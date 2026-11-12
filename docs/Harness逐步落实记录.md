@@ -316,6 +316,14 @@
 
 **实测**：`runtime.native.workflowPtc = 已挂载`、`toolExecutorPtc = 已停用`；设置页「PTC 与实验执行器」显示对应状态，未改动 profile patch。截图 `runtime-ptc-status.png`。
 
+### 16.3 后台作业停止边界
+
+**结论**：产品只能停止“沙箱运行时”，不能停止单个后台作业。DSH 内部 `LocalJobRegistry` 有 `kill(id)`，但 `dsh-sdk-client` 协议没有暴露 job/kill；产品侧能拿到的只有 `job/registered`、`job/settled` 事件和 job id，没有可用控制通道。
+
+**产品处理**：后台作业面板的按钮改为「停止运行时」，并在面板内写明“停止操作会结束该会话所属的沙箱运行时，并同时终止其中的全部后台作业”；服务端仍会先检查同目录其他会话是否在运行，避免误停。
+
+**要做单作业停止，需要**：在 DSH profile 内加一个自定义插件，把 `ctx.jobs.kill(id)` 暴露成产品可调用的本地 remote/HTTP 通道，或者由产品自己维护任务队列。两者都不属于现有 SDK 协议，不能只改前端。
+
 ### 17. MCP 资源浏览
 
 **背景**：DSH 已挂载 `dsh-mcp-resources` 与 `dsh-mcp-client`，模型侧具备 `list_mcp_resources` / `list_mcp_resource_templates` / `read_mcp_resource`；但产品侧原来只有静态“MCP 服务地址”和演示连接测试，没有资源目录。产品 MCP 桥 `mcp-jg.mjs` 原来只声明 `tools`，没有 `resources`。

@@ -9203,6 +9203,7 @@ function jobsBlock(jobs, showKill = false) {
   if (!jobs || !jobs.length) return ''
   return `<details class="steps-block" open>
     <summary class="steps-title">后台作业 · ${jobs.length}</summary>
+    <div class="step-detail">停止操作会结束该会话所属的沙箱运行时，并同时终止其中的全部后台作业。</div>
     ${jobs.map((j) => {
       const live = /running|pending|已启动/i.test(j.status)
       const dot = /fail|error|kill|停止/i.test(j.status) ? 'bad' : live ? 'warn' : 'ok'
@@ -9210,7 +9211,7 @@ function jobsBlock(jobs, showKill = false) {
         <span class="step-dot ${dot}"></span>
         <span class="step-tool">${esc(j.id)}</span>
         <span class="step-detail">${esc(j.kind)} · ${esc(j.status)} — ${esc(j.label)}${j.detail ? ` · ${esc(j.detail)}` : ''}</span>
-        ${showKill && live ? `<button class="btn sm" data-killjob="${esc(j.id)}" style="margin-left:8px">停止</button>` : ''}
+        ${showKill && live ? `<button class="btn sm" data-killjob="${esc(j.id)}" style="margin-left:8px" title="停止该作业所属的沙箱运行时；会同时结束该项目下的其他后台作业">停止运行时</button>` : ''}
       </div>`
     }).join('')}
   </details>`

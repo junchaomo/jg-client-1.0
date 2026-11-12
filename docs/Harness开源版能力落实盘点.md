@@ -57,7 +57,7 @@
 | Windows 沙箱前置条件 | 风险 | 历史问题：普通权限启动时 `dsh-sandbox-windows-acl` 需要 `SeSecurityPrivilege`，当前用管理员启动规避；企业部署需明确权限模型。 |
 | pwsh 工具 | 已落地 | Windows 下 `tool-bash` 禁用、`tool-pwsh` 启用；产品大量真实命令执行已实测。 |
 | 文件读写/编辑/apply_patch | 已落地 | `tool-fs` 在 profile 中显式 `applyPatch: true`；`tool-fs-search` 启用。 |
-| 后台作业 | 部分 | `jobs-local` + `tool-jobs` 可用；停止靠关闭整个沙箱根运行时，不是单作业接口，且没有持久队列。`server.mjs:3295` |
+| 后台作业 | 已确定边界 | `jobs-local` + `tool-jobs` 可用；SDK client 没有 job/kill 协议，停止只能关闭整个沙箱根运行时。产品按钮已改为「停止运行时」并写明会终止全部后台作业；持久队列仍未落地。`server.mjs:3491` |
 | 持久终端 | 未落地 | `dsh-tool-terminal`、`dsh-terminal-*` 未进入 `sdk` bundle；历史 Windows PTY 尝试已回滚。 |
 | Web 搜索/抓取 | 已落地 | `dsh-web`、`web-search-deepseek`、`web-fetch-http`、`tool-web` 均在 base。 |
 | 超时/重复调用提醒 | 已落地 | `tool-call-timeout-policy`、`repeat-tool-reminder` 在 base。 |
