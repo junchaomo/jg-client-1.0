@@ -72,7 +72,7 @@
 | MCP 客户端/资源 | 已落地 | base 有 `mcp-resources`；profile insert `mcp-jg`；产品有资源目录与读取接口。 |
 | 产品 MCP 工具 | 已落地 | `mcp-jg.mjs` 注册 10 个工具：`drive_search`、`drive_read`、`notice_list`、`notice_read`、`academy_search`、`contacts_find`、`im_send`、`notebook_search`、`resource_query`、`task_create`。 |
 | 插件管理器 | 部分 | `plugin-manager`、`tool-plugin-manager` 已启用；产品库存按当前 profile 用 `dsh --dump-config` 即时生成，启停只改 profile patch 并提示重启。`server.mjs:617-690` |
-| 插件市场/用户插件真实挂载 | 部分 | 2026-11-12 已接通技能包：内置 5 个技能包，上传 ZIP 审核通过后入库，安装复制到 `$DSH_HOME/skills`，模型可见；DSH Bundle 仍不能一键安装。`server.mjs` 市场安装段、`marketplace/skills` |
+| 插件市场/用户插件真实挂载 | 已核对现状 | 2026-11-12 已接通技能包：内置 5 个技能包，上传 ZIP 审核通过后入库，安装复制到 `$DSH_HOME/skills`，模型可见；DSH Bundle 仍不能一键安装。界面已收口：`/api/plugins` 只返回本机实际加载的 3 个目录技能 + Office + MCP，不再展示 21 条演示插件；未安装条目不再混入“已安装”列表。 |
 | 选中插件注入 | 部分 | 产品把选中的插件名称/描述拼进上下文提示，不是运行时能力。`server.mjs:3479-3483` |
 | DSH 原生设置/配置编辑 | 已确定边界 | `settings`、`config-editor` 运行时已挂载；产品设置是唯一可写入口，设置中心只读展示原生挂载状态，不提供编辑表单。 |
 | 凭据管理 | 已确定边界 | `authorization`、`credentials-local` 已挂载；模型密钥由产品设置中心按会话注入子进程环境，产品不读取 DSH `.credentials.yaml` 内容。 |

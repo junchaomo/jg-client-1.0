@@ -3779,8 +3779,8 @@ async function renderSkills(el) {
   const scop = state.skillScope || 'public'
 
   const installed = tab === 'plugin'
-    ? state.market.filter((m) => m.installed)
-    : state.plugins.filter((p) => p.kind === 'personal' || p.status === 'enabled')
+    ? state.plugins.filter((p) => p.kind !== 'personal')
+    : state.plugins.filter((p) => p.kind === 'personal')
 
   const tone = (i) => 't' + (i % 8)
 
@@ -3813,6 +3813,9 @@ async function renderSkills(el) {
     return list.length ? sec(name, list.map(marketCard).join('')) : ''
   }).join('')
 
+  const pluginSections = sec('已安装插件',
+    state.plugins.filter((p) => p.kind !== 'personal').map(skillCard).join(''))
+
   const personalSections = `
     ${sec('我的插件提交', subs.length ? subs.map((x, i) => {
       const st = { pending: ['warn', '待审核'], approved: ['ok', '已上架'], rejected: ['bad', '已退回'] }[x.status] || ['', x.status]
@@ -3825,13 +3828,10 @@ async function renderSkills(el) {
     }).join('') : '<div class="sk-empty">还没有提交过插件，点右上「添加」开始</div>')}
     ${sec('已安装', installed.length ? installed.map(marketCard).join('') : '<div class="sk-empty">还没有安装插件</div>')}`
 
-  const skillSections = sec(scop === 'public' ? '企业技能' : '个人技能',
-    state.plugins
-      .filter((p) => (scop === 'public' ? p.kind === 'enterprise' : p.kind === 'personal'))
-      .map(skillCard)
-      .join(''))
+  const skillSections = sec('已安装技能',
+    state.plugins.filter((p) => p.kind === 'personal').map(skillCard).join(''))
 
-  const instAttr = (x) => tab === 'plugin' ? `data-mdetail="${x.id}"` : `data-plug="${x.id}"`
+  const instAttr = (x) => `data-plug="${x.id}"`
   const title = tab === 'plugin' ? '插件' : '技能'
   const sub = tab === 'plugin'
     ? '连接插件，让九规智能中枢在你的各类工具中协同工作'
@@ -3865,12 +3865,7 @@ async function renderSkills(el) {
             <button class="pl-add" id="skAddLeft">添加</button>
           </div>
         </div>
-        <div class="pl-tabs">
-          <button class="pl-tab${scop === 'public' ? ' on' : ''}" data-skscope="public">公开</button>
-          <button class="pl-tab${scop === 'personal' ? ' on' : ''}" data-skscope="personal">个人</button>
-        </div>
-        ${tab === 'plugin' && scop === 'public' ? marketSections : ''}
-        ${tab === 'plugin' && scop === 'personal' ? personalSections : ''}
+        ${tab === 'plugin' ? pluginSections : ''}
         ${tab === 'skill' ? skillSections : ''}
       </div>
     </div>`
@@ -3937,9 +3932,9 @@ function openSkillSlide(id) {
       <div class="field"><div class="field-label">依赖</div><div class="field-value">${esc(p.deps)}</div></div>
       <div class="field"><div class="field-label">风险等级</div><div class="field-value">${esc(p.risk)}；写操作与高危调用执行前二次确认。</div></div>
     </div>
-    <div class="slide-foot"><button class="btn primary" data-toggle>${p.status === 'enabled' ? '停用' : '启用'}</button><button class="btn" data-log>运行记录</button><button class="btn" data-close>关闭</button></div>`
+    <div class="slide-foot">${p.source ? '<span class="tag">由 DSH 运行时加载，产品内只读</span>' : `<button class="btn primary" data-toggle>停用</button>`}<button class="btn" data-log>运行记录</button><button class="btn" data-close>关闭</button></div>`
   wireSlide(slide)
-  slide.querySelector('[data-toggle]').addEventListener('click', async () => {
+  if (!p.source) slide.querySelector('[data-toggle]').addEventListener('click', async () => {
     const { ok, body } = await api('/api/plugins/toggle', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: p.id }) })
     if (!ok) return toast(body.error, true)
     slide.classList.remove('open')

@@ -21,7 +21,7 @@ import {
   apps, auditSeed, automations, cloudCredentials, cloudPolicy, cloudSessions,
   cloudSpaces, cloudSystems, contacts, dataServices, driveItems, driveQuota, feedback, imageryCompare, imThreads,
   knowledgeDocs, messagesSeed, modelPolicy, modules,
-  monitor, networks, networkOrder, notices, notifications, orgMembers, orgUnits, plugins, projects,
+  monitor, networks, networkOrder, notices, notifications, orgMembers, orgUnits, projects,
   quickPrompts, resourceGrantSeed, resourceVersionSeed, resources,
   roles, sampleConversations, satelliteQuarters, spatialBounds, tasks, tickets, toolLedger, duties, dutyCatalog,
   notebookSeed, notebookTopics, collabCommentSeed,
@@ -312,6 +312,82 @@ function runtimeOverview() {
     },
   }
 }
+function installedSkillPlugins() {
+  const home = join(dataDirPath(), 'dsh-home')
+  const skillsDir = join(home, 'skills')
+  const inventory = runtimePluginInventory()
+  const list = []
+  let dirs = []
+  try {
+    dirs = readdirSync(skillsDir, { withFileTypes: true }).filter((entry) => entry.isDirectory()).map((entry) => entry.name)
+  } catch {}
+  for (const dir of dirs) {
+    let name = dir
+    let desc = '本机 DSH 已加载的技能'
+    try {
+      const text = readFileSync(join(skillsDir, dir, 'SKILL.md'), 'utf8')
+      const fm = text.match(/^---\s*\n([\s\S]*?)\n---/)
+      if (fm) {
+        name = (fm[1].match(/^name:\s*(.+)$/m) || [])[1]?.trim() || name
+        desc = (fm[1].match(/^description:\s*(.+)$/m) || [])[1]?.trim() || desc
+      }
+      if (/^[\x00-\x7F]+$/.test(name)) {
+        const heading = (text.match(/^#\s+(.+)$/m) || [])[1]?.trim()
+        if (heading) name = heading
+      }
+    } catch {}
+    list.push({
+      id: `S-${dir}`,
+      name,
+      kind: 'personal',
+      publisher: '本机 DSH',
+      version: '',
+      status: 'enabled',
+      nets: ['inet', 'gov', 'secret'],
+      deps: 'DSH skills 目录',
+      scope: '本机 DSH 运行时',
+      risk: '只读',
+      desc,
+      source: 'dsh-skill',
+      dir,
+    })
+  }
+  const row = (id) => inventory.find((x) => x.id === id)
+  if (row('skill-office')?.enabled) {
+    list.push({
+      id: 'P-OFFICE',
+      name: 'Office 文档',
+      kind: 'enterprise',
+      publisher: 'DSH 运行时',
+      version: '',
+      status: 'enabled',
+      nets: ['inet', 'gov', 'secret'],
+      deps: 'skill-office 插件',
+      scope: '本机 DSH 运行时',
+      risk: '只读',
+      desc: '通过 skill-office 插件加载的 Word / Excel / PPT / PDF 文档处理技能。',
+      source: 'dsh-plugin',
+    })
+  }
+  if (row('mcp-jg')?.enabled) {
+    list.push({
+      id: 'P-MCP-JG',
+      name: '九规内部工具（MCP）',
+      kind: 'enterprise',
+      publisher: '九规智能中枢',
+      version: '',
+      status: 'enabled',
+      nets: ['inet', 'gov', 'secret'],
+      deps: 'mcp-jg 插件',
+      scope: '本机 DSH 运行时',
+      risk: '写操作需确认',
+      desc: '云空间、公告、课程、通讯录、IM 与待办等内部工具的 MCP 桥。',
+      source: 'dsh-plugin',
+    })
+  }
+  return list
+}
+
 const liveToolLedger = toolLedger.map((t) => ({ ...t }))
 const liveVersions = Object.fromEntries(Object.entries(resourceVersionSeed).map(([k, v]) => [k, v.map((x) => ({ ...x }))]))
 const liveGrants = Object.fromEntries(Object.entries(resourceGrantSeed).map(([k, v]) => [k, v.map((x) => ({ ...x }))]))
@@ -2410,7 +2486,7 @@ const api = {
       counts: {
         resources: visible.length,
         resourcesTotal: liveResources.length,
-        plugins: plugins.filter((p) => (p.nets || ['inet']).includes(net)).length,
+        plugins: installedSkillPlugins().filter((p) => (p.nets || ['inet']).includes(net)).length,
         apps: liveApps.filter((a) => (a.nets || []).includes(net)).length,
         tasks: liveTasks.length,
       },
@@ -3120,7 +3196,7 @@ const api = {
   'GET /api/plugins': (req, res) => {
     const user = roleOf(req)
     const net = netOf(req)
-    const list = plugins
+    const list = installedSkillPlugins()
       .filter((p) => (p.nets || ['inet']).includes(net))
       .map((p) => ({ ...p, status: pluginEnabledFor(user.id, p) }))
     json(res, 200, { items: list, canManage: canManage(user) })
@@ -3128,7 +3204,7 @@ const api = {
   'GET /api/plugin-review': (req, res) => {
     const user = roleOf(req)
     if (!canManage(user)) return json(res, 403, { error: '当前角色无插件审批权' })
-    json(res, 200, { items: plugins })
+    json(res, 200, { items: installedSkillPlugins() })
   },
   'POST /api/guest/grant': (req, res) => {
     const user = roleOf(req)
@@ -3150,26 +3226,16 @@ const api = {
     const user = roleOf(req)
     const body = JSON.parse(req.__body || '{}')
     if (!canManage(user)) return json(res, 403, { error: '当前角色无插件审批权' })
-    const p = plugins.find((x) => x.id === body.id)
+    const p = installedSkillPlugins().find((x) => x.id === body.id)
     if (!p) return json(res, 404, { error: '插件不存在' })
-    if (p.status !== 'review') return json(res, 409, { error: '该插件不在待审队列' })
-    p.status = body.action === 'approve' ? 'enabled' : 'rejected'
-    p.reviewedBy = user.name
-    p.reviewedAt = new Date().toISOString().slice(0, 16).replace('T', ' ')
-    logAudit(user, 'plugin.review.' + (body.action === 'approve' ? 'approve' : 'reject'), p.id, 'allow', netOf(req))
-    json(res, 200, { ok: true, item: p })
+    return json(res, 409, { error: '该条目已由本机 DSH 运行时加载，没有待审队列', code: 'PLUGIN_ALREADY_MOUNTED' })
   },
   'POST /api/plugins/toggle': (req, res) => {
     const user = roleOf(req)
     const body = JSON.parse(req.__body || '{}')
-    const p = plugins.find((x) => x.id === body.id)
+    const p = installedSkillPlugins().find((x) => x.id === body.id)
     if (!p) return json(res, 404, { error: '插件不存在' })
-    const current = pluginEnabledFor(user.id, p)
-    const next = current === 'enabled' ? 'disabled' : 'enabled'
-    const map = { ...(livePluginToggles.get(user.id) || {}), [p.id]: next }
-    livePluginToggles.set(user.id, map)
-    logAudit(user, 'plugin.toggle', `${p.id}:${next}`, 'allow', netOf(req))
-    json(res, 200, { ok: true, item: { ...p, status: next } })
+    return json(res, 409, { error: '该条目由 DSH 运行时加载，产品内不能逐项停用；请在「DSH 插件运行时」管理', code: 'PLUGIN_MANAGED_BY_RUNTIME' })
   },
   'GET /api/plugin-market': (req, res) => {
     const user = roleOf(req)
@@ -3687,8 +3753,8 @@ const api = {
       chatTask = startChatRunTask({ conv, user, text, mode, taskMode, target: project?.name || '' })
       const refContext = await refContextForModel(user, net, body.refs)
       const selectedPlugins = (Array.isArray(body.tools) ? body.tools : [])
-        .map((id) => plugins.find((p) => p.id === id))
-        .filter((p) => p && p.status === 'enabled')
+        .map((id) => installedSkillPlugins().find((p) => p.id === id))
+        .filter((p) => p)
       const pluginContext = selectedPlugins.length
         ? `本次已启用的插件与技能（可选择使用）：\n${selectedPlugins.map((p) => `- ${p.name}（${p.kind === 'personal' ? '个人技能' : '企业插件'}）：${p.desc}`).join('\n')}`
         : ''
