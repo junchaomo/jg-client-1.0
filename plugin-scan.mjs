@@ -82,6 +82,26 @@ function findSkillRoot(names) {
   return { root: hits[0].slice(0, -'SKILL.md'.length) }
 }
 
+function findBundleRoot(names) {
+  const hits = names.filter((name) => name.split('/').pop() === 'package.json')
+  if (!hits.length) return { error: '插件包根目录缺少 package.json' }
+  const sorted = hits.map((name) => ({ name, depth: name.split('/').length })).sort((a, b) => a.depth - b.depth)
+  const shallow = sorted[0]
+  if (sorted.filter((item) => item.depth === shallow.depth).length > 1) {
+    return { error: '插件包内存在多个同级 package.json，无法确定根目录' }
+  }
+  return { root: shallow.name.slice(0, -'package.json'.length) }
+}
+
+function safeBundleRel(name, root) {
+  if (root && !name.startsWith(root)) return null
+  const rel = root ? name.slice(root.length) : name
+  if (!rel || rel.split('/').includes('..') || rel.startsWith('/') || /^[A-Za-z]:/.test(rel)) {
+    throw new Error(`插件包包含非法路径：${name}`)
+  }
+  return rel
+}
+
 function inspectSkillZipEntries(buffer, entries) {
   const names = normalizedNames(entries)
   const found = findSkillRoot(names)
@@ -183,6 +203,29 @@ export function extractSkillPackage(buffer, targetDir) {
   return written
 }
 
+export function extractBundlePackage(buffer, targetDir) {
+  const entries = parseCentralDirectory(buffer)
+  const names = normalizedNames(entries)
+  const found = findBundleRoot(names)
+  if (found.error) throw new Error(found.error)
+  const root = found.root || ''
+  const written = []
+  for (const entry of entries) {
+    const name = entry.name.replace(/\\/g, '/')
+    if (name.endsWith('/') || name.startsWith('__MACOSX/')) continue
+    const rel = safeBundleRel(name, root)
+    if (!rel) continue
+    const data = extractEntry(buffer, entry)
+    if (!data) throw new Error(`插件包文件解压失败：${rel}`)
+    const out = join(targetDir, ...rel.split('/'))
+    mkdirSync(dirname(out), { recursive: true })
+    writeFileSync(out, data)
+    written.push(rel)
+  }
+  if (!written.includes('package.json')) throw new Error('插件包根目录缺少 package.json')
+  return written
+}
+
 export function inspectPluginZip(buffer) {
   const issues = []
   let entries = []
@@ -221,28 +264,42 @@ export function inspectPluginZip(buffer) {
     }
   }
 
-  const required = ['package.json', 'index.js', 'cordis.patch.yml']
-  const missing = required.filter((f) => !names.some((n) => n.split(/[\\/]/).pop() === f))
-  const bundlePass = missing.length === 0
-  if (!bundlePass) issues.push(`缺少必需文件：${missing.join('、')}`)
-
+  const bundleFound = findBundleRoot(names)
+  if (bundleFound.error) issues.push(bundleFound.error)
+  const root = bundleFound.root || ''
+  const pkgName = `${root}package.json`
   let packageJson = null
-  const pkgText = texts.get(names.find((n) => n.split(/[\\/]/).pop() === 'package.json') || '')
+  const pkgText = texts.get(pkgName) || texts.get(names.find((n) => n.split(/[\\/]/).pop() === 'package.json') || '')
   if (pkgText) {
     try { packageJson = JSON.parse(pkgText) } catch { issues.push('package.json 不是合法 JSON') }
+  } else {
+    issues.push('插件包根目录缺少 package.json')
   }
+  const bundleMeta = packageJson && packageJson.dsh && packageJson.dsh.bundle
+  const patchRel = String(bundleMeta && bundleMeta.patch ? bundleMeta.patch : 'cordis.patch.yml').replace(/^\.\//, '').replace(/\\/g, '/')
+  const patchExists = names.includes(`${root}${patchRel}`)
+  const mainRel = packageJson && packageJson.main ? String(packageJson.main).replace(/^\.\//, '') : ''
+  const mainExists = !mainRel || names.includes(`${root}${mainRel}`)
+  const missing = []
+  if (!pkgText) missing.push('package.json')
+  if (!bundleMeta) missing.push('dsh.bundle')
+  if (!patchExists) missing.push(patchRel)
+  if (!mainExists) missing.push(mainRel)
+  if (missing.length) issues.push(`缺少必需文件：${missing.join('、')}`)
+  const bundlePass = missing.length === 0
+
   const deps = packageJson && packageJson.dependencies ? Object.keys(packageJson.dependencies) : []
   const depDefault = deps.filter((d) => !/^(@jg|jg-|node:)/.test(d))
   const depPass = !pkgText ? '不通过' : depDefault.length === 0 ? '通过' : '待复核'
   const depNote = !pkgText ? 'package.json 无法读取' : depDefault.length === 0 ? '未声明外部依赖' : `声明外部依赖：${depDefault.slice(0, 8).join('、')}`
 
-  const permText = [pkgText, texts.get(names.find((n) => n.split(/[\\/]/).pop() === 'cordis.patch.yml') || '')].filter(Boolean).join('\n')
+  const permText = [pkgText, texts.get(`${root}${patchRel}`) || ''].filter(Boolean).join('\n')
   const hasWrite = /(write|写|fs\.write|writeFile|mutate|update)/i.test(permText)
   const hasPermissionBlock = /(permission|权限|scope)/i.test(permText)
   const permVerdict = !hasPermissionBlock ? '待复核' : hasWrite ? '待复核' : '通过'
   const permNote = !hasPermissionBlock ? '未见明确权限声明' : hasWrite ? '包含写入类声明，需管理员核对' : '仅声明读取类权限'
 
-  const dangerous = names.filter((n) => /\.(exe|dll|ps1|bat|cmd|com|scr|jar|so)$/i.test(n))
+  const dangerous = names.filter((n) => /\.(exe|dll|ps1|bat|cmd|com|scr|jar|so|msi)$/i.test(n))
   const externalRefs = []
   for (const [name, text] of texts) {
     if (/https?:\/\//i.test(text)) externalRefs.push(name)
@@ -265,8 +322,9 @@ export function inspectPluginZip(buffer) {
     entryCount: entries.length,
     totalBytes: entries.reduce((s, e) => s + e.uncompSize, 0),
     packageName: packageJson?.name || '',
+    bundleRoot: root,
     checks: [
-      ['DSH Bundle 格式', bundlePass ? '通过' : '不通过', bundlePass ? `根目录包含 ${required.join(' / ')}` : `缺少 ${missing.join('、')}`],
+      ['DSH Bundle 格式', bundlePass ? '通过' : '不通过', bundlePass ? `根目录包含 package.json / ${patchRel}${mainRel ? ` / ${mainRel}` : ''}` : `缺少 ${missing.join('、')}`],
       ['依赖与版本', depPass, depNote],
       ['权限声明', permVerdict, permNote],
       ['静态安全扫描', scanVerdict, scanNotes],

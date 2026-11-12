@@ -14,7 +14,7 @@ import { dataDirPath } from './db.mjs'
 const root = fileURLToPath(new URL('./', import.meta.url))
 const runtimeRoot = process.env.JG_DSH_RUNTIME || join(root, 'dsh-runtime')
 const sdkEntry = join(runtimeRoot, 'node_modules', '@deepseek-ai', 'dsh-sdk-client', 'lib', 'index.js')
-const dshBin = join(runtimeRoot, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
+export const dshBin = join(runtimeRoot, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
 const baseHome = process.env.JG_DSH_HOME || join(dataDirPath(), 'dsh-home')
 const workspace = process.env.JG_DSH_WORKSPACE || join(dataDirPath(), 'dsh-workspace')
 

@@ -3807,7 +3807,7 @@ async function renderSkills(el) {
       <div class="pl-grid">${cards}</div>
     </section>` : ''
 
-  const marketSections = ['热门', '新品推荐', '企业内部'].map((name) => {
+  const marketSections = ['官方与内置', '热门', '新品推荐', '企业内部'].map((name) => {
     const list = state.market.filter((m) => m.section === name).filter((m) => {
       const q = String(state.skillQuery || '').trim().toLowerCase()
       if (!q) return true
@@ -3923,21 +3923,21 @@ function openPluginSlide(id) {
   slide.innerHTML = `
     <div class="slide-head"><div><div class="slide-title">${esc(m.name)}</div><div class="slide-sub">${esc(m.publisher)} · ${esc(m.section)} · ID ${esc(m.id)}</div></div><span class="spacer"></span><button class="btn subtle" data-close>${icon('close')}</button></div>
     <div class="slide-body">
-      <div style="display:flex;gap:6px;margin-bottom:12px"><span class="tag ${m.installed ? 'ok' : ''}">${m.installed ? '已安装' : '未安装'}</span><span class="tag ${m.available === false ? 'warn' : ''}">${m.available === false ? '待上架' : '可安装'}</span><span class="tag">${m.origin === 'community' ? '社区提交' : '官方/内置'}</span><span class="tag">${esc(m.scope)}</span></div>
+      <div style="display:flex;gap:6px;margin-bottom:12px"><span class="tag ${m.installed ? 'ok' : ''}">${m.installed ? '已安装' : '未安装'}</span><span class="tag ${m.available === false ? 'warn' : ''}">${m.available === false ? '待上架' : m.locked ? '系统内置' : '可安装'}</span><span class="tag">${m.origin === 'community' ? '社区提交' : '官方/内置'}</span><span class="tag">${esc(m.scope)}</span></div>
       <div class="field"><div class="field-label">功能说明</div><div class="field-value">${esc(m.desc)}</div></div>
       <div class="field"><div class="field-label">来源</div><div class="field-value">${m.origin === 'community' ? `${esc(m.submittedUnit || '')} · 提交人 ${esc(m.submittedBy || '')} · v${esc(m.version || '1.0.0')}` : `DSH 官方 / 产品内置 · v${esc(m.version || '1.0.0')}`}</div></div>
       <div class="field"><div class="field-label">权限与数据</div><div class="field-value">按当前授权与网络范围返回数据；敏感字段最小必要展示，读取与调用进审计。写操作需人工确认。</div></div>
-      <div class="field"><div class="field-label">安装状态</div><div class="field-value">${m.available === false ? '该插件尚未提供可安装的技能包，暂不能安装。上架后会显示安装入口。' : `安装到${esc(m.installScope || '本机 DSH 运行时')}；安装或卸载后，下一轮对话生效。`}</div></div>
-      <div class="field"><div class="field-label">安装要求</div><div class="field-value">${m.scope === '需授权' ? '需部门负责人授权后安装，授权范围按岗位与项目参与关系核定。' : '企业公开插件，可直接安装；启用后仅在当前网络与已授权范围生效。'}</div></div>
+      <div class="field"><div class="field-label">安装状态</div><div class="field-value">${m.locked ? '该插件随客户端内置，由平台统一维护，不支持单独安装或卸载。' : m.available === false ? '该插件尚未提供可安装的技能包，暂不能安装。上架后会显示安装入口。' : `安装到${esc(m.installScope || '本机 DSH 运行时')}；安装或卸载后，下一轮对话生效。`}</div></div>
+      <div class="field"><div class="field-label">安装要求</div><div class="field-value">${m.locked ? '系统内置插件，无需安装；按当前网络与授权范围生效。' : m.scope === '需授权' ? '需部门负责人授权后安装，授权范围按岗位与项目参与关系核定。' : '企业公开插件，可直接安装；启用后仅在当前网络与已授权范围生效。'}</div></div>
     </div>
     <div class="slide-foot">
-      ${m.available === false ? '<button class="btn primary" disabled>尚未提供安装包</button>' : `<button class="btn primary" data-toggle>${m.installed ? '卸载' : '安装'}</button>`}
+      ${m.locked ? '<button class="btn primary" disabled>系统内置</button>' : m.available === false ? '<button class="btn primary" disabled>尚未提供安装包</button>' : `<button class="btn primary" data-toggle>${m.installed ? '卸载' : '安装'}</button>`}
       ${m.downloadUrl ? '<button class="btn" data-download>下载原始包</button>' : ''}
       <button class="btn" data-log>调用记录</button>
       <button class="btn" data-close>关闭</button>
     </div>`
   wireSlide(slide)
-  slide.querySelector('[data-toggle]').addEventListener('click', async () => {
+  slide.querySelector('[data-toggle]')?.addEventListener('click', async () => {
     const { ok, body } = await api('/api/plugin-market/install', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: m.id }) })
     if (!ok) return toast(body.error, true)
     slide.classList.remove('open')
@@ -3982,7 +3982,7 @@ function openSkillSlide(id) {
 
 function openPluginPublish() {
   const mask = openModal('上传插件', `
-    <div class="form-note">支持两种 ZIP：技能包（根目录含 SKILL.md，推荐）与 DSH Bundle（含 package.json、index.js、cordis.patch.yml）。平台会做安全解压、格式与权限检查；技能包审核通过后可直接安装到本机运行时，Bundle 仍需运行时依赖，当前不开放一键安装。</div>
+    <div class="form-note">支持两种 ZIP：技能包（根目录含 SKILL.md）与 DSH Bundle（含 package.json 与 dsh.bundle 指定的 cordis.patch.yml）。平台会做安全解压、格式与权限检查；审核通过后均可上架，用户可从市场一键安装到本机运行时。</div>
     <div class="up-spec"><span>不确定包结构？</span><button class="linkbtn" id="pubSpec">查看《插件开发规范》</button></div>
     <div class="up-zone" id="pubZone">
       <span class="up-ico">${icon('upload')}</span>
@@ -4054,7 +4054,7 @@ function openPluginPublish() {
 
 function openPluginSpec() {
   const mask = openModal('插件开发规范', `
-    <div class="form-note">推荐技能包：根目录放 SKILL.md，可附 references 与素材；审核通过后可直接安装到本机运行时。DSH Bundle 仍可提交检测，但需要完整运行时依赖，当前不开放一键安装。</div>
+    <div class="form-note">推荐技能包：根目录放 SKILL.md，可附 references 与素材；也可提交 DSH Bundle，要求 package.json 里声明 dsh.bundle 与 cordis.patch.yml。审核通过后都会进入市场，用户可一键安装。</div>
     <pre class="spec-tree">技能包（推荐）
 my-skill.zip
 ├─ SKILL.md             技能名称、适用场景、步骤与边界
@@ -4092,8 +4092,8 @@ function openPluginReport(sub) {
     </div>
     ${sub.reason ? `<div class="form-note bad-note">退回原因：${esc(sub.reason)}</div>` : ''}
     <div class="form-note">${sub.status === 'approved'
-      ? (sub.kind === 'skill' ? '技能包已入库，可在插件市场一键安装到本机运行时。' : '已上架，但 DSH Bundle 需要运行时依赖，当前版本不开放一键安装。')
-      : (sub.kind === 'skill' ? '审核通过后技能包会入库并开放安装；审核在「管理中心 · AI 能力管理 · 插件审核」处理。' : '审核通过后会登记上架，但 DSH Bundle 需要运行时依赖，当前版本不开放一键安装。')}</div>
+      ? (sub.kind === 'skill' ? '技能包已入库，可在插件市场一键安装到本机运行时。' : 'Bundle 已入库，可在插件市场一键安装；安装会写入本机 DSH profile，下一轮对话生效。')
+      : (sub.kind === 'skill' ? '审核通过后技能包会入库并开放安装；审核在「管理中心 · AI 能力管理 · 插件审核」处理。' : '审核通过后 Bundle 会入库并开放安装；审核在「管理中心 · AI 能力管理 · 插件审核」处理。')}</div>
     <div class="form-foot"><span class="mono">提交人 ${esc(sub.author)} · ${esc(sub.unit)} · ${esc(sub.submitted)}</span><span class="spacer"></span><button class="btn primary" data-mclose>知道了</button></div>`)
   mask.querySelector('[data-mclose]').addEventListener('click', () => mask.remove())
 }
@@ -10009,6 +10009,60 @@ async function renderAdmin(el) {
           m2.remove()
           if (!ok) return toast(body.error || '退回失败', true)
           toast('已退回，提交人会收到检测报告与原因')
+          renderView()
+        })
+      }))
+    }
+    const { body: marketAdmin } = await api('/api/admin/plugin-market')
+    if (blocks) {
+      const items = marketAdmin.items || []
+      const wrap = document.createElement('div')
+      wrap.className = 'mc-block'
+      wrap.innerHTML = `<div class="mc-block-head"><b>插件市场已上架管理</b><span class="spacer"></span><span class="mc-count">${marketAdmin.counts?.listed ?? items.length} 个已上架 / ${items.length} 个条目</span></div>
+        <div class="mc-table" style="--mc-cols:1.8fr .9fr .8fr .8fr 1.2fr">
+          <div class="mc-thead"><span>插件 / 技能</span><span>分组</span><span>来源</span><span>状态</span><span>操作</span></div>
+          ${items.map((x) => `<div class="mc-trow">
+            <span class="mc-first">${esc(x.name)} <span class="mc-dim mono">${esc(x.id)}</span></span>
+            <span>${esc(x.section || '')}</span>
+            <span>${x.origin === 'community' ? '社区提交' : '官方 / 内置'}</span>
+            <span><span class="mc-tag ${x.listed === false ? 'warn' : 'ok'}">${x.listed === false ? '已下架' : '已上架'}</span>${x.installed ? ' <span class="mc-tag ok">本机已安装</span>' : ''}</span>
+            <span class="mc-acts">
+              <button class="btn sm" data-mkt-edit="${esc(x.id)}">编辑</button>
+              <button class="btn sm ${x.listed === false ? 'primary' : ''}" data-mkt-list="${esc(x.id)}" data-next="${x.listed === false ? 'list' : 'unlist'}">${x.listed === false ? '重新上架' : '下架'}</button>
+              ${x.origin === 'community' ? `<button class="btn sm" data-mkt-del="${esc(x.id)}">删除</button>` : ''}
+            </span>
+          </div>`).join('') || '<div class="mc-row">市场还没有条目</div>'}
+        </div>`
+      blocks.appendChild(wrap)
+      wrap.querySelectorAll('[data-mkt-list]').forEach((b) => b.addEventListener('click', async () => {
+        const { ok, body } = await api('/api/admin/plugin-market', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: b.dataset.mktList, action: b.dataset.next }) })
+        if (!ok) return toast(body.error || '操作失败', true)
+        toast(b.dataset.next === 'list' ? '已重新上架' : '已下架，用户市场不再展示')
+        renderView()
+      }))
+      wrap.querySelectorAll('[data-mkt-del]').forEach((b) => b.addEventListener('click', async () => {
+        const { ok, body } = await api('/api/admin/plugin-market', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: b.dataset.mktDel, action: 'delete' }) })
+        if (!ok) return toast(body.error || '删除失败', true)
+        toast('已删除该社区条目及其安装包')
+        renderView()
+      }))
+      wrap.querySelectorAll('[data-mkt-edit]').forEach((b) => b.addEventListener('click', () => {
+        const item = items.find((x) => x.id === b.dataset.mktEdit)
+        if (!item) return
+        const m = openModal('编辑市场条目', `
+          <div class="form-label">名称</div><input class="text-input" id="mktName" value="${esc(item.name)}" />
+          <div class="form-label" style="margin-top:8px">描述</div><textarea class="form-area" id="mktDesc" rows="3">${esc(item.desc || '')}</textarea>
+          <div class="form-label" style="margin-top:8px">分组</div>
+          <select class="text-input" id="mktSection">
+            ${['官方与内置', '热门', '新品推荐', '企业内部'].map((s) => `<option value="${s}"${item.section === s ? ' selected' : ''}>${s}</option>`).join('')}
+          </select>
+          <div class="form-foot"><span class="spacer"></span><button class="btn" data-mclose>取消</button><button class="btn primary" id="mktSave">保存</button></div>`)
+        m.querySelector('[data-mclose]').addEventListener('click', () => m.remove())
+        m.querySelector('#mktSave').addEventListener('click', async () => {
+          const { ok, body } = await api('/api/admin/plugin-market', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: item.id, action: 'update', name: m.querySelector('#mktName').value, desc: m.querySelector('#mktDesc').value, section: m.querySelector('#mktSection').value }) })
+          m.remove()
+          if (!ok) return toast(body.error || '保存失败', true)
+          toast('市场条目已更新')
           renderView()
         })
       }))

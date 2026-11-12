@@ -698,3 +698,31 @@
 - 审批归属依赖“当前唯一活动会话”。同一账号并发多个会话时，MCP 写操作会 fail closed，不会把审批卡投到错误会话。
 - 目前只覆盖 `im_send`、`task_create` 两个 MCP 写工具；新增 MCP 写工具必须同步加入 `mcp-jg.mjs` 的 `EXTERNAL_WRITE_TOOLS` 与 `server.mjs` 的 `AUTO_APPROVAL_EXTERNAL_TOOL`。
 - 遥测是“默认关闭”，不是强制关闭；如管理员显式改 env 指向内网 OTLP，仍会外发到该端点。
+## 26. 插件市场统一入口与 Bundle 一键安装（2026-11-12）
+
+**目标**：所有插件与技能，包括 DSH 默认技能、集团内部技能和客户端内置插件，都通过插件市场统一展示、安装与管理；DSH Bundle 不再因缺少 pnpm 停在“待上架”。
+
+**实现**：
+
+- `server.mjs` 的 `MARKET_BUILTIN` 扩展为 12 条：4 个 DSH 默认技能（`D-01`~`D-04`，官方与内置）、集团内部工具技能（`JG-01`，企业内部）、客户端内置插件（`P-OFFICE`、`P-MCP-JG`，官方与内置），以及原有 `M-01/02/03/07/08`。
+- `SKILL_SOURCE_DIR` 把默认技能映射到 `dsh-runtime/node_modules/@deepseek-ai/dsh-agent-preset/skills`，把 `JG-01` 映射到 `marketplace/skills/JG-01`；`SKILL_INSTALL_DIR` 让默认技能安装回原名目录、`JG-01` 安装回 `jg-product`，避免同名技能重复。
+- 内置插件条目 `kind='plugin'`，状态为已安装、系统内置、不可单独卸载；详情页显示“系统内置”，不再出现可点击的安装/卸载按钮。
+- 内置 pnpm：`runtime/pnpm` 存放 pnpm 11.21.0 与 `pnpm.cmd`；`pnpmAvailable()` 直接用 `runtime/node.exe` 探测 `pnpm.cjs`，`dshPluginEnv()` 注入 `DSH_HOME=data/dsh-home` 与 pnpm PATH，确保 `dsh plugin add/remove` 修改的是产品 profile，而不是用户默认 `~/.dsh`。
+- Bundle 安装：审核通过后解压到 `data/bundle-packages/<marketId>`；`POST /api/plugin-market/install` 对 `kind='bundle'` 执行 `dsh plugin add file:<dir>`，随后把包名写入 profile 的 `dsh.profile.bundles`；校验不通过则 `dsh plugin remove` 回滚。卸载时先 `dsh plugin remove`，再从 bundles 列表移除。
+- 管理后台新增“插件市场已上架管理”：`GET/POST /api/admin/plugin-market` 支持查看全部条目、上架/下架、编辑名称/描述/分组、删除社区条目；列表显示来源、状态与本机安装状态。
+- 管理中心 AI 能力页的“插件 / 技能”指标改为实时统计，不再写死 `12 / 9`；市场条目数、待审核数同源。
+
+**实测**：
+
+- 启动后公开市场返回 12 条，已安装 7 项技能与 2 个内置插件；管理 API 返回 `total=12 / listed=12 / installed=9`。
+- 上架/下架 `M-02`：公开市场由 12 变 11，再恢复 12。
+- 默认技能 `D-01` 从市场卸载后目录删除，重新安装后目录恢复且写入 `.jg-market.json`。
+- 真实 Bundle 测试包：上传 → `SUB-MWD8S7P2` 待审 → 审核通过解压 → 市场可见 → 安装成功，`data/dsh-home/profiles/sdk/node_modules/jg-market-demo-bundle` 存在，profile `bundles` 含 `jg-market-demo-bundle`；`dsh --profile sdk --dump-config` 退出码 0；卸载后依赖与 bundles 条目均移除。
+- 测试提交、包文件与市场条目已全部清理；当前 `pluginSubs=0`，市场 12 条，无测试残留。
+- 截图：`D:\project-test3\shots\plugin-market-all.png`、`plugin-market-admin.png`。
+
+**边界**：
+
+- `P-OFFICE` / `P-MCP-JG` 随客户端加载，市场只做展示与运维上下架，不提供单独安装/卸载；这是系统内置插件的明确边界。
+- 社区 Bundle 安装仍要求包内 `package.json` 声明 `dsh.bundle` 且 patch 文件存在；空 patch 可用于验证安装链路，但不会给运行时增加能力。
+- 安装 Bundle 会重建空闲 Harness 运行时；有会话正在执行时接口返回 409，需下一轮再操作。
