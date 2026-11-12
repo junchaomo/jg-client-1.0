@@ -67,11 +67,11 @@
 
 | 能力 | 状态 | 实际情况与证据 |
 |---|---|---|
-| 技能框架 | 部分 | `skill`、`skill-filesystem`、`tool-skill` 已启用；`$DSH_HOME/skills` 实际只有 `jg-product` 一个技能。 |
+| 技能框架 | 部分 | `skill`、`skill-filesystem`、`tool-skill` 已启用；`$DSH_HOME/skills` 实际有 `jg-product` 与已安装的市场技能 `market-M-01`、`market-M-03`，Office 通过 `skill-office` 插件加载。 |
 | Office 技能 | 已落地 | profile 显式启用 `skill-office`，并指向 `dsh-skill-office/assets` 与 `libreoffice-kit` CLI。 |
 | MCP 客户端/资源 | 已落地 | base 有 `mcp-resources`；profile insert `mcp-jg`；产品有资源目录与读取接口。 |
 | 产品 MCP 工具 | 已落地 | `mcp-jg.mjs` 注册 10 个工具：`drive_search`、`drive_read`、`notice_list`、`notice_read`、`academy_search`、`contacts_find`、`im_send`、`notebook_search`、`resource_query`、`task_create`。 |
-| 插件管理器 | 部分 | `plugin-manager`、`tool-plugin-manager` 已启用；产品库存读启动快照 `dsh-dump-config.txt`，启停只改 profile patch 并提示重启。`server.mjs:2330-2350` |
+| 插件管理器 | 部分 | `plugin-manager`、`tool-plugin-manager` 已启用；产品库存按当前 profile 用 `dsh --dump-config` 即时生成，启停只改 profile patch 并提示重启。`server.mjs:617-690` |
 | 插件市场/用户插件真实挂载 | 部分 | 2026-11-12 已接通技能包：内置 5 个技能包，上传 ZIP 审核通过后入库，安装复制到 `$DSH_HOME/skills`，模型可见；DSH Bundle 仍不能一键安装。`server.mjs` 市场安装段、`marketplace/skills` |
 | 选中插件注入 | 部分 | 产品把选中的插件名称/描述拼进上下文提示，不是运行时能力。`server.mjs:3479-3483` |
 | DSH 原生设置/配置编辑 | 部分 | `settings`、`config-editor` 运行时已挂载；产品仍用自己的设置中心，不读写 DSH settings。 |
