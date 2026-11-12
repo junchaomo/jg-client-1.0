@@ -99,5 +99,6 @@ Invoke-RestMethod "$base/api/login" -Method Post -ContentType 'application/json'
 - P1：文件变更摘要、会话全文检索、会话导出 Markdown、后台作业面板、审批待处理会话恢复、`/plan`、项目级指令、设置中心、MCP 资源浏览、子代理正文、工作流阶段/节点、Agent 预设、插件运行时清单与启停。
 - 明确不做：官方 Web/Desktop UI 套装。
 - P2 已落地：语音输入（Web Speech API，含失败路径）、AI 会话标题（`session-title-llm`）、token 用量（`assistant/message.usage`）、消息反馈（按消息索引持久化）、`apply_patch`（开启 `tool-fs.applyPatch`）、Office 技能（`dsh-skill-office` + 包内 LibreOffice Kit CLI）。
-- 仍有边界：DSH 原生 settings/config-editor 全量表单、插件安装完整包管理（当前环境缺 pnpm）、持久终端（已试挂载，但 Windows PTY 启动失败，已回滚）、PTC、ACP、open-in-app。
+- P2 收口边界：持久终端（Windows PTY 不可用，已回滚）、PTC（会替代 native executor 并丢失工具级审批/步骤归因，不启用）、ACP（外部协议，不挂载）、open-in-app（依赖官方 UI/webServer，按既定范围不做）。
+- 设置中心仍是产品级设置，不是 DSH 原生 settings/config-editor 全量表单；插件安装完整包管理仍受当前环境缺少 pnpm 限制。
 

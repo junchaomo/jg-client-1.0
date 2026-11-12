@@ -472,12 +472,12 @@
 
 - 插件安装的完整包操作体验（pnpm 缺失；无组合包详情、版本列表、构建脚本批准）
 
-### P2
+### P2 收口（环境阻塞或明确不做）
 
-- 持久终端（`dsh-terminal` / `dsh-tool-terminal`，已试挂载但 Windows PTY 启动失败）
-- PTC 工具执行器
-- ACP
-- open-in-app
+- 持久终端：三件套可挂载，但当前 Windows 环境无可用 PTY 后端（bash 启动即退出、pwsh 就绪超时），已回滚，不暴露必失败工具。
+- PTC：`tool-executor-ptc` 会替代 `tool-executor-native`，模型只看到 `run_code`，会丢失当前产品依赖的工具级步骤归因与 Auto 逐次审批矩阵，因此不默认启用；保留 native executor。
+- ACP：属于外部编辑器/客户端的接入协议，不是本产品统一对话入口的必需能力；当前不挂载，避免引入第二套会话与审批面。
+- open-in-app：官方 Web/Desktop UI 套装已明确不做；`dsh-host-open-in-app` 依赖 `webServer` 与浏览器信任路由，当前自定义产品服务端未提供该挂载面，因此不落地。
 
 ### P2 已落地（本轮）
 
