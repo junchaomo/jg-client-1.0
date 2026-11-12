@@ -4081,6 +4081,7 @@ const api = {
         cwd: conv.agentCwd,
         executionPolicy,
         runKey: conv.id,
+        runtimeScope: conv.id,
         onStart: (dshSessionId) => markChatRunStarted(chatTask, dshSessionId),
         shouldCancel: () => Boolean(conv.cancelRequested),
         images: imageBlocksForAgent(user, net, body.refs),
@@ -4250,7 +4251,7 @@ const api = {
       let closedRuntime = false
       if (activeRuns.has(conv.id)) {
         try {
-          const result = await cancelRun(conv.id, conv.agentCwd)
+          const result = await cancelRun(conv.id)
           native = Boolean(result?.native)
           closedRuntime = Boolean(result?.runtimeClosed)
         } catch (cancelError) {

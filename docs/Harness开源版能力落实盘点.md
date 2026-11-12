@@ -93,7 +93,7 @@
 | 工作区依赖 | 未落地 | `workspace-dependencies` 依赖 `DSH_PRIMARY_RUNTIME`；当前未设置，行被禁用。 |
 | worktree 隔离 | 未落地 | `dsh-experimental-tool-worktree` 未进入 profile。 |
 | 持久化任务队列 | 部分 | `chat-run` 先 `queued`，由进程内并发槽（默认 2）启动；任务记录持久化，重启后 `queued/running` 标为 `interrupted`，保留指令但不自动续跑。没有常驻跨重启 worker 与断点重放。 |
-| 长任务取消 | 已落地（会话级） | Chat 会话独占运行时；停止先尝试 DSH 原生 `session/cancel`，SDK 未暴露时关闭该会话运行时。实测取消一个会话后，另一并发会话正常完成。Work 项目仍共享项目运行时。 |
+| 长任务取消 | 已落地（会话级） | 每个会话在运行时缓存键中追加 `runtimeScope=会话 id`，即使多个 Work 会话共享同一项目目录，也各自独占运行时。停止先尝试 DSH 原生 `session/cancel`，SDK 未暴露时关闭该会话运行时。实测同项目两个 Work 会话并发，取消一个后另一个正常完成。 |
 | 语音输入/语音转写 | 未落地 | `experimental-voice-input`、`speech-to-text` 未进入 profile。 |
 | 其他实验能力 | 未落地 | forge、liveshare、Ralph、inspector、auto-review、COT translation、action-cards 均未装载。 |
 

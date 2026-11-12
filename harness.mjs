@@ -37,6 +37,11 @@ function keyOf({ apiKey, baseUrl, model, reasoningEffort }) {
   return createHash('sha256').update(`${apiKey}|${baseUrl}|${model}|${reasoningEffort || ''}`).digest('hex')
 }
 
+function runtimeEntryKey(cfg, cwd, scope = '') {
+  const base = `${keyOf(cfg)}|${sandboxRootFor(cwd).toLowerCase()}`
+  return scope ? `${base}|${String(scope)}` : base
+}
+
 function sandboxRootFor(cwd) {
   const target = String(cwd || '').trim()
   if (!target) return workspace
@@ -60,9 +65,9 @@ function acquire(entry) {
   return next.then(() => () => release())
 }
 
-async function getHarness(cfg, handlers = null, cwd = '') {
+async function getHarness(cfg, handlers = null, cwd = '', runtimeScope = '') {
   const sandboxRoot = sandboxRootFor(cwd)
-  const key = `${keyOf(cfg)}|${sandboxRoot.toLowerCase()}`
+  const key = runtimeEntryKey(cfg, cwd, runtimeScope)
   if (active.has(key)) {
     const entry = active.get(key)
     entry.handlers = handlers
@@ -70,10 +75,13 @@ async function getHarness(cfg, handlers = null, cwd = '') {
     return entry.harness
   }
   if (active.size >= MAX_ACTIVE_HARNESSES) {
-    const oldest = [...active.entries()].sort((a, b) => a[1].usedAt - b[1].usedAt)[0]
-    if (oldest) {
-      active.delete(oldest[0])
-      try { await oldest[1].harness.close() } catch {}
+    // 只回收空闲运行时；正在跑 run 的条目如果被淘汰，会把用户正在执行的任务直接杀掉。
+    const idle = [...active.entries()]
+      .filter(([, entry]) => !entry.runs?.size)
+      .sort((a, b) => a[1].usedAt - b[1].usedAt)[0]
+    if (idle) {
+      active.delete(idle[0])
+      try { await idle[1].harness.close() } catch {}
     }
   }
   mkdirSync(baseHome, { recursive: true })
@@ -491,12 +499,12 @@ export async function runtimeRequest(method, params = {}, cfg = {}) {
  * 在 DSH 会话中运行一轮 agent。已存在 dshSessionId 时续用同一会话，
  * 不存在时自动创建新会话并返回 id。
  */
-export async function runAgent({ apiKey, baseUrl, model, text, sessionId, context, images, handlers, reasoningEffort, cwd, executionPolicy = 'auto', runKey = '', onStart = null, shouldCancel = null }) {
+export async function runAgent({ apiKey, baseUrl, model, text, sessionId, context, images, handlers, reasoningEffort, cwd, executionPolicy = 'auto', runKey = '', runtimeScope = '', onStart = null, shouldCancel = null }) {
   if (!apiKey) throw new HarnessError('没有可用的模型密钥', { code: 'MODEL_KEY_MISSING', status: 503 })
   const effort = ['off', 'low', 'medium', 'high', 'max'].includes(String(reasoningEffort || '')) ? String(reasoningEffort) : ''
   const cfg = { apiKey, baseUrl, model, reasoningEffort: effort }
-  const harness = await getHarness(cfg, handlers, cwd)
-  const entryKey = `${keyOf(cfg)}|${sandboxRootFor(cwd).toLowerCase()}`
+  const harness = await getHarness(cfg, handlers, cwd, runtimeScope)
+  const entryKey = runtimeEntryKey(cfg, cwd, runtimeScope)
   const entry = active.get(entryKey)
   const release = entry ? await acquire(entry) : () => {}
   // 父会话 idle 时子代理可能还在跑；单独订阅运行时通知，补齐后续的 subagent.finished 正文。
@@ -657,9 +665,10 @@ export async function closeHarness() {
  * 通过 DSH 原生 session/cancel 取消某一轮 Agent，不关闭运行时、不影响其他会话。
  * runKey 为产品侧会话 id；只有当前进程里正在执行才能拿到 SDK session id。
  */
-export async function cancelRun(runKey, cwd) {
-  const root = sandboxRootFor(cwd).toLowerCase()
-  const targets = [...active.entries()].filter(([key]) => key.toLowerCase().endsWith(`|${root}`))
+export async function cancelRun(runKey) {
+  // 按产品侧 runKey（会话 id）定位正在执行的运行时，而不是按 cwd 批量匹配；
+  // Work 会话共享项目目录时也能只命中当前会话的运行时。
+  const targets = [...active.entries()].filter(([, entry]) => entry.runs?.has(String(runKey)))
   for (const [key, entry] of targets) {
     const run = entry.runs?.get(String(runKey))
     if (!run) continue

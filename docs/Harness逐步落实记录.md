@@ -733,8 +733,8 @@
 
 **实现**：
 
-- 每个 Chat 会话改为独占一个 Harness 运行时（`sandboxRootFor` 返回会话目录），取消时只关闭该会话的运行时，不再关闭全部运行时。
-- `harness.mjs` 新增 `cancelRun(runKey, cwd)`：先尝试 DSH 原生 `session/cancel`；当前 SDK 运行时未暴露该方法时，退化为关闭该会话独占运行时。`runAgent` 记录 `entry.runs` 中的 SDK 会话 id，并在启动前检查取消标记。
+- 每个会话在运行时缓存键中追加 `runtimeScope`（会话 id），Chat 与 Work 都按会话独占运行时；Work 多个会话即使共享同一项目目录，也不会互相停掉运行时。
+- `harness.mjs` 新增 `cancelRun(runKey)`：先尝试 DSH 原生 `session/cancel`；当前 SDK 运行时未暴露该方法时，退化为关闭该会话独占运行时。按 `runKey` 定位，不再按 cwd 批量匹配。
 - `/api/chat/cancel` 重写：排队中的任务直接标记 `cancelled`；执行中的任务走 `cancelRun`；返回 `native` 与 `runtimeClosed`，并在会话里记录停止步骤，不再笼统关闭整个 Harness。
 - `chat-run` 任务先进入 `queued`，由进程内调度器限制并发（`JG_MAX_CHAT_RUNS`，默认 2）；真正开始模型轮次时切到 `running` 并写入执行的 DSH 会话 id；取消、完成、失败分别落 `cancelled / done / failed`。
 - 任务记录继续持久化；服务重启时 `queued / running` 统一标为 `interrupted`，保留原会话与指令，不自动重放副作用。
@@ -744,6 +744,7 @@
 
 - 运行 `Start-Sleep -Seconds 12` 的长任务，6 秒后停止：返回 `runtimeClosed=true`，任务从 `running/20` 变为 `cancelled`，会话状态为 `done`。
 - 同一时刻另开一个会话只回复 `ok`：被取消会话关闭运行时后，另一会话正常完成并返回 `ok`，证明取消不波及其他会话。
+- 同一 Work 项目（`PRJ-D1F5D4`）下并发两个会话：一个执行长任务、一个短回复；取消长任务后短回复仍完成，任务分别落 `cancelled` 与 `done`，证明项目共享目录不再导致取消互相影响。
 - `dsh --profile sdk --dump-config` 在挂载会话检索后退出码 0，dump 中可见 `optional-session-search`、`optional-session-query-sqlite`、`optional-tool-session-query`。
 - `GET /api/bootstrap` 返回 `runtime.native.sessionSearch=已挂载`。
 
