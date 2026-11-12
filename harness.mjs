@@ -44,10 +44,11 @@ function sandboxRootFor(cwd) {
   const normalized = target.replace(/\\/g, '/')
   const chatBaseNormalized = chatBase.replace(/\\/g, '/')
   if (normalized.toLowerCase().startsWith(chatBaseNormalized.toLowerCase() + '/')) {
-    // Chat：同一用户的多个会话共用该用户的托管根目录，会话目录再作为 Session cwd。
+    // Chat：每个会话独占一个 Harness 运行时，取消时只关闭该会话的运行时，
+    // 不波及其他会话；会话目录仍是真实执行 cwd。
     const rest = normalized.slice(chatBaseNormalized.length + 1).split('/').filter(Boolean)
-    if (rest.length >= 1) return join(chatBase, rest[0])
-    return chatBase
+    if (rest.length >= 2) return target
+    return join(chatBase, rest[0] || 'default')
   }
   return target
 }
@@ -104,7 +105,7 @@ async function getHarness(cfg, handlers = null, cwd = '') {
       onUserQuestion: typeof handlers.onQuestion === 'function' ? handlers.onQuestion : undefined,
     } : {}),
   })
-  const entry = { key, harness, handlers, usedAt: Date.now(), queue: Promise.resolve(), toolCalls: new Map() }
+  const entry = { key, harness, handlers, usedAt: Date.now(), queue: Promise.resolve(), toolCalls: new Map(), runs: new Map() }
   if (handlers && typeof handlers.onApproval === 'function') {
     // 必须先启动 client 再注册审批回调，否则 SDK 会把审批失败关闭为 unavailable。
     harness.client.start()
@@ -490,7 +491,7 @@ export async function runtimeRequest(method, params = {}, cfg = {}) {
  * 在 DSH 会话中运行一轮 agent。已存在 dshSessionId 时续用同一会话，
  * 不存在时自动创建新会话并返回 id。
  */
-export async function runAgent({ apiKey, baseUrl, model, text, sessionId, context, images, handlers, reasoningEffort, cwd, executionPolicy = 'auto' }) {
+export async function runAgent({ apiKey, baseUrl, model, text, sessionId, context, images, handlers, reasoningEffort, cwd, executionPolicy = 'auto', runKey = '', onStart = null, shouldCancel = null }) {
   if (!apiKey) throw new HarnessError('没有可用的模型密钥', { code: 'MODEL_KEY_MISSING', status: 503 })
   const effort = ['off', 'low', 'medium', 'high', 'max'].includes(String(reasoningEffort || '')) ? String(reasoningEffort) : ''
   const cfg = { apiKey, baseUrl, model, reasoningEffort: effort }
@@ -558,9 +559,21 @@ export async function runAgent({ apiKey, baseUrl, model, text, sessionId, contex
     // 统一用 read-only 入口；Auto 由服务端对每次审批做低风险自动放行，高风险仍落人工审批。
     await session.run('/permission read-only')
     if (planActivate) await session.run('/plan')
+    // 记录本轮正在执行的 SDK 会话，供产品按会话调用原生 session/cancel。
+    if (entry && runKey) entry.runs.set(String(runKey), { sessionId: String(session.id), startedAt: Date.now() })
+    if (typeof onStart === 'function') onStart(String(session.id))
+    if (typeof shouldCancel === 'function' && shouldCancel()) {
+      throw new HarnessError('用户已停止本轮执行', { code: 'RUN_CANCELLED', status: 409 })
+    }
     result = await session.run(input)
     await settleSubagents()
   } catch (error) {
+    // 用户已停止本轮：不再因为“会话不存在”之类的错误自动新建会话重试。
+    if (error?.code === 'RUN_CANCELLED' || (typeof shouldCancel === 'function' && shouldCancel())) {
+      throw error?.code === 'RUN_CANCELLED'
+        ? error
+        : new HarnessError('用户已停止本轮执行', { code: 'RUN_CANCELLED', status: 409 })
+    }
     if (sessionId) {
       // 会话可能已被清理或来自旧 DSH_HOME；退回新会话，不丢当前输入。
       try {
@@ -568,6 +581,8 @@ export async function runAgent({ apiKey, baseUrl, model, text, sessionId, contex
         if (cwd) await session.setWorkingDirectory(cwd)
         await session.run('/permission read-only')
         if (planActivate) await session.run('/plan')
+        if (entry && runKey) entry.runs.set(String(runKey), { sessionId: String(session.id), startedAt: Date.now() })
+        if (typeof onStart === 'function') onStart(String(session.id))
         result = await session.run(input)
         await settleSubagents()
       } catch (retryError) {
@@ -577,6 +592,7 @@ export async function runAgent({ apiKey, baseUrl, model, text, sessionId, contex
       throw wrap(error)
     }
   } finally {
+    if (entry && runKey) entry.runs.delete(String(runKey))
     try { subagentSubscription?.close?.() } catch {}
     try { await subagentPump } catch {}
     release()
@@ -635,4 +651,31 @@ export async function closeHarness() {
   const current = [...active.values()]
   active.clear()
   await Promise.all(current.map((entry) => entry.harness.close().catch(() => {})))
+}
+
+/**
+ * 通过 DSH 原生 session/cancel 取消某一轮 Agent，不关闭运行时、不影响其他会话。
+ * runKey 为产品侧会话 id；只有当前进程里正在执行才能拿到 SDK session id。
+ */
+export async function cancelRun(runKey, cwd) {
+  const root = sandboxRootFor(cwd).toLowerCase()
+  const targets = [...active.entries()].filter(([key]) => key.toLowerCase().endsWith(`|${root}`))
+  for (const [key, entry] of targets) {
+    const run = entry.runs?.get(String(runKey))
+    if (!run) continue
+    try {
+      await entry.harness.client.request('session/cancel', { sessionId: run.sessionId })
+      return { accepted: true, native: true, sessionId: run.sessionId }
+    } catch (error) {
+      // 当前 SDK 运行时没有暴露 session/cancel；关闭该会话独占的运行时，
+      // 让 session.run 立即结束，而不是等模型自己跑完。
+      if (/unknown .* method|not supported|session\/cancel/i.test(error?.message || '')) {
+        active.delete(key)
+        try { await entry.harness.close() } catch {}
+        return { accepted: true, native: false, runtimeClosed: true, sessionId: run.sessionId }
+      }
+      throw new HarnessError(`DSH 会话取消失败：${error?.message || error}`, { code: 'SESSION_CANCEL_FAILED', status: 502 })
+    }
+  }
+  throw new HarnessError('当前会话没有正在执行的 DSH 回合', { code: 'SESSION_NOT_RUNNING', status: 409 })
 }

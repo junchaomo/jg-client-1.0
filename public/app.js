@@ -9610,6 +9610,7 @@ const TASK_STATE_MAP = {
   done: ['ok', '已完成'],
   failed: ['bad', '失败'],
   interrupted: ['warn', '已中断'],
+  cancelled: ['warn', '已取消'],
 }
 const taskStateMap = TASK_STATE_MAP
 
@@ -10845,6 +10846,8 @@ function settingsBody(tab) {
           srow('原生 settings', '运行时插件，负责 schema 表单与配置投影；产品只读状态，不写入', nativeTag(nt.settings)),
           srow('原生 config-editor', 'DSH 自带的配置编辑入口；产品不暴露，避免绕过产品设置', nativeTag(nt.configEditor)),
           srow('原生 authorization', '运行时授权插件；审批策略仍以产品设置与输入框切换为准', nativeTag(nt.authorization)),
+          srow('原生会话检索', '通过 dsh-tool-session-query 让模型检索并读取当前工作区的历史会话；产品不另建索引', nativeTag(nt.sessionSearch)),
+          srow('会话导出', '产品按真实消息记录导出 Markdown；DSH 原生会话日志继续由运行时保存', `<span class="tag ok">${esc(nt.sessionExport || '可用')}</span>`),
           srow('凭据文件', 'DSH 本地凭据文件；产品不读取内容，也不允许从这里取模型密钥',
             `${nativeTag(nt.credentials)}<span class="set-desc" style="display:block;margin-top:4px">${nt.credentialsPresent ? '文件存在 · 内容不展示' : '文件未生成'}${nt.credentialsUpdatedAt ? ' · 更新于 ' + esc(when(nt.credentialsUpdatedAt)) : ''}</span>`),
           srow('模型密钥来源', '模型密钥由产品「模型与密钥」保存，按会话注入子进程环境；不走 DSH 原生凭据',

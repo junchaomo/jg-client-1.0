@@ -28,7 +28,7 @@ import {
 } from './data.mjs'
 import { buildDocument, supportedFormats } from './docs.mjs'
 import { ModelError, chatCompletion, resolveModelConfig } from './model.mjs'
-import { HarnessError, closeHarness, dshBin, runAgent, stopBackgroundRuntime } from './harness.mjs'
+import { HarnessError, cancelRun, closeHarness, dshBin, runAgent, stopBackgroundRuntime } from './harness.mjs'
 import { extractBundlePackage, extractSkillPackage, inspectPluginZip } from './plugin-scan.mjs'
 import { consoleRoles, consoleNav, consoleModules, consoleSections, consoleScopeOptions } from './console.mjs'
 
@@ -312,6 +312,8 @@ function runtimeOverview() {
       skillsDir,
       skills,
       officeSkill: nativeRow('skill-office'),
+      sessionSearch: nativeRow('optional-tool-session-query'),
+      sessionExport: '产品会话导出',
       credentialsPath,
       credentialsPresent: existsSync(credentialsPath),
       credentialsUpdatedAt,
@@ -882,6 +884,35 @@ function setRuntimePluginEnabled(id, enabled) {
   const separator = current.endsWith('\n') ? '' : '\n'
   writeFileSync(patchPath, `${current}${separator}- id: ${id}\n  disabled: ${enabled ? 'false' : 'true'}\n`, 'utf8')
   return { id, enabled, restartRequired: true }
+}
+
+function ensureNativeSessionSearch() {
+  const dir = runtimeProfileDir()
+  mkdirSync(dir, { recursive: true })
+  const patchPath = join(dir, 'cordis.patch.yml')
+  let current = existsSync(patchPath) ? readFileSync(patchPath, 'utf8') : '# profile patch\n'
+  if (current.includes('optional-tool-session-query')) return false
+  const block = [
+    '',
+    '- insert:',
+    '    - id: optional-session-search',
+    '      name: cordis:group',
+    '      group: true',
+    '      isolate:',
+    '        sessionQuery: true',
+    '      config:',
+    '        - id: optional-session-query-sqlite',
+    '          name: \'@deepseek-ai/dsh-session-query-sqlite\'',
+    '          config:',
+    '            path: \':memory:\'',
+    '            openAt: first-search',
+    '        - id: optional-tool-session-query',
+    '          name: \'@deepseek-ai/dsh-tool-session-query\'',
+    '',
+  ].join('\n')
+  const separator = current.endsWith('\n') ? '' : '\n'
+  writeFileSync(patchPath, `${current}${separator}${block}`, 'utf8')
+  return true
 }
 
 function roleOf(req) {
@@ -2189,15 +2220,33 @@ function bboxHit(a, b) {
 }
 
 /** 会话执行记录：把每次真实 AI 运行作为一条持久化任务，服务重启后可定位原会话继续。 */
+const MAX_CHAT_RUNS = Math.max(1, Number(process.env.JG_MAX_CHAT_RUNS || 2))
+let chatRunSlots = 0
+const chatRunWaiters = []
+
+function acquireChatRunSlot() {
+  if (chatRunSlots < MAX_CHAT_RUNS) {
+    chatRunSlots += 1
+    return Promise.resolve()
+  }
+  return new Promise((resolve) => chatRunWaiters.push(resolve))
+}
+
+function releaseChatRunSlot() {
+  const next = chatRunWaiters.shift()
+  if (next) next()
+  else chatRunSlots = Math.max(0, chatRunSlots - 1)
+}
+
 function startChatRunTask({ conv, user, text, mode, taskMode, target }) {
   const task = {
     id: `TR-${Date.now()}-${Math.floor(Math.random() * 900 + 100)}`,
     kind: 'chat-run',
     title: text.length > 40 ? `${text.slice(0, 40)}…` : text,
-    state: 'running',
-    progress: 10,
+    state: 'queued',
+    progress: 0,
     target: `${mode === 'work' ? '工作' : mode === 'chat' ? '对话' : '自动'} · ${target || '对话工作区'}`,
-    started: new Date().toLocaleTimeString('zh-CN', { hour12: false }).slice(0, 5),
+    started: '',
     createdAt: Date.now(),
     finishedAt: null,
     conversationId: conv.id,
@@ -2208,11 +2257,31 @@ function startChatRunTask({ conv, user, text, mode, taskMode, target }) {
     steps: 0,
     artifacts: 0,
     reason: '',
+    queuePosition: chatRunWaiters.length + 1,
   }
   liveTasks.unshift(task)
   conv.taskRunId = task.id
   persistPersistentState()
   return task
+}
+
+function markChatRunStarted(task, sessionId = '') {
+  if (!task) return
+  task.state = 'running'
+  task.progress = 20
+  task.started = new Date().toLocaleTimeString('zh-CN', { hour12: false }).slice(0, 5)
+  task.dshSessionId = sessionId || task.dshSessionId || ''
+  task.queuePosition = 0
+  persistPersistentState()
+}
+
+function cancelChatRunTask(task, reason = '用户停止执行') {
+  if (!task) return
+  task.state = 'cancelled'
+  task.finishedAt = Date.now()
+  task.reason = String(reason).slice(0, 160)
+  task.progress = Math.min(100, Math.max(0, task.progress || 0))
+  persistPersistentState()
 }
 
 function finishChatRunTask(task, { steps = 0, artifacts = 0 } = {}) {
@@ -3944,6 +4013,7 @@ const api = {
       })
     }
     conv.agentCwd = project?.cwd || chatWorkspaceDir(user, conv.id)
+    conv.cancelRequested = false
     conv.messages.push({ role: 'user', text, time: new Date().toLocaleTimeString('zh-CN', { hour12: false }).slice(0, 5) })
     conv.status = 'running'
     activeRuns.add(conv.id)
@@ -3961,8 +4031,17 @@ const api = {
       })
     }
     let chatTask = null
+    let chatSlotHeld = false
     try {
       chatTask = startChatRunTask({ conv, user, text, mode, taskMode, target: project?.name || '' })
+      await acquireChatRunSlot()
+      chatSlotHeld = true
+      if (conv.cancelRequested || chatTask.state === 'cancelled') {
+        cancelChatRunTask(chatTask, '排队期间已停止')
+        conv.status = 'done'
+        activeRuns.delete(conv.id)
+        return json(res, 200, { ok: true, cancelled: true, conversation: conv })
+      }
       const refContext = await refContextForModel(user, net, body.refs)
       const selectedPlugins = (Array.isArray(body.tools) ? body.tools : [])
         .map((id) => installedSkillPlugins().find((p) => p.id === id))
@@ -4001,6 +4080,9 @@ const api = {
         context,
         cwd: conv.agentCwd,
         executionPolicy,
+        runKey: conv.id,
+        onStart: (dshSessionId) => markChatRunStarted(chatTask, dshSessionId),
+        shouldCancel: () => Boolean(conv.cancelRequested),
         images: imageBlocksForAgent(user, net, body.refs),
         reasoningEffort,
         handlers: {
@@ -4031,6 +4113,12 @@ const api = {
         },
       })
       const reply = result.reply
+      if (conv.cancelRequested) {
+        conv.status = 'done'
+        activeRuns.delete(conv.id)
+        cancelChatRunTask(chatTask, '用户停止本轮执行')
+        return json(res, 200, { ok: true, cancelled: true, conversation: conv })
+      }
       const visible = liveResources.filter((r) => canSee(user, r, net))
       const citationIds = [...new Set((reply.match(/R-[A-Z0-9-]+/g) || []).filter((id) => visible.some((r) => r.id === id)))]
       const citations = citationIds.map((id) => {
@@ -4081,6 +4169,12 @@ const api = {
         model: { name: result.model, latencyMs: result.latencyMs, usage: null, harness: true },
       })
     } catch (error) {
+      if (conv.cancelRequested) {
+        conv.status = 'done'
+        activeRuns.delete(conv.id)
+        cancelChatRunTask(chatTask, '用户停止本轮执行')
+        return json(res, 200, { ok: true, cancelled: true, conversation: conv })
+      }
       conv.status = 'failed'
       activeRuns.delete(conv.id)
       failChatRunTask(chatTask, error?.message || error)
@@ -4092,6 +4186,8 @@ const api = {
         return json(res, error.status, { error: error.message, code: error.code, detail: error.detail })
       }
       return json(res, 502, { error: `模型调用失败：${error?.message || error}`, code: 'MODEL_ERROR' })
+    } finally {
+      if (chatSlotHeld) releaseChatRunSlot()
     }
   },
   'GET /api/chat/pending': (req, res) => {
@@ -4145,23 +4241,41 @@ const api = {
     const body = JSON.parse(req.__body || '{}')
     const conv = conversations.find((c) => c.id === body.conversationId)
     if (conv && !conversationAllowed(user, conv)) return json(res, 403, { error: '无权停止该会话', code: 'CONVERSATION_FORBIDDEN' })
+    const task = conv?.taskRunId ? liveTasks.find((t) => t.id === conv.taskRunId) : null
     try {
       cancelPendingInteractions(body.conversationId)
-      await closeHarness()
-      if (conv) {
-        conv.status = 'done'
-        activeRuns.delete(conv.id)
-        conv.messages.push({
-          role: 'assistant',
-          text: '已停止本轮 Harness 执行。',
-          time: new Date().toLocaleTimeString('zh-CN', { hour12: false }).slice(0, 5),
-          steps: [{ tool: '停止执行', detail: 'Harness 子进程已关闭，可从下一轮重新开始', status: 'warn', ms: 0 }],
-        })
+      if (!conv) return json(res, 404, { error: '会话不存在', code: 'CONVERSATION_NOT_FOUND' })
+      conv.cancelRequested = true
+      let native = false
+      let closedRuntime = false
+      if (activeRuns.has(conv.id)) {
+        try {
+          const result = await cancelRun(conv.id, conv.agentCwd)
+          native = Boolean(result?.native)
+          closedRuntime = Boolean(result?.runtimeClosed)
+        } catch (cancelError) {
+          if (cancelError?.code !== 'SESSION_NOT_RUNNING') throw cancelError
+        }
       }
-      logAudit(user, 'chat.cancel', conv?.id || '—', 'allow', net)
-      return json(res, 200, { ok: true, conversation: conv || null, note: 'Harness 无原生单轮取消，已关闭运行时进程；历史会话仍可恢复。' })
+      if (task && task.state !== 'done') cancelChatRunTask(task, '用户停止本轮执行')
+      conv.status = 'done'
+      activeRuns.delete(conv.id)
+      conv.messages.push({
+        role: 'assistant',
+        text: native ? '已停止本轮 Harness 执行，其他会话不受影响。' : closedRuntime ? '已停止本轮执行；该会话的 Harness 运行时已关闭，其他会话不受影响。' : '已停止本轮生成。',
+        time: new Date().toLocaleTimeString('zh-CN', { hour12: false }).slice(0, 5),
+        steps: [{ tool: '停止执行', detail: native ? 'DSH session/cancel · 仅取消当前会话回合' : closedRuntime ? '关闭该会话独占运行时' : '任务未在执行，已直接取消', status: 'warn', ms: 0 }],
+      })
+      logAudit(user, 'chat.cancel', conv.id, native ? 'allow(native-session-cancel)' : closedRuntime ? 'allow(conversation-runtime-close)' : 'allow(queue-cancel)', net)
+      return json(res, 200, {
+        ok: true, conversation: conv, native, runtimeClosed: closedRuntime,
+        note: native ? '已调用 DSH 原生 session/cancel，仅停止当前会话回合，不关闭运行时。' : closedRuntime ? 'DSH SDK 未暴露 session/cancel；已关闭该会话独占的 Harness 运行时，其他会话不受影响。' : '已取消当前任务，未发现正在执行的 DSH 回合。',
+      })
     } catch (error) {
-      return json(res, 502, { error: `停止执行失败：${error?.message || error}` })
+      return json(res, error?.status || 502, {
+        error: `停止执行失败：${error?.message || error}`,
+        code: error?.code || 'SESSION_CANCEL_FAILED',
+      })
     }
   },
   'POST /api/chat/confirm': (req, res) => {
@@ -5690,6 +5804,7 @@ const server = createServer(async (req, res) => {
 
 server.listen(port, '127.0.0.1', () => {
   cleanupSessions()
+  ensureNativeSessionSearch()
   refreshRuntimeConfigDump()
   console.log(`[jg-hub] http://127.0.0.1:${port}`)
   console.log(`[jg-server] sqlite: ${dataDirPath()}`)

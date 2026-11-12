@@ -8,8 +8,8 @@
 
 1. **Agent 核心链路是扎实的**：`0.2.2-rc.1` 的 Agent Loop、会话 JSONL 持久化、跨重启恢复、工作目录、DeepSeek 模型、推理强度、token 用量、压缩、计划模式、待办、子代理、工作流、技能、MCP、定时任务都已真实运行。
 2. **执行安全有骨架，但矩阵有盲区**：人类审批、自动审批矩阵、只读入口、沙箱都有；审批矩阵目前主要覆盖 `pwsh` 与文件路径，**MCP 写操作、插件管理工具、网络外发没有进入同一套风险评估**。
-3. **插件市场已接通技能包与社区提交，但仍不是完整插件市场**：5 个内置技能包、4 个 DSH 预设默认技能和上传技能包都已真实挂载；社区包可提交、审核、上架、下载、安装，安装范围仍是本机全局而非按账号隔离。DSH Bundle 因缺 pnpm 不能一键安装，DSH 原生设置、凭据、会话检索、会话导出也没有接入。
-4. **第三阶段只完成了执行记录**：持久化 `chat-run` 记录和中断恢复已有；真正的后台任务队列、断点续跑、长任务取消还没有。
+3. **插件市场已统一收口并打通 Bundle 一键安装**：DSH 4 个默认技能、集团技能与客户端内置插件统一进入市场条目；社区提交、审核、上下架、编辑、删除、下载、安装、卸载已打通。Bundle 使用内置 pnpm 真正安装进 `data/dsh-home`，并补写 profile `bundles`、校验失败自动回滚；安装范围仍是本机全局而非按账号隔离。原生设置、凭据、会话检索在设置中心只读展示，会话导出走产品真实消息记录。
+4. **第三阶段是“进程内队列 + 持久执行记录”**：`chat-run` 先 `queued` 再由并发槽启动，支持排队中取消和执行中停止；任务记录持久化，重启后 `queued/running` 标为 `interrupted` 但不自动重放。真正的跨重启续跑、断点快照仍未实现，停止依赖关闭会话独占运行时而非 DSH 原生 `session/cancel`。
 5. **实验能力基本未部署**：多代理团队、持久终端、worktree、forge、liveshare、Ralph、语音输入、自动评审、COT 翻译均未进入当前 `sdk` profile。
 
 ## 二、部署基线
@@ -41,8 +41,8 @@
 | 上下文压缩 | 已落地 | `compaction-basic`、`tool-result-pruner`、`image-offload`、`/compact` 均在 base。 |
 | 会话检查点 | 已确定边界 | `session-checkpoint-policy` 已挂载，做的是模型请求/顶层工具调用前的语义持久化；不备份文件内容，产品侧回滚入口未提供。设置页只读展示策略与“文件回滚未提供”。 |
 | AI 会话标题 | 已落地 | profile 显式启用 `session-title-llm`；产品做了标题可用性过滤后落库。`server.mjs:3572` |
-| 会话全文检索 | 未落地 | `session-query-sqlite` 配置 `openAt: never`；产品搜索是对自有会话消息做字符串过滤，不是 DSH 检索。`server.mjs:3243-3250` |
-| 会话导出 | 未落地 | 产品只导出自有 Markdown；`dsh-session-log-export` 未进入 base bundle。 |
+| 会话全文检索 | 已落地 | profile 已挂载 `optional-session-search` 组（`session-query-sqlite` + `tool-session-query`），模型可检索/读取当前工作区历史会话；产品消息面板仍保留自有全文过滤。`server.mjs:ensureNativeSessionSearch` |
+| 会话导出 | 已落地（产品侧） | `GET /api/conversation/export?id=` 按真实消息记录导出 Markdown；`dsh-session-log-export` 未进入 base bundle，原生 ZIP 导出未接。 |
 | 遥测/可观测 | 已收口 | `harness.mjs` 在 env 未显式指定时注入 `DSH_TELEMETRY_DISABLED=1` 与 `DSH_TELEMETRY_MODE=DISABLED`；`dsh-session-telemetry-otel` 的 `DISABLED` 分支不构造 provider，不会向公网 collector 发请求。运行态核对到 collector IP 无已建立连接。 |
 
 ### 3.2 执行与安全
@@ -57,7 +57,7 @@
 | Windows 沙箱前置条件 | 风险 | 历史问题：普通权限启动时 `dsh-sandbox-windows-acl` 需要 `SeSecurityPrivilege`，当前用管理员启动规避；企业部署需明确权限模型。 |
 | pwsh 工具 | 已落地 | Windows 下 `tool-bash` 禁用、`tool-pwsh` 启用；产品大量真实命令执行已实测。 |
 | 文件读写/编辑/apply_patch | 已落地 | `tool-fs` 在 profile 中显式 `applyPatch: true`；`tool-fs-search` 启用。 |
-| 后台作业 | 已确定边界 | `jobs-local` + `tool-jobs` 可用；SDK client 没有 job/kill 协议，停止只能关闭整个沙箱根运行时。产品按钮已改为「停止运行时」并写明会终止全部后台作业；持久队列仍未落地。`server.mjs:3491` |
+| 后台作业 | 已确定边界 | `jobs-local` + `tool-jobs` 可用；SDK client 没有 job/kill 协议，停止只能关闭沙箱根运行时。产品按钮已改为「停止运行时」并写明会终止全部后台作业。`chat-run` 已有进程内并发槽与排队状态，和后台作业不是同一层。`server.mjs:3491` |
 | 持久终端 | 未落地 | `dsh-tool-terminal`、`dsh-terminal-*` 未进入 `sdk` bundle；历史 Windows PTY 尝试已回滚。 |
 | Web 搜索/抓取 | 已落地 | `dsh-web`、`web-search-deepseek`、`web-fetch-http`、`tool-web` 均在 base。 |
 | 超时/重复调用提醒 | 已落地 | `tool-call-timeout-policy`、`repeat-tool-reminder` 在 base。 |
@@ -67,12 +67,12 @@
 
 | 能力 | 状态 | 实际情况与证据 |
 |---|---|---|
-| 技能框架 | 已核对现状 | `skill`、`skill-filesystem`、`tool-skill` 已启用；`$DSH_HOME/skills` 实际有 `jg-product`、`market-M-01`、`market-M-03` 三个目录技能，Office 通过 `skill-office` 插件加载。设置页已只读列出目录技能与 Office 插件状态。 |
+| 技能框架 | 已核对现状 | `skill`、`skill-filesystem`、`tool-skill` 已启用；`$DSH_HOME/skills` 实际有 `agent-experience`、`cordis-composition-reference`、`cordis-plugin-development`、`editing-cordis-compositions`、`jg-product`、`market-M-01`、`market-M-03` 等目录技能，Office 通过 `skill-office` 插件加载。设置页已只读列出目录技能与 Office 插件状态。 |
 | Office 技能 | 已落地 | profile 显式启用 `skill-office`，并指向 `dsh-skill-office/assets` 与 `libreoffice-kit` CLI。 |
 | MCP 客户端/资源 | 已落地 | base 有 `mcp-resources`；profile insert `mcp-jg`；产品有资源目录与读取接口。 |
 | 产品 MCP 工具 | 已落地 | `mcp-jg.mjs` 注册 10 个工具：`drive_search`、`drive_read`、`notice_list`、`notice_read`、`academy_search`、`contacts_find`、`im_send`、`notebook_search`、`resource_query`、`task_create`。 |
 | 插件管理器 | 部分 | `plugin-manager`、`tool-plugin-manager` 已启用；产品库存按当前 profile 用 `dsh --dump-config` 即时生成，启停只改 profile patch 并提示重启。`server.mjs:617-690` |
-| 插件市场/用户插件真实挂载 | 已核对现状 | 2026-11-12 已接通技能包：内置 5 个技能包，上传 ZIP 审核通过后入库，安装复制到 `$DSH_HOME/skills`，模型可见；DSH Bundle 仍不能一键安装。界面已收口：`/api/plugins` 只返回本机实际加载的 3 个目录技能 + Office + MCP，不再展示 21 条演示插件；未安装条目不再混入“已安装”列表。 |
+| 插件市场/用户插件真实挂载 | 已落地 | 2026-11-12 市场统一收口为 12 条：4 个 DSH 默认技能、集团技能、客户端内置插件与社区技能；`/api/plugins` 只返回本机实际加载的 9 项。社区包审核通过后入库，DSH Bundle 用内置 pnpm 安装进 `data/dsh-home`，补写 profile `bundles`，失败自动回滚；管理中心可上下架、编辑、删除。安装范围仍是本机全局，不是按账号隔离。 |
 | 选中插件注入 | 部分 | 产品把选中的插件名称/描述拼进上下文提示，不是运行时能力。`server.mjs:3479-3483` |
 | DSH 原生设置/配置编辑 | 已确定边界 | `settings`、`config-editor` 运行时已挂载；产品设置是唯一可写入口，设置中心只读展示原生挂载状态，不提供编辑表单。 |
 | 凭据管理 | 已确定边界 | `authorization`、`credentials-local` 已挂载；模型密钥由产品设置中心按会话注入子进程环境，产品不读取 DSH `.credentials.yaml` 内容。 |
@@ -92,8 +92,8 @@
 | 定时任务 | 已落地 | `schedule`、`tool-schedule`；产品读取 `storages/schedule.json`，支持暂停/删除。`server.mjs:1514-1556` |
 | 工作区依赖 | 未落地 | `workspace-dependencies` 依赖 `DSH_PRIMARY_RUNTIME`；当前未设置，行被禁用。 |
 | worktree 隔离 | 未落地 | `dsh-experimental-tool-worktree` 未进入 profile。 |
-| 持久化任务队列 | 未落地 | 只有 `chat-run` 执行记录与中断恢复；没有常驻 worker、队列并发、自动续跑。 |
-| 长任务取消 | 未落地 | 没有会话级 cancel/abort 接口；只有关闭沙箱根运行时来停后台作业。 |
+| 持久化任务队列 | 部分 | `chat-run` 先 `queued`，由进程内并发槽（默认 2）启动；任务记录持久化，重启后 `queued/running` 标为 `interrupted`，保留指令但不自动续跑。没有常驻跨重启 worker 与断点重放。 |
+| 长任务取消 | 已落地（会话级） | Chat 会话独占运行时；停止先尝试 DSH 原生 `session/cancel`，SDK 未暴露时关闭该会话运行时。实测取消一个会话后，另一并发会话正常完成。Work 项目仍共享项目运行时。 |
 | 语音输入/语音转写 | 未落地 | `experimental-voice-input`、`speech-to-text` 未进入 profile。 |
 | 其他实验能力 | 未落地 | forge、liveshare、Ralph、inspector、auto-review、COT translation、action-cards 均未装载。 |
 
@@ -109,30 +109,28 @@
 
 `session-telemetry-otel` 默认 `FEEDBACK_ONLY`，端点是外部 collector。`harness.mjs` 现在在 env 未显式指定时注入 `DSH_TELEMETRY_DISABLED=1` 和 `DSH_TELEMETRY_MODE=DISABLED`；DSH 的 `DISABLED` 分支不构造 SDK provider，只保留“反馈未上传”的本地告警。运行态已核对 `dsh-otel-collector.deepseeksvc.com` 两个解析 IP 上没有已建立连接。管理员如确需内网 OTLP，需要显式改 env 并自行承担外发策略。
 
-### P1：插件市场已接通技能包，DSH Bundle 仍未落地
+### P1：插件市场已统一收口，DSH Bundle 一键安装已落地
 
-2026-11-12 已把市场安装改成真实挂载：内置 5 个技能包（规范条文核查、用地指标测算、公文格式校对、会议纪要整理、合同条款比对），安装时复制到 `$DSH_HOME/skills/market-<id>`，关闭空闲运行时后下一轮对话重新发现；上传的技能包（根目录含 `SKILL.md`）经检测、审核后入库到 `data/market-packages`，同样可安装。实测模型技能清单已出现 `code-compliance-check`。
+2026-11-12 已把市场安装改成真实挂载：4 个 DSH 默认技能、集团技能与客户端内置插件统一进入 12 条市场目录；技能包安装时复制到 `$DSH_HOME/skills/<原名>`，关闭空闲运行时后下一轮对话重新发现；上传的技能包（根目录含 `SKILL.md`）经检测、审核后入库到 `data/market-packages`，同样可安装。
 
-同轮已补齐社区闭环：普通用户 `GET /api/plugin-subs?mine=1` 只看自己的提交，管理员默认看全部；审核通过后条目进入市场「企业内部」分组，并开放 `GET /api/plugin-market/download` 下载原始 ZIP。实测“上传 → 提交 → 审核上架 → 市场可见 → 下载 349 字节 ZIP → 安装到技能目录 → 卸载”全部走通。市场页也按示意图恢复为“左侧已安装、右侧市场（公开/个人）”，不再把市场做成第三个导航。DSH 预设自带的 4 个技能已复制到本机技能目录，`/api/plugins` 返回 9 项真实条目。
+同轮已补齐社区闭环与 Bundle：普通用户只看自己的提交，管理员看全部；审核通过后条目进入市场并开放下载；管理中心可上下架、编辑名称/描述/分组、删除社区条目。DSH Bundle 使用内置 pnpm 11.21.0 安装，服务端注入 `DSH_HOME=data/dsh-home`，装完补写 profile `bundles`，`dsh --dump-config` 校验失败时自动 `dsh plugin remove` 并回滚；实测上传 → 审核 → 解压 → 市场可见 → 安装 → dump 退出码 0 → 卸载全链路通过。
 
-仍未落地：DSH Bundle 一键安装。当前客户端没有 pnpm，`dsh plugin add` 走不通；Bundle 审核后只登记上架，市场卡片显示“待上架”。另外，技能安装是**本机运行时全局挂载**，不是按账号隔离；要按账号隔离，需要每个用户独立 DSH_HOME 或独立运行时。
+仍需补齐：技能与 Bundle 安装都是**本机运行时全局挂载**，不是按账号隔离；要按账号隔离，需要每个用户独立 DSH_HOME 或独立运行时。
 
-下一步：要么补 pnpm 与 Bundle 安装/回滚，要么把“插件市场”明确收敛为“技能市场”，避免 Bundle 条目给人可安装的预期。
+### P1：后台任务已有队列，但重启后不自动续跑
 
-### P1：后台任务仍是“记录”不是“队列”
+`chat-run` 会先进入 `queued`，由进程内并发槽（`JG_MAX_CHAT_RUNS` 默认 2）启动，真正开始时切 `running` 并记录 DSH 会话 id。排队中和执行中都可停止；任务记录持久化，重启后 `queued/running` 标为 `interrupted`，保留会话与指令。真正的跨重启 worker、幂等键、断点快照和自动重放仍未实现，当前刻意不自动重放，避免重复副作用。
 
-`chat-run` 记录解决了“知道哪次被打断”，但没有解决“服务重启后继续跑”。真正的后台队列需要：任务入队、串行/并发调度、幂等键、断点快照、自动续跑和取消。当前实现刻意不自动重放，避免重复副作用。
+### P2：DSH 原生设置、凭据、检索、导出
 
-### P2：DSH 原生设置、凭据、检索、导出没有接入
-
-运行时组件都在，但产品仍使用自有 settings/搜索/导出。短期可以接受；长期会出现“两套配置源”，例如默认模型、权限、插件启停在不同地方各有一份。
+设置中心「DSH 原生设置（只读）」已展示原生 `settings`、`config-editor`、`authorization`、`.credentials.yaml` 存在性与模型密钥来源，产品设置仍是唯一可写入口，避免两套配置源。会话检索已挂载 `dsh-tool-session-query` 与 `dsh-session-query-sqlite`，模型可检索/读取当前工作区历史会话；设置页新增「原生会话检索」「会话导出」状态。会话导出由产品按真实消息记录生成 Markdown，DSH 原生 ZIP 导出（`dsh-session-log-export`）尚未挂载。
 
 ## 五、建议推进顺序
 
 1. **审批矩阵继续扩面**：MCP 写工具已走人工审批；下一步把插件管理、网络外发也纳入同一套人工确认，并补拒绝路径的回归测试。
 2. **插件市场已完成统一收口**：技能包与 DSH Bundle 都已通过市场安装，pnpm 已内置，默认技能、集团技能与客户端内置插件都进入市场目录；管理中心可上/下架和编辑条目。后续只剩“按账号/项目隔离安装范围”与安装权限细分。
-3. **然后做持久任务队列**：在现有 `chat-run` 记录上增加 worker、幂等键与断点，不直接做自动重放。
-4. **最后收口 DSH 原生设置/检索/导出**：避免两套配置源，补齐会话检索与审计导出。
+3. **持久任务队列继续补断点**：现有 `chat-run` 已有入队、并发槽、取消与中断标记；下一步补幂等键、断点快照与可选的自动续跑，仍不做无条件重放。
+4. **最后收口原生导出与账号隔离**：补齐 `dsh-session-log-export` 的原生 ZIP/Markdown 导出，并评估按账号/项目隔离 `DSH_HOME` 或运行时。
 
 ## 六、附：本次核对的关键文件
 
