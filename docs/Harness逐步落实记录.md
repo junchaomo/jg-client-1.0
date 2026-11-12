@@ -737,6 +737,7 @@
 - `harness.mjs` 新增 `cancelRun(runKey)`：先尝试 DSH 原生 `session/cancel`；当前 SDK 运行时未暴露该方法时，退化为关闭该会话独占运行时。按 `runKey` 定位，不再按 cwd 批量匹配。
 - `/api/chat/cancel` 重写：排队中的任务直接标记 `cancelled`；执行中的任务走 `cancelRun`；返回 `native` 与 `runtimeClosed`，并在会话里记录停止步骤，不再笼统关闭整个 Harness。
 - `chat-run` 任务先进入 `queued`，由进程内调度器限制并发（`JG_MAX_CHAT_RUNS`，默认 2）；真正开始模型轮次时切到 `running` 并写入执行的 DSH 会话 id；取消、完成、失败分别落 `cancelled / done / failed`。
+- 运行时池满时只回收空闲条目；会话进入 `runAgent` 即占位 `entry.runs`，避免初始化期间被误判为空闲而关闭。
 - 任务记录继续持久化；服务重启时 `queued / running` 统一标为 `interrupted`，保留原会话与指令，不自动重放副作用。
 - 启用 DSH 原生会话检索：服务启动时确保 profile patch 挂载 `dsh-tool-session-query` 与 `dsh-session-query-sqlite`，模型可检索/读取当前工作区的历史会话；设置中心新增“原生会话检索”和“会话导出”只读事实。
 
