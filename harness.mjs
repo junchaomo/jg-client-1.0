@@ -507,6 +507,8 @@ export async function runAgent({ apiKey, baseUrl, model, text, sessionId, contex
   const entryKey = runtimeEntryKey(cfg, cwd, runtimeScope)
   const entry = active.get(entryKey)
   const release = entry ? await acquire(entry) : () => {}
+  // 先占位，避免会话初始化期间被“回收空闲运行时”误判为空闲；拿到 SDK session 后再补 id。
+  if (entry && runKey) entry.runs.set(String(runKey), { sessionId: '', startedAt: Date.now() })
   // 父会话 idle 时子代理可能还在跑；单独订阅运行时通知，补齐后续的 subagent.finished 正文。
   const backgroundNotifications = []
   const subagentSubscription = harness.client?.subscribe((n) => n.method === 'subagent.started' || n.method === 'subagent.finished')
@@ -672,6 +674,12 @@ export async function cancelRun(runKey) {
   for (const [key, entry] of targets) {
     const run = entry.runs?.get(String(runKey))
     if (!run) continue
+    if (!run.sessionId) {
+      // 会话还没完成初始化：没有可调用的原生 session/cancel，只能关闭该会话运行时。
+      active.delete(key)
+      try { await entry.harness.close() } catch {}
+      return { accepted: true, native: false, runtimeClosed: true, sessionId: '' }
+    }
     try {
       await entry.harness.client.request('session/cancel', { sessionId: run.sessionId })
       return { accepted: true, native: true, sessionId: run.sessionId }
