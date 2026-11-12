@@ -28,6 +28,7 @@ const state = {
   activeProjectName: '',
   activeProjectCwd: '',
   executionPolicy: 'auto',
+  taskMode: 'auto',
   runtimeSettings: { defaultPolicy: 'auto', defaultEffort: 'medium', workspaceChanges: true },
   agentPresets: [],
   agentPresetId: '',
@@ -2163,10 +2164,59 @@ function projectContextControl() {
   </button>`
 }
 
+function taskModeLabel(id) {
+  return { auto: 'Auto', chat: 'Chat', work: 'Work' }[id] || 'Auto'
+}
+
+function taskModeControl() {
+  const id = ['auto', 'chat', 'work'].includes(state.taskMode) ? state.taskMode : 'auto'
+  const tips = {
+    auto: '自动判断任务类型：普通问答走对话，文件/命令/多步骤任务走工作',
+    chat: '仅对话：优先直接回答，不主动修改文件或运行命令',
+    work: '工作执行：允许文件、命令与成果生成',
+  }
+  return `<button class="quick" id="taskModeBtn" style="display:inline-flex;align-items:center;gap:6px;line-height:1.2" title="${tips[id]}">
+    <span class="ico" style="display:inline-flex;align-items:center;justify-content:center">${icon(id === 'chat' ? 'chat' : id === 'work' ? 'layers' : 'spark')}</span>${taskModeLabel(id)}<span class="ico hc-caret">${icon('chevron')}</span>
+  </button>`
+}
+
+function openTaskModeMenu(anchor) {
+  document.querySelectorAll('.mode-pop').forEach((p) => p.remove())
+  if (window.__modePop) { window.__modePop.remove(); window.__modePop = null; return }
+  const pop = document.createElement('div')
+  pop.className = 'plus-pop mode-pop'
+  pop.style.width = '260px'
+  pop.innerHTML = [
+    ['auto', 'Auto', '智能判断，按需执行'],
+    ['chat', 'Chat', '只对话，不改文件'],
+    ['work', 'Work', '文件、代码、多步骤'],
+  ].map(([id, label, desc]) => `<button class="pp-row" data-taskmode="${id}">
+      <span class="ico pp-ico">${state.taskMode === id ? icon('check') : ''}</span>
+      <span class="pp-label">${label}</span>
+      <span class="pp-desc">${desc}</span>
+    </button>`).join('')
+  document.body.appendChild(pop)
+  window.__modePop = pop
+  const r = anchor.getBoundingClientRect()
+  pop.style.left = `${Math.round(Math.min(window.innerWidth - 272, Math.max(12, r.left)))}px`
+  pop.style.top = `${Math.round(Math.max(12, r.top - pop.offsetHeight - 8))}px`
+  pop.querySelectorAll('[data-taskmode]').forEach((b) => b.addEventListener('click', (e) => {
+    e.stopPropagation()
+    state.taskMode = b.dataset.taskmode
+    pop.remove()
+    window.__modePop = null
+    toast(`已切换为 ${taskModeLabel(state.taskMode)} 模式`)
+    renderView()
+  }))
+  setTimeout(() => document.addEventListener('click', function close(e) {
+    if (!pop.contains(e.target)) { pop.remove(); document.removeEventListener('click', close); window.__modePop = null }
+  }), 0)
+}
+
 function policyControl() {
   const manual = state.executionPolicy === 'manual'
   return `<button class="quick" id="policyToggle" style="display:inline-flex;align-items:center;gap:6px;line-height:1.2" title="${manual ? '修改、删除、运行命令前需要逐次批准' : '在授权范围内自主执行，高风险操作仍需审批'}">
-    <span class="ico" style="display:inline-flex;align-items:center;justify-content:center">${icon(manual ? 'shield' : 'pulse')}</span>${manual ? 'Manual' : 'Auto'}
+    <span class="ico" style="display:inline-flex;align-items:center;justify-content:center">${icon(manual ? 'shield' : 'pulse')}</span>${manual ? '审批 Manual' : '审批 Auto'}
   </button>`
 }
 
@@ -2340,7 +2390,10 @@ async function renderHome(el) {
     <div class="hh-center">
       <div class="hh-title">${esc(rh.title)}</div>
       <div class="hh-composer" style="width:100%;max-width:760px;margin:0 auto;box-sizing:border-box">
-        <button class="hc-plus" id="attachBtn" title="添加照片、文件或工具"><span class="ico">${icon('plus')}</span></button>
+        <div style="display:flex;align-items:center;gap:6px;flex:none">
+          <button class="hc-plus" id="attachBtn" title="添加照片、文件或工具"><span class="ico">${icon('plus')}</span></button>
+          ${policyControl()}
+        </div>
         <textarea id="draft" rows="1" placeholder="有什么可以帮你？">${esc(state.draft)}</textarea>
         <div class="hc-right">
           <button class="hc-mic" id="micBtn" title="语音输入"><span class="ico">${icon('mic')}</span></button>
@@ -2348,10 +2401,9 @@ async function renderHome(el) {
         </div>
       </div>
       <div class="quick-row" style="justify-content:space-between;align-items:center;margin:8px auto 0;width:100%;max-width:760px;box-sizing:border-box">
-        <div style="display:flex;gap:6px;align-items:center">${projectContextControl()}</div>
+        <div style="display:flex;gap:6px;align-items:center">${taskModeControl()}${projectContextControl()}</div>
         <div style="display:flex;gap:6px;align-items:center">
           <button class="hc-lang" id="langBtn" title="推理强度"><span id="langValue">${reasoningLabel(state.reasoningEffort)}</span><span class="ico hc-caret">${icon('chevron')}</span></button>
-          ${policyControl()}
         </div>
       </div>
       ${(state.composerRefs || []).length ? `<div class="hh-refs">
@@ -2371,6 +2423,7 @@ async function renderHome(el) {
     })
   }
   el.querySelector('#projectContext')?.addEventListener('click', openWorkspacePicker)
+  el.querySelector('#taskModeBtn')?.addEventListener('click', (ev) => { ev.stopPropagation(); openTaskModeMenu(ev.currentTarget) })
   el.querySelector('#policyToggle')?.addEventListener('click', togglePolicy)
   el.querySelector('#langBtn')?.addEventListener('click', (ev) => { ev.stopPropagation(); openReasoningMenu(ev.currentTarget) })
   el.querySelectorAll('[data-prompt]').forEach((btn) => btn.addEventListener('click', () => {
@@ -2430,6 +2483,7 @@ async function openConversation(id) {
   state.activeProjectName = sp?.name || ''
   state.activeProjectCwd = sp?.cwd || ''
   state.executionPolicy = one.item.executionPolicy === 'manual' ? 'manual' : 'auto'
+  state.taskMode = ['auto', 'chat', 'work'].includes(one.item.taskMode) ? one.item.taskMode : 'auto'
   state.agentPresetId = one.item.agentPresetId || ''
   if (one.item.reasoningEffort) state.reasoningEffort = one.item.reasoningEffort
   state.chatSteps = []
@@ -2466,6 +2520,7 @@ function startFreshChat() {
   state.activeProjectName = ''
   state.activeProjectCwd = ''
   state.executionPolicy = state.runtimeSettings?.defaultPolicy === 'manual' ? 'manual' : 'auto'
+  state.taskMode = 'auto'
   state.reasoningEffort = state.runtimeSettings?.defaultEffort || 'medium'
   render()
   toast('已开始全新对话：项目、上下文和策略均已重置')
@@ -2954,7 +3009,7 @@ async function sendMessage(text) {
       reasoningEffort: state.reasoningEffort || 'medium',
       ownApiKey: localStorage.getItem('jg.ownKey') || '',
       refs,
-      mode: state.activeProjectId ? 'work' : 'chat',
+      mode: state.taskMode || 'auto',
       projectId: state.activeProjectId || '',
       executionPolicy: state.executionPolicy,
       presetId: state.agentPresetId || '',
@@ -8917,7 +8972,10 @@ function renderChat(el) {
         ${state.pendingInteraction ? renderInteraction() : ''}
       </div>
       <div class="hh-composer" style="width:100%;max-width:760px;margin:0 auto;box-sizing:border-box">
-        <button class="hc-plus" id="chatAttach" title="添加照片、文件或工具"><span class="ico">${icon('plus')}</span></button>
+        <div style="display:flex;align-items:center;gap:6px;flex:none">
+          <button class="hc-plus" id="chatAttach" title="添加照片、文件或工具"><span class="ico">${icon('plus')}</span></button>
+          ${policyControl()}
+        </div>
         <textarea id="draft" rows="1" placeholder="继续追问…">${esc(state.draft)}</textarea>
         <div class="hc-right">
           <button class="hc-mic" id="chatMic" title="语音输入"><span class="ico">${icon('mic')}</span></button>
@@ -8927,10 +8985,9 @@ function renderChat(el) {
         </div>
       </div>
       <div class="quick-row" style="justify-content:space-between;align-items:center;margin:8px auto 0;width:100%;max-width:760px;box-sizing:border-box">
-        <div style="display:flex;gap:6px;align-items:center">${projectContextControl()}</div>
+        <div style="display:flex;gap:6px;align-items:center">${taskModeControl()}${projectContextControl()}</div>
         <div style="display:flex;gap:6px;align-items:center">
           <button class="hc-lang" id="chatLang" title="推理强度"><span id="chatLangValue">${reasoningLabel(state.reasoningEffort)}</span><span class="ico hc-caret">${icon('chevron')}</span></button>
-          ${policyControl()}
         </div>
       </div>
       ${(state.composerRefs || []).length ? `<div class="hh-refs">
@@ -8943,6 +9000,7 @@ function renderChat(el) {
   const draft = el.querySelector('#draft')
   draft?.addEventListener('input', (e) => { state.draft = e.target.value; updateSlashMenu(e.target) })
   el.querySelector('#projectContext')?.addEventListener('click', openWorkspacePicker)
+  el.querySelector('#taskModeBtn')?.addEventListener('click', (ev) => { ev.stopPropagation(); openTaskModeMenu(ev.currentTarget) })
   el.querySelector('#policyToggle')?.addEventListener('click', togglePolicy)
   draft?.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') closeSlashMenu()

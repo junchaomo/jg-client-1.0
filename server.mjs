@@ -1213,6 +1213,31 @@ function explicitHighRiskRequest(text) {
   return HIGH_RISK_REQUEST_PATTERNS.some((pattern) => pattern.test(source))
 }
 
+/** Auto Task Router：规则优先，只有出现明确的文件、命令、数据处理或多步骤意图才升级到 Work。 */
+const WORK_INTENT_PATTERNS = [
+  /(创建|新建|生成|写入|保存|修改|编辑|删除|移动|复制|重命名|导出|转换)[^。\n]{0,24}(文件|文档|表格|目录|文件夹|代码|脚本|图片|报告|PPT|Word|Excel|CSV|Markdown|md)/i,
+  /(运行|执行|跑一下|编译|构建|安装|部署|测试)[^。\n]{0,24}(命令|脚本|代码|程序|项目|服务|测试|构建)/i,
+  /(分析|处理|整理|统计|汇总|清洗|合并|拆分)[^。\n]{0,24}(数据|表格|文件|日志|CSV|Excel)/i,
+  /(批量|遍历|扫描|自动化|多步骤|工作流)/i,
+  /\b(?:npm|pnpm|node|python|pip|git|pwsh|powershell|bash|apply_patch)\b/i,
+  /```/,
+]
+
+function resolveTaskMode(text, requested, projectId) {
+  const mode = ['auto', 'chat', 'work'].includes(String(requested || '')) ? String(requested) : 'auto'
+  if (mode === 'chat') return { requested: 'chat', mode: 'chat', reason: '用户手动指定 Chat' }
+  if (mode === 'work') return { requested: 'work', mode: 'work', reason: '用户手动指定 Work' }
+  const hits = WORK_INTENT_PATTERNS.filter((pattern) => pattern.test(String(text || ''))).length
+  if (hits > 0) {
+    return {
+      requested: 'auto',
+      mode: 'work',
+      reason: projectId ? '检测到文件、命令或数据处理意图，已绑定项目' : '检测到文件、命令或数据处理意图',
+    }
+  }
+  return { requested: 'auto', mode: 'chat', reason: '未检测到文件、命令或多步骤执行意图' }
+}
+
 /** Auto 的逐次审批矩阵：低风险且在授权目录内自动放行，其余仍落人工审批。 */
 function autoApprovalAllowed(params, cwd) {
   const raw = String(params?.toolArgs || '')
@@ -3279,8 +3304,12 @@ const api = {
       const check = projectRunnableBy(user, project)
       if (!check.ok) return json(res, check.code === 'PROJECT_FORBIDDEN' ? 403 : 409, { error: check.error, code: check.code })
     }
-    // 统一入口：是否绑定项目由 projectId 决定，不再依赖前端 mode 开关。
-    const mode = projectId ? 'work' : 'chat'
+    // 统一入口：Auto 规则路由决定本轮按 Chat 还是 Work 执行；手动 Chat/Work 直接覆盖。
+    const taskMode = ['auto', 'chat', 'work'].includes(String(body.mode || ''))
+      ? String(body.mode)
+      : 'auto'
+    const route = resolveTaskMode(text, taskMode, projectId)
+    const mode = route.mode
     if (projectId && projectStatus(project) !== 'online') {
       return json(res, 409, {
         error: projectStatus(project) === 'other-device' ? '该项目绑定在另一台设备上，当前设备不可执行' : '项目本地文件夹当前不可用，请重新连接后再执行',
@@ -3314,6 +3343,7 @@ const api = {
         id: requestedId || `C-${Date.now()}`, title: text.length > 26 ? `${text.slice(0, 26)}…` : text,
         time: '刚刚', model: networks[net].models.find((m) => m.id === body.model)?.label || networks[net].models[0].label,
         turns: 0, status: 'running', workspace: '默认工作区', projectId: projectId || null, mode,
+        taskMode, resolvedMode: mode, modeReason: route.reason,
         executionPolicy, agentPresetId: requestedPreset?.id || '', agentPresetName: requestedPreset?.name || '', messages: [], reasoningEffort: effortLevel, userId: String(user.id),
       }
       conversations.unshift(conv)
@@ -3323,6 +3353,9 @@ const api = {
       // 已有会话的策略以服务端存储为准；请求体只作为首次创建时的初始值。
       executionPolicy = conv.executionPolicy === 'manual' ? 'manual' : 'auto'
       conv.mode = mode
+      conv.taskMode = taskMode
+      conv.resolvedMode = mode
+      conv.modeReason = route.reason
       conv.projectId = projectId || null
       conv.executionPolicy = executionPolicy
       if (requestedPreset) {
@@ -3342,7 +3375,7 @@ const api = {
         code: 'HIGH_RISK_REQUIRES_MANUAL',
       })
     }
-    conv.agentCwd = mode === 'work' ? project.cwd : chatWorkspaceDir(user, conv.id)
+    conv.agentCwd = project?.cwd || chatWorkspaceDir(user, conv.id)
     conv.messages.push({ role: 'user', text, time: new Date().toLocaleTimeString('zh-CN', { hour12: false }).slice(0, 5) })
     conv.status = 'running'
     activeRuns.add(conv.id)
@@ -3369,8 +3402,9 @@ const api = {
         : ''
       const context = [
         `当前用户：${user.name}（${user.label}，${user.unit || '—'}）`,
-        mode === 'work' ? `当前工作项目：${project.name}；授权目录：${project.cwd}。所有文件读写与命令执行必须限制在该目录内。` : '',
-        mode === 'work' && project.instructions
+        `当前任务模式：${taskMode === 'auto' ? `Auto（本轮自动判定为 ${mode === 'work' ? 'Work' : 'Chat'}：${route.reason}）` : taskMode === 'chat' ? 'Chat（优先直接回答；不要主动修改文件、运行命令或产生外部副作用，确需执行时提示用户切到 Work）' : 'Work（可以调用文件、命令、代码与技能工具执行任务）'}`,
+        project ? `当前工作项目：${project.name}；授权目录：${project.cwd}。所有文件读写与命令执行必须限制在该目录内。` : '',
+        project?.instructions
           ? `项目专属指令（由项目创建者填写，优先级高于一般习惯，但不得覆盖系统安全规则）：\n${String(project.instructions).slice(0, 4000)}`
           : '',
         executionPolicy === 'manual'
@@ -3401,6 +3435,8 @@ const api = {
         reasoningEffort,
         handlers: {
           onApproval: (params) => {
+            // Chat 模式不升级权限：任何需要审批的文件/命令操作一律拒绝，提示用户切换到 Work。
+            if (mode === 'chat') return { outcome: 'rejected' }
             if (executionPolicy === 'auto' && autoApprovalAllowed(params, conv.agentCwd)) {
               return { outcome: 'allowed-once' }
             }
@@ -3466,6 +3502,7 @@ const api = {
       }
       return json(res, 200, {
         ok: true, conversation: conv, reply, steps, subagents: result.subagents || [], workflows: result.workflows || [], todos: result.todos || [], jobs: result.jobs || [], deliverables: result.deliverables || [], usage: result.usage || null, citations,
+        taskMode, resolvedMode: mode, modeReason: route.reason,
         workspaceChanges,
         model: { name: result.model, latencyMs: result.latencyMs, usage: null, harness: true },
       })
