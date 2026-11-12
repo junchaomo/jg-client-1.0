@@ -616,6 +616,38 @@ function sessionOf(req) {
 
 const RUNTIME_PROFILE = process.env.JG_DSH_PROFILE || 'sdk'
 const DSH_BIN = join(root, 'dsh-runtime', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
+
+/**
+ * 用 dsh CLI 重新生成启动配置快照。
+ * 旧实现只在 data/dsh-dump-config.txt 存在时读取，文件可能停在第一次生成时的旧配置；
+ * 这里在服务启动和管理页打开时重新 dump，保证插件清单、profile patch 覆盖与当前一致。
+ */
+function refreshRuntimeConfigDump() {
+  const dumpPath = join(dataDirPath(), 'dsh-dump-config.txt')
+  const home = process.env.JG_DSH_HOME || join(dataDirPath(), 'dsh-home')
+  const result = spawnSync(process.execPath, [DSH_BIN, '--profile', RUNTIME_PROFILE, '--dump-config'], {
+    cwd: root,
+    encoding: 'utf8',
+    timeout: 60000,
+    env: {
+      ...process.env,
+      DSH_HOME: home,
+      DEEPSEEK_API_KEY: process.env.DEEPSEEK_API_KEY || 'dump-only',
+      JG_DSH_NODE: process.env.JG_DSH_NODE || process.execPath,
+      JG_MCP_SCRIPT: process.env.JG_MCP_SCRIPT || join(root, 'mcp-jg.mjs'),
+      JG_MCP_URL: process.env.JG_MCP_URL || `http://127.0.0.1:${process.env.PORT || port}`,
+      JG_MCP_TOKEN: process.env.JG_MCP_TOKEN || '',
+      JG_MCP_ACCOUNT: process.env.JG_MCP_ACCOUNT || 'A-7788-01',
+    },
+  })
+  if (result.status !== 0 || !result.stdout.trim()) {
+    console.error('[jg-server] 刷新 DSH 配置快照失败:', (result.stderr || '').trim().slice(0, 300))
+    return false
+  }
+  writeFileSync(dumpPath, result.stdout, 'utf8')
+  return true
+}
+
 let pnpmProbe = null
 function pnpmAvailable() {
   if (pnpmProbe === null) {
@@ -2431,11 +2463,12 @@ const api = {
   'GET /api/runtime/plugins': (req, res) => {
     const user = roleOf(req)
     if (!canManage(user)) return json(res, 403, { error: '仅管理员可管理运行时插件' })
+    refreshRuntimeConfigDump()
     const plugins = runtimePluginInventory()
     json(res, 200, {
       ok: true,
       profile: RUNTIME_PROFILE,
-      source: 'dsh-dump-config.txt（启动时快照）',
+      source: 'dsh-dump-config.txt（按当前 profile 即时生成）',
       protectedIds: [...PROTECTED_PLUGIN_IDS],
       plugins,
     })
@@ -5328,6 +5361,7 @@ const server = createServer(async (req, res) => {
 
 server.listen(port, '127.0.0.1', () => {
   cleanupSessions()
+  refreshRuntimeConfigDump()
   console.log(`[jg-hub] http://127.0.0.1:${port}`)
   console.log(`[jg-server] sqlite: ${dataDirPath()}`)
   try {

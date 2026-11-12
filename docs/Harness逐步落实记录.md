@@ -397,7 +397,7 @@
 
 **做法**：
 
-- 从 `data\dsh-dump-config.txt` 解析当前 profile 的真实条目（id、模块名、`disabled` 状态），作为运行时插件清单；再合并 `cordis.patch.yml` 最后一层 `disabled` 覆盖，让界面显示“重启后将要生效”的状态。快照是启动时权威组合，页面明确标注来源与「重启生效」。
+- 插件清单以 `dsh --profile sdk --dump-config` 为准：服务启动时、每次打开「DSH 插件运行时」时都重新生成 `data\dsh-dump-config.txt`，再解析当前 profile 的真实条目（id、模块名、`disabled` 状态）；随后合并 `cordis.patch.yml` 最后一层 `disabled` 覆盖，让界面显示“重启后将要生效”的状态。旧实现只读首次生成的快照，会停在旧配置；现已修正为按当前 profile 即时生成，页面来源标注同步改为「按当前 profile 即时生成」。
 - 启停写入 `data\dsh-home\profiles\sdk\cordis.patch.yml` 的 `- id: … / disabled: true|false` 覆盖项，遵循 DSH 的 patch 组合语义；重启后由 DSH 重新组合生效。
 - 核心条目白名单保护（`plugin-manager`、`tool-plugin-manager`、`llm`、`session`、`agent`、`sandbox`、`typert*`、`session-log-deepseek`、`mcp-jg`），产品界面不允许停用，避免把运行时或 MCP 桥自己关掉。
 - `POST /api/runtime/restart` 调用 `closeHarness()` 关闭所有活跃 SDK 运行时；下一次会话按新 profile 重新启动，DSH 会话历史仍在。
@@ -407,11 +407,13 @@
 **实测**：
 
 - `/api/runtime/plugins` 返回 `112` 个条目、`11` 个核心保护项；4 个默认停用条目可见（`hmr`、`session-title-llm`、`fs-observation-policy`、`tool-executor-ptc`）。
+- 重启后 `dsh-dump-config.txt` 的生成时间更新为当前时间，快照内可看到 `mcp-jg` 的 `toolCallTimeoutMs: 600000`；接口来源返回「按当前 profile 即时生成」，条目数仍为 `112`。
+- `session-title-llm` 停用 → 启用两次写入均成功，响应 `restartRequired=true`；patch 最后一层覆盖分别为 `disabled: true` / `disabled: false`，测试后已恢复为启用。
 - `hmr` 启用 → 停用两次写入均成功，响应 `restartRequired=true`；测试后已把 `cordis.patch.yml` 恢复到测试前原文。
 - 在弹窗中点击 `hmr` 的「启用」，patch 新增 `- id: hmr / disabled: false`，验证 UI → API → 文件链路；测试后同样已清理该覆盖项。
 - 停用核心 `llm` 返回 400「该条目是运行时核心组件，不允许从产品界面启停」。
 - `POST /api/runtime/restart` 返回「运行时进程已关闭；下一个会话将按新配置启动」。
-- 弹窗显示 112 行、搜索框、已启用/已停用/按条件状态、核心标签与禁用按钮；截图 `v2-runtime-plugins.png`、`v2-runtime-plugins-entry.png`。
+- 弹窗显示 112 行、搜索框、已启用/已停用/按条件状态、核心标签与禁用按钮；截图 `v2-runtime-plugins.png`、`v2-runtime-plugins-entry.png`，本轮即时生成快照后的弹窗见 `D:\project-test3\shots\runtime-plugins-refreshed.png`。
 
 **边界**：这不是 DSH 官方 plugin-manager 的完整复刻：没有 live fiber 阶段、没有 pnpm 包操作日志、没有组合包详情/版本列表/脚本批准；安装接口在 pnpm 缺失时返回 `501`，当前环境未安装 pnpm。写入 patch 后必须重启运行时才生效，不能热加载（HMR 在 profile 中默认关闭）。
 
