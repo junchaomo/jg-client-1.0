@@ -423,8 +423,8 @@
 
 **做法**：
 
-- 前端 `state.taskMode` 默认 `auto`；首页与会话页输入框快捷行新增 `Auto / Chat / Work` 胶囊，点开是三项单选菜单，标题分别说明“智能判断 / 只对话 / 文件、代码、多步骤”；「新聊天」重置为 Auto，打开历史会话恢复该会话保存的模式。
-- 按参考图把执行审批胶囊移入输入框内部、紧挨“＋”的左侧；快捷行只保留任务模式、项目与推理强度。审批文案改为「审批 Auto / 审批 Manual」，避免与任务模式 Auto 混淆。全部复用 `.quick` / `.plus-pop` / `.pp-row` 等现有样式，`styles.css` 未新增规则。
+- 前端 `state.taskMode` 默认 `auto`；首页与会话页输入框快捷行右侧、推理强度之后新增 `Auto / Chat / Work` 胶囊，点开是三项单选菜单，标题分别说明“智能判断 / 只对话 / 文件、代码、多步骤”；「新聊天」重置为 Auto，打开历史会话恢复该会话保存的模式。
+- 按参考图把执行审批胶囊移入输入框内部、紧挨“＋”的右侧，改为无边框浅灰胶囊（Codex 风格）；快捷行只保留项目、推理强度与任务模式。审批文案改为「审批 Auto / 审批 Manual」，避免与任务模式 Auto 混淆。全部复用 `.quick` / `.plus-pop` / `.pp-row` 等现有样式，`styles.css` 未新增规则。
 - `/api/chat` 接受 `mode` 并在服务端权威解析：手动 Chat / Work 直接覆盖；Auto 用规则路由 `WORK_INTENT_PATTERNS` 判断，命中创建/修改文件、运行命令、数据清洗、多步骤/工作流、代码块或 `npm/pnpm/node/python/git/pwsh` 等意图时升级为 Work，否则保持 Chat。规则优先，不增加普通问答的模型分类延迟。
 - 会话保存 `taskMode`、`resolvedMode`、`modeReason`；响应一并返回。上下文注入明确本轮模式：Chat 要求优先直接回答、不主动改文件或跑命令，确需执行时提示切 Work；Work 允许调用文件、命令、代码与技能工具；Auto 说明本轮自动判定结果与原因。
 - Work 未绑定项目时不再崩溃：有项目用项目 `cwd`，无项目用会话托管目录；Chat 与 Work 共用同一 `dshSessionId` 与消息历史。Chat 模式下出现权限升级审批时统一返回 `rejected`，由模型明确提示“请切换到 Work”，避免写文件或跑命令；Auto/Work 继续走原有 `autoApprovalAllowed()` 审批矩阵。

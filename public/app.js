@@ -2215,7 +2215,7 @@ function openTaskModeMenu(anchor) {
 
 function policyControl() {
   const manual = state.executionPolicy === 'manual'
-  return `<button class="quick" id="policyToggle" style="display:inline-flex;align-items:center;gap:6px;line-height:1.2" title="${manual ? '修改、删除、运行命令前需要逐次批准' : '在授权范围内自主执行，高风险操作仍需审批'}">
+  return `<button class="quick" id="policyToggle" style="display:inline-flex;align-items:center;gap:6px;line-height:1.2;background:#f1f2f4;border:0;border-radius:999px;height:32px;padding:0 12px;color:#5f6368;box-shadow:none;white-space:nowrap" title="${manual ? '修改、删除、运行命令前需要逐次批准' : '在授权范围内自主执行，高风险操作仍需审批'}">
     <span class="ico" style="display:inline-flex;align-items:center;justify-content:center">${icon(manual ? 'shield' : 'pulse')}</span>${manual ? '审批 Manual' : '审批 Auto'}
   </button>`
 }
@@ -2401,9 +2401,10 @@ async function renderHome(el) {
         </div>
       </div>
       <div class="quick-row" style="justify-content:space-between;align-items:center;margin:8px auto 0;width:100%;max-width:760px;box-sizing:border-box">
-        <div style="display:flex;gap:6px;align-items:center">${taskModeControl()}${projectContextControl()}</div>
+        <div style="display:flex;gap:6px;align-items:center">${projectContextControl()}</div>
         <div style="display:flex;gap:6px;align-items:center">
           <button class="hc-lang" id="langBtn" title="推理强度"><span id="langValue">${reasoningLabel(state.reasoningEffort)}</span><span class="ico hc-caret">${icon('chevron')}</span></button>
+          ${taskModeControl()}
         </div>
       </div>
       ${(state.composerRefs || []).length ? `<div class="hh-refs">
@@ -8985,9 +8986,10 @@ function renderChat(el) {
         </div>
       </div>
       <div class="quick-row" style="justify-content:space-between;align-items:center;margin:8px auto 0;width:100%;max-width:760px;box-sizing:border-box">
-        <div style="display:flex;gap:6px;align-items:center">${taskModeControl()}${projectContextControl()}</div>
+        <div style="display:flex;gap:6px;align-items:center">${projectContextControl()}</div>
         <div style="display:flex;gap:6px;align-items:center">
           <button class="hc-lang" id="chatLang" title="推理强度"><span id="chatLangValue">${reasoningLabel(state.reasoningEffort)}</span><span class="ico hc-caret">${icon('chevron')}</span></button>
+          ${taskModeControl()}
         </div>
       </div>
       ${(state.composerRefs || []).length ? `<div class="hh-refs">
