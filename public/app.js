@@ -3794,10 +3794,11 @@ async function renderSkills(el) {
           : `<button class="pl-act add" data-minstall="${m.id}" title="安装">${icon('plus')}</button>`}
     </div>`
 
+  const skillDesc = (p) => (state.market || []).find((m) => m.kind === 'skill' && m.name === p.name)?.desc || p.desc
   const skillCard = (p, i) => `
     <div class="pl-item">
       <span class="pl-ico ${tone(i)}">${icon('tool')}</span>
-      <div class="pl-item-main"><div class="pl-item-name">${esc(p.name)}</div><div class="pl-item-desc">${esc(p.desc)}</div></div>
+      <div class="pl-item-main"><div class="pl-item-name">${esc(p.name)}</div><div class="pl-item-desc">${esc(skillDesc(p))}</div></div>
       <button class="pl-act" data-plug="${p.id}" title="技能详情">${icon('dots')}</button>
     </div>`
 
@@ -3891,7 +3892,6 @@ async function renderSkills(el) {
     renderView()
   })
   el.querySelector('#skAddLeft').addEventListener('click', () => {
-    if (tab === 'skill') return toast('技能由管理员在管理中心登记后上架')
     openPluginPublish()
   })
   el.querySelectorAll('[data-minstall]').forEach((b) => b.addEventListener('click', async () => {
@@ -3959,12 +3959,13 @@ function openPluginSlide(id) {
 function openSkillSlide(id) {
   const p = (state.plugins || []).find((x) => x.id === id)
   if (!p) return
+  const desc = (state.market || []).find((m) => m.kind === 'skill' && m.name === p.name)?.desc || p.desc
   const slide = ensureSlide()
   slide.innerHTML = `
     <div class="slide-head"><div><div class="slide-title">${esc(p.name)}</div><div class="slide-sub">${esc(p.publisher)} · v${esc(p.version)} · ${p.kind === 'enterprise' ? '企业技能' : '个人技能'}</div></div><span class="spacer"></span><button class="btn subtle" data-close>${icon('close')}</button></div>
     <div class="slide-body">
       <div style="display:flex;gap:6px;margin-bottom:12px"><span class="tag ${p.status === 'enabled' ? 'ok' : ''}">${p.status === 'enabled' ? '已启用' : '未启用'}</span><span class="tag">${esc(p.scope)}</span></div>
-      <div class="field"><div class="field-label">能力说明</div><div class="field-value">${esc(p.desc)}</div></div>
+      <div class="field"><div class="field-label">能力说明</div><div class="field-value">${esc(desc)}</div></div>
       <div class="field"><div class="field-label">依赖</div><div class="field-value">${esc(p.deps)}</div></div>
       <div class="field"><div class="field-label">风险等级</div><div class="field-value">${esc(p.risk)}；写操作与高危调用执行前二次确认。</div></div>
     </div>
@@ -3981,18 +3982,18 @@ function openSkillSlide(id) {
 }
 
 function openPluginPublish() {
-  const mask = openModal('上传插件', `
-    <div class="form-note">支持两种 ZIP：技能包（根目录含 SKILL.md）与 DSH Bundle（含 package.json 与 dsh.bundle 指定的 cordis.patch.yml）。平台会做安全解压、格式与权限检查；审核通过后均可上架，用户可从市场一键安装到本机运行时。</div>
+  const mask = openModal('上传插件或技能', `
+    <div class="form-note">支持两种 ZIP：技能包（根目录含 SKILL.md）与 DSH Bundle（含 package.json 与 dsh.bundle 指定的 cordis.patch.yml）。插件与技能都通过同一市场提交、审核、上架，审核通过后用户可一键安装。</div>
     <div class="up-spec"><span>不确定包结构？</span><button class="linkbtn" id="pubSpec">查看《插件开发规范》</button></div>
     <div class="up-zone" id="pubZone">
       <span class="up-ico">${icon('upload')}</span>
-      <b>点击选择或拖入 ZIP 插件包</b>
-      <span>单个 ZIP 文件（.zip），包含完整插件目录</span>
+      <b>点击选择或拖入 ZIP 插件 / 技能包</b>
+      <span>单个 ZIP 文件（.zip），包含完整插件或技能目录</span>
       <input type="file" id="pubFile" accept=".zip" hidden />
     </div>
     <div class="up-file" id="pubFileLine" hidden><span class="ico">${icon('doc')}</span><b id="pubFileName"></b><span class="mono" id="pubFileSize"></span></div>
     <div class="form-grid">
-      <label>插件名称<input class="text-input" id="pubName" placeholder="例如：规划指标计算" /></label>
+      <label>名称<input class="text-input" id="pubName" placeholder="例如：规划指标计算" /></label>
       <label>版本<input class="text-input" id="pubVer" placeholder="例如：1.2.0" /></label>
     </div>
     <div class="form-grid">
@@ -4000,7 +4001,7 @@ function openPluginPublish() {
       <label>所需权限<select id="pubPerm"><option>仅读取已授权资源</option><option>读取 + 写入（需二次确认）</option><option>无资源访问</option></select></label>
     </div>
     <div class="form-label">功能说明</div>
-    <textarea class="form-area" id="pubDesc" rows="3" placeholder="说明插件做什么、依赖哪些系统、输出什么结果，便于审核"></textarea>
+    <textarea class="form-area" id="pubDesc" rows="3" placeholder="说明插件或技能做什么、依赖哪些系统、输出什么结果，便于审核"></textarea>
     <div class="form-checks">
       <label class="check"><input type="checkbox" id="pubRule" /> 已按《插件开发规范》生成包结构，并同意平台进行静态扫描与沙箱测试</label>
     </div>
