@@ -1225,8 +1225,8 @@ const WORK_INTENT_PATTERNS = [
 
 function resolveTaskMode(text, requested, projectId) {
   const mode = ['auto', 'chat', 'work'].includes(String(requested || '')) ? String(requested) : 'auto'
-  if (mode === 'chat') return { requested: 'chat', mode: 'chat', reason: '用户手动指定 Chat' }
-  if (mode === 'work') return { requested: 'work', mode: 'work', reason: '用户手动指定 Work' }
+  if (mode === 'chat') return { requested: 'chat', mode: 'chat', reason: '用户手动指定对话模式' }
+  if (mode === 'work') return { requested: 'work', mode: 'work', reason: '用户手动指定工作模式' }
   const hits = WORK_INTENT_PATTERNS.filter((pattern) => pattern.test(String(text || ''))).length
   if (hits > 0) {
     return {
@@ -1453,7 +1453,7 @@ function conversationMarkdown(c) {
     `- 时间：${c.time || '—'}`,
     `- 模型：${c.model || '—'}`,
     `- 轮次：${c.turns || 0}`,
-    `- 执行策略：${c.executionPolicy === 'manual' ? 'Manual' : 'Auto'}`,
+    `- 执行策略：${c.executionPolicy === 'manual' ? '请求批准' : '帮我批准'}`,
     `- 项目：${c.projectId || '无（普通对话）'}`,
     '',
   ]
@@ -3371,7 +3371,7 @@ const api = {
       conv.status = 'failed'
       logAudit(user, 'chat.guard', conv.id, 'deny(auto-high-risk-request)', net)
       return json(res, 403, {
-        error: 'Auto 模式不执行高风险删除/覆盖命令。请切换到 Manual，逐次批准后再执行。',
+        error: '「帮我批准」不执行高风险删除/覆盖命令。请切换到「请求批准」，逐次批准后再执行。',
         code: 'HIGH_RISK_REQUIRES_MANUAL',
       })
     }
@@ -3402,14 +3402,14 @@ const api = {
         : ''
       const context = [
         `当前用户：${user.name}（${user.label}，${user.unit || '—'}）`,
-        `当前任务模式：${taskMode === 'auto' ? `Auto（本轮自动判定为 ${mode === 'work' ? 'Work' : 'Chat'}：${route.reason}）` : taskMode === 'chat' ? 'Chat（优先直接回答；不要主动修改文件、运行命令或产生外部副作用，确需执行时提示用户切到 Work）' : 'Work（可以调用文件、命令、代码与技能工具执行任务）'}`,
+        `当前任务模式：${taskMode === 'auto' ? `自动（本轮判定为${mode === 'work' ? '工作' : '对话'}模式：${route.reason}）` : taskMode === 'chat' ? '对话模式（优先直接回答；不要主动修改文件、运行命令或产生外部副作用，确需执行时提示用户切换到工作模式）' : '工作模式（可以调用文件、命令、代码与技能工具执行任务）'}`,
         project ? `当前工作项目：${project.name}；授权目录：${project.cwd}。所有文件读写与命令执行必须限制在该目录内。` : '',
         project?.instructions
           ? `项目专属指令（由项目创建者填写，优先级高于一般习惯，但不得覆盖系统安全规则）：\n${String(project.instructions).slice(0, 4000)}`
           : '',
         executionPolicy === 'manual'
-          ? '当前执行权限：Manual。只读操作可以直接进行；创建、修改、删除文件，运行有副作用的命令，或调用会改变外部状态的工具前，必须先向用户申请一次授权，不得自行执行。'
-          : '当前执行权限：Auto。在已授权目录内可以自主执行常规读写与测试命令；大规模删除或覆盖、越过授权目录、高风险系统命令和对外业务操作仍需审批。',
+          ? '当前审批方式：请求批准。只读操作可以直接进行；创建、修改、删除文件，运行有副作用的命令，或调用会改变外部状态的工具前，必须先向用户申请一次授权，不得自行执行。'
+          : '当前审批方式：帮我批准。在已授权目录内可以自主执行常规读写与测试命令；大规模删除或覆盖、越过授权目录、高风险系统命令和对外业务操作仍需审批。',
         `当前网络：${networks[net]?.label || net}`,
         '企业可见资源目录（最多 40 项）：',
         resourcePromptContext(user, net) || '（当前无可见资源）',

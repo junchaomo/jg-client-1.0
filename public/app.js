@@ -1855,7 +1855,7 @@ function composerPresetPickerItems() {
       preset: p.id,
       ic: 'target',
       label: `${state.agentPresetId === p.id ? '✓ ' : ''}${p.name}`,
-      desc: `${p.defaultPolicy === 'manual' ? 'Manual' : 'Auto'} · ${p.defaultEffort === 'high' ? '高' : p.defaultEffort === 'low' ? '低' : '中'}${p.description ? ` · ${p.description}` : ''}`,
+      desc: `${p.defaultPolicy === 'manual' ? '请求批准' : '帮我批准'} · ${p.defaultEffort === 'high' ? '高' : p.defaultEffort === 'low' ? '低' : '中'}${p.description ? ` · ${p.description}` : ''}`,
     })),
   ]
   if (!presets.length) rows.push({ act: 'empty', ic: 'target', label: '还没有 Agent 预设', desc: '可在「设置 · Agent 运行时」创建', off: true })
@@ -2165,7 +2165,7 @@ function projectContextControl() {
 }
 
 function taskModeLabel(id) {
-  return { auto: 'Auto', chat: 'Chat', work: 'Work' }[id] || 'Auto'
+  return { auto: '自动', chat: '对话', work: '工作' }[id] || '自动'
 }
 
 function taskModeControl() {
@@ -2182,14 +2182,15 @@ function taskModeControl() {
 
 function openTaskModeMenu(anchor) {
   document.querySelectorAll('.mode-pop').forEach((p) => p.remove())
+  document.querySelectorAll('.policy-pop').forEach((p) => p.remove())
   if (window.__modePop) { window.__modePop.remove(); window.__modePop = null; return }
   const pop = document.createElement('div')
   pop.className = 'plus-pop mode-pop'
   pop.style.width = '260px'
   pop.innerHTML = [
-    ['auto', 'Auto', '智能判断，按需执行'],
-    ['chat', 'Chat', '只对话，不改文件'],
-    ['work', 'Work', '文件、代码、多步骤'],
+    ['auto', '自动', '智能判断，按需执行'],
+    ['chat', '对话', '只对话，不改文件'],
+    ['work', '工作', '文件、代码、多步骤'],
   ].map(([id, label, desc]) => `<button class="pp-row" data-taskmode="${id}">
       <span class="ico pp-ico">${state.taskMode === id ? icon('check') : ''}</span>
       <span class="pp-label">${label}</span>
@@ -2215,9 +2216,45 @@ function openTaskModeMenu(anchor) {
 
 function policyControl() {
   const manual = state.executionPolicy === 'manual'
-  return `<button class="quick" id="policyToggle" style="display:inline-flex;align-items:center;gap:6px;line-height:1.2;background:#f1f2f4;border:0;border-radius:999px;height:32px;padding:0 12px;color:#5f6368;box-shadow:none;white-space:nowrap" title="${manual ? '修改、删除、运行命令前需要逐次批准' : '在授权范围内自主执行，高风险操作仍需审批'}">
-    <span class="ico" style="display:inline-flex;align-items:center;justify-content:center">${icon(manual ? 'shield' : 'pulse')}</span>${manual ? '审批 Manual' : '审批 Auto'}
+  return `<button class="quick" id="policyToggle" style="display:inline-flex;align-items:center;gap:6px;line-height:1.2;background:#f1f2f4;border:0;border-radius:999px;height:32px;padding:0 12px;color:#5f6368;box-shadow:none;white-space:nowrap" title="${manual ? '编辑外部文件和使用互联网时始终询问' : '仅对检测到的风险操作请求批准'}">
+    <span class="ico" style="display:inline-flex;align-items:center;justify-content:center">${icon(manual ? 'shield' : 'pulse')}</span>${manual ? '请求批准' : '帮我批准'}
   </button>`
+}
+
+/** 审批策略菜单，用词与交互参考 Codex：点击后让用户选择，不直接切换。 */
+function openPolicyMenu(anchor) {
+  document.querySelectorAll('.policy-pop').forEach((p) => p.remove())
+  document.querySelectorAll('.mode-pop').forEach((p) => p.remove())
+  if (window.__policyPop) { window.__policyPop.remove(); window.__policyPop = null; return }
+  const pop = document.createElement('div')
+  pop.className = 'plus-pop policy-pop'
+  pop.style.width = '326px'
+  pop.innerHTML = [
+    ['manual', '请求批准', '编辑外部文件和使用互联网时始终询问', 'shield'],
+    ['auto', '帮我批准', '仅对检测到的风险操作请求批准', 'pulse'],
+  ].map(([id, label, desc, ico]) => `<button class="pp-row" data-policy="${id}" style="align-items:flex-start;padding:10px 12px 10px 10px">
+      <span class="ico pp-ico" style="margin-top:1px;flex:none">${icon(ico)}</span>
+      <span style="display:flex;flex-direction:column;gap:2px;min-width:0;text-align:left;flex:1">
+        <span style="font-size:13px;color:#202124;line-height:1.35">${label}</span>
+        <span style="font-size:12px;color:#7b8087;line-height:1.4;white-space:normal">${desc}</span>
+      </span>
+      <span class="ico" style="margin-top:7px;flex:none">${state.executionPolicy === id ? icon('check') : ''}</span>
+    </button>`).join('')
+  document.body.appendChild(pop)
+  window.__policyPop = pop
+  const r = anchor.getBoundingClientRect()
+  pop.style.left = `${Math.round(Math.min(window.innerWidth - 338, Math.max(12, r.left - 8)))}px`
+  pop.style.top = `${Math.round(Math.max(12, r.top - pop.offsetHeight - 8))}px`
+  pop.querySelectorAll('[data-policy]').forEach((b) => b.addEventListener('click', (e) => {
+    e.stopPropagation()
+    const next = b.dataset.policy
+    pop.remove()
+    window.__policyPop = null
+    setExecutionPolicy(next)
+  }))
+  setTimeout(() => document.addEventListener('click', function close(e) {
+    if (!pop.contains(e.target)) { pop.remove(); document.removeEventListener('click', close); window.__policyPop = null }
+  }), 0)
 }
 
 /** 统一入口的项目选择：浮层卡片，支持已有项目、新建项目、解除关联。 */
@@ -2425,7 +2462,7 @@ async function renderHome(el) {
   }
   el.querySelector('#projectContext')?.addEventListener('click', openWorkspacePicker)
   el.querySelector('#taskModeBtn')?.addEventListener('click', (ev) => { ev.stopPropagation(); openTaskModeMenu(ev.currentTarget) })
-  el.querySelector('#policyToggle')?.addEventListener('click', togglePolicy)
+  el.querySelector('#policyToggle')?.addEventListener('click', (ev) => { ev.stopPropagation(); openPolicyMenu(ev.currentTarget) })
   el.querySelector('#langBtn')?.addEventListener('click', (ev) => { ev.stopPropagation(); openReasoningMenu(ev.currentTarget) })
   el.querySelectorAll('[data-prompt]').forEach((btn) => btn.addEventListener('click', () => {
     state.draft = btn.dataset.prompt
@@ -2444,11 +2481,11 @@ async function renderHome(el) {
   draft?.focus()
 }
 
-async function togglePolicy() {
-  const next = state.executionPolicy === 'manual' ? 'auto' : 'manual'
+async function setExecutionPolicy(next) {
+  if (!['auto', 'manual'].includes(next)) return
   if (state.conversation?.id) {
     if (state.conversation.status === 'running') {
-      toast('本轮执行尚未结束，切换策略会从下一轮开始生效', true)
+      toast('本轮执行尚未结束，切换审批方式会从下一轮开始生效', true)
       return
     }
     const result = await api('/api/conversation/policy', {
@@ -2456,14 +2493,18 @@ async function togglePolicy() {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ conversationId: state.conversation.id, executionPolicy: next }),
     })
-    if (!result.ok) { toast(result.body?.error || '切换执行策略失败', true); return }
+    if (!result.ok) { toast(result.body?.error || '切换审批方式失败', true); return }
     state.executionPolicy = result.body.executionPolicy
     state.conversation.executionPolicy = result.body.executionPolicy
   } else {
     state.executionPolicy = next
   }
-  toast(state.executionPolicy === 'manual' ? '已切换为 Manual：写操作执行前会请求批准' : '已切换为 Auto：授权范围内可自主执行常规操作')
+  toast(state.executionPolicy === 'manual' ? '已切换为「请求批准」：编辑外部文件和使用互联网时始终询问' : '已切换为「帮我批准」：仅对检测到的风险操作请求批准')
   renderView()
+}
+
+function togglePolicy() {
+  setExecutionPolicy(state.executionPolicy === 'manual' ? 'auto' : 'manual')
 }
 
 function greet() {
@@ -9003,7 +9044,7 @@ function renderChat(el) {
   draft?.addEventListener('input', (e) => { state.draft = e.target.value; updateSlashMenu(e.target) })
   el.querySelector('#projectContext')?.addEventListener('click', openWorkspacePicker)
   el.querySelector('#taskModeBtn')?.addEventListener('click', (ev) => { ev.stopPropagation(); openTaskModeMenu(ev.currentTarget) })
-  el.querySelector('#policyToggle')?.addEventListener('click', togglePolicy)
+  el.querySelector('#policyToggle')?.addEventListener('click', (ev) => { ev.stopPropagation(); openPolicyMenu(ev.currentTarget) })
   draft?.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') closeSlashMenu()
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendFromChat() }
@@ -10109,7 +10150,7 @@ function openAgentPresetEditor(preset = null) {
     <input id="apDesc" class="text-input" maxlength="200" value="${esc(p.description)}" placeholder="这个预设适合什么任务">
     <div style="display:flex;gap:12px;margin-top:12px">
       <div style="flex:1"><div class="form-label">默认执行策略</div>
-        <select id="apPolicy" class="text-input"><option value="auto"${p.defaultPolicy !== 'manual' ? ' selected' : ''}>Auto 自动执行</option><option value="manual"${p.defaultPolicy === 'manual' ? ' selected' : ''}>Manual 逐次审批</option></select></div>
+        <select id="apPolicy" class="text-input"><option value="auto"${p.defaultPolicy !== 'manual' ? ' selected' : ''}>帮我批准</option><option value="manual"${p.defaultPolicy === 'manual' ? ' selected' : ''}>请求批准</option></select></div>
       <div style="flex:1"><div class="form-label">默认推理强度</div>
         <select id="apEffort" class="text-input"><option value="low"${p.defaultEffort === 'low' ? ' selected' : ''}>低</option><option value="medium"${p.defaultEffort === 'medium' ? ' selected' : ''}>中</option><option value="high"${p.defaultEffort === 'high' ? ' selected' : ''}>高</option></select></div>
     </div>
@@ -10336,7 +10377,7 @@ function renderSettings(el) {
       const changesEl = el.querySelector('#rtChanges')
       const effortLabel = effortEl ? effortEl.value : '中'
       const payload = {
-        defaultPolicy: policyEl && policyEl.value.startsWith('Manual') ? 'manual' : 'auto',
+        defaultPolicy: policyEl && policyEl.value === '请求批准' ? 'manual' : 'auto',
         defaultEffort: effortLabel === '高' ? 'high' : effortLabel === '低' ? 'low' : 'medium',
         workspaceChanges: changesEl ? changesEl.checked : true,
       }
@@ -10596,14 +10637,14 @@ function settingsBody(tab) {
       const d = new Date(v)
       return Number.isNaN(d.getTime()) ? String(v) : d.toLocaleString('zh-CN', { hour12: false })
     }
-    const policyText = rs.defaultPolicy === 'manual' ? 'Manual · 写操作逐次审批' : 'Auto · 工作区内自动执行'
+    const policyText = rs.defaultPolicy === 'manual' ? '请求批准 · 外部操作始终询问' : '帮我批准 · 仅风险操作询问'
     const effortText = rs.defaultEffort === 'high' ? '高' : rs.defaultEffort === 'low' ? '低' : '中'
     return {
       title: 'Agent 运行时',
       groups: [
         sgroup('新会话默认值', [
-          srow('默认执行策略', '只影响新开的会话；当前会话可在输入框下方单独切换',
-            canEditRt ? sel('rtPolicy', ['Auto 自动执行', 'Manual 逐次审批'], rs.defaultPolicy === 'manual' ? 'Manual 逐次审批' : 'Auto 自动执行') : `<span class="set-value">${esc(policyText)}</span>`),
+          srow('默认执行策略', '只影响新开的会话；当前会话可在输入框内单独切换',
+            canEditRt ? sel('rtPolicy', ['帮我批准', '请求批准'], rs.defaultPolicy === 'manual' ? '请求批准' : '帮我批准') : `<span class="set-value">${esc(policyText)}</span>`),
           srow('默认推理强度', '只影响新开的会话；低/中/高映射到模型实际支持的强度档',
             canEditRt ? sel('rtEffort', ['低', '中', '高'], effortText) : `<span class="set-value">${esc(effortText)}</span>`),
           srow('每轮文件变更摘要', '执行前后对项目目录做只读快照并列出新增/修改/删除；关闭后不再生成该块',
@@ -10634,7 +10675,7 @@ function settingsBody(tab) {
             `<button class="btn sm" data-preset-new>新建预设</button>`),
           ...(state.agentPresets.length ? state.agentPresets.map((p) => srow(
             `${esc(p.name)}${state.agentPresetId === p.id ? ' <span class="tag" style="margin-left:6px">当前</span>' : ''}`,
-            `${esc(p.description || '未填写说明')} · ${p.defaultPolicy === 'manual' ? 'Manual' : 'Auto'} · ${p.defaultEffort === 'high' ? '高' : p.defaultEffort === 'low' ? '低' : '中'}`,
+            `${esc(p.description || '未填写说明')} · ${p.defaultPolicy === 'manual' ? '请求批准' : '帮我批准'} · ${p.defaultEffort === 'high' ? '高' : p.defaultEffort === 'low' ? '低' : '中'}`,
             `<button class="btn sm" data-preset-edit="${esc(p.id)}">编辑</button> <button class="btn sm" data-preset-del="${esc(p.id)}">删除</button>`,
           )) : [srow('还没有预设', '新建后可在输入框「＋ → Agent 预设」中选择', '<span class="set-value">—</span>')]),
         ]),
