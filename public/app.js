@@ -3770,10 +3770,9 @@ async function attemptUnauthorized() {
 /* ------------------------------ skills ------------------------------ */
 
 async function renderSkills(el) {
-  const [{ body: marketBody }, { body: plugBody }, { body: subBody }] = await Promise.all([api('/api/plugin-market'), api('/api/plugins'), api('/api/plugin-subs')])
+  const [{ body: marketBody }, { body: plugBody }, { body: subBody }] = await Promise.all([api('/api/plugin-market'), api('/api/plugins'), api('/api/plugin-subs?mine=1')])
   state.market = marketBody.items || []
   state.plugins = plugBody.items || []
-  state.skillQuery = ''
   const subs = subBody.items || []
   const tab = state.skillTab || 'plugin'
   const scop = state.skillScope || 'public'
@@ -3791,7 +3790,7 @@ async function renderSkills(el) {
       ${m.installed
         ? `<button class="pl-act" data-mdetail="${m.id}" title="已安装，查看详情">${icon('dots')}</button>`
         : m.available === false
-          ? `<span class="tag">待上架</span>`
+          ? `<span class="tag" style="font-size:10px">待上架</span>`
           : `<button class="pl-act add" data-minstall="${m.id}" title="安装">${icon('plus')}</button>`}
     </div>`
 
@@ -3809,7 +3808,11 @@ async function renderSkills(el) {
     </section>` : ''
 
   const marketSections = ['热门', '新品推荐', '企业内部'].map((name) => {
-    const list = state.market.filter((m) => m.section === name)
+    const list = state.market.filter((m) => m.section === name).filter((m) => {
+      const q = String(state.skillQuery || '').trim().toLowerCase()
+      if (!q) return true
+      return `${m.name} ${m.desc} ${m.publisher || ''}`.toLowerCase().includes(q)
+    })
     return list.length ? sec(name, list.map(marketCard).join('')) : ''
   }).join('')
 
@@ -3821,7 +3824,7 @@ async function renderSkills(el) {
       const st = { pending: ['warn', '待审核'], approved: ['ok', '已上架'], rejected: ['bad', '已退回'] }[x.status] || ['', x.status]
       return `<div class="pl-item">
         <span class="pl-ico ${tone(i)}">${icon('plugin')}</span>
-        <div class="pl-item-main"><div class="pl-item-name">${esc(x.name)}</div><div class="pl-item-desc">${esc(x.file)} · v${esc(x.version)} · ${esc(x.scope)}</div></div>
+        <div class="pl-item-main"><div class="pl-item-name">${esc(x.name)}</div><div class="pl-item-desc">${esc(x.file)} · v${esc(x.version)} · ${esc(x.scope)} · ${esc(x.submitted)}</div></div>
         <span class="tag ${st[0]}">${st[1]}</span>
         <button class="pl-act" data-subreport="${x.id}" title="查看检测报告">${icon('doc')}</button>
       </div>`
@@ -3855,17 +3858,25 @@ async function renderSkills(el) {
         <div class="pl-foot">插件与技能按授权与网络可用；企业内部插件需经过安全审核后上架。</div>
       </aside>
       <div class="sk-main pl-main">
-        <div class="pl-head">
-          <div class="pl-head-main">
-            <h1 class="pl-title">${title}</h1>
-            <div class="pl-sub">${sub}</div>
+        <div class="pl-head" style="display:block">
+          <div style="display:flex;align-items:flex-start">
+            <div class="pl-head-main">
+              <h1 class="pl-title">${title}</h1>
+            </div>
+            <div class="pl-acts">
+              <input class="text-input" id="skSearch" placeholder="搜索插件" value="${esc(state.skillQuery || '')}" style="width:180px;height:32px" />
+              <button class="pl-ico-btn" id="skRefresh" title="刷新">${icon('refresh')}</button>
+              <button class="pl-add" id="skAddLeft" style="background:#111;color:#fff;border-color:#111">添加</button>
+            </div>
           </div>
-          <div class="pl-acts">
-            <button class="pl-ico-btn" id="skRefresh" title="刷新">${icon('refresh')}</button>
-            <button class="pl-add" id="skAddLeft">添加</button>
-          </div>
+          <div class="pl-sub">${sub}</div>
         </div>
-        ${tab === 'plugin' ? pluginSections : ''}
+        ${tab === 'plugin' ? `<div class="pl-tabs">
+          <button class="pl-tab${scop === 'public' ? ' on' : ''}" data-skscope="public">公开</button>
+          <button class="pl-tab${scop === 'personal' ? ' on' : ''}" data-skscope="personal">个人</button>
+        </div>` : ''}
+        ${tab === 'plugin' && scop === 'public' ? marketSections : ''}
+        ${tab === 'plugin' && scop === 'personal' ? personalSections : ''}
         ${tab === 'skill' ? skillSections : ''}
       </div>
     </div>`
@@ -3873,6 +3884,12 @@ async function renderSkills(el) {
   el.querySelectorAll('[data-sktab]').forEach((b) => { b.onclick = () => { state.skillTab = b.dataset.sktab; renderView() } })
   el.querySelectorAll('[data-skscope]').forEach((b) => { b.onclick = () => { state.skillScope = b.dataset.skscope; renderView() } })
   el.querySelector('#skRefresh').addEventListener('click', () => { toast('已刷新插件目录'); renderView() })
+  const search = el.querySelector('#skSearch')
+  search.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return
+    state.skillQuery = search.value.trim()
+    renderView()
+  })
   el.querySelector('#skAddLeft').addEventListener('click', () => {
     if (tab === 'skill') return toast('技能由管理员在管理中心登记后上架')
     openPluginPublish()
@@ -3884,6 +3901,14 @@ async function renderSkills(el) {
     renderView()
   }))
   el.querySelectorAll('[data-mdetail]').forEach((b) => b.addEventListener('click', () => openPluginSlide(b.dataset.mdetail)))
+  el.querySelectorAll('[data-market-download]').forEach((b) => b.addEventListener('click', () => {
+    const a = document.createElement('a')
+    a.href = b.dataset.marketDownload
+    a.download = ''
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+  }))
   el.querySelectorAll('[data-subreport]').forEach((b) => b.addEventListener('click', () => {
     const x = subs.find((y) => y.id === b.dataset.subreport)
     if (x) openPluginReport(x)
@@ -3898,14 +3923,16 @@ function openPluginSlide(id) {
   slide.innerHTML = `
     <div class="slide-head"><div><div class="slide-title">${esc(m.name)}</div><div class="slide-sub">${esc(m.publisher)} · ${esc(m.section)} · ID ${esc(m.id)}</div></div><span class="spacer"></span><button class="btn subtle" data-close>${icon('close')}</button></div>
     <div class="slide-body">
-      <div style="display:flex;gap:6px;margin-bottom:12px"><span class="tag ${m.installed ? 'ok' : ''}">${m.installed ? '已安装' : '未安装'}</span><span class="tag ${m.available === false ? 'warn' : ''}">${m.available === false ? '待上架' : '可安装'}</span><span class="tag">${esc(m.scope)}</span></div>
+      <div style="display:flex;gap:6px;margin-bottom:12px"><span class="tag ${m.installed ? 'ok' : ''}">${m.installed ? '已安装' : '未安装'}</span><span class="tag ${m.available === false ? 'warn' : ''}">${m.available === false ? '待上架' : '可安装'}</span><span class="tag">${m.origin === 'community' ? '社区提交' : '官方/内置'}</span><span class="tag">${esc(m.scope)}</span></div>
       <div class="field"><div class="field-label">功能说明</div><div class="field-value">${esc(m.desc)}</div></div>
+      <div class="field"><div class="field-label">来源</div><div class="field-value">${m.origin === 'community' ? `${esc(m.submittedUnit || '')} · 提交人 ${esc(m.submittedBy || '')} · v${esc(m.version || '1.0.0')}` : `DSH 官方 / 产品内置 · v${esc(m.version || '1.0.0')}`}</div></div>
       <div class="field"><div class="field-label">权限与数据</div><div class="field-value">按当前授权与网络范围返回数据；敏感字段最小必要展示，读取与调用进审计。写操作需人工确认。</div></div>
       <div class="field"><div class="field-label">安装状态</div><div class="field-value">${m.available === false ? '该插件尚未提供可安装的技能包，暂不能安装。上架后会显示安装入口。' : `安装到${esc(m.installScope || '本机 DSH 运行时')}；安装或卸载后，下一轮对话生效。`}</div></div>
       <div class="field"><div class="field-label">安装要求</div><div class="field-value">${m.scope === '需授权' ? '需部门负责人授权后安装，授权范围按岗位与项目参与关系核定。' : '企业公开插件，可直接安装；启用后仅在当前网络与已授权范围生效。'}</div></div>
     </div>
     <div class="slide-foot">
       ${m.available === false ? '<button class="btn primary" disabled>尚未提供安装包</button>' : `<button class="btn primary" data-toggle>${m.installed ? '卸载' : '安装'}</button>`}
+      ${m.downloadUrl ? '<button class="btn" data-download>下载原始包</button>' : ''}
       <button class="btn" data-log>调用记录</button>
       <button class="btn" data-close>关闭</button>
     </div>`
@@ -3918,6 +3945,15 @@ function openPluginSlide(id) {
     renderView()
   })
   slide.querySelector('[data-log]').addEventListener('click', () => toast('调用记录按任务、参数与结果留存，可在审计中回查'))
+  const dl = slide.querySelector('[data-download]')
+  if (dl) dl.addEventListener('click', () => {
+    const a = document.createElement('a')
+    a.href = m.downloadUrl
+    a.download = ''
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+  })
 }
 
 function openSkillSlide(id) {

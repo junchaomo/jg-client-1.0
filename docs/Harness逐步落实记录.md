@@ -326,13 +326,13 @@
 
 ### 16.4 技能目录现状
 
-**事实**：`data/dsh-home/skills` 当前只有三个目录技能：`jg-product`、`market-M-01`、`market-M-03`；Office 不在这个目录里，而是通过 `skill-office` 插件加载。设置页新增「技能目录（只读）」组，直接列出目录技能、Office 插件挂载状态和技能根目录，不再用“技能体系已完整”这种模糊说法。
+**事实**：`data/dsh-home/skills` 当前有 7 个目录技能：DSH 预设自带的 `agent-experience`、`cordis-composition-reference`、`cordis-plugin-development`、`editing-cordis-compositions`，本地业务技能 `jg-product`、`market-M-01`、`market-M-03`；Office 仍通过 `skill-office` 插件加载，不重复复制。设置页「技能目录（只读）」直接列出目录技能、Office 插件挂载状态和技能根目录。
 
-**边界**：目录技能和插件技能是两条来源；要增加技能，需要把技能包写入 `skills` 目录，或在市场安装对应插件。当前没有“从市场安装后自动刷新 DSH 技能缓存”的机制。
+**默认技能安装**：源目录 `dsh-runtime/node_modules/@deepseek-ai/dsh-agent-preset/skills`，递归复制到 `data/dsh-home/skills`，未覆盖已有同名目录；`installedSkillPlugins()` 为四个默认技能补中文标签，`/api/plugins` 中文界面可读。重启后接口返回 9 项：4 个默认技能 + 3 个本地目录技能 + Office + MCP。技能描述仍保留英文原文，因为那是技能自身的 `description`，不另行翻译。
 
-**界面收口**：`/api/plugins` 不再返回 `data.mjs` 里的 21 条演示插件（P-DOC、P-DB、P-GIS 等），改为只返回本机实际加载的目录技能、`skill-office` 和 `mcp-jg`。插件页只显示“已安装插件”，技能页只显示“已安装技能”；未安装的市场条目和演示提交不再出现在这两页。实测接口返回 5 项：3 个目录技能 + Office + MCP。
+**边界**：目录技能和插件技能是两条来源；市场安装会写入 `skills/market-<ID>` 并关闭空闲 Harness，下一轮重新发现；这不是热插拔，正在执行的任务不会被中断。
 
-**边界**：插件市场安装能力仍在后端保留，但本页不再把未安装条目当作已安装展示；后续要做市场，应单独做“可安装”页，不要把未安装项混进已安装列表。
+**界面收口**：`/api/plugins` 只返回本机实际加载的目录技能、`skill-office` 和 `mcp-jg`，不再返回 `data.mjs` 里的 21 条演示插件。插件页按示意图恢复为“左侧已安装、右侧市场”的结构：插件 tab 主区即市场，公开/个人两个视图；技能 tab 只列已安装技能。
 
 ### 16.5 检查点现状
 
@@ -645,6 +645,32 @@
 - 安装是**本机运行时全局挂载**，不是按账号隔离；同一客户端所有账号可见。
 - DSH Bundle 未一键安装：当前环境无 pnpm，`dsh plugin add` 不可用；Bundle 审核后只登记上架。
 - 技能只提供提示词与参考文件，不执行自定义 JS；需要真实系统调用时走产品 MCP 工具。
+
+### 25.1 市场页按示意图重做与社区提交闭环
+
+**背景**：此前把“市场”误做成第三个侧栏 tab，并且单独做了“社区提交 / 官方与内置”分组页，与用户提供的 ChatGPT 风格示意图不符。示意图的结构是：左侧为已安装页，右侧主区为市场页；市场页标题「插件」，右上搜索、刷新、添加；`公开 / 个人` 切换；内容按「热门」「新品推荐」「小型企业（本项目为「企业内部」）」分组，两列卡片，卡片右侧 `+` 或 `...`。
+
+**前端收口**：
+- 删除第三个「市场」导航，`state.skillTab` 只保留 `plugin` / `skill`；插件 tab 主区就是市场页，左侧「已安装」列本机真实安装的插件（当前 Office、MCP）。
+- 市场卡片改为示意图样式：图标 + 名称 + 描述 + 右侧操作；已安装显示 `...` 打开详情，未安装显示 `+` 安装；不再把“官方/社区”标签和版本号堆在卡片标题行。
+- `公开` 显示 `热门` / `新品推荐` / `企业内部`；`个人` 显示「我的插件提交」和「已安装」。提交记录状态为待审核 / 已上架 / 已退回。
+- 搜索框按 Enter 过滤名称、描述与发布单位；刷新重新拉取；「添加」打开提交弹窗。为贴合示意图，添加按钮使用内联黑色样式，未修改 `styles.css` / `search-fixes.css`。
+
+**后端收口**：
+- `GET /api/plugin-subs` 支持 `?mine=1`，普通用户只看自己的提交；管理员默认返回全部，审核页能看到所有人的待审记录。
+- `marketSkillState()` 增加 `origin`（`community` / `builtin`）、`submittedBy`、`submittedUnit`、`downloadUrl`。
+- 新增 `GET /api/plugin-market/download?id=<marketId>`，只允许已审核通过的社区插件下载原始 ZIP。
+- 提交 id 改为时间戳 `SUB-${Date.now().toString(36).toUpperCase()}`，避免过滤与持久化后序号冲突。
+- 审核通过后技能包解压到 `data/market-packages/<marketId>`，并以 `section: 企业内部` 写入 `liveMarket`；随后走原有安装链路复制到 `skills/market-<id>`。
+
+**实测（本轮闭环）**：
+- 生成测试技能包 `market-demo-skill`，`POST /api/files/upload?kind=plugin` 返回 `PKG-MWD7XG4J-F62842B2`，sha256 `6799951e...09e201`。
+- `POST /api/plugin-subs` 返回 `SUB-MWD7XLCH`，状态 `pending`，五项检测四项通过、隔离测试未执行（技能包不执行代码）。
+- 管理员 `POST /api/plugin-subs/review` 通过，返回 `packageReady=true`；`/api/plugin-market` 新增 `PLG-MWD7XLCH`，`section=企业内部`，`downloadUrl=/api/plugin-market/download?id=PLG-MWD7XLCH`。
+- `GET /api/plugin-market/download` 返回 349 字节 ZIP；`POST /api/plugin-market/install` 返回 `installed=true`，`data/dsh-home/skills/market-PLG-MWD7XLCH/SKILL.md` 存在；卸载后目录删除。
+- 验证完成后已清理测试提交、市场条目、上传文件、解压目录和临时 ZIP；当前 `/api/plugin-subs` 返回 0 条，市场只保留 5 个内置包。
+
+**边界**：仍不提供“他人提交后自动推送”；其他用户需要刷新市场才能看到新上架条目。审核入口仍在「管理中心 · AI 能力管理 · 插件审核」，市场页不重复放管理员审核按钮。
 
 ### 26. MCP 写操作人工审批与遥测默认关闭
 

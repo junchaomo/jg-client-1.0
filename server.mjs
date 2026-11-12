@@ -316,6 +316,12 @@ function installedSkillPlugins() {
   const home = join(dataDirPath(), 'dsh-home')
   const skillsDir = join(home, 'skills')
   const inventory = runtimePluginInventory()
+  const labels = {
+    'agent-experience': 'Agent 经验与工具设计',
+    'cordis-composition-reference': 'Cordis 组合参考',
+    'cordis-plugin-development': 'DSH 插件开发',
+    'editing-cordis-compositions': 'Agent 预设编辑',
+  }
   const list = []
   let dirs = []
   try {
@@ -333,7 +339,7 @@ function installedSkillPlugins() {
       }
       if (/^[\x00-\x7F]+$/.test(name)) {
         const heading = (text.match(/^#\s+(.+)$/m) || [])[1]?.trim()
-        if (heading) name = heading
+        name = labels[dir] || heading || name
       }
     } catch {}
     list.push({
@@ -2462,10 +2468,15 @@ async function uninstallMarketSkill(item) {
   await closeHarness()
 }
 function marketSkillState(item) {
+  const sub = item.subId ? pluginSubs.find((s) => s.id === item.subId) : null
   return {
     ...item,
+    origin: sub ? 'community' : 'builtin',
+    submittedBy: sub ? sub.author : '',
+    submittedUnit: sub ? sub.unit : '',
     available: marketSkillAvailable(item.id),
     installed: marketSkillInstalled(item.id),
+    downloadUrl: sub && sub.fileId ? `/api/plugin-market/download?id=${encodeURIComponent(item.id)}` : '',
     installScope: '本机 DSH 运行时（同一客户端全局可见）',
   }
 }
@@ -3243,6 +3254,25 @@ const api = {
     const items = liveMarket.map((m) => marketSkillState(m))
     json(res, 200, { items, network: networks[net]?.label || '', installScope: '本机 DSH 运行时（同一客户端全局可见）' })
   },
+  'GET /api/plugin-market/download': (req, res, url) => {
+    const id = String(url.searchParams.get('id') || '')
+    const item = liveMarket.find((x) => x.id === id)
+    const sub = item && item.subId ? pluginSubs.find((s) => s.id === item.subId) : null
+    if (!sub || sub.status !== 'approved' || !sub.fileId) {
+      return json(res, 404, { error: '该插件没有可下载的原始包' })
+    }
+    const meta = getFile(sub.fileId)
+    let buffer = null
+    try { buffer = readFileBuffer(sub.fileId) } catch {}
+    if (!meta || !buffer) return json(res, 404, { error: '插件包文件已失效，请让提交人重新上传' })
+    res.writeHead(200, {
+      'content-type': meta.mime || 'application/zip',
+      'content-length': buffer.length,
+      'content-disposition': contentDisposition(meta.name),
+      'cache-control': 'no-store',
+    })
+    res.end(buffer)
+  },
   'POST /api/plugin-market/install': async (req, res) => {
     const user = roleOf(req)
     const body = JSON.parse(req.__body || '{}')
@@ -3267,9 +3297,11 @@ const api = {
       message: has ? '已从本机运行时卸载，下一轮对话生效' : '已安装到本机运行时，下一轮对话生效',
     })
   },
-  'GET /api/plugin-subs': (req, res) => {
+  'GET /api/plugin-subs': (req, res, url) => {
     const user = roleOf(req)
-    json(res, 200, { items: pluginSubs.filter((s) => s.author === user.name) })
+    const mine = url.searchParams.get('mine') === '1'
+    const items = canManage(user) && !mine ? pluginSubs : pluginSubs.filter((s) => s.author === user.name)
+    json(res, 200, { items })
   },
   'POST /api/plugin-subs': (req, res) => {
     const user = roleOf(req)
@@ -3285,7 +3317,7 @@ const api = {
     try { buffer = readFileBuffer(fileId) } catch { return json(res, 400, { error: '插件包读取失败，请重新上传' }) }
     const scan = inspectPluginZip(buffer)
     const hasFail = (scan.checks || []).some((c) => c[1] === '不通过')
-    const id = `SUB-${String(pluginSubs.length + 1).padStart(2, '0')}`
+    const id = `SUB-${Date.now().toString(36).toUpperCase()}`
     const sizeText = meta.size >= 1024 ** 2 ? `${(meta.size / 1024 ** 2).toFixed(1)} MB` : `${Math.max(1, Math.round(meta.size / 1024))} KB`
     const sub = {
       id, name, version: body.version || '0.1.0', file: meta.name, size: sizeText,
