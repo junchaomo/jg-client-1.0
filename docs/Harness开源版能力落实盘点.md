@@ -43,14 +43,14 @@
 | AI 会话标题 | 已落地 | profile 显式启用 `session-title-llm`；产品做了标题可用性过滤后落库。`server.mjs:3572` |
 | 会话全文检索 | 未落地 | `session-query-sqlite` 配置 `openAt: never`；产品搜索是对自有会话消息做字符串过滤，不是 DSH 检索。`server.mjs:3243-3250` |
 | 会话导出 | 未落地 | 产品只导出自有 Markdown；`dsh-session-log-export` 未进入 base bundle。 |
-| 遥测/可观测 | 风险 | `session-telemetry-otel` 默认 `FEEDBACK_ONLY`，默认端点指向 `dsh-otel-collector.deepseeksvc.com`；项目未设置 `DSH_TELEMETRY_DISABLED`，也未改内网 collector。 |
+| 遥测/可观测 | 已收口 | `harness.mjs` 在 env 未显式指定时注入 `DSH_TELEMETRY_DISABLED=1` 与 `DSH_TELEMETRY_MODE=DISABLED`；`dsh-session-telemetry-otel` 的 `DISABLED` 分支不构造 provider，不会向公网 collector 发请求。运行态核对到 collector IP 无已建立连接。 |
 
 ### 3.2 执行与安全
 
 | 能力 | 状态 | 实际情况与证据 |
 |---|---|---|
 | 人工审批 | 已落地 | `dsh-user-approval` + `approval/request` 回调 + 产品审批/拒绝接口。`harness.mjs:104-115`、`server.mjs:3519` |
-| 自动审批矩阵 | 部分/风险 | `autoApprovalAllowed()` 只解析 `command/cmd/script` 和 `path/file_path/cwd`；**`im_send`、`task_create` 等 MCP 外部副作用工具没有命令/路径参数，会自动放行**。`server.mjs:1243-1265` |
+| 自动审批矩阵 | 已收口（MCP 写操作） | `autoApprovalAllowed()` 增加外部副作用工具识别；MCP 桥在 `im_send`/`task_create` 执行前调用 `POST /api/mcp/approval`，服务端定位当前唯一活动会话并生成审批卡，用户批准后才调用产品接口。实测批准后创建成功、拒绝后无副作用。 |
 | 用户提问 | 已落地 | `onQuestion` → `pendingInteractions` → `/api/chat/answer`。`server.mjs:3527`、`:3636` |
 | 计划模式 | 已落地 | `/plan` 原生激活；计划评审走通用 user-question 选项流。`harness.mjs:514-518`、`:556` |
 | 沙箱与权限 | 已落地 | base 启用 `sandbox-local`、`sandbox-policy`、`pwsh-sandbox`；产品统一从 `/permission read-only` 入口起，按审批逐次提权。 |
@@ -99,15 +99,15 @@
 
 ## 四、关键缺口与风险
 
-### P0：审批矩阵没有覆盖 MCP 外部副作用
+### 已收口：MCP 外部副作用绕过审批
 
-`autoApprovalAllowed()` 的判断输入只有命令文本和文件路径。`im_send`、`task_create` 这类 MCP 工具没有 `command`/`path`，会被直接判为低风险并自动放行；`tool-plugin-manager` 也没有进入矩阵。这意味着“Auto 只自动放行低风险操作”的承诺目前只对 `pwsh`/文件类工具成立。
+`autoApprovalAllowed()` 原先只解析命令文本和文件路径，`im_send`、`task_create` 这类 MCP 工具没有 `command`/`path`，会被直接判为低风险并自动放行。更关键的是，DSH 的 MCP 桥默认没有把这些工具送进 `approval/request`，只改矩阵函数根本拦不住。
 
-建议：按工具名建立白名单/黑名单，把 `im_send`、`task_create`、插件管理、网络写操作默认归入人工审批；MCP 工具在 `tools/list` 时带上风险等级，由 `autoApprovalAllowed()` 统一裁决。
+2026-11-12 已把闸门前移到 MCP 桥：`mcp-jg.mjs` 在 `im_send`、`task_create` 执行前调用 `POST /api/mcp/approval`；服务端按 MCP token/账号定位当前唯一活动会话，生成 `approval` 待处理项并等待用户选择，批准后才调用 `/api/ai/invoke`。没有活动会话或有多个活动会话时一律拒绝（fail closed）。实测：批准后待办创建成功；拒绝后模型收到“用户未批准该 MCP 外部副作用操作”，没有产生任何待办。
 
-### P0：遥测默认端点未治理
+### 已收口：遥测默认端点
 
-`session-telemetry-otel` 默认开启 `FEEDBACK_ONLY`，端点是外部 collector。企业环境应显式设置 `DSH_TELEMETRY_DISABLED=1`，或改为内网 OTLP endpoint；至少在部署文档中写明。
+`session-telemetry-otel` 默认 `FEEDBACK_ONLY`，端点是外部 collector。`harness.mjs` 现在在 env 未显式指定时注入 `DSH_TELEMETRY_DISABLED=1` 和 `DSH_TELEMETRY_MODE=DISABLED`；DSH 的 `DISABLED` 分支不构造 SDK provider，只保留“反馈未上传”的本地告警。运行态已核对 `dsh-otel-collector.deepseeksvc.com` 两个解析 IP 上没有已建立连接。管理员如确需内网 OTLP，需要显式改 env 并自行承担外发策略。
 
 ### P1：插件市场已接通技能包，DSH Bundle 仍未落地
 
@@ -127,7 +127,7 @@
 
 ## 五、建议推进顺序
 
-1. **先补审批矩阵**：MCP 写工具、插件管理、网络外发纳入人工审批；这是安全承诺，不是体验优化。
+1. **审批矩阵继续扩面**：MCP 写工具已走人工审批；下一步把插件管理、网络外发也纳入同一套人工确认，并补拒绝路径的回归测试。
 2. **插件市场继续收口**：技能包已真实挂载；接下来决定是补 pnpm 与 Bundle 安装，还是把市场收敛为技能市场，并把安装范围从“本机全局”改成按账号/项目隔离。
 3. **然后做持久任务队列**：在现有 `chat-run` 记录上增加 worker、幂等键与断点，不直接做自动重放。
 4. **最后收口 DSH 原生设置/检索/导出**：避免两套配置源，补齐会话检索与审计导出。

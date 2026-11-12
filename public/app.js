@@ -2222,6 +2222,73 @@ function policyControl() {
   </button>`
 }
 
+/** 待审批胶囊：放在输入框内「＋」右侧，点击后再让用户选择，不直接放行。 */
+function approvalControl() {
+  return `<button class="quick" id="approvalToggle" style="display:inline-flex;align-items:center;gap:6px;line-height:1.2;background:#f1f2f4;border:0;border-radius:999px;height:32px;padding:0 12px;color:#5f6368;box-shadow:none;white-space:nowrap" title="有 1 项工具调用等待你批准">
+    <span class="ico" style="display:inline-flex;align-items:center;justify-content:center">${icon('shield')}</span>请求批准
+  </button>`
+}
+
+const TOOL_LABELS = {
+  'mcp__jg__task_create': '创建待办',
+  'mcp__jg__im_send': '发送即时消息',
+  'mcp__jg__drive_search': '检索云空间',
+  'mcp__jg__drive_read': '读取云空间文件',
+  'mcp__jg__notice_list': '查询通知公告',
+  'mcp__jg__notice_read': '读取通知公告',
+  'mcp__jg__academy_search': '检索教学园地',
+  'mcp__jg__contacts_find': '查询通讯录',
+  'mcp__jg__resource_query': '查询数据资源',
+  'mcp__jg__notebook_search': '检索智能笔记',
+  task_create: '创建待办',
+  im_send: '发送即时消息',
+}
+function toolLabel(name) {
+  if (TOOL_LABELS[name]) return TOOL_LABELS[name]
+  const short = String(name || '').replace(/^mcp__[^_]+__/, '')
+  return TOOL_LABELS[short] || short || '工具调用'
+}
+
+/** 点击胶囊后弹出的审批菜单；选择前不会产生任何副作用。 */
+function openApprovalMenu(anchor) {
+  if (window.__approvalPop) { window.__approvalPop.remove(); window.__approvalPop = null; return }
+  document.querySelectorAll('.approval-pop').forEach((p) => p.remove())
+  document.querySelectorAll('.policy-pop').forEach((p) => p.remove())
+  const p = state.pendingInteraction
+  if (!p || p.kind !== 'approval') return
+  const pop = document.createElement('div')
+  pop.className = 'plus-pop approval-pop'
+  pop.style.width = '340px'
+  pop.innerHTML = `
+    <div style="padding:12px 14px 8px">
+      <div style="font-size:14px;color:#202124;font-weight:500;line-height:1.4">工具调用需要确认</div>
+      <div style="font-size:12px;color:#7b8087;line-height:1.5;margin-top:3px">${esc(toolLabel(p.toolName))} 将在你的账号下执行，仅本次有效。</div>
+    </div>
+    ${p.summary ? `<div style="margin:0 12px 10px;padding:9px 10px;background:#f6f7f8;border-radius:8px;font-size:12px;color:#4b5056;line-height:1.5;word-break:break-word">${esc(p.summary)}</div>` : ''}
+    <button data-approval="allowed-once" style="display:flex;align-items:center;gap:10px;width:100%;border:0;background:transparent;padding:10px 13px;font:inherit;text-align:left;cursor:pointer">
+      <span class="ico" style="flex:none">${icon('check')}</span>
+      <span style="display:flex;flex-direction:column;gap:2px;min-width:0"><span style="font-size:13px;color:#202124">允许本次执行</span><span style="font-size:12px;color:#7b8087">执行后才会写入结果</span></span>
+    </button>
+    <button data-approval="rejected" style="display:flex;align-items:center;gap:10px;width:100%;border:0;background:transparent;padding:10px 13px;font:inherit;text-align:left;cursor:pointer">
+      <span class="ico" style="flex:none">${icon('close')}</span>
+      <span style="display:flex;flex-direction:column;gap:2px;min-width:0"><span style="font-size:13px;color:#202124">拒绝本次执行</span><span style="font-size:12px;color:#7b8087">不会产生任何外部操作</span></span>
+    </button>`
+  document.body.appendChild(pop)
+  window.__approvalPop = pop
+  const r = anchor.getBoundingClientRect()
+  pop.style.left = `${Math.round(Math.min(window.innerWidth - 352, Math.max(12, r.left - 8)))}px`
+  pop.style.top = `${Math.round(Math.max(12, r.top - pop.offsetHeight - 8))}px`
+  pop.querySelectorAll('[data-approval]').forEach((b) => b.addEventListener('click', (e) => {
+    e.stopPropagation()
+    pop.remove()
+    window.__approvalPop = null
+    decideApproval(b.dataset.approval)
+  }))
+  setTimeout(() => document.addEventListener('click', function close(e) {
+    if (!pop.contains(e.target)) { pop.remove(); document.removeEventListener('click', close); window.__approvalPop = null }
+  }), 0)
+}
+
 /** 审批策略菜单，用词与交互参考 Codex：点击后让用户选择，不直接切换。 */
 function openPolicyMenu(anchor) {
   document.querySelectorAll('.policy-pop').forEach((p) => p.remove())
@@ -2430,6 +2497,7 @@ async function renderHome(el) {
       <div class="hh-composer" style="width:100%;max-width:760px;margin:0 auto;box-sizing:border-box">
         <div style="display:flex;align-items:center;gap:6px;flex:none">
           <button class="hc-plus" id="attachBtn" title="添加照片、文件或工具"><span class="ico">${icon('plus')}</span></button>
+          ${state.pendingInteraction?.kind === 'approval' ? approvalControl() : ''}
           ${policyControl()}
         </div>
         <textarea id="draft" rows="1" placeholder="有什么可以帮你？">${esc(state.draft)}</textarea>
@@ -2464,6 +2532,7 @@ async function renderHome(el) {
   el.querySelector('#projectContext')?.addEventListener('click', openWorkspacePicker)
   el.querySelector('#taskModeBtn')?.addEventListener('click', (ev) => { ev.stopPropagation(); openTaskModeMenu(ev.currentTarget) })
   el.querySelector('#policyToggle')?.addEventListener('click', (ev) => { ev.stopPropagation(); openPolicyMenu(ev.currentTarget) })
+  el.querySelector('#approvalToggle')?.addEventListener('click', (ev) => { ev.stopPropagation(); openApprovalMenu(ev.currentTarget) })
   el.querySelector('#langBtn')?.addEventListener('click', (ev) => { ev.stopPropagation(); openReasoningMenu(ev.currentTarget) })
   el.querySelectorAll('[data-prompt]').forEach((btn) => btn.addEventListener('click', () => {
     state.draft = btn.dataset.prompt
@@ -9025,6 +9094,7 @@ function renderChat(el) {
       <div class="hh-composer" style="width:100%;max-width:760px;margin:0 auto;box-sizing:border-box">
         <div style="display:flex;align-items:center;gap:6px;flex:none">
           <button class="hc-plus" id="chatAttach" title="添加照片、文件或工具"><span class="ico">${icon('plus')}</span></button>
+          ${state.pendingInteraction?.kind === 'approval' ? approvalControl() : ''}
           ${policyControl()}
         </div>
         <textarea id="draft" rows="1" placeholder="继续追问…">${esc(state.draft)}</textarea>
@@ -9054,6 +9124,7 @@ function renderChat(el) {
   el.querySelector('#projectContext')?.addEventListener('click', openWorkspacePicker)
   el.querySelector('#taskModeBtn')?.addEventListener('click', (ev) => { ev.stopPropagation(); openTaskModeMenu(ev.currentTarget) })
   el.querySelector('#policyToggle')?.addEventListener('click', (ev) => { ev.stopPropagation(); openPolicyMenu(ev.currentTarget) })
+  el.querySelector('#approvalToggle')?.addEventListener('click', (ev) => { ev.stopPropagation(); openApprovalMenu(ev.currentTarget) })
   draft?.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') closeSlashMenu()
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendFromChat() }
@@ -9297,15 +9368,8 @@ function renderInteraction() {
   const p = state.pendingInteraction
   if (!p) return ''
   if (p.kind === 'approval') {
-    return `<div class="confirm-card">
-      <div class="confirm-title">工具调用需要确认</div>
-      <div class="confirm-text">模型请求执行「${esc(p.toolName || '工具调用')}」。${esc(p.reason || '允许后本次调用才会执行。')}</div>
-      ${p.summary ? `<div class="confirm-draft">${esc(p.summary)}</div>` : ''}
-      <div class="confirm-foot">
-        <button class="btn sm" id="apprReject">拒绝</button>
-        <button class="btn sm primary" id="apprAllow">允许一次</button>
-      </div>
-    </div>`
+    // 审批入口已收敛到输入框内的「请求批准」胶囊；点击后再弹出菜单让用户选择。
+    return ''
   }
   const qs = p.questions || []
   const planReview = qs.length === 1 && qs[0]?.intent?.kind === 'plan-review'

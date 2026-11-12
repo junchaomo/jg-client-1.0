@@ -597,3 +597,29 @@
 - 安装是**本机运行时全局挂载**，不是按账号隔离；同一客户端所有账号可见。
 - DSH Bundle 未一键安装：当前环境无 pnpm，`dsh plugin add` 不可用；Bundle 审核后只登记上架。
 - 技能只提供提示词与参考文件，不执行自定义 JS；需要真实系统调用时走产品 MCP 工具。
+
+### 26. MCP 写操作人工审批与遥测默认关闭
+
+**背景**：审计把“MCP 外部副作用绕过审批”和“遥测默认外发”列为两个 P0。第一次实测 `mcp__jg__task_create` 仍然直接创建待办，证明漏点不在 `autoApprovalAllowed()`，而在 DSH 的 MCP 桥没有把 MCP 工具送进 `approval/request`。
+
+**实现**：
+
+- `server.mjs` 的 `autoApprovalAllowed()` 增加 `AUTO_APPROVAL_EXTERNAL_TOOL` 与 `isExternalSideEffectTool()`，外部副作用工具一律不自动放行；`approvalDetails()` 增加 `externalSideEffect` 标记与 `text/message/title` 摘要。
+- 新增 `POST /api/mcp/approval`：只接受本机 MCP token，按 `JG_MCP_ACCOUNT` 找到用户，再定位当前唯一活动会话；生成 `approval` 待处理项并等待 `/api/chat/approval`。没有活动会话或多个活动会话时 fail closed。
+- `mcp-jg.mjs` 在 `im_send`、`task_create` 执行前先请求审批；`data/dsh-home/profiles/sdk/cordis.patch.yml` 把 `mcp-jg` 的 `toolCallTimeoutMs` 调到 600000，避免审批等待被 60 秒默认超时截断。
+- 审批 UI 从消息区的确认卡收敛到输入框内「＋」右侧的「请求批准」胶囊；点击胶囊才弹出菜单，菜单用中文展示工具用途（如“创建待办”）与摘要，选项为「允许本次执行 / 拒绝本次执行」，不再直接放行。
+- `harness.mjs` 在 env 未显式指定时注入 `DSH_TELEMETRY_DISABLED=1` 与 `DSH_TELEMETRY_MODE=DISABLED`，企业默认不外发遥测。
+
+**实测**：
+
+- 修复前：真实 `/api/chat` 调用 `mcp__jg__task_create`，直接创建 `T-AI43100`，无 pending 审批。
+- 修复后：同一提示词触发 `AP-67ab41b7f614`，胶囊显示“请求批准”；点击「允许本次执行」后待办 `T-AI09367` 创建成功。
+- 拒绝路径：`AP-ceeb196cc6dd` 拒绝后模型收到“用户未批准该 MCP 外部副作用操作”，没有产生新待办；已有待办数量保持 2 条。
+- UI 实测截图 `D:\project-test3\shots\mcp-approval-menu.png`、`mcp-approval-approved.png`。
+- 遥测：`dsh-session-telemetry-otel` 的 `DISABLED` 分支不构造 provider；运行态核对 `dsh-otel-collector.deepseeksvc.com` 的 `116.205.40.113/114` 无已建立连接。
+
+**边界**：
+
+- 审批归属依赖“当前唯一活动会话”。同一账号并发多个会话时，MCP 写操作会 fail closed，不会把审批卡投到错误会话。
+- 目前只覆盖 `im_send`、`task_create` 两个 MCP 写工具；新增 MCP 写工具必须同步加入 `mcp-jg.mjs` 的 `EXTERNAL_WRITE_TOOLS` 与 `server.mjs` 的 `AUTO_APPROVAL_EXTERNAL_TOOL`。
+- 遥测是“默认关闭”，不是强制关闭；如管理员显式改 env 指向内网 OTLP，仍会外发到该端点。

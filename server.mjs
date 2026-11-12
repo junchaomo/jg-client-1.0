@@ -1057,6 +1057,7 @@ const GUEST_GUARD = {
   'GET /api/feedback': 'admin',
   'POST /api/feedback/create': 'admin',
   'POST /api/ai/invoke': 'ai',
+  'POST /api/mcp/approval': 'ai',
   'GET /api/apps': 'apps',
 }
 
@@ -1188,6 +1189,10 @@ function approvalDetails(params) {
   if (resource) summary = `目标：${resource}`
   const command = String(args.command || args.cmd || '')
   if (command) summary = `${summary ? `${summary}；` : ''}命令：${clipText(command, 220)}`
+  const text = String(args.text || args.message || '')
+  if (text && !command) summary = `${summary ? `${summary}；` : ''}内容：${clipText(text, 160)}`
+  const title = String(args.title || '')
+  if (title) summary = `${summary ? `${summary}；` : ''}标题：${clipText(title, 120)}`
   if (args.content !== undefined) summary = `${summary ? `${summary}；` : ''}写入 ${String(args.content).length} 字符`
   if (args.old_string !== undefined || args.new_string !== undefined) {
     summary = `${summary ? `${summary}；` : ''}替换 ${String(args.old_string || '').length} → ${String(args.new_string || '').length} 字符`
@@ -1199,6 +1204,7 @@ function approvalDetails(params) {
     reason: String(params?.reason || ''),
     resource,
     summary: summary || '未提供可展示的参数',
+    externalSideEffect: isExternalSideEffectTool(toolName),
     arguments: clipText(params?.toolArgs || '', 900),
   }
 }
@@ -1251,21 +1257,38 @@ function resolveTaskMode(text, requested, projectId) {
   return { requested: 'auto', mode: 'chat', reason: '未检测到文件、命令或多步骤执行意图' }
 }
 
+/** 外部副作用工具：即使没有命令或路径参数，也不能在 Auto 模式自动放行。 */
+const AUTO_APPROVAL_EXTERNAL_TOOL = [
+  /mcp__[a-z0-9_-]+__im_send/i,
+  /mcp__[a-z0-9_-]+__task_create/i,
+  /mcp__[a-z0-9_-]+__(?:send|publish|upload|create|update|delete|remove|invoke|write)[a-z0-9_-]*/i,
+  /^im_send$/i,
+  /^task_create$/i,
+]
+function isExternalSideEffectTool(tool) {
+  const name = String(tool || '')
+  return AUTO_APPROVAL_EXTERNAL_TOOL.some((pattern) => pattern.test(name))
+}
+
 /** Auto 的逐次审批矩阵：低风险且在授权目录内自动放行，其余仍落人工审批。 */
 function autoApprovalAllowed(params, cwd) {
   const raw = String(params?.toolArgs || '')
   let args = {}
   try { args = JSON.parse(raw) || {} } catch { args = {} }
   const tool = String(params?.toolNameResolved || params?.toolName || '')
+  // MCP 写工具（发消息、建待办等）会改变产品外部状态，必须人工确认。
+  if (isExternalSideEffectTool(tool)) return false
   const commandText = [args.command, args.cmd, args.script].filter(Boolean).map(String).join('\n')
   if (commandText && explicitHighRiskRequest(`${tool} ${commandText}`)) return false
   const target = String(args.path || args.file_path || args.filePath || args.cwd || args.directory || args.dir || '')
   if (target) {
-    const full = isAbsolute(target) ? target : join(cwd || '', target)
-    if (cwd && !pathInside(full, cwd)) return false
+    if (!cwd) return false
+    const full = isAbsolute(target) ? target : join(cwd, target)
+    if (!pathInside(full, cwd)) return false
   }
   // 命令里出现授权目录以外的盘符/绝对路径时，必须人工确认。
-  if (cwd && commandText) {
+  if (commandText) {
+    if (!cwd) return false
     const decoded = commandText.replace(/\\\\/g, '\\').replace(/\\"/g, '"')
     const winPaths = decoded.match(/[A-Za-z]:\\[^"',\s}]+/g) || []
     if (winPaths.some((p) => !pathInside(p.replace(/[\\)\],;]+$/, ''), cwd))) return false
@@ -1274,6 +1297,8 @@ function autoApprovalAllowed(params, cwd) {
   }
   // 删除、覆盖、格式化等命令即使没命中高危关键字，也不在 Auto 自动放行。
   if (commandText && /remove-item|del\s|rmdir|\bformat\b|diskpart|shutdown|reg\s+delete|taskkill/i.test(commandText)) return false
+  // 本次矩阵只覆盖命令与路径；没有这两类表面参数的内置工具保持原有放行，
+  // 外部副作用工具已在上方单独拒绝。
   return true
 }
 
@@ -4873,6 +4898,41 @@ const api = {
       items: aiTools,
       identity: '工具以“当前登录员工 + 当前网络”为调用身份，每次调用按模块授权判定并写审计',
     })
+  },
+  'POST /api/mcp/approval': async (req, res) => {
+    const mcpToken = process.env.JG_MCP_TOKEN || ''
+    if (!mcpToken || String(req.headers['x-jg-mcp-token'] || '') !== mcpToken) {
+      return json(res, 403, { error: '仅允许本机 MCP 桥请求审批' })
+    }
+    const account = getAccount(process.env.JG_MCP_ACCOUNT || 'A-7788-01') || getAccountByRole('admin')
+    const user = account ? userOfAccount(account) : null
+    if (!user) return json(res, 403, { error: 'MCP 账号不可用' })
+    const body = JSON.parse(req.__body || '{}')
+    const tool = String(body.tool || '')
+    const args = body.args && typeof body.args === 'object' ? body.args : {}
+    if (!isExternalSideEffectTool(tool) && !isExternalSideEffectTool(`mcp__jg__${tool}`)) {
+      return json(res, 200, { ok: true, outcome: 'allowed-once', note: '非外部副作用工具，无需审批' })
+    }
+    const active = [...activeRuns]
+      .map((id) => conversations.find((c) => c.id === id))
+      .filter((c) => c && (c.userId === user.id || !c.userId))
+    if (!active.length) {
+      return json(res, 409, { error: '当前没有正在执行的会话，MCP 写操作已拒绝；请在大厅发起任务后再调用。', code: 'NO_ACTIVE_RUN' })
+    }
+    if (active.length > 1) {
+      return json(res, 409, { error: '当前有多个会话正在执行，无法确定审批归属，MCP 写操作已拒绝。', code: 'AMBIGUOUS_ACTIVE_RUN' })
+    }
+    const conv = active[0]
+    const details = approvalDetails({
+      toolNameResolved: `mcp__jg__${tool}`,
+      toolArgs: JSON.stringify(args),
+      reason: 'MCP 外部副作用工具需要人工确认',
+    })
+    const result = await createPendingInteraction('approval', conv.id, details)
+    const allowed = result?.outcome === 'allowed-once'
+    logAudit(user, 'mcp.approval', conv.id, `${allowed ? 'allow' : String(result?.outcome || 'cancelled')} ${details.toolName} ${details.summary}`.slice(0, 900), netOf(req))
+    if (!allowed) return json(res, 403, { error: '用户未批准该 MCP 外部副作用操作', outcome: result?.outcome || 'cancelled' })
+    return json(res, 200, { ok: true, outcome: 'allowed-once' })
   },
   'POST /api/ai/invoke': (req, res) => {
     const mcpToken = process.env.JG_MCP_TOKEN || ''

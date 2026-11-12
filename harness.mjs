@@ -79,6 +79,10 @@ async function getHarness(cfg, handlers = null, cwd = '') {
   mkdirSync(sandboxRoot, { recursive: true })
   const { DeepSeekHarness } = await loadSdk()
   const env = { ...process.env, DEEPSEEK_API_KEY: cfg.apiKey }
+  // 企业默认不外发遥测：DSH_TELEMETRY_DISABLED 任一值都会让启动器停用 OTel 行；
+  // 同时把模式设为 DISABLED，避免 FEEDBACK_ONLY 默认指向公网 collector。
+  if (env.DSH_TELEMETRY_DISABLED === undefined) env.DSH_TELEMETRY_DISABLED = '1'
+  if (!env.DSH_TELEMETRY_MODE) env.DSH_TELEMETRY_MODE = 'DISABLED'
   if (cfg.baseUrl && cfg.baseUrl !== 'https://api.deepseek.com') env.DEEPSEEK_BASE_URL = cfg.baseUrl
   if (!env.JG_MCP_URL && env.PORT) env.JG_MCP_URL = `http://127.0.0.1:${env.PORT}`
   if (!env.JG_MCP_SCRIPT) env.JG_MCP_SCRIPT = join(root, 'mcp-jg.mjs')

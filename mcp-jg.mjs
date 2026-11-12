@@ -75,8 +75,27 @@ function fail(id, code, message) {
   stdout.write(JSON.stringify({ jsonrpc: '2.0', id, error: { code, message } }) + '\n')
 }
 
+const EXTERNAL_WRITE_TOOLS = new Set(['im_send', 'task_create'])
+
+async function requestApproval(name, args) {
+  const res = await fetch(`${baseUrl}/api/mcp/approval`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-jg-mcp-token': token,
+      'x-jg-mcp-account': account,
+    },
+    body: JSON.stringify({ tool: name, args: args || {} }),
+    signal: AbortSignal.timeout(9 * 60 * 1000),
+  })
+  const data = await res.json().catch(() => ({}))
+  debug(`approval ${name} -> HTTP ${res.status} ${JSON.stringify(data).slice(0, 200)}`)
+  if (!res.ok) throw new Error(data.error || `审批未通过（HTTP ${res.status}）`)
+}
+
 async function callTool(name, args) {
   if (!token) throw new Error('MCP token missing')
+  if (EXTERNAL_WRITE_TOOLS.has(name)) await requestApproval(name, args)
   const res = await fetch(endpoint, {
     method: 'POST',
     headers: {
