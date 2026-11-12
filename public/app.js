@@ -10715,12 +10715,14 @@ function settingsBody(tab) {
   if (tab === 'runtime') {
     const rs = state.runtimeSettings || {}
     const rt = state.boot?.runtime || {}
+    const nt = rt.native || {}
     const canEditRt = canAdmin()
     const when = (v) => {
       if (!v) return '—'
       const d = new Date(v)
       return Number.isNaN(d.getTime()) ? String(v) : d.toLocaleString('zh-CN', { hour12: false })
     }
+    const nativeTag = (v) => `<span class="tag${v === '已挂载' ? ' ok' : ''}">${esc(v || '未挂载')}</span>`
     const policyText = rs.defaultPolicy === 'manual' ? '请求批准 · 外部操作始终询问' : '帮我批准 · 仅风险操作询问'
     const effortText = rs.defaultEffort === 'high' ? '高' : rs.defaultEffort === 'low' ? '低' : '中'
     return {
@@ -10749,6 +10751,17 @@ function settingsBody(tab) {
             `<span class="mono set-value" style="display:block;max-width:460px;word-break:break-all">${esc(rt.dumpPath || '—')}</span><span class="set-desc" style="display:block;margin-top:4px">生成时间：${esc(when(rt.dumpUpdatedAt))}</span>`),
           srow('会话日志', 'DSH 原始会话日志目录，由运行时写入，平台只读索引',
             `<span class="mono set-value" style="display:block;max-width:460px;word-break:break-all">${esc(rt.sessionsPath || '—')}</span>`),
+        ]),
+        sgroup('DSH 原生设置（只读）', [
+          srow('配置权威', '产品设置中心是唯一可写入口；DSH 原生设置仅供运行时使用，不向用户提供编辑表单，避免两套配置源互相覆盖',
+            '<span class="tag ok">产品设置优先</span>'),
+          srow('原生 settings', '运行时插件，负责 schema 表单与配置投影；产品只读状态，不写入', nativeTag(nt.settings)),
+          srow('原生 config-editor', 'DSH 自带的配置编辑入口；产品不暴露，避免绕过产品设置', nativeTag(nt.configEditor)),
+          srow('原生 authorization', '运行时授权插件；审批策略仍以产品设置与输入框切换为准', nativeTag(nt.authorization)),
+          srow('凭据文件', 'DSH 本地凭据文件；产品不读取内容，也不允许从这里取模型密钥',
+            `${nativeTag(nt.credentials)}<span class="set-desc" style="display:block;margin-top:4px">${nt.credentialsPresent ? '文件存在 · 内容不展示' : '文件未生成'}${nt.credentialsUpdatedAt ? ' · 更新于 ' + esc(when(nt.credentialsUpdatedAt)) : ''}</span>`),
+          srow('模型密钥来源', '模型密钥由产品「模型与密钥」保存，按会话注入子进程环境；不走 DSH 原生凭据',
+            `<span class="set-value">${esc(nt.modelKeySource || '产品设置中心 → 子进程环境')}</span>`),
         ]),
         sgroup('DSH 插件运行时', [
           srow('插件条目', '查看当前 profile 的真实挂载清单，启停单个条目；写入 cordis.patch.yml，重启运行时后生效，核心组件受保护',

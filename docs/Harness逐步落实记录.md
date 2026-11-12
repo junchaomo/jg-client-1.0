@@ -296,6 +296,20 @@
 
 **边界**：本轮设置中心是平台级运行时默认值与只读运行态，不是 DSH 原生 `settings.yaml` 表单，也不直接编辑 `cordis.patch.yml`。agent loop、shell、subagent、session log 等 DSH 原始配置项仍只读展示；要真正表单化，需要另接 Host remote `ctx.remote.settings` 或进程内 settings 服务，SDK 协议目前不提供。
 
+### 16.1 DSH 原生设置/凭据只读边界
+
+**决定**：产品设置是唯一可写入口；DSH 原生 `settings` / `config-editor` / `authorization` / `credentials` 仅在「Agent 运行时」页做只读运行态展示，不提供编辑表单，不读取凭据内容，也不把模型密钥写进 DSH 原生凭据。这样避免“产品设置 + DSH 原生设置”两套可写源互相覆盖。
+
+**做法**：
+
+- `/api/bootstrap` 的 `runtime.native` 增加 `settings`、`configEditor`、`authorization`、`credentials` 的挂载状态，`credentialsPath` 只返回路径、是否存在和更新时间，不返回内容；`modelKeySource` 固定标注为“产品设置中心 → 子进程环境”。
+- 设置中心新增「DSH 原生设置（只读）」组：配置权威、原生 settings、原生 config-editor、原生 authorization、凭据文件、模型密钥来源。
+- 不新增可写 API，不在前端暴露 `settings.update` / `settings.mutate` / `.credentials.yaml` 编辑入口。
+
+**实测**：设置页显示 `settings`/`config-editor` 为「按条件」、`authorization`/`credentials` 为「已挂载」，凭据文件存在但内容不展示，模型密钥来源为「产品设置中心 → 子进程环境」；截图 `runtime-native-settings.png`、`runtime-native-settings-2.png`。
+
+**边界**：这是“单写入口 + 只读核对”，不是 DSH 原生设置表单。若后续要让产品直接改写原生 settings，需要单独设计冲突检测、revision/覆盖优先级和密钥托管，不在本轮范围。
+
 ### 17. MCP 资源浏览
 
 **背景**：DSH 已挂载 `dsh-mcp-resources` 与 `dsh-mcp-client`，模型侧具备 `list_mcp_resources` / `list_mcp_resource_templates` / `read_mcp_resource`；但产品侧原来只有静态“MCP 服务地址”和演示连接测试，没有资源目录。产品 MCP 桥 `mcp-jg.mjs` 原来只声明 `tools`，没有 `resources`。

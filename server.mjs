@@ -255,12 +255,23 @@ function runtimeOverview() {
   let configUpdatedAt = ''
   let dumpUpdatedAt = ''
   let configEntries = 0
+  let dumpText = ''
   try { configUpdatedAt = statSync(configPath).mtime.toISOString() } catch {}
   try {
     dumpUpdatedAt = statSync(dumpPath).mtime.toISOString()
-    const text = readFileSync(dumpPath, 'utf8')
-    configEntries = (text.match(/^\s*name: '@deepseek-ai\//gm) || []).length
+    dumpText = readFileSync(dumpPath, 'utf8')
+    configEntries = (dumpText.match(/^\s*name: '@deepseek-ai\//gm) || []).length
   } catch {}
+  const inventory = runtimePluginInventory()
+  const nativeRow = (id) => {
+    const row = inventory.find((x) => x.id === id)
+    if (!row) return '未挂载'
+    if (row.condition) return '按条件'
+    return row.enabled ? '已挂载' : '已停用'
+  }
+  const credentialsPath = join(home, '.credentials.yaml')
+  let credentialsUpdatedAt = ''
+  try { credentialsUpdatedAt = statSync(credentialsPath).mtime.toISOString() } catch {}
   return {
     dshVersion,
     profile: 'sdk',
@@ -273,6 +284,18 @@ function runtimeOverview() {
     activeRuns: activeRuns.size,
     sessions: conversations.length,
     running: conversations.filter((c) => c.status === 'running').length,
+    native: {
+      authority: 'product-settings',
+      writable: false,
+      settings: nativeRow('settings'),
+      configEditor: nativeRow('config-editor'),
+      authorization: nativeRow('authorization'),
+      credentials: nativeRow('credentials'),
+      credentialsPath,
+      credentialsPresent: existsSync(credentialsPath),
+      credentialsUpdatedAt,
+      modelKeySource: '产品设置中心 → 子进程环境',
+    },
   }
 }
 const liveToolLedger = toolLedger.map((t) => ({ ...t }))
