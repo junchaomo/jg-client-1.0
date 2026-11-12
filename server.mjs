@@ -291,6 +291,8 @@ function runtimeOverview() {
       configEditor: nativeRow('config-editor'),
       authorization: nativeRow('authorization'),
       credentials: nativeRow('credentials'),
+      workflowPtc: nativeRow('workflow-ptc'),
+      toolExecutorPtc: nativeRow('tool-executor-ptc'),
       credentialsPath,
       credentialsPresent: existsSync(credentialsPath),
       credentialsUpdatedAt,

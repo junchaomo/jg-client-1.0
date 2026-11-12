@@ -10763,6 +10763,10 @@ function settingsBody(tab) {
           srow('模型密钥来源', '模型密钥由产品「模型与密钥」保存，按会话注入子进程环境；不走 DSH 原生凭据',
             `<span class="set-value">${esc(nt.modelKeySource || '产品设置中心 → 子进程环境')}</span>`),
         ]),
+        sgroup('PTC 与实验执行器', [
+          srow('workflow-ptc', '工作流内的程序化调用已挂载，可供工作流使用', nativeTag(nt.workflowPtc)),
+          srow('直接 tool-executor-ptc', '默认关闭：会改变模型调用工具的协议，并使嵌套工具调用难以逐步确认；启用前需单独回归审批与步骤展示', nativeTag(nt.toolExecutorPtc)),
+        ]),
         sgroup('DSH 插件运行时', [
           srow('插件条目', '查看当前 profile 的真实挂载清单，启停单个条目；写入 cordis.patch.yml，重启运行时后生效，核心组件受保护',
             `${sbtn('runtimePlugins', '管理')}<span class="set-btn-gap"></span>${sbtn('runtimeRestart', '重启运行时')}`),

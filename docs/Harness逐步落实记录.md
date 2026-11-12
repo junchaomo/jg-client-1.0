@@ -310,6 +310,12 @@
 
 **边界**：这是“单写入口 + 只读核对”，不是 DSH 原生设置表单。若后续要让产品直接改写原生 settings，需要单独设计冲突检测、revision/覆盖优先级和密钥托管，不在本轮范围。
 
+### 16.2 PTC 执行器状态
+
+**结论**：`workflow-ptc` 保持启用，直接 `tool-executor-ptc` 保持关闭。产品设置页只读展示两者的挂载状态，并写明关闭原因：直接执行器会把模型工具调用改成 `run_code` 程序协议，嵌套工具调用难以逐步展示和确认；启用前需要单独回归审批、步骤展示和失败恢复。
+
+**实测**：`runtime.native.workflowPtc = 已挂载`、`toolExecutorPtc = 已停用`；设置页「PTC 与实验执行器」显示对应状态，未改动 profile patch。截图 `runtime-ptc-status.png`。
+
 ### 17. MCP 资源浏览
 
 **背景**：DSH 已挂载 `dsh-mcp-resources` 与 `dsh-mcp-client`，模型侧具备 `list_mcp_resources` / `list_mcp_resource_templates` / `read_mcp_resource`；但产品侧原来只有静态“MCP 服务地址”和演示连接测试，没有资源目录。产品 MCP 桥 `mcp-jg.mjs` 原来只声明 `tools`，没有 `resources`。

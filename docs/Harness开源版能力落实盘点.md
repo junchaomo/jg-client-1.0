@@ -61,7 +61,7 @@
 | 持久终端 | 未落地 | `dsh-tool-terminal`、`dsh-terminal-*` 未进入 `sdk` bundle；历史 Windows PTY 尝试已回滚。 |
 | Web 搜索/抓取 | 已落地 | `dsh-web`、`web-search-deepseek`、`web-fetch-http`、`tool-web` 均在 base。 |
 | 超时/重复调用提醒 | 已落地 | `tool-call-timeout-policy`、`repeat-tool-reminder` 在 base。 |
-| PTC 执行器 | 部分 | `tool-executor-ptc` 显式 disabled；`workflow-ptc` 以 spawn provider 形式启用。 |
+| PTC 执行器 | 已确定边界 | `workflow-ptc` 保持启用；直接 `tool-executor-ptc` 刻意关闭，避免模型用 `run_code` 包裹嵌套工具、绕过逐步审批与步骤展示；设置页只读展示两者状态。 |
 
 ### 3.3 技能、MCP 与插件
 
