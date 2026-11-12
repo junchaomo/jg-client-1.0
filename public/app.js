@@ -3721,7 +3721,9 @@ async function renderSkills(el) {
       <div class="pl-item-main"><div class="pl-item-name">${esc(m.name)}</div><div class="pl-item-desc">${esc(m.desc)}</div></div>
       ${m.installed
         ? `<button class="pl-act" data-mdetail="${m.id}" title="已安装，查看详情">${icon('dots')}</button>`
-        : `<button class="pl-act add" data-minstall="${m.id}" title="安装">${icon('plus')}</button>`}
+        : m.available === false
+          ? `<span class="tag">待上架</span>`
+          : `<button class="pl-act add" data-minstall="${m.id}" title="安装">${icon('plus')}</button>`}
     </div>`
 
   const skillCard = (p, i) => `
@@ -3814,7 +3816,7 @@ async function renderSkills(el) {
   el.querySelectorAll('[data-minstall]').forEach((b) => b.addEventListener('click', async () => {
     const { ok, body } = await api('/api/plugin-market/install', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: b.dataset.minstall }) })
     if (!ok) return toast(body.error || '安装失败', true)
-    toast(`已安装「${body.item.name}」，可在对话中调用`)
+    toast(body.message || (body.item.installed ? `已安装「${body.item.name}」，下一轮对话生效` : `已卸载「${body.item.name}」`))
     renderView()
   }))
   el.querySelectorAll('[data-mdetail]').forEach((b) => b.addEventListener('click', () => openPluginSlide(b.dataset.mdetail)))
@@ -3832,13 +3834,14 @@ function openPluginSlide(id) {
   slide.innerHTML = `
     <div class="slide-head"><div><div class="slide-title">${esc(m.name)}</div><div class="slide-sub">${esc(m.publisher)} · ${esc(m.section)} · ID ${esc(m.id)}</div></div><span class="spacer"></span><button class="btn subtle" data-close>${icon('close')}</button></div>
     <div class="slide-body">
-      <div style="display:flex;gap:6px;margin-bottom:12px"><span class="tag ${m.installed ? 'ok' : ''}">${m.installed ? '已安装' : '未安装'}</span><span class="tag">${esc(m.scope)}</span></div>
+      <div style="display:flex;gap:6px;margin-bottom:12px"><span class="tag ${m.installed ? 'ok' : ''}">${m.installed ? '已安装' : '未安装'}</span><span class="tag ${m.available === false ? 'warn' : ''}">${m.available === false ? '待上架' : '可安装'}</span><span class="tag">${esc(m.scope)}</span></div>
       <div class="field"><div class="field-label">功能说明</div><div class="field-value">${esc(m.desc)}</div></div>
       <div class="field"><div class="field-label">权限与数据</div><div class="field-value">按当前授权与网络范围返回数据；敏感字段最小必要展示，读取与调用进审计。写操作需人工确认。</div></div>
+      <div class="field"><div class="field-label">安装状态</div><div class="field-value">${m.available === false ? '该插件尚未提供可安装的技能包，暂不能安装。上架后会显示安装入口。' : `安装到${esc(m.installScope || '本机 DSH 运行时')}；安装或卸载后，下一轮对话生效。`}</div></div>
       <div class="field"><div class="field-label">安装要求</div><div class="field-value">${m.scope === '需授权' ? '需部门负责人授权后安装，授权范围按岗位与项目参与关系核定。' : '企业公开插件，可直接安装；启用后仅在当前网络与已授权范围生效。'}</div></div>
     </div>
     <div class="slide-foot">
-      <button class="btn primary" data-toggle>${m.installed ? '卸载' : '安装'}</button>
+      ${m.available === false ? '<button class="btn primary" disabled>尚未提供安装包</button>' : `<button class="btn primary" data-toggle>${m.installed ? '卸载' : '安装'}</button>`}
       <button class="btn" data-log>调用记录</button>
       <button class="btn" data-close>关闭</button>
     </div>`
@@ -3847,7 +3850,7 @@ function openPluginSlide(id) {
     const { ok, body } = await api('/api/plugin-market/install', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: m.id }) })
     if (!ok) return toast(body.error, true)
     slide.classList.remove('open')
-    toast(`已${body.item.installed ? '安装' : '卸载'}「${m.name}」`)
+    toast(body.message || (body.item.installed ? `已安装「${m.name}」，下一轮对话生效` : `已卸载「${m.name}」`))
     renderView()
   })
   slide.querySelector('[data-log]').addEventListener('click', () => toast('调用记录按任务、参数与结果留存，可在审计中回查'))
@@ -3879,7 +3882,7 @@ function openSkillSlide(id) {
 
 function openPluginPublish() {
   const mask = openModal('上传插件', `
-    <div class="form-note">上传符合 DSH Bundle 规范的 ZIP 插件包，包内至少包含 package.json、index.js、cordis.patch.yml，建议附 README.md。平台会先做安全解压、格式与依赖校验、权限核对和沙箱隔离测试，检测通过后进入管理员审核，审核通过才会上架集团插件市场。</div>
+    <div class="form-note">支持两种 ZIP：技能包（根目录含 SKILL.md，推荐）与 DSH Bundle（含 package.json、index.js、cordis.patch.yml）。平台会做安全解压、格式与权限检查；技能包审核通过后可直接安装到本机运行时，Bundle 仍需运行时依赖，当前不开放一键安装。</div>
     <div class="up-spec"><span>不确定包结构？</span><button class="linkbtn" id="pubSpec">查看《插件开发规范》</button></div>
     <div class="up-zone" id="pubZone">
       <span class="up-ico">${icon('upload')}</span>
@@ -3951,20 +3954,27 @@ function openPluginPublish() {
 
 function openPluginSpec() {
   const mask = openModal('插件开发规范', `
-    <div class="form-note">插件包是符合 DSH Bundle 的文件夹压缩成的 ZIP。员工不必手工编写配置：可用统一的「插件开发模板」或对应 AI Skill，让 AI 按规范生成完整目录和打包脚本，员工只需测试、压缩、上传。</div>
-    <pre class="spec-tree">planning-calculator.zip
-├─ package.json         插件名称、版本、依赖，以及 DSH Bundle 声明
+    <div class="form-note">推荐技能包：根目录放 SKILL.md，可附 references 与素材；审核通过后可直接安装到本机运行时。DSH Bundle 仍可提交检测，但需要完整运行时依赖，当前不开放一键安装。</div>
+    <pre class="spec-tree">技能包（推荐）
+my-skill.zip
+├─ SKILL.md             技能名称、适用场景、步骤与边界
+├─ references/          参考文档（可选）
+└─ assets/              图片等素材（可选）
+
+DSH Bundle（需运行时依赖）
+my-plugin.zip
+├─ package.json         插件名称、版本、依赖声明
 ├─ index.js             插件功能代码
 ├─ cordis.patch.yml     DSH 插件注册与配置声明
-└─ README.md            使用说明（建议，也是审核材料）</pre>
+└─ README.md            使用说明（建议）</pre>
     <div class="spec-list">
-      <div class="spec-row"><b>包结构</b><span>根目录即包根，不再套一层文件夹；文件名与 package.json 中的 name 保持一致。</span></div>
-      <div class="spec-row"><b>依赖</b><span>优先使用平台内置依赖；确需外部包时须说明来源，审核会核对是否可离线安装。</span></div>
-      <div class="spec-row"><b>权限</b><span>只声明实际需要的读、写与业务 API 权限；写操作默认要求二次确认。</span></div>
-      <div class="spec-row"><b>安全</b><span>禁止动态执行远程代码、读取凭据、静默外联；平台在隔离沙箱内先扫描后测试。</span></div>
+      <div class="spec-row"><b>技能包</b><span>SKILL.md 必须包含 name 与 description；只允许 Markdown、文本、JSON、CSV、YAML、图片与 PDF，不允许可执行脚本。</span></div>
+      <div class="spec-row"><b>包结构</b><span>根目录即包根，不再套一层文件夹；不要包含 __MACOSX 或路径跳转。</span></div>
+      <div class="spec-row"><b>权限</b><span>技能包只提供提示词与参考文件，不注册自定义工具；需要访问内部系统时，通过产品 MCP 工具在授权范围内执行。</span></div>
+      <div class="spec-row"><b>安全</b><span>禁止动态执行远程代码、读取凭据、静默外联；平台先做静态扫描，审核通过后才进入市场。</span></div>
       <div class="spec-row"><b>版本与更新</b><span>每次更新上传新 ZIP，版本号递增，重新检测与审核；旧版本在审核期间保持可用。</span></div>
     </div>
-    <div class="form-note">AI 可直接按本规范生成插件：说明插件要做什么、依赖哪些系统，产出符合上述结构的文件夹与 zip 打包脚本。</div>
+    <div class="form-note">AI 可直接按本规范生成技能包：说明技能要做什么、需要哪些参考材料，产出 SKILL.md 与目录结构，再压缩为 ZIP。</div>
     <div class="form-foot"><span class="spacer"></span><button class="btn primary" data-mclose>知道了</button></div>`)
   mask.querySelector('[data-mclose]').addEventListener('click', () => mask.remove())
 }
@@ -3981,7 +3991,9 @@ function openPluginReport(sub) {
       ${(sub.checks || []).map((c) => `<div class="rp-row"><span class="rp-k">${esc(c[0])}</span><span class="rp-v"><span class="tag ${tag(c[1])}">${esc(c[1])}</span>${esc(c[2] || '')}</span></div>`).join('')}
     </div>
     ${sub.reason ? `<div class="form-note bad-note">退回原因：${esc(sub.reason)}</div>` : ''}
-    <div class="form-note">${sub.status === 'approved' ? '制品已生成标准 npm tarball 并登记批准版本，员工可在插件市场一键安装。' : '审核通过后平台会生成标准 npm 制品（.tgz）并登记版本；审核在「管理中心 · AI 能力管理 · 插件审核」处理。未通过审核的插件不会进入生产运行环境。'}</div>
+    <div class="form-note">${sub.status === 'approved'
+      ? (sub.kind === 'skill' ? '技能包已入库，可在插件市场一键安装到本机运行时。' : '已上架，但 DSH Bundle 需要运行时依赖，当前版本不开放一键安装。')
+      : (sub.kind === 'skill' ? '审核通过后技能包会入库并开放安装；审核在「管理中心 · AI 能力管理 · 插件审核」处理。' : '审核通过后会登记上架，但 DSH Bundle 需要运行时依赖，当前版本不开放一键安装。')}</div>
     <div class="form-foot"><span class="mono">提交人 ${esc(sub.author)} · ${esc(sub.unit)} · ${esc(sub.submitted)}</span><span class="spacer"></span><button class="btn primary" data-mclose>知道了</button></div>`)
   mask.querySelector('[data-mclose]').addEventListener('click', () => mask.remove())
 }
@@ -9885,7 +9897,7 @@ async function renderAdmin(el) {
         if (b.dataset.review === 'approve') {
           const { ok, body } = await api('/api/plugin-subs/review', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id, action: 'approve' }) })
           if (!ok) return toast(body.error || '审核失败', true)
-          toast('已通过并上架集团插件市场，员工可一键安装')
+          toast(body.packageReady ? '已通过并上架，技能包可安装' : '已通过并上架；该包不是技能包，当前不可一键安装')
           renderView()
           return
         }

@@ -3,11 +3,15 @@
  * 不依赖第三方库；zip 的 store / deflate 两种压缩方式均支持。
  */
 import { inflateRawSync } from 'node:zlib'
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 
 const MAX_ENTRIES = 2000
 const MAX_ENTRY_BYTES = 8 * 1024 * 1024
 const MAX_TOTAL_BYTES = 48 * 1024 * 1024
 const TEXT_EXT = /\.(js|cjs|mjs|ts|json|yml|yaml|md|txt|xml|html|css|sh|ps1|bat|cmd)$/i
+const SKILL_ASSET_EXT = /\.(md|txt|json|csv|ya?ml|png|jpe?g|gif|webp|svg|pdf)$/i
+const SKILL_EXEC_EXT = /\.(js|cjs|mjs|ts|py|sh|ps1|bat|cmd|exe|dll|com|scr|jar|so|msi|vbs)$/i
 
 function readUInt64(buffer, offset) {
   // ZIP64 extra 暂不支持；常规字段足够本场景。
@@ -64,6 +68,121 @@ function extractEntry(buffer, entry) {
   return null
 }
 
+function normalizedNames(entries) {
+  return entries
+    .map((entry) => entry.name.replace(/\\/g, '/'))
+    .filter((name) => !name.endsWith('/') && !name.startsWith('__MACOSX/'))
+}
+
+function findSkillRoot(names) {
+  const hits = names.filter((name) => name === 'SKILL.md' || name.endsWith('/SKILL.md'))
+  if (hits.length !== 1) {
+    return { error: hits.length ? '技能包内存在多个 SKILL.md，无法确定根目录' : '技能包根目录缺少 SKILL.md' }
+  }
+  return { root: hits[0].slice(0, -'SKILL.md'.length) }
+}
+
+function inspectSkillZipEntries(buffer, entries) {
+  const names = normalizedNames(entries)
+  const found = findSkillRoot(names)
+  const issues = []
+  if (found.error) issues.push(found.error)
+  const root = found.root || ''
+  const skillEntry = names.find((name) => name === `${root}SKILL.md`)
+  let skillText = ''
+  if (skillEntry) {
+    const entry = entries.find((item) => item.name.replace(/\\/g, '/') === skillEntry)
+    try {
+      const data = extractEntry(buffer, entry)
+      if (data) skillText = data.toString('utf8')
+    } catch (error) {
+      issues.push(`SKILL.md 解压失败：${error.message}`)
+    }
+  }
+  const frontmatter = skillText.match(/^---\r?\n([\s\S]*?)\r?\n---/)
+  const meta = frontmatter ? frontmatter[1] : ''
+  const skillName = (meta.match(/^name:\s*([^\r\n]+)/m) || [])[1]?.trim() || ''
+  const description = (meta.match(/^description:\s*([^\r\n]+)/m) || [])[1]?.trim() || ''
+  if (!frontmatter) issues.push('SKILL.md 缺少 frontmatter')
+  if (!skillName) issues.push('SKILL.md 缺少 name')
+  if (!description) issues.push('SKILL.md 缺少 description')
+
+  const executable = names.filter((name) => SKILL_EXEC_EXT.test(name))
+  const unsupported = names.filter((name) => {
+    if (name === `${root}SKILL.md`) return false
+    return !SKILL_ASSET_EXT.test(name)
+  })
+  const externalRefs = []
+  for (const name of names) {
+    if (!/\.(md|txt|json|ya?ml)$/i.test(name)) continue
+    const entry = entries.find((item) => item.name.replace(/\\/g, '/') === name)
+    if (!entry || entry.uncompSize > MAX_ENTRY_BYTES) continue
+    try {
+      const data = extractEntry(buffer, entry)
+      if (data && /https?:\/\//i.test(data.toString('utf8'))) externalRefs.push(name)
+    } catch {
+      // 解压失败已在其余检查中体现，这里不重复抛出。
+    }
+  }
+  if (unsupported.length) issues.push(`包含不支持的技能包文件：${unsupported.slice(0, 6).join('、')}`)
+
+  const formatPass = !found.error
+  const metaPass = Boolean(frontmatter && skillName && description)
+  const permPass = executable.length === 0
+  const scanPass = executable.length === 0 && externalRefs.length === 0 && issues.length === 0
+  const scanNotes = [
+    executable.length ? `含可执行文件：${executable.slice(0, 6).join('、')}` : '',
+    externalRefs.length ? `含外部网络地址：${externalRefs.slice(0, 6).join('、')}` : '',
+    issues.length ? issues.slice(0, 4).join('；') : '',
+  ].filter(Boolean).join('；') || '未发现可执行文件、外部网络地址或路径越界'
+
+  return {
+    ok: true,
+    kind: 'skill',
+    entries: names.slice(0, 200),
+    entryCount: entries.length,
+    totalBytes: entries.reduce((sum, entry) => sum + entry.uncompSize, 0),
+    packageName: skillName || '',
+    skillRoot: root,
+    checks: [
+      ['技能包格式', formatPass ? '通过' : '不通过', formatPass ? `根目录包含 SKILL.md（${root || '/'}）` : found.error],
+      ['技能元信息', metaPass ? '通过' : '不通过', metaPass ? `name=${skillName}` : 'SKILL.md 的 name/description 不完整'],
+      ['权限声明', permPass ? '通过' : '不通过', permPass ? '技能包只包含提示词与参考文件，不注册可执行工具' : `包含可执行文件：${executable.slice(0, 6).join('、')}`],
+      ['静态安全扫描', scanPass ? '通过' : '不通过', scanNotes],
+      ['隔离测试', '未执行', '技能包不执行代码；安装后由运行时按技能规则加载'],
+    ],
+  }
+}
+
+export function extractSkillPackage(buffer, targetDir) {
+  const entries = parseCentralDirectory(buffer)
+  const names = normalizedNames(entries)
+  const found = findSkillRoot(names)
+  if (found.error) throw new Error(found.error)
+  const root = found.root || ''
+  const written = []
+  for (const entry of entries) {
+    const name = entry.name.replace(/\\/g, '/')
+    if (name.endsWith('/') || name.startsWith('__MACOSX/')) continue
+    if (root && !name.startsWith(root)) continue
+    const rel = root ? name.slice(root.length) : name
+    if (!rel || rel.split('/').includes('..') || rel.startsWith('/') || /^[A-Za-z]:/.test(rel)) {
+      throw new Error(`技能包包含非法路径：${name}`)
+    }
+    if (!(rel === 'SKILL.md' || SKILL_ASSET_EXT.test(rel))) {
+      throw new Error(`技能包包含不支持的文件：${rel}`)
+    }
+    const data = extractEntry(buffer, entry)
+    if (!data) throw new Error(`技能包文件解压失败：${rel}`)
+    const out = join(targetDir, ...rel.split('/'))
+    mkdirSync(dirname(out), { recursive: true })
+    writeFileSync(out, data)
+    written.push(rel)
+  }
+  if (!written.includes('SKILL.md')) throw new Error('技能包根目录缺少 SKILL.md')
+  return written
+}
+
 export function inspectPluginZip(buffer) {
   const issues = []
   let entries = []
@@ -84,6 +203,9 @@ export function inspectPluginZip(buffer) {
     }
   }
   const names = entries.map((e) => e.name)
+  if (normalizedNames(entries).some((name) => name === 'SKILL.md' || name.endsWith('/SKILL.md'))) {
+    return inspectSkillZipEntries(buffer, entries)
+  }
   const texts = new Map()
   for (const entry of entries) {
     if (!TEXT_EXT.test(entry.name)) continue
@@ -138,6 +260,7 @@ export function inspectPluginZip(buffer) {
 
   return {
     ok: true,
+    kind: 'bundle',
     entries: names.slice(0, 200),
     entryCount: entries.length,
     totalBytes: entries.reduce((s, e) => s + e.uncompSize, 0),

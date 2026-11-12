@@ -571,3 +571,29 @@
 - 验证后已删除测试会话和测试任务记录。
 
 **边界**：本批完成的是“持久化执行记录 + 中断恢复入口”，仍是同步执行；真正的常驻后台 worker、队列并发/吞吐、进程重启后自动续跑、集团业务系统调用尚未实现。自动续跑会重放副作用，后续需先做幂等键与断点快照再开放。
+
+### 25. 插件市场真实挂载（技能包闭环）
+
+**背景**：此前市场安装只写 `livePluginInstalls` 内存标记，模型看不到任何新能力；上传 ZIP 只做检测与审核，不生成可加载产物。审计已把“插件市场名不副实”列为 P1 风险。
+
+**实现**：
+
+- 市场内置 5 个真实技能包：`M-01` 规范条文核查、`M-02` 用地指标测算、`M-03` 公文格式校对、`M-07` 会议纪要整理、`M-08` 合同条款比对，源文件在 `marketplace/skills/<ID>/SKILL.md`。
+- `POST /api/plugin-market/install` 改为真实安装/卸载：复制到 `$DSH_HOME/skills/market-<ID>`，写入 `.jg-market.json` 标记；卸载只删除带标记的目录，不误删手工技能。
+- 安装/卸载后调用 `closeHarness()` 关闭空闲运行时；有 `activeRuns` 时返回 409，避免打断正在执行的任务。下一轮对话重新发现技能。
+- `GET /api/plugin-market` 的 `installed` 由技能目录与市场清单实时计算，不再读内存 Map；没有提供技能包的条目返回 `available: false`，前端显示“待上架”。
+- 上传链路支持技能包：`plugin-scan.mjs` 识别根目录 `SKILL.md`，校验 frontmatter `name`/`description`、禁止可执行文件/外部地址/路径越界；审核通过后解压到 `data/market-packages/<PLG-ID>`，加入市场并可安装。
+- 上传说明与《插件开发规范》同步改为“技能包优先，DSH Bundle 仍可检测但当前不开放一键安装”。
+
+**实测**：
+
+- 市场返回 5 个内置条目，均 `available: true`；安装 M-01 后 `data/dsh-home/skills/market-M-01/SKILL.md` 存在，模型在新会话的技能清单中出现 `code-compliance-check`。
+- 点击 M-07 安装，侧栏立即出现；打开详情点卸载，目录消失，M-07 回到未安装。
+- 上传测试包 `market-smoke-test.zip` → 检测“技能包格式/元信息/权限/静态扫描”四项通过 → 管理员审核 → `data/market-packages/PLG-01/SKILL.md` → 安装 → `market-PLG-01` 出现，闭环通过；测试数据已清理。
+- 截图 `D:\project-test3\shots\plugin-market-final.png`。
+
+**边界**：
+
+- 安装是**本机运行时全局挂载**，不是按账号隔离；同一客户端所有账号可见。
+- DSH Bundle 未一键安装：当前环境无 pnpm，`dsh plugin add` 不可用；Bundle 审核后只登记上架。
+- 技能只提供提示词与参考文件，不执行自定义 JS；需要真实系统调用时走产品 MCP 工具。

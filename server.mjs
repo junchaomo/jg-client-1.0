@@ -6,7 +6,7 @@
 import { spawnSync } from 'node:child_process'
 import { createServer } from 'node:http'
 import { createHmac, randomBytes } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { basename, extname, isAbsolute, join, normalize, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -21,7 +21,7 @@ import {
   apps, auditSeed, automations, cloudCredentials, cloudPolicy, cloudSessions,
   cloudSpaces, cloudSystems, contacts, dataServices, driveItems, driveQuota, feedback, imageryCompare, imThreads,
   knowledgeDocs, messagesSeed, modelPolicy, modules,
-  monitor, networks, networkOrder, notices, notifications, orgMembers, orgUnits, plugins, pluginMarket, projects,
+  monitor, networks, networkOrder, notices, notifications, orgMembers, orgUnits, plugins, projects,
   quickPrompts, resourceGrantSeed, resourceVersionSeed, resources,
   roles, sampleConversations, satelliteQuarters, spatialBounds, tasks, tickets, toolLedger, duties, dutyCatalog,
   notebookSeed, notebookTopics, collabCommentSeed,
@@ -29,7 +29,7 @@ import {
 import { buildDocument, supportedFormats } from './docs.mjs'
 import { ModelError, chatCompletion, resolveModelConfig } from './model.mjs'
 import { HarnessError, closeHarness, runAgent, stopBackgroundRuntime } from './harness.mjs'
-import { inspectPluginZip } from './plugin-scan.mjs'
+import { extractSkillPackage, inspectPluginZip } from './plugin-scan.mjs'
 import { consoleRoles, consoleNav, consoleModules, consoleSections, consoleScopeOptions } from './console.mjs'
 
 const root = fileURLToPath(new URL('./', import.meta.url))
@@ -117,7 +117,14 @@ const liveFeedback = [...feedback]
 const liveTasks = tasks.map((t) => ({ ...t }))
 const liveCloud = cloudSystems.map((s) => ({ ...s }))
 const liveProjects = projects.map((p) => ({ ...p }))
-const liveMarket = pluginMarket.map((m) => ({ ...m }))
+const MARKET_BUILTIN = [
+  { id: 'M-01', section: '热门', name: '规范条文核查', desc: '对规划、建筑、市政图纸与文本做条文级合规核查，输出带依据、位置与整改建议的问题清单', publisher: '智数中心', scope: '企业公开', kind: 'skill', version: '1.0.0' },
+  { id: 'M-02', section: '热门', name: '用地指标测算', desc: '按用地、基底、建筑面积与绿地数据测算容积率、建筑密度、绿地率，并输出计算过程', publisher: '智数中心', scope: '企业公开', kind: 'skill', version: '1.0.0' },
+  { id: 'M-03', section: '热门', name: '公文格式校对', desc: '按党政机关公文格式校对版头、发文字号、标题、主送、附件、落款与页码', publisher: '集团办公室', scope: '企业公开', kind: 'skill', version: '1.0.0' },
+  { id: 'M-07', section: '新品推荐', name: '会议纪要整理', desc: '把会议转写或笔记整理成议定事项、责任人、时限与待确认问题', publisher: '集团办公室', scope: '企业公开', kind: 'skill', version: '1.0.0' },
+  { id: 'M-08', section: '新品推荐', name: '合同条款比对', desc: '比对合同两版条款差异，标记付款、工期、违约、知识产权与保密风险', publisher: '法务合规部', scope: '需授权', kind: 'skill', version: '1.0.0' },
+]
+const liveMarket = MARKET_BUILTIN.map((m) => ({ ...m }))
 /* 插件安装与启停按用户独立保存，避免一个账号的操作影响其他人。 */
 const livePluginInstalls = new Map()
 const livePluginToggles = new Map()
@@ -829,7 +836,12 @@ function hydratePersistentState() {
   replaceArray(liveTasks, snap.tasks)
   replaceArray(liveCloud, snap.cloudSystems)
   replaceArray(liveProjects, snap.projects)
-  replaceArray(liveMarket, snap.pluginMarket)
+  const persistedMarket = Array.isArray(snap.pluginMarket) ? snap.pluginMarket : []
+  const builtinIds = new Set(MARKET_BUILTIN.map((m) => m.id))
+  replaceArray(liveMarket, [
+    ...MARKET_BUILTIN.map((m) => ({ ...m })),
+    ...persistedMarket.filter((m) => m && m.id && !builtinIds.has(m.id)),
+  ])
   replaceArray(pluginSubs, snap.pluginSubs)
   replaceMap(livePluginInstalls, Object.fromEntries(snap.pluginInstalls || []))
   replaceMap(livePluginToggles, Object.fromEntries(snap.pluginToggles || []))
@@ -2221,6 +2233,73 @@ async function buildModelMessages({ user, net, text, conv, refs }) {
   return [{ role: 'system', content: system }, ...history]
 }
 
+const MARKET_SKILL_SOURCE = join(root, 'marketplace', 'skills')
+const MARKET_PACKAGE_ROOT = join(dataDirPath(), 'market-packages')
+const MARKET_MANIFEST = '.jg-market.json'
+function marketSkillTarget(id) {
+  return join(dataDirPath(), 'dsh-home', 'skills', `market-${id}`)
+}
+function marketSkillSource(id) {
+  const candidates = [join(MARKET_SKILL_SOURCE, id), join(MARKET_PACKAGE_ROOT, id)]
+  return candidates.find((dir) => existsSync(join(dir, 'SKILL.md'))) || ''
+}
+function marketSkillAvailable(id) {
+  return Boolean(marketSkillSource(id))
+}
+function marketSkillManifest(id) {
+  try {
+    return JSON.parse(readFileSync(join(marketSkillTarget(id), MARKET_MANIFEST), 'utf8'))
+  } catch {
+    return null
+  }
+}
+function marketSkillInstalled(id) {
+  const manifest = marketSkillManifest(id)
+  return Boolean(manifest && manifest.marketId === id)
+}
+async function installMarketSkill(item, user) {
+  const source = marketSkillSource(item.id)
+  if (!source) {
+    throw new Error('该插件尚未提供可安装的技能包')
+  }
+  const target = marketSkillTarget(item.id)
+  if (existsSync(target)) {
+    const manifest = marketSkillManifest(item.id)
+    if (!manifest || manifest.marketId !== item.id) {
+      throw new Error('本机已存在同名技能目录，且不是插件市场安装的，拒绝覆盖')
+    }
+    rmSync(target, { recursive: true, force: true })
+  }
+  mkdirSync(target, { recursive: true })
+  cpSync(source, target, { recursive: true })
+  writeFileSync(join(target, MARKET_MANIFEST), `${JSON.stringify({
+    marketId: item.id,
+    name: item.name,
+    version: '1.0.0',
+    installedAt: Date.now(),
+    installedBy: String(user.id || ''),
+  }, null, 2)}\n`, 'utf8')
+  // 关闭空闲运行时，下一轮对话重新加载技能目录；有会话执行时由调用方先拒绝。
+  await closeHarness()
+}
+async function uninstallMarketSkill(item) {
+  const target = marketSkillTarget(item.id)
+  const manifest = marketSkillManifest(item.id)
+  if (!manifest || manifest.marketId !== item.id) {
+    throw new Error('该插件不是由本机插件市场安装的，拒绝删除')
+  }
+  rmSync(target, { recursive: true, force: true })
+  await closeHarness()
+}
+function marketSkillState(item) {
+  return {
+    ...item,
+    available: marketSkillAvailable(item.id),
+    installed: marketSkillInstalled(item.id),
+    installScope: '本机 DSH 运行时（同一客户端全局可见）',
+  }
+}
+
 const api = {
   'GET /api/bootstrap': (req, res) => {
     const user = roleOf(req)
@@ -3000,22 +3079,32 @@ const api = {
   'GET /api/plugin-market': (req, res) => {
     const user = roleOf(req)
     const net = netOf(req)
-    const installed = installedIdsOf(user.id)
-    const items = liveMarket.map((m) => ({ ...m, installed: installed.includes(m.id) }))
-    json(res, 200, { items, network: networks[net]?.label || '' })
+    const items = liveMarket.map((m) => marketSkillState(m))
+    json(res, 200, { items, network: networks[net]?.label || '', installScope: '本机 DSH 运行时（同一客户端全局可见）' })
   },
-  'POST /api/plugin-market/install': (req, res) => {
+  'POST /api/plugin-market/install': async (req, res) => {
     const user = roleOf(req)
     const body = JSON.parse(req.__body || '{}')
     const item = liveMarket.find((x) => x.id === body.id)
     if (!item) return json(res, 404, { error: '插件不存在' })
+    if (!marketSkillAvailable(item.id)) {
+      return json(res, 409, { error: '该插件尚未提供可安装的技能包，暂不能安装', code: 'MARKET_PACKAGE_NOT_READY' })
+    }
     if (item.scope === '需授权' && !canManage(user)) return json(res, 403, { error: '该插件需部门负责人授权后安装' })
-    const installed = installedIdsOf(user.id)
-    const has = installed.includes(item.id)
-    const next = has ? installed.filter((id) => id !== item.id) : [...installed, item.id]
-    livePluginInstalls.set(user.id, next)
-    logAudit(user, has ? 'plugin.remove' : 'plugin.install', item.id, `allow(${user.id})`, netOf(req))
-    json(res, 200, { ok: true, item: { ...item, installed: !has } })
+    if (activeRuns.size) return json(res, 409, { error: '有会话正在执行，安装或卸载会在下一轮生效，请稍后再试', code: 'RUNTIME_BUSY' })
+    const has = marketSkillInstalled(item.id)
+    try {
+      if (has) await uninstallMarketSkill(item)
+      else await installMarketSkill(item, user)
+    } catch (error) {
+      return json(res, 409, { error: error.message || (has ? '卸载失败' : '安装失败') })
+    }
+    logAudit(user, has ? 'plugin.remove' : 'plugin.install', item.id, `install(${user.id})`, netOf(req))
+    json(res, 200, {
+      ok: true,
+      item: { ...marketSkillState(item), installed: !has },
+      message: has ? '已从本机运行时卸载，下一轮对话生效' : '已安装到本机运行时，下一轮对话生效',
+    })
   },
   'GET /api/plugin-subs': (req, res) => {
     json(res, 200, { items: pluginSubs })
@@ -3038,7 +3127,7 @@ const api = {
     const sizeText = meta.size >= 1024 ** 2 ? `${(meta.size / 1024 ** 2).toFixed(1)} MB` : `${Math.max(1, Math.round(meta.size / 1024))} KB`
     const sub = {
       id, name, version: body.version || '0.1.0', file: meta.name, size: sizeText,
-      fileId, sha256: meta.sha256,
+      fileId, sha256: meta.sha256, kind: scan.kind || 'bundle',
       author: user.name, unit: user.unit, scope: body.scope || '全集团',
       status: hasFail ? 'rejected' : 'pending', submitted: stamp(),
       desc: body.desc || '企业自研插件，按插件开发规范打包，经平台检测与审核后上架',
@@ -3059,14 +3148,40 @@ const api = {
     sub.status = action === 'approve' ? 'approved' : 'rejected'
     sub.reviewed = '刚刚'
     if (action === 'reject') sub.reason = String(body.reason || '').trim() || '安全检测或权限说明不满足上架要求'
-    if (action === 'approve' && !liveMarket.some((m) => m.subId === sub.id)) {
-      liveMarket.unshift({
-        id: `M-${Date.now()}`, subId: sub.id, section: '企业内部', name: sub.name, desc: sub.desc,
-        publisher: sub.unit, installed: false, scope: sub.scope, version: sub.version,
-      })
+    let packageReady = false
+    if (action === 'approve') {
+      const kind = sub.kind || 'bundle'
+      const marketId = sub.marketId || (kind === 'skill' ? `PLG-${sub.id.replace(/^SUB-/, '')}` : `M-${Date.now()}`)
+      if (kind === 'skill') {
+        const meta = getFile(sub.fileId)
+        if (!meta) return json(res, 409, { error: '技能包文件已失效，请让提交人重新上传' })
+        try {
+          const buffer = readFileBuffer(sub.fileId)
+          const target = join(MARKET_PACKAGE_ROOT, marketId)
+          rmSync(target, { recursive: true, force: true })
+          mkdirSync(target, { recursive: true })
+          extractSkillPackage(buffer, target)
+          sub.marketId = marketId
+          packageReady = true
+        } catch (error) {
+          return json(res, 409, { error: `技能包入库失败：${error.message}` })
+        }
+      }
+      if (!liveMarket.some((m) => m.subId === sub.id)) {
+        liveMarket.unshift({
+          id: marketId, subId: sub.id, section: '企业内部', name: sub.name, desc: sub.desc,
+          publisher: sub.unit, installed: false, scope: sub.scope, version: sub.version,
+          kind, packageId: kind === 'skill' ? marketId : '',
+        })
+      }
     }
     logAudit(user, 'plugin.review.' + action, sub.id, 'allow', netOf(req))
-    json(res, 200, { ok: true, item: sub })
+    json(res, 200, {
+      ok: true,
+      item: sub,
+      packageReady,
+      note: action === 'approve' && !packageReady ? '已上架，但该包不是技能包，当前运行时不能直接安装' : '',
+    })
   },
   'GET /api/projects': (req, res) => {
     const user = roleOf(req)
