@@ -505,6 +505,7 @@ function cancelPendingInteractions(conversationId) {
 hydratePersistentState()
 seedLocalAccounts()
 clearDemoData()
+recoverChatRunTasks()
 
 // 2026-11-11：按用户要求清空所有演示业务数据，仅保留真实账号与模型配置。
 // 演示数组已在 data.mjs 模块加载时置空；这里只做一次旧快照清理，避免重启后又回来。
@@ -1968,9 +1969,76 @@ function bboxHit(a, b) {
   return !(a[2] < b[0] || b[2] < a[0] || a[3] < b[1] || b[3] < a[1])
 }
 
+/** 会话执行记录：把每次真实 AI 运行作为一条持久化任务，服务重启后可定位原会话继续。 */
+function startChatRunTask({ conv, user, text, mode, taskMode, target }) {
+  const task = {
+    id: `TR-${Date.now()}-${Math.floor(Math.random() * 900 + 100)}`,
+    kind: 'chat-run',
+    title: text.length > 40 ? `${text.slice(0, 40)}…` : text,
+    state: 'running',
+    progress: 10,
+    target: `${mode === 'work' ? '工作' : mode === 'chat' ? '对话' : '自动'} · ${target || '对话工作区'}`,
+    started: new Date().toLocaleTimeString('zh-CN', { hour12: false }).slice(0, 5),
+    createdAt: Date.now(),
+    finishedAt: null,
+    conversationId: conv.id,
+    userId: String(user.id || ''),
+    prompt: text,
+    mode,
+    taskMode,
+    steps: 0,
+    artifacts: 0,
+    reason: '',
+  }
+  liveTasks.unshift(task)
+  conv.taskRunId = task.id
+  persistPersistentState()
+  return task
+}
+
+function finishChatRunTask(task, { steps = 0, artifacts = 0 } = {}) {
+  if (!task) return
+  task.state = 'done'
+  task.progress = 100
+  task.steps = steps
+  task.artifacts = artifacts
+  task.finishedAt = Date.now()
+  task.reason = ''
+  persistPersistentState()
+}
+
+function failChatRunTask(task, reason) {
+  if (!task) return
+  task.state = 'failed'
+  task.progress = Math.max(task.progress || 0, 10)
+  task.finishedAt = Date.now()
+  task.reason = String(reason || '执行失败').slice(0, 160)
+  persistPersistentState()
+}
+
+/** 启动时把上次进程未收尾的任务标记为中断，保留原会话与指令供用户恢复，不自动重放副作用。 */
+function recoverChatRunTasks() {
+  let changed = false
+  for (const t of liveTasks) {
+    if (t?.kind !== 'chat-run') continue
+    if (t.state === 'running' || t.state === 'queued') {
+      t.state = 'interrupted'
+      t.progress = Math.min(95, Math.max(10, Number(t.progress) || 10))
+      t.reason = '服务重启导致任务中断，可在原会话继续'
+      t.interruptedAt = Date.now()
+      const conv = conversations.find((c) => c.id === t.conversationId)
+      if (conv && conv.status === 'running') conv.status = 'failed'
+      changed = true
+    }
+  }
+  if (changed) persistPersistentState()
+}
+
 function taskTick() {
   const now = Date.now()
   for (const t of liveTasks) {
+    // 会话执行记录由真实运行收尾，不参与演示任务的进度推进。
+    if (t.kind === 'chat-run') continue
     if (t.state === 'queued') {
       if (now - t.createdAt > 12000) { t.state = 'running'; t.progress = 6; t.started = new Date().toLocaleTimeString('zh-CN', { hour12: false }).slice(0, 5) }
     } else if (t.state === 'running') {
@@ -3157,6 +3225,18 @@ const api = {
     t.reason = ''
     json(res, 200, { ok: true, item: t })
   },
+  'POST /api/tasks/delete': (req, res) => {
+    const user = roleOf(req)
+    if (!canManage(user)) return json(res, 403, { error: '仅管理员可清理执行记录' })
+    const body = JSON.parse(req.__body || '{}')
+    const id = String(body.id || '')
+    const index = liveTasks.findIndex((x) => x.id === id)
+    if (index < 0) return json(res, 404, { error: '任务不存在' })
+    liveTasks.splice(index, 1)
+    persistPersistentState()
+    logAudit(user, 'task.delete', id, 'allow', netOf(req))
+    json(res, 200, { ok: true, id })
+  },
   'GET /api/conversations': (req, res, url) => {
     const user = roleOf(req)
     // 会话全文检索只在搜索面板请求时带上正文，避免侧栏每次刷新传输大段消息。
@@ -3392,7 +3472,9 @@ const api = {
         model: { name: modelCfg.model, endpoint: modelCfg.baseUrl, keyConfigured: false },
       })
     }
+    let chatTask = null
     try {
+      chatTask = startChatRunTask({ conv, user, text, mode, taskMode, target: project?.name || '' })
       const refContext = await refContextForModel(user, net, body.refs)
       const selectedPlugins = (Array.isArray(body.tools) ? body.tools : [])
         .map((id) => plugins.find((p) => p.id === id))
@@ -3496,6 +3578,10 @@ const api = {
       conv.model = result.model
       if (reasoningEffort) conv.reasoningEffort = effortLevel
       conv.dshSessionId = result.sessionId
+      finishChatRunTask(chatTask, {
+        steps: Array.isArray(steps) ? steps.length : 0,
+        artifacts: workspaceChanges.length + (Array.isArray(result.deliverables) ? result.deliverables.length : 0),
+      })
       logAudit(user, 'chat.message', conv.id, `allow(harness=${result.model})`, net)
       for (const tool of (result.toolAudit || [])) {
         logAudit(user, 'harness.tool', tool.tool, `${tool.status}(${tool.callId || '—'}) ${tool.detail}`.slice(0, 900), net)
@@ -3509,6 +3595,7 @@ const api = {
     } catch (error) {
       conv.status = 'failed'
       activeRuns.delete(conv.id)
+      failChatRunTask(chatTask, error?.message || error)
       logAudit(user, 'chat.message', conv.id, `deny(${error.code || 'HARNESS_ERROR'})`, net)
       if (error instanceof HarnessError) {
         return json(res, error.status, { error: error.message, code: error.code, detail: error.detail })

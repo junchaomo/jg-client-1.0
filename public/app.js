@@ -9455,15 +9455,25 @@ function openTaskRuns(a) {
     <div class="tk-runs">
       ${runs.map((x) => {
         const [cls, label] = TASK_STATE_MAP[x.state] || ['', x.state]
-        return `<div class="tk-run">
-          <span class="tk-run-name"><b>${esc(x.title)}</b><span>${esc(x.target)} · 启动 ${esc(x.started || '—')}${x.reason ? ` · ${esc(x.reason)}` : ''}</span></span>
-          <span class="tk-run-prog"><span class="prog"><span style="width:${x.progress}%"></span></span><span class="mono">${x.progress}%</span></span>
+        const resumable = x.kind === 'chat-run' && x.conversationId && ['interrupted', 'failed'].includes(x.state)
+        return `<div class="tk-run"${resumable ? ` data-resume="${esc(x.id)}" style="cursor:pointer"` : ''}>
+          <span class="tk-run-name"><b>${esc(x.title)}</b><span>${esc(x.target)} · 启动 ${esc(x.started || '—')}${x.reason ? ` · ${esc(x.reason)}` : ''}${resumable ? ' · 点击回到原会话继续' : ''}</span></span>
+          <span class="tk-run-prog"><span class="prog"><span style="width:${x.progress || 0}%"></span></span><span class="mono">${x.progress || 0}%</span></span>
           <span class="tag ${cls}">${label}</span>
         </div>`
       }).join('') || '<div class="tk-doc-empty">暂无执行记录</div>'}
     </div>
     <div class="form-foot"><span class="mono">每次执行都是一次真实的 AI 运行，失败保留原因</span><span class="spacer"></span><button class="btn" data-cancel>关闭</button></div>`)
   mask.querySelector('[data-cancel]').addEventListener('click', () => mask.remove())
+  mask.querySelectorAll('[data-resume]').forEach((row) => row.addEventListener('click', async () => {
+    const task = (state.tasks || []).find((x) => x.id === row.dataset.resume)
+    if (!task?.conversationId) return
+    mask.remove()
+    await openConversation(task.conversationId)
+    state.draft = task.prompt || ''
+    renderView()
+    toast('已回到原会话并填入原指令，确认后发送')
+  }))
 }
 
 function openTaskFiles(a) {
@@ -9490,6 +9500,7 @@ const TASK_STATE_MAP = {
   queued: ['', '排队中'],
   done: ['ok', '已完成'],
   failed: ['bad', '失败'],
+  interrupted: ['warn', '已中断'],
 }
 const taskStateMap = TASK_STATE_MAP
 
