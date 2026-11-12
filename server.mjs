@@ -272,6 +272,13 @@ function runtimeOverview() {
   const credentialsPath = join(home, '.credentials.yaml')
   let credentialsUpdatedAt = ''
   try { credentialsUpdatedAt = statSync(credentialsPath).mtime.toISOString() } catch {}
+  const skillsDir = join(home, 'skills')
+  let skills = []
+  try {
+    skills = readdirSync(skillsDir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+  } catch {}
   return {
     dshVersion,
     profile: 'sdk',
@@ -293,6 +300,11 @@ function runtimeOverview() {
       credentials: nativeRow('credentials'),
       workflowPtc: nativeRow('workflow-ptc'),
       toolExecutorPtc: nativeRow('tool-executor-ptc'),
+      checkpointPolicy: nativeRow('session-checkpoint-policy'),
+      fileRollback: '未提供',
+      skillsDir,
+      skills,
+      officeSkill: nativeRow('skill-office'),
       credentialsPath,
       credentialsPresent: existsSync(credentialsPath),
       credentialsUpdatedAt,

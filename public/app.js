@@ -10768,6 +10768,15 @@ function settingsBody(tab) {
           srow('workflow-ptc', '工作流内的程序化调用已挂载，可供工作流使用', nativeTag(nt.workflowPtc)),
           srow('直接 tool-executor-ptc', '默认关闭：会改变模型调用工具的协议，并使嵌套工具调用难以逐步确认；启用前需单独回归审批与步骤展示', nativeTag(nt.toolExecutorPtc)),
         ]),
+        sgroup('技能目录（只读）', [
+          srow('目录技能', `DSH 实际加载的目录技能：${(nt.skills || []).join('、') || '无'}`, nativeTag((nt.skills || []).length ? '已挂载' : '未挂载')),
+          srow('Office 技能', '通过 skill-office 插件加载，不在 skills 目录中', nativeTag(nt.officeSkill)),
+          srow('技能根目录', nt.skillsDir || '—', '只读'),
+        ]),
+        sgroup('会话检查点（只读）', [
+          srow('检查点策略', '模型请求、顶层工具调用前做语义持久化；保证会话可恢复，不是文件内容备份', nativeTag(nt.checkpointPolicy)),
+          srow('文件回滚', '当前只记录文件大小与修改时间，不能还原文件内容；产品侧回滚入口未提供', nativeTag(nt.fileRollback)),
+        ]),
         sgroup('DSH 插件运行时', [
           srow('插件条目', '查看当前 profile 的真实挂载清单，启停单个条目；写入 cordis.patch.yml，重启运行时后生效，核心组件受保护',
             `${sbtn('runtimePlugins', '管理')}<span class="set-btn-gap"></span>${sbtn('runtimeRestart', '重启运行时')}`),

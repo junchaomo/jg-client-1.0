@@ -39,7 +39,7 @@
 | 推理强度 | 已落地 | `reasoningEffort` 传入构造参数，并按 effort 分 key 创建独立运行时。`harness.mjs:36-40`、`:93` |
 | token 用量 | 已落地 | `dsh-token-meter`；`usageOf(events)` 回传产品。`harness.mjs:593` |
 | 上下文压缩 | 已落地 | `compaction-basic`、`tool-result-pruner`、`image-offload`、`/compact` 均在 base。 |
-| 会话检查点 | 部分 | `session-checkpoint-policy` 已挂载，但没有产品侧“回滚到某个检查点”的 API/操作。 |
+| 会话检查点 | 已确定边界 | `session-checkpoint-policy` 已挂载，做的是模型请求/顶层工具调用前的语义持久化；不备份文件内容，产品侧回滚入口未提供。设置页只读展示策略与“文件回滚未提供”。 |
 | AI 会话标题 | 已落地 | profile 显式启用 `session-title-llm`；产品做了标题可用性过滤后落库。`server.mjs:3572` |
 | 会话全文检索 | 未落地 | `session-query-sqlite` 配置 `openAt: never`；产品搜索是对自有会话消息做字符串过滤，不是 DSH 检索。`server.mjs:3243-3250` |
 | 会话导出 | 未落地 | 产品只导出自有 Markdown；`dsh-session-log-export` 未进入 base bundle。 |
@@ -67,7 +67,7 @@
 
 | 能力 | 状态 | 实际情况与证据 |
 |---|---|---|
-| 技能框架 | 部分 | `skill`、`skill-filesystem`、`tool-skill` 已启用；`$DSH_HOME/skills` 实际有 `jg-product` 与已安装的市场技能 `market-M-01`、`market-M-03`，Office 通过 `skill-office` 插件加载。 |
+| 技能框架 | 已核对现状 | `skill`、`skill-filesystem`、`tool-skill` 已启用；`$DSH_HOME/skills` 实际有 `jg-product`、`market-M-01`、`market-M-03` 三个目录技能，Office 通过 `skill-office` 插件加载。设置页已只读列出目录技能与 Office 插件状态。 |
 | Office 技能 | 已落地 | profile 显式启用 `skill-office`，并指向 `dsh-skill-office/assets` 与 `libreoffice-kit` CLI。 |
 | MCP 客户端/资源 | 已落地 | base 有 `mcp-resources`；profile insert `mcp-jg`；产品有资源目录与读取接口。 |
 | 产品 MCP 工具 | 已落地 | `mcp-jg.mjs` 注册 10 个工具：`drive_search`、`drive_read`、`notice_list`、`notice_read`、`academy_search`、`contacts_find`、`im_send`、`notebook_search`、`resource_query`、`task_create`。 |

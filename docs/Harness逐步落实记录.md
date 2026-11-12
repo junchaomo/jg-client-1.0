@@ -324,6 +324,20 @@
 
 **要做单作业停止，需要**：在 DSH profile 内加一个自定义插件，把 `ctx.jobs.kill(id)` 暴露成产品可调用的本地 remote/HTTP 通道，或者由产品自己维护任务队列。两者都不属于现有 SDK 协议，不能只改前端。
 
+### 16.4 技能目录现状
+
+**事实**：`data/dsh-home/skills` 当前只有三个目录技能：`jg-product`、`market-M-01`、`market-M-03`；Office 不在这个目录里，而是通过 `skill-office` 插件加载。设置页新增「技能目录（只读）」组，直接列出目录技能、Office 插件挂载状态和技能根目录，不再用“技能体系已完整”这种模糊说法。
+
+**边界**：目录技能和插件技能是两条来源；要增加技能，需要把技能包写入 `skills` 目录，或在市场安装对应插件。当前没有“从市场安装后自动刷新 DSH 技能缓存”的机制。
+
+### 16.5 检查点现状
+
+**事实**：`session-checkpoint-policy` 已挂载，但它是“语义持久化检查点”——在模型请求、顶层工具调用前记录会话状态，用于恢复会话，不备份文件内容。产品侧 `snapshotTree`/`diffTree` 只记录文件大小和 mtime，不能还原文件。
+
+**边界**：要做“回滚到上一轮文件”，必须在每轮开始前复制被修改文件的内容，并单独设计回滚确认、新增文件删除和冲突处理；这不是现有 checkpoint 策略能直接提供的。设置页新增「会话检查点（只读）」组，明确写“检查点策略已挂载、文件回滚未提供”。
+
+**实测**：`runtime.native.checkpointPolicy = 已挂载`、`fileRollback = 未提供`；技能目录返回 `jg-product`、`market-M-01`、`market-M-03`，`officeSkill = 已挂载`。截图 `runtime-skills-checkpoints-3.png`。
+
 ### 17. MCP 资源浏览
 
 **背景**：DSH 已挂载 `dsh-mcp-resources` 与 `dsh-mcp-client`，模型侧具备 `list_mcp_resources` / `list_mcp_resource_templates` / `read_mcp_resource`；但产品侧原来只有静态“MCP 服务地址”和演示连接测试，没有资源目录。产品 MCP 桥 `mcp-jg.mjs` 原来只声明 `tools`，没有 `resources`。
