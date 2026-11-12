@@ -615,6 +615,7 @@
 - 修复前：真实 `/api/chat` 调用 `mcp__jg__task_create`，直接创建 `T-AI43100`，无 pending 审批。
 - 修复后：同一提示词触发 `AP-67ab41b7f614`，胶囊显示“请求批准”；点击「允许本次执行」后待办 `T-AI09367` 创建成功。
 - 拒绝路径：`AP-ceeb196cc6dd` 拒绝后模型收到“用户未批准该 MCP 外部副作用操作”，没有产生新待办；已有待办数量保持 2 条。
+- 超时边界：审批卡出现后等待 65 秒再批准，`mcp__jg__task_create` 仍成功返回，证明 `toolCallTimeoutMs: 600000` 已生效，审批等待不会被 MCP 客户端 60 秒默认超时截断。
 - UI 实测截图 `D:\project-test3\shots\mcp-approval-menu.png`、`mcp-approval-approved.png`。
 - 遥测：`dsh-session-telemetry-otel` 的 `DISABLED` 分支不构造 provider；运行态核对 `dsh-otel-collector.deepseeksvc.com` 的 `116.205.40.113/114` 无已建立连接。
 
