@@ -1,0 +1,172 @@
+/**
+ * 九规智能中枢本地 MCP 桥
+ * 由 dsh-mcp-client 以 stdio 子进程启动，把产品现有 /api/ai/invoke 工具
+ * 暴露为 mcp__jg__* 工具。只监听本机，使用进程内随机令牌，不暴露到外网。
+ */
+import { createInterface } from 'node:readline'
+import { stdin, stdout, stderr } from 'node:process'
+import { appendFileSync } from 'node:fs'
+
+const debug = process.env.JG_MCP_DEBUG ? (line) => appendFileSync(process.env.JG_MCP_DEBUG, `${new Date().toISOString()} ${line}\n`) : () => {}
+
+const baseUrl = (process.env.JG_MCP_URL || 'http://127.0.0.1:4173').replace(/\/$/, '')
+const endpoint = `${baseUrl}/api/ai/invoke`
+const token = process.env.JG_MCP_TOKEN || ''
+const account = process.env.JG_MCP_ACCOUNT || 'A-7788-01'
+
+const tools = [
+  {
+    name: 'drive_search',
+    description: '搜索企业云空间文件与目录，返回名称、类型、部门、所有者。',
+    inputSchema: { type: 'object', properties: { q: { type: 'string', description: '关键词' }, type: { type: 'string', description: '文件类型' } } },
+  },
+  {
+    name: 'drive_read',
+    description: '读取云空间一个文件/数据集的元数据或正文。',
+    inputSchema: { type: 'object', properties: { id: { type: 'string', description: '文件 ID' } }, required: ['id'] },
+  },
+  {
+    name: 'notice_list',
+    description: '检索通知公告。',
+    inputSchema: { type: 'object', properties: { q: { type: 'string', description: '关键词' } } },
+  },
+  {
+    name: 'academy_search',
+    description: '检索教学园地课程与资料。',
+    inputSchema: { type: 'object', properties: { q: { type: 'string', description: '关键词' } } },
+  },
+  {
+    name: 'contacts_find',
+    description: '按姓名、职责、部门检索通讯录。',
+    inputSchema: { type: 'object', properties: { q: { type: 'string', description: '关键词' } } },
+  },
+  {
+    name: 'im_send',
+    description: '向指定即时通讯会话发送一条消息。',
+    inputSchema: { type: 'object', properties: { id: { type: 'string' }, text: { type: 'string' } }, required: ['id', 'text'] },
+  },
+  {
+    name: 'notice_read',
+    description: '读取一条通知公告正文。',
+    inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
+  },
+  {
+    name: 'notebook_search',
+    description: '在智能笔记本范围检索引用资源。',
+    inputSchema: { type: 'object', properties: { q: { type: 'string' }, notebook: { type: 'string' } } },
+  },
+  {
+    name: 'resource_query',
+    description: '查询数据中心资源目录。',
+    inputSchema: { type: 'object', properties: { q: { type: 'string' } } },
+  },
+  {
+    name: 'task_create',
+    description: '创建一个待办任务（当前为产品任务接口登记）。',
+    inputSchema: { type: 'object', properties: { title: { type: 'string' } } },
+  },
+]
+
+function reply(id, result) {
+  stdout.write(JSON.stringify({ jsonrpc: '2.0', id, result }) + '\n')
+}
+
+function fail(id, code, message) {
+  stdout.write(JSON.stringify({ jsonrpc: '2.0', id, error: { code, message } }) + '\n')
+}
+
+async function callTool(name, args) {
+  if (!token) throw new Error('MCP token missing')
+  const res = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-jg-mcp-token': token,
+      'x-jg-mcp-account': account,
+    },
+    body: JSON.stringify({ tool: name, args: args || {} }),
+  })
+  const data = await res.json().catch(() => ({}))
+  debug(`call ${name} -> HTTP ${res.status} ${JSON.stringify(data).slice(0, 200)}`)
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`)
+  return data
+}
+
+async function getResource(path) {
+  if (!token) throw new Error('MCP token missing')
+  const res = await fetch(`${baseUrl}${path}`, {
+    headers: { 'x-jg-mcp-token': token, 'x-jg-mcp-account': account },
+  })
+  const data = await res.json().catch(() => ({}))
+  debug(`resource ${path} -> HTTP ${res.status}`)
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`)
+  return data
+}
+
+const rl = createInterface({ input: stdin, crlfDelay: Infinity })
+rl.on('line', async (line) => {
+  let msg
+  try { msg = JSON.parse(line) } catch { return }
+  if (!msg || msg.jsonrpc !== '2.0') return
+  const id = msg.id
+  if (id === undefined || id === null) return
+  try {
+    if (msg.method === 'initialize') {
+      reply(id, {
+        protocolVersion: msg.params?.protocolVersion || '2025-06-18',
+        capabilities: { tools: {}, resources: {} },
+        serverInfo: { name: 'jg-product-tools', version: '1.0.0' },
+      })
+      return
+    }
+    if (msg.method === 'ping') { reply(id, {}); return }
+    if (msg.method === 'resources/list') {
+      const data = await getResource('/api/mcp/resources')
+      reply(id, {
+        resources: (data.items || []).map((r) => ({
+          uri: r.uri,
+          name: r.name,
+          description: r.description,
+          mimeType: r.mimeType || 'application/json',
+        })),
+      })
+      return
+    }
+    if (msg.method === 'resources/templates/list') {
+      reply(id, {
+        resourceTemplates: [
+          { uriTemplate: 'jg://resource/{id}', name: '数据中心资源', description: '按资源 ID 读取元数据', mimeType: 'application/json' },
+          { uriTemplate: 'jg://notice/{id}', name: '通知公告', description: '按公告 ID 读取正文', mimeType: 'application/json' },
+        ],
+      })
+      return
+    }
+    if (msg.method === 'resources/read') {
+      const uri = String(msg.params?.uri || '')
+      if (!/^jg:\/\/[a-z]+[\/]/.test(uri)) return fail(id, -32602, `unsupported resource uri: ${uri}`)
+      const data = await getResource(`/api/mcp/resource?uri=${encodeURIComponent(uri)}`)
+      reply(id, { contents: [{ uri, mimeType: data.mimeType || 'application/json', text: data.text || '' }] })
+      return
+    }
+    if (msg.method === 'tools/list') {
+      reply(id, { tools })
+      return
+    }
+    if (msg.method === 'tools/call') {
+      const rawName = String(msg.params?.name || '')
+      const name = rawName.replace(/^mcp__jg__/, '')
+      if (!tools.some((t) => t.name === name)) return fail(id, -32602, `unknown tool: ${rawName}`)
+      const data = await callTool(name, msg.params?.arguments)
+      reply(id, {
+        content: [{ type: 'text', text: JSON.stringify(data, null, 2) }],
+        isError: data?.ok === false,
+      })
+      return
+    }
+    fail(id, -32601, `method not found: ${msg.method}`)
+  } catch (error) {
+    fail(id, -32603, String(error?.message || error))
+  }
+})
+
+stderr.write(`[jg-mcp] ready endpoint=${endpoint} account=${account}\n`)

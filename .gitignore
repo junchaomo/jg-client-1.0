@@ -1,0 +1,12 @@
+node_modules/
+dist/
+dsh-runtime/
+runtime/
+.run.log
+.run.err
+.run-admin.log
+.run-admin.err
+.m1.log
+.m1.err
+data/
+*.bak
