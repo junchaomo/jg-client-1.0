@@ -3268,7 +3268,8 @@ const api = {
     })
   },
   'GET /api/plugin-subs': (req, res) => {
-    json(res, 200, { items: pluginSubs })
+    const user = roleOf(req)
+    json(res, 200, { items: pluginSubs.filter((s) => s.author === user.name) })
   },
   'POST /api/plugin-subs': (req, res) => {
     const user = roleOf(req)
