@@ -244,6 +244,7 @@ async function loadBoot() {
   const { body } = await api('/api/bootstrap')
   state.boot = body
   state.runtimeSettings = body.settings || state.runtimeSettings
+  if (!state.conversation?.id) state.executionPolicy = state.runtimeSettings.defaultPolicy === 'manual' ? 'manual' : 'auto'
   state.agentPresets = body.agentPresets || []
   if (!state.agentPresets.some((p) => p.id === state.agentPresetId)) state.agentPresetId = ''
   if (body.settings?.defaultEffort) state.reasoningEffort = body.settings.defaultEffort
@@ -2501,10 +2502,6 @@ async function setExecutionPolicy(next) {
   }
   toast(state.executionPolicy === 'manual' ? '已切换为「请求批准」：编辑外部文件和使用互联网时始终询问' : '已切换为「帮我批准」：仅对检测到的风险操作请求批准')
   renderView()
-}
-
-function togglePolicy() {
-  setExecutionPolicy(state.executionPolicy === 'manual' ? 'auto' : 'manual')
 }
 
 function greet() {
