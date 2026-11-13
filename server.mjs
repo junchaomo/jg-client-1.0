@@ -28,7 +28,7 @@ import {
 } from './data.mjs'
 import { buildDocument, supportedFormats } from './docs.mjs'
 import { ModelError, chatCompletion, resolveModelConfig } from './model.mjs'
-import { HarnessError, cancelRun, closeHarness, dshBin, runAgent, stopBackgroundRuntime } from './harness.mjs'
+import { HarnessError, cancelRun, closeHarness, closeHarnessForHome, dshBin, runAgent, stopBackgroundRuntime } from './harness.mjs'
 import { extractBundlePackage, extractSkillPackage, inspectPluginZip } from './plugin-scan.mjs'
 import { consoleRoles, consoleNav, consoleModules, consoleSections, consoleScopeOptions } from './console.mjs'
 
@@ -122,12 +122,6 @@ const MARKET_BUILTIN = [
   { id: 'D-02', section: '官方与内置', name: 'Cordis 组合参考', desc: '编写或阅读 Cordis 组合补丁与 Agent 预设时，查询 YAML 方言与可安装插件包清单', publisher: 'DeepSeek Harness', scope: '企业公开', kind: 'skill', version: '0.2.2-rc.1' },
   { id: 'D-03', section: '官方与内置', name: 'DSH 插件开发', desc: '设计、审查、安装、启停和调试 Harness 插件、Bundle、页面、工具与 MCP 连接', publisher: 'DeepSeek Harness', scope: '企业公开', kind: 'skill', version: '0.2.2-rc.1' },
   { id: 'D-04', section: '官方与内置', name: 'Agent 预设编辑', desc: '创建、修改和校验 Agent 预设与其他 Cordis 组合，判断 Host 与预设的正确放置位置', publisher: 'DeepSeek Harness', scope: '企业公开', kind: 'skill', version: '0.2.2-rc.1' },
-  { id: 'JG-01', section: '企业内部', name: '九规智能中枢内部工具', desc: '检索云空间、通知公告、教学园地、通讯录、数据中心资源与智能笔记本，并发送 IM、创建待办', publisher: '集团总部', scope: '企业公开', kind: 'skill', version: '1.0.0' },
-  { id: 'M-01', section: '热门', name: '规范条文核查', desc: '对规划、建筑、市政图纸与文本做条文级合规核查，输出带依据、位置与整改建议的问题清单', publisher: '智数中心', scope: '企业公开', kind: 'skill', version: '1.0.0' },
-  { id: 'M-02', section: '热门', name: '用地指标测算', desc: '按用地、基底、建筑面积与绿地数据测算容积率、建筑密度、绿地率，并输出计算过程', publisher: '智数中心', scope: '企业公开', kind: 'skill', version: '1.0.0' },
-  { id: 'M-03', section: '热门', name: '公文格式校对', desc: '按党政机关公文格式校对版头、发文字号、标题、主送、附件、落款与页码', publisher: '集团办公室', scope: '企业公开', kind: 'skill', version: '1.0.0' },
-  { id: 'M-07', section: '新品推荐', name: '会议纪要整理', desc: '把会议转写或笔记整理成议定事项、责任人、时限与待确认问题', publisher: '集团办公室', scope: '企业公开', kind: 'skill', version: '1.0.0' },
-  { id: 'M-08', section: '新品推荐', name: '合同条款比对', desc: '比对合同两版条款差异，标记付款、工期、违约、知识产权与保密风险', publisher: '法务合规部', scope: '需授权', kind: 'skill', version: '1.0.0' },
 ]
 const liveMarket = MARKET_BUILTIN.map((m, i) => ({ ...m, order: i }))
 /* 市场安装台账：按市场条目记录“哪个账号、装到哪个范围”，用于隔离与后台查看。 */
@@ -159,48 +153,7 @@ function pluginEnabledFor(userId, plugin) {
   return plugin.status
 }
 /* ===== 插件提交与审核（演示内存态） ===== */
-const pluginSubs = [
-  {
-    id: 'SUB-01', name: '规划指标计算', version: '1.2.0', file: 'planning-calculator.zip', size: '42 KB',
-    author: '赵工', unit: '规划一所', scope: '全集团', status: 'pending', submitted: '2026-11-06 16:20',
-    desc: '按控规与用地分类计算容积率、建筑密度与绿地率，输出指标表',
-    checks: [['DSH Bundle 格式', '通过', 'package.json / index.js / cordis.patch.yml 齐全'],
-      ['依赖与版本', '通过', '仅依赖平台内置 npm 包，无外部下载'],
-      ['权限声明', '通过', '读取已授权资源，无写权限'],
-      ['静态安全扫描', '通过', '无网络外联、无动态执行、无凭据读取'],
-      ['隔离测试', '通过', '沙箱内 12 组样例全部返回预期结果']],
-  },
-  {
-    id: 'SUB-02', name: 'CAD 图层整理', version: '0.9.3', file: 'cad-layer-cleaner.zip', size: '118 KB',
-    author: '周晓', unit: '规划二所', scope: '本部门', status: 'pending', submitted: '2026-11-07 09:10',
-    desc: '批量规范 CAD 图层命名、颜色与线型，输出整理报告',
-    checks: [['DSH Bundle 格式', '通过', '结构完整'],
-      ['依赖与版本', '通过', '依赖平台内置 CAD 解析器'],
-      ['权限声明', '待复核', '声明写入原始文件目录，需部门负责人确认'],
-      ['静态安全扫描', '通过', '无网络外联'],
-      ['隔离测试', '通过', '沙箱内 6 组图纸通过']],
-  },
-  {
-    id: 'SUB-03', name: '投标文件查重', version: '1.0.1', file: 'bid-dup-check.zip', size: '86 KB',
-    author: '孙工', unit: '经营部', scope: '全集团', status: 'rejected', submitted: '2026-11-05 14:02',
-    desc: '比对投标文件相似段落并标注来源', reason: '依赖外部在线查重接口，未提供企业内网替代方案',
-    checks: [['DSH Bundle 格式', '通过', '结构完整'],
-      ['依赖与版本', '不通过', '声明外部 registry 依赖'],
-      ['权限声明', '通过', '仅读文件'],
-      ['静态安全扫描', '不通过', '存在外部网络请求'],
-      ['隔离测试', '未执行', '前置检查未通过']],
-  },
-  {
-    id: 'SUB-04', name: '日照分析辅助', version: '1.0.0', file: 'sunlight-helper.zip', size: '64 KB',
-    author: '李工', unit: '规划一所', scope: '全集团', status: 'approved', submitted: '2026-11-03 11:30',
-    desc: '按建筑高度与朝向计算日照时数，输出分析图与结论', approved: '2026-11-04 10:15',
-    checks: [['DSH Bundle 格式', '通过', '结构完整'],
-      ['依赖与版本', '通过', '无外部依赖'],
-      ['权限声明', '通过', '读取已授权三维资源'],
-      ['静态安全扫描', '通过', '无网络外联'],
-      ['隔离测试', '通过', '沙箱内 8 组样例通过']],
-  },
-]
+const pluginSubs = []
 
 const cloudLog = cloudSessions.map((s) => ({ ...s }))
 const liveDrive = driveItems.map((d) => ({ ...d, shared: [...d.shared] }))
@@ -352,7 +305,7 @@ function installedSkillPlugins() {
   } catch {}
   for (const dir of dirs) {
     let name = dir
-    let desc = '本机 DSH 已加载的技能'
+    let desc = '平台已加载的官方 Harness 技能'
     try {
       const text = readFileSync(join(skillsDir, dir, 'SKILL.md'), 'utf8')
       const fm = text.match(/^---\s*\n([\s\S]*?)\n---/)
@@ -369,12 +322,12 @@ function installedSkillPlugins() {
       id: `S-${dir}`,
       name,
       kind: 'personal',
-      publisher: '本机 DSH',
+      publisher: 'DeepSeek Harness',
       version: '',
       status: 'enabled',
       nets: ['inet', 'gov', 'secret'],
-      deps: 'DSH skills 目录',
-      scope: '本机 DSH 运行时',
+      deps: 'DSH 官方技能',
+      scope: '平台官方基线',
       risk: '只读',
       desc,
       source: 'dsh-skill',
@@ -853,22 +806,22 @@ function pnpmAvailable() {
   }
   return pnpmProbe
 }
-function dshPluginEnv() {
+function dshPluginEnv(home = process.env.JG_DSH_HOME || join(dataDirPath(), 'dsh-home')) {
   const path = process.env.PATH || process.env.Path || ''
   const extra = [PNPM_RUNTIME_DIR, dirname(process.execPath)].filter(Boolean).join(';')
   return {
     ...process.env,
-    DSH_HOME: join(dataDirPath(), 'dsh-home'),
+    DSH_HOME: home,
     PATH: `${extra};${path}`,
     Path: `${extra};${path}`,
   }
 }
-function runDshPlugin(args, timeout = 180000) {
+function runDshPlugin(args, timeout = 180000, home = process.env.JG_DSH_HOME || join(dataDirPath(), 'dsh-home')) {
   return spawnSync(process.execPath, [dshBin, 'plugin', '--profile', RUNTIME_PROFILE, ...args], {
-    cwd: runtimeProfileDir(),
+    cwd: runtimeProfileDir(home),
     timeout,
     encoding: 'utf8',
-    env: dshPluginEnv(),
+    env: dshPluginEnv(home),
   })
 }
 const PROTECTED_PLUGIN_IDS = new Set([
@@ -876,8 +829,8 @@ const PROTECTED_PLUGIN_IDS = new Set([
   'typert', 'typert-loader', 'typert-gateway', 'session-log-deepseek', 'mcp-jg',
 ])
 
-function runtimeProfileDir() {
-  return join(dataDirPath(), 'dsh-home', 'profiles', RUNTIME_PROFILE)
+function runtimeProfileDir(home = process.env.JG_DSH_HOME || join(dataDirPath(), 'dsh-home')) {
+  return join(home, 'profiles', RUNTIME_PROFILE)
 }
 
 /**
@@ -1114,17 +1067,25 @@ function hydratePersistentState() {
   replaceArray(liveTasks, snap.tasks)
   replaceArray(liveCloud, snap.cloudSystems)
   replaceArray(liveProjects, snap.projects)
+  const persistedSubs = Array.isArray(snap.pluginSubs)
+    ? snap.pluginSubs.filter((s) => s && s.id && !['SUB-01', 'SUB-02', 'SUB-03', 'SUB-04'].includes(s.id))
+    : []
+  replaceArray(pluginSubs, persistedSubs)
   const persistedMarket = Array.isArray(snap.pluginMarket) ? snap.pluginMarket : []
   const builtinIds = new Set(MARKET_BUILTIN.map((m) => m.id))
+  const subIds = new Set(persistedSubs.map((s) => s.id))
   replaceArray(liveMarket, [
     ...MARKET_BUILTIN.map((m) => ({ ...m })),
-    ...persistedMarket.filter((m) => m && m.id && !builtinIds.has(m.id) && !['P-OFFICE', 'P-MCP-JG'].includes(m.id)),
+    ...persistedMarket.filter((m) => m && m.id && m.subId && subIds.has(m.subId) && !builtinIds.has(m.id)),
   ])
   liveMarket.forEach((m, i) => { m.order = Number.isFinite(Number(m.order)) ? Number(m.order) : i })
-  replaceArray(pluginSubs, snap.pluginSubs)
   replaceMap(livePluginInstalls, Object.fromEntries(snap.pluginInstalls || []))
   replaceMap(livePluginToggles, Object.fromEntries(snap.pluginToggles || []))
   replaceMap(liveMarketInstalls, Object.fromEntries(snap.marketInstalls || []))
+  const marketIds = new Set(liveMarket.map((m) => m.id))
+  for (const id of [...liveMarketInstalls.keys()]) {
+    if (!marketIds.has(id)) liveMarketInstalls.delete(id)
+  }
   replaceMap(liveCapabilityPolicies, Object.fromEntries(snap.capabilityPolicies || []))
   replaceArray(cloudLog, snap.cloudLog)
   replaceArray(liveDrive, snap.drive)
@@ -2584,20 +2545,63 @@ const SKILL_SOURCE_DIR = {
   'D-02': join(DSH_DEFAULT_SKILL_SOURCE, 'cordis-composition-reference'),
   'D-03': join(DSH_DEFAULT_SKILL_SOURCE, 'cordis-plugin-development'),
   'D-04': join(DSH_DEFAULT_SKILL_SOURCE, 'editing-cordis-compositions'),
-  'JG-01': join(MARKET_SKILL_SOURCE, 'JG-01'),
 }
 const SKILL_INSTALL_DIR = {
   'D-01': 'agent-experience',
   'D-02': 'cordis-composition-reference',
   'D-03': 'cordis-plugin-development',
   'D-04': 'editing-cordis-compositions',
-  'JG-01': 'jg-product',
 }
 const MARKET_PACKAGE_ROOT = join(dataDirPath(), 'market-packages')
 const MARKET_MANIFEST = '.jg-market.json'
 const USER_AGENT_ROOT = join(dataDirPath(), 'agents')
 function userAgentHome(userId) {
   return join(USER_AGENT_ROOT, String(userId || 'guest'))
+}
+/**
+ * Bundle 与 DSH profile 按账号隔离：每个账号一个 DSH_HOME，
+ * 只复制平台官方 profile 的基线 bundles 与官方技能，不继承其他账号安装的 Bundle。
+ */
+const OFFICIAL_SKILL_DIRS = ['agent-experience', 'cordis-composition-reference', 'cordis-plugin-development', 'editing-cordis-compositions']
+function userDshHome(userId) {
+  return join(userAgentHome(userId), 'dsh-home')
+}
+function ensureUserDshHome(userId) {
+  const home = userDshHome(userId)
+  const profileDir = join(home, 'profiles', RUNTIME_PROFILE)
+  mkdirSync(profileDir, { recursive: true })
+  const profileFile = join(profileDir, 'package.json')
+  if (!existsSync(profileFile)) {
+    let base = null
+    try {
+      base = JSON.parse(readFileSync(join(dataDirPath(), 'dsh-home', 'profiles', RUNTIME_PROFILE, 'package.json'), 'utf8'))
+    } catch {}
+    const pkg = base || { name: `dsh-profile-${RUNTIME_PROFILE}`, private: true, dsh: { profile: { bundles: [] } } }
+    pkg.dsh = pkg.dsh || {}
+    pkg.dsh.profile = pkg.dsh.profile || {}
+    pkg.dsh.profile.bundles = Array.isArray(pkg.dsh.profile.bundles) ? [...new Set(pkg.dsh.profile.bundles)] : []
+    writeFileSync(profileFile, `${JSON.stringify(pkg, null, 2)}\n`)
+  }
+  // 官方技能是平台基线，随账号 DSH_HOME 各放一份；非官方技能不复制。
+  const targetSkills = join(home, 'skills')
+  mkdirSync(targetSkills, { recursive: true })
+  for (const name of OFFICIAL_SKILL_DIRS) {
+    const source = join(dataDirPath(), 'dsh-home', 'skills', name)
+    const target = join(targetSkills, name)
+    if (!existsSync(source) || existsSync(target)) continue
+    try { cpSync(source, target, { recursive: true }) } catch {}
+  }
+  // profile 的 patch 层决定 MCP、Office、会话检索等平台模块是否挂载；
+  // 初建账号必须复制官方 patch 与 pnpm 配置，否则新 DSH_HOME 会退回空 profile。
+  const globalProfile = join(dataDirPath(), 'dsh-home', 'profiles', RUNTIME_PROFILE)
+  for (const name of ['cordis.patch.yml', 'cordis.yml', 'pnpm-lock.yaml', 'pnpm-workspace.yaml']) {
+    const source = join(globalProfile, name)
+    const target = join(profileDir, name)
+    if (existsSync(source) && !existsSync(target)) {
+      try { cpSync(source, target) } catch {}
+    }
+  }
+  return home
 }
 function projectCwdOf(projectId) {
   const p = liveProjects.find((x) => x.id === projectId)
@@ -2697,15 +2701,15 @@ function bundlePackageManifest(id) {
 function marketBundleAvailable(id) {
   return Boolean(bundlePackageManifest(id)?.name)
 }
-function profileManifest() {
+function profileManifest(home = process.env.JG_DSH_HOME || join(dataDirPath(), 'dsh-home')) {
   try {
-    return JSON.parse(readFileSync(join(runtimeProfileDir(), 'package.json'), 'utf8'))
+    return JSON.parse(readFileSync(join(runtimeProfileDir(home), 'package.json'), 'utf8'))
   } catch {
     return null
   }
 }
-function setProfileBundle(name, enabled) {
-  const file = join(runtimeProfileDir(), 'package.json')
+function setProfileBundle(home, name, enabled) {
+  const file = join(runtimeProfileDir(home), 'package.json')
   const pkg = JSON.parse(readFileSync(file, 'utf8'))
   pkg.dsh = pkg.dsh || {}
   pkg.dsh.profile = pkg.dsh.profile || {}
@@ -2717,41 +2721,62 @@ function setProfileBundle(name, enabled) {
   writeFileSync(file, `${JSON.stringify(pkg, null, 2)}\n`)
   return next
 }
-function marketBundleInstalled(id) {
+function marketBundleInstalled(id, home) {
   const pkg = bundlePackageManifest(id)
   if (!pkg || !pkg.name) return false
-  const profile = profileManifest()
+  const profile = home ? profileManifest(home) : null
   const bundles = profile?.dsh?.profile?.bundles || []
   return bundles.includes(pkg.name)
 }
-async function installMarketBundle(item) {
+function bundleInstallUsers(id) {
+  const pkg = bundlePackageManifest(id)
+  if (!pkg || !pkg.name) return []
+  let dirs = []
+  try {
+    dirs = readdirSync(USER_AGENT_ROOT, { withFileTypes: true }).filter((entry) => entry.isDirectory()).map((entry) => entry.name)
+  } catch {}
+  return dirs
+    .filter((userId) => !userId.startsWith('_'))
+    .filter((userId) => marketBundleInstalled(id, userDshHome(userId)))
+    .map((userId) => ({
+      userId,
+      userName: roles[userId]?.name || userId,
+      scope: 'account',
+      projectId: '',
+      installedAt: 0,
+    }))
+}
+function anyUserBundleInstalled(id) {
+  return bundleInstallUsers(id).length > 0
+}
+async function installMarketBundle(item, home) {
   if (!pnpmAvailable()) throw new Error('客户端未内置 pnpm，无法安装 DSH Bundle')
   const pkg = bundlePackageManifest(item.id)
   if (!pkg || !pkg.name) throw new Error('该插件尚未提供可安装的 Bundle 包')
   const dir = bundlePackageDir(item.id)
-  const result = runDshPlugin(['add', `file:${dir.replace(/\\/g, '/')}`])
+  const result = runDshPlugin(['add', `file:${dir.replace(/\\/g, '/')}`], 180000, home)
   if (result.status !== 0) {
     throw new Error(`Bundle 安装失败：${(result.stderr || result.stdout || 'pnpm 未返回诊断').slice(-1800)}`)
   }
-  const bundles = profileManifest()?.dsh?.profile?.bundles || []
-  if (!bundles.includes(pkg.name)) setProfileBundle(pkg.name, true)
-  const installed = marketBundleInstalled(item.id)
+  const bundles = profileManifest(home)?.dsh?.profile?.bundles || []
+  if (!bundles.includes(pkg.name)) setProfileBundle(home, pkg.name, true)
+  const installed = marketBundleInstalled(item.id, home)
   if (!installed) {
-    runDshPlugin(['remove', pkg.name])
-    setProfileBundle(pkg.name, false)
-    throw new Error('Bundle 已下载但未进入 profile bundles，已回滚；请检查包内 dsh.bundle 与 cordis.patch.yml')
+    runDshPlugin(['remove', pkg.name], 180000, home)
+    setProfileBundle(home, pkg.name, false)
+    throw new Error('Bundle 已下载但未进入当前账号的 profile bundles，已回滚；请检查包内 dsh.bundle 与 cordis.patch.yml')
   }
-  await closeHarness()
+  await closeHarnessForHome(home)
 }
-async function uninstallMarketBundle(item) {
+async function uninstallMarketBundle(item, home) {
   const pkg = bundlePackageManifest(item.id)
   if (!pkg || !pkg.name) throw new Error('插件包信息已失效')
-  const result = runDshPlugin(['remove', pkg.name])
+  const result = runDshPlugin(['remove', pkg.name], 180000, home)
   if (result.status !== 0) {
     throw new Error(`Bundle 卸载失败：${(result.stderr || result.stdout || 'pnpm 未返回诊断').slice(-1800)}`)
   }
-  setProfileBundle(pkg.name, false)
-  await closeHarness()
+  setProfileBundle(home, pkg.name, false)
+  await closeHarnessForHome(home)
 }
 function marketItemState(item, ctx = {}) {
   const sub = item.subId ? pluginSubs.find((s) => s.id === item.subId) : null
@@ -2759,8 +2784,10 @@ function marketItemState(item, ctx = {}) {
   const globalBaseline = !isBundle && marketSkillGlobalBaseline(item.id)
   const records = marketInstallRecords(item.id)
   const userRecord = records.find((r) => r.userId === ctx.userId)
+  const home = ctx.userId ? userDshHome(ctx.userId) : ''
+  const bundleUsers = isBundle ? bundleInstallUsers(item.id) : []
   const installed = isBundle
-    ? marketBundleInstalled(item.id)
+    ? (ctx.any ? anyUserBundleInstalled(item.id) : Boolean(home && marketBundleInstalled(item.id, home)))
     : ctx.any
       ? (globalBaseline || records.length > 0)
       : (globalBaseline || Boolean(userRecord))
@@ -2774,12 +2801,14 @@ function marketItemState(item, ctx = {}) {
     available: isBundle ? marketBundleAvailable(item.id) : marketSkillAvailable(item.id),
     installed,
     locked: globalBaseline,
-    installedScope: userRecord ? userRecord.scope : '',
-    installedProjectId: userRecord ? userRecord.projectId || '' : '',
-    installScope: isBundle ? '本机 DSH 运行时（Bundle 全局可见）' : '当前账号或项目技能目录（互不可见）',
-    installUsers: globalBaseline
-      ? [{ userId: '*', userName: '全客户端基线', scope: 'baseline', projectId: '', installedAt: 0 }]
-      : records,
+    installedScope: isBundle ? (installed ? 'account' : '') : (userRecord ? userRecord.scope : ''),
+    installedProjectId: isBundle ? '' : (userRecord ? userRecord.projectId || '' : ''),
+    installScope: isBundle ? '当前账号的 DSH 运行时（其他账号不可见）' : '当前账号或项目技能目录（互不可见）',
+    installUsers: isBundle
+      ? bundleUsers
+      : globalBaseline
+        ? [{ userId: '*', userName: '全客户端基线', scope: 'baseline', projectId: '', installedAt: 0 }]
+        : records,
     downloadUrl: sub && sub.fileId ? `/api/plugin-market/download?id=${encodeURIComponent(item.id)}` : '',
   }
 }
@@ -2929,7 +2958,8 @@ const api = {
   'GET /api/runtime/bundles': (req, res) => {
     const user = roleOf(req)
     if (!canManage(user)) return json(res, 403, { error: '仅管理员可管理运行时组合包' })
-    const manifest = join(runtimeProfileDir(), 'package.json')
+    const home = ensureUserDshHome(user.id)
+    const manifest = join(runtimeProfileDir(home), 'package.json')
     let bundles = []
     let dependencies = []
     if (existsSync(manifest)) {
@@ -2937,7 +2967,7 @@ const api = {
       bundles = pkg?.dsh?.profile?.bundles || []
       dependencies = Object.keys(pkg?.dependencies || {})
     }
-    json(res, 200, { ok: true, profile: RUNTIME_PROFILE, bundles, dependencies, installAvailable: Boolean(pnpmAvailable()) })
+    json(res, 200, { ok: true, profile: RUNTIME_PROFILE, bundles, dependencies, installAvailable: Boolean(pnpmAvailable()), scope: 'account' })
   },
   'POST /api/runtime/bundles': (req, res) => {
     const user = roleOf(req)
@@ -2945,7 +2975,8 @@ const api = {
     const body = JSON.parse(req.__body || '{}')
     const name = String(body.name || '').trim()
     if (!name) return json(res, 400, { error: '缺少组合包名称' })
-    const manifest = join(runtimeProfileDir(), 'package.json')
+    const home = ensureUserDshHome(user.id)
+    const manifest = join(runtimeProfileDir(home), 'package.json')
     if (!existsSync(manifest)) return json(res, 404, { error: 'profile 清单不存在' })
     const pkg = JSON.parse(readFileSync(manifest, 'utf8'))
     const list = pkg?.dsh?.profile?.bundles || []
@@ -2956,10 +2987,11 @@ const api = {
     pkg.dsh.profile = pkg.dsh.profile || {}
     pkg.dsh.profile.bundles = next
     writeFileSync(manifest, `${JSON.stringify(pkg, null, 2)}\n`, 'utf8')
+    closeHarnessForHome(home).catch(() => {})
     logAudit(user, 'runtime-bundle.toggle', name, next ? 'enable' : 'disable', netOf(req))
     json(res, 200, { ok: true, bundles: next, restartRequired: true })
   },
-  'POST /api/runtime/bundles/install': (req, res) => {
+  'POST /api/runtime/bundles/install': async (req, res) => {
     const user = roleOf(req)
     if (!canManage(user)) return json(res, 403, { error: '仅管理员可安装组合包' })
     const body = JSON.parse(req.__body || '{}')
@@ -2968,8 +3000,10 @@ const api = {
     if (!pnpmAvailable()) {
       return json(res, 501, { error: '当前环境没有 pnpm，无法安装组合包。请先在客户端环境安装 pnpm，或使用离线 profile 包。', code: 'PNPM_MISSING' })
     }
-    const result = runDshPlugin(['add', spec])
+    const home = ensureUserDshHome(user.id)
+    const result = runDshPlugin(['add', spec], 180000, home)
     const okRun = result.status === 0
+    if (okRun) await closeHarnessForHome(home)
     logAudit(user, 'runtime-bundle.install', spec, okRun ? 'ok' : 'failed', netOf(req))
     if (!okRun) {
       return json(res, 502, {
@@ -3592,7 +3626,7 @@ const api = {
       .filter((m) => m.listed !== false)
       .sort((a, b) => Number(a.order || 0) - Number(b.order || 0))
       .map((m) => marketItemState(m, { userId: user.id }))
-    json(res, 200, { items, network: networks[net]?.label || '', installScope: '当前账号或项目技能目录；Bundle 为运行时级共享' })
+    json(res, 200, { items, network: networks[net]?.label || '', installScope: '当前账号或项目技能目录；Bundle 按账号独立 DSH_HOME' })
   },
   'GET /api/plugin-market/download': (req, res, url) => {
     const id = String(url.searchParams.get('id') || '')
@@ -3628,16 +3662,17 @@ const api = {
     }
     if (item.scope === '需授权' && !canManage(user)) return json(res, 403, { error: '该插件需部门负责人授权后安装' })
     if (activeRuns.size) return json(res, 409, { error: '有会话正在执行，安装或卸载会在下一轮生效，请稍后再试', code: 'RUNTIME_BUSY' })
-    const scope = isBundle ? 'global' : (body.scope === 'project' ? 'project' : 'user')
+    const scope = isBundle ? 'account' : (body.scope === 'project' ? 'project' : 'user')
     const projectId = scope === 'project' ? String(body.projectId || '') : ''
     if (scope === 'project' && !projectCwdOf(projectId)) return json(res, 400, { error: '请选择有本地工作目录的项目后再安装' })
-    const ctx = { scope, userId: user.id, projectId, projectCwd: projectCwdOf(projectId) }
-    const has = isBundle ? marketBundleInstalled(item.id) : Boolean(marketSkillManifestAt(marketSkillTarget(item.id, ctx))?.marketId === item.id)
+    const home = isBundle ? ensureUserDshHome(user.id) : ''
+    const ctx = { scope, userId: user.id, projectId, projectCwd: projectCwdOf(projectId), dshHome: home }
+    const has = isBundle ? marketBundleInstalled(item.id, home) : Boolean(marketSkillManifestAt(marketSkillTarget(item.id, ctx))?.marketId === item.id)
     try {
       if (isBundle) {
         if (!pnpmAvailable()) return json(res, 501, { error: '客户端未内置 pnpm，无法安装 DSH Bundle', code: 'PNPM_MISSING' })
-        if (has) await uninstallMarketBundle(item)
-        else await installMarketBundle(item)
+        if (has) await uninstallMarketBundle(item, home)
+        else await installMarketBundle(item, home)
       } else if (has) {
         await uninstallMarketSkill(item, user, ctx)
       } else {
@@ -3647,8 +3682,8 @@ const api = {
       return json(res, 409, { error: error.message || (has ? '卸载失败' : '安装失败') })
     }
     if (isBundle) {
-      if (has) removeMarketInstallRecord(item.id, { userId: user.id, scope: 'global', projectId: '' })
-      else addMarketInstallRecord(item.id, { userId: user.id, userName: user.name, scope: 'global', projectId: '', installedAt: Date.now() })
+      if (has) removeMarketInstallRecord(item.id, { userId: user.id, scope: 'account', projectId: '' })
+      else addMarketInstallRecord(item.id, { userId: user.id, userName: user.name, scope: 'account', projectId: '', installedAt: Date.now() })
     } else {
       if (has) removeMarketInstallRecord(item.id, { userId: user.id, scope, projectId })
       else addMarketInstallRecord(item.id, { userId: user.id, userName: user.name, scope, projectId, installedAt: Date.now() })
@@ -4269,6 +4304,7 @@ const api = {
         context,
         cwd: conv.agentCwd,
         agentsHome: userAgentHome(user.id),
+        dshHome: ensureUserDshHome(user.id),
         executionPolicy,
         runKey: conv.id,
         runtimeScope: conv.id,

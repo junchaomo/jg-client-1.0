@@ -33,8 +33,8 @@ let sdkPromise = null
 const active = new Map()
 const MAX_ACTIVE_HARNESSES = 6
 
-function keyOf({ apiKey, baseUrl, model, reasoningEffort, agentsHome }) {
-  return createHash('sha256').update(`${apiKey}|${baseUrl}|${model}|${reasoningEffort || ''}|${agentsHome || ''}`).digest('hex')
+function keyOf({ apiKey, baseUrl, model, reasoningEffort, agentsHome, dshHome }) {
+  return createHash('sha256').update(`${apiKey}|${baseUrl}|${model}|${reasoningEffort || ''}|${agentsHome || ''}|${dshHome || ''}`).digest('hex')
 }
 
 function runtimeEntryKey(cfg, cwd, scope = '') {
@@ -67,6 +67,7 @@ function acquire(entry) {
 
 async function getHarness(cfg, handlers = null, cwd = '', runtimeScope = '') {
   const sandboxRoot = sandboxRootFor(cwd)
+  const userHome = cfg.dshHome || baseHome
   const key = runtimeEntryKey(cfg, cwd, runtimeScope)
   if (active.has(key)) {
     const entry = active.get(key)
@@ -84,7 +85,7 @@ async function getHarness(cfg, handlers = null, cwd = '', runtimeScope = '') {
       try { await idle[1].harness.close() } catch {}
     }
   }
-  mkdirSync(baseHome, { recursive: true })
+  mkdirSync(userHome, { recursive: true })
   mkdirSync(sandboxRoot, { recursive: true })
   const { DeepSeekHarness } = await loadSdk()
   const env = { ...process.env, DEEPSEEK_API_KEY: cfg.apiKey }
@@ -102,10 +103,10 @@ async function getHarness(cfg, handlers = null, cwd = '', runtimeScope = '') {
     mkdirSync(join(cfg.agentsHome, 'skills'), { recursive: true })
     env.DSH_AGENTS_HOME = cfg.agentsHome
   }
-  if (!env.JG_MCP_DEBUG) env.JG_MCP_DEBUG = join(baseHome, 'mcp-debug.log')
+  if (!env.JG_MCP_DEBUG) env.JG_MCP_DEBUG = join(userHome, 'mcp-debug.log')
   const harness = new DeepSeekHarness({
     dshBin,
-    dshHome: baseHome,
+    dshHome: userHome,
     cwd: sandboxRoot,
     provider: 'deepseek-official',
     model: cfg.model || 'deepseek-chat',
@@ -119,7 +120,7 @@ async function getHarness(cfg, handlers = null, cwd = '', runtimeScope = '') {
       onUserQuestion: typeof handlers.onQuestion === 'function' ? handlers.onQuestion : undefined,
     } : {}),
   })
-  const entry = { key, harness, handlers, usedAt: Date.now(), queue: Promise.resolve(), toolCalls: new Map(), runs: new Map() }
+  const entry = { key, home: userHome, harness, handlers, usedAt: Date.now(), queue: Promise.resolve(), toolCalls: new Map(), runs: new Map() }
   if (handlers && typeof handlers.onApproval === 'function') {
     // 必须先启动 client 再注册审批回调，否则 SDK 会把审批失败关闭为 unavailable。
     harness.client.start()
@@ -505,10 +506,10 @@ export async function runtimeRequest(method, params = {}, cfg = {}) {
  * 在 DSH 会话中运行一轮 agent。已存在 dshSessionId 时续用同一会话，
  * 不存在时自动创建新会话并返回 id。
  */
-export async function runAgent({ apiKey, baseUrl, model, text, sessionId, context, images, handlers, reasoningEffort, cwd, agentsHome = '', executionPolicy = 'auto', runKey = '', runtimeScope = '', onStart = null, shouldCancel = null }) {
+export async function runAgent({ apiKey, baseUrl, model, text, sessionId, context, images, handlers, reasoningEffort, cwd, agentsHome = '', dshHome = '', executionPolicy = 'auto', runKey = '', runtimeScope = '', onStart = null, shouldCancel = null }) {
   if (!apiKey) throw new HarnessError('没有可用的模型密钥', { code: 'MODEL_KEY_MISSING', status: 503 })
   const effort = ['off', 'low', 'medium', 'high', 'max'].includes(String(reasoningEffort || '')) ? String(reasoningEffort) : ''
-  const cfg = { apiKey, baseUrl, model, reasoningEffort: effort, agentsHome }
+  const cfg = { apiKey, baseUrl, model, reasoningEffort: effort, agentsHome, dshHome }
   const harness = await getHarness(cfg, handlers, cwd, runtimeScope)
   const entryKey = runtimeEntryKey(cfg, cwd, runtimeScope)
   const entry = active.get(entryKey)
@@ -667,6 +668,17 @@ export async function closeHarness() {
   const current = [...active.values()]
   active.clear()
   await Promise.all(current.map((entry) => entry.harness.close().catch(() => {})))
+}
+
+/** 只关闭某个账号的 DSH_HOME 对应的运行时，供该账号安装/卸载 Bundle 后重载。 */
+export async function closeHarnessForHome(home) {
+  const normalized = String(home || '').replace(/\\/g, '/').toLowerCase()
+  const targets = [...active.entries()].filter(([, entry]) => String(entry.home || '').replace(/\\/g, '/').toLowerCase() === normalized)
+  for (const [key, entry] of targets) {
+    active.delete(key)
+    try { await entry.harness.close() } catch {}
+  }
+  return targets.length
 }
 
 /**

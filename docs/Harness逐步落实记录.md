@@ -780,10 +780,12 @@
 
 **边界**：
 
-- 账号/项目隔离只覆盖技能；DSH Bundle 仍通过 `dsh plugin add` 安装到本机运行时，对同一客户端所有账号可见，详情页已标注。
+- 账号/项目隔离只覆盖技能；DSH Bundle 仍通过 `dsh plugin add` 安装到本机运行时，对同一客户端所有账号可见（该边界已在第 30 节改为按账号 DSH_HOME 隔离）。
 - 全客户端基线技能按产品级共享处理，未迁移为某个账号的私有安装。
 
 ## 29. 按三层架构拆分公共能力、业务插件与技能（2026-11-13）
+
+> 本节记录当时的中间状态（市场 10 条、技能 7 个）。最终清理与 Bundle 账号隔离见第 30 节：市场只保留 4 个官方技能，技能 4 个，Bundle 按账号隔离。
 
 **目标**：按架构图把插件市场拆成三层：Harness 核心运行时、平台公共能力、业务插件；公共能力不进可卸载市场，业务插件与技能共用市场但必须显式区分类型与图标。
 
@@ -811,3 +813,30 @@
 - 当前市场没有真实业务插件包，架构图中的“智能技术标编制 / 建筑材质提取 / 交通流量统计 / 规划成果质检”只是业务示例，未作为演示条目上架；员工提交的 Bundle 会以“插件”类型进入市场。
 - 平台能力的权限与资源上限是平台策略配置，已落库并在界面展示；运行时实际执行仍受 DSH 工具白名单与人工审批约束，尚未做进程级 cgroup/Job Object 资源限额。
 - PDF 尚未独立成模块，GIS/CAD 没有真实运行时模块，因此公共能力清单是 5 项而不是架构图中的 6 项。
+
+## 30. Bundle 按账号隔离、清空非官方技能与市场演示数据（2026-11-13）
+
+**目标**：把 DSH Bundle 从“本机全局挂载”改成按账号独立；开发阶段只保留 DeepSeek Harness 官方技能，清掉内部/虚构的市场条目、提交记录和技能目录。
+
+**实现**：
+
+- 每个账号使用独立 `DSH_HOME`：`data/agents/<userId>/dsh-home`。首次使用时从平台官方 profile 复制基线 `bundles`、`cordis.patch.yml`、`cordis.yml`、`pnpm-lock.yaml`、`pnpm-workspace.yaml`，并从全局官方技能目录复制 4 个官方技能，不复制任何市场或内部技能。
+- `runAgent` 增加 `dshHome` 参数，Harness 进程的 `dshHome`、`JG_MCP_DEBUG` 与缓存键都按账号区分；同一账号的 Bundle 只影响该账号的运行时。
+- Bundle 的安装、卸载、启停与 `/api/runtime/bundles` 全部改为读写当前账号的 profile；新增 `closeHarnessForHome()`，安装后只关闭该账号的运行时，不再关闭所有账号的 Harness。
+- 市场台账中 Bundle 范围由 `global` 改为 `account`；后台安装用户按账号扫描 `data/agents/*/dsh-home` 的 profile bundles。
+- 市场目录只保留官方技能 `D-01`~`D-04`；移除 `JG-01`、`M-01`、`M-02`、`M-03`、`M-07`、`M-08`。旧持久快照中的无 `subId` 市场条目与 `SUB-01`~`SUB-04` 演示提交在 hydrate 时过滤，市场安装台账同步清理已不存在条目。
+- 删除 `data/dsh-home/skills` 下的 `jg-product`、`market-M-01`、`market-M-03`，删除 `marketplace/skills` 下 6 个非官方技能源目录；`SKILL_SOURCE_DIR` / `SKILL_INSTALL_DIR` 移除 `JG-01`。
+- 技能/安装文案改为“官方基线技能”“当前账号 DSH 运行时”，不再声称 Bundle 对全客户端可见。
+
+**实测**：
+
+- `GET /api/plugins` 返回 4 个官方技能；`GET /api/plugin-market` 返回 4 条，全部 `type='skill'`；`counts.plugins=4`，KPI 为 `5 / 4`。
+- `GET /api/runtime/bundles` 对 admin 与 ops 分别返回各自 `DSH_HOME` 的 profile；关闭 admin 的 `@deepseek-ai/dsh-sdk-app` 后 admin 只剩 `@deepseek-ai/dsh-base`，ops 仍为 `dsh-base + dsh-sdk-app`，恢复后 admin 回到两项，证明账号隔离。
+- `data/agents/A-7788-01/dsh-home` 与 `data/agents/ops/dsh-home` 各自只有 4 个官方技能目录，基线 bundles 为 `@deepseek-ai/dsh-base`、`@deepseek-ai/dsh-sdk-app`。以各自 `DSH_HOME` 执行 `dsh --profile sdk --dump-config` 均退出码 0，dump 中可见 `skill-office`、`mcp-jg`、`optional-session-search`、`optional-session-query-sqlite`，证明账号 profile 仍加载平台 patch。
+- 管理后台市场表 4 条，均技能；插件审核为 0 条，无演示提交。
+
+**边界**：
+
+- Bundle 目前只做账号级隔离，未做项目级 Bundle；项目级仍只覆盖技能目录。
+- 每个账号复制一份官方技能与 profile，账号多时磁盘占用线性增长；后续可改为只读共享 + 按账号 overlay。
+- 账号首次切换 `DSH_HOME` 后，旧全局 DSH 会话不能 resume，聊天会退回新建会话；历史对话正文仍由产品侧保存。

@@ -105,7 +105,7 @@ export const consoleSections = {
       { k: '个人模型', v: '2', note: '员工自有 Key', tone: '' },
       { k: 'Agent', v: '5', note: '已发布 3 · 草稿 2', tone: '' },
       { k: 'MCP 工具', v: '18', note: '高风险 3（需审批）', tone: 'warn' },
-      { k: '公共能力 / 技能', v: '5 / 7', note: '市场 0 个插件 / 10 个技能 · 待审核 0', tone: 'ok' },
+      { k: '公共能力 / 技能', v: '5 / 4', note: '市场 0 个插件 / 4 个官方技能 · 待审核 0', tone: 'ok' },
       { k: '自动化任务', v: '24', note: '今日执行 412 次', tone: 'ok' },
     ],
     blocks: [

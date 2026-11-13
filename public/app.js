@@ -4016,7 +4016,7 @@ function openPluginSlide(id) {
         <select class="text-input" id="mktInstallProject" style="display:none;margin-top:6px">${(state.projects || []).filter((p) => p.cwd).map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('')}</select>
       </div></div>` : ''}
       ${m.installed && m.installedScope ? `<div class="field"><div class="field-label">安装位置</div><div class="field-value">${m.installedScope === 'project' ? `项目 ${esc((state.projects || []).find((p) => p.id === m.installedProjectId)?.name || m.installedProjectId)}` : '当前账号'}</div></div>` : ''}
-      <div class="field"><div class="field-label">安装要求</div><div class="field-value">${m.locked ? '全客户端基线能力，无需安装；按当前网络与授权范围生效。' : m.scope === '需授权' ? '需部门负责人授权后安装，授权范围按岗位与项目参与关系核定。' : m.kind === 'bundle' ? 'Bundle 会安装到本机 DSH 运行时，对同一客户端的所有账号生效。' : '企业公开技能，可直接安装；账号范围与其他账号互不可见，项目范围仅该项目会话可见。'}</div></div>
+      <div class="field"><div class="field-label">安装要求</div><div class="field-value">${m.locked ? '平台官方基线技能，无需安装；按当前网络与授权范围生效。' : m.scope === '需授权' ? '需部门负责人授权后安装，授权范围按岗位与项目参与关系核定。' : m.kind === 'bundle' ? 'Bundle 会安装到当前账号的 DSH 运行时，只对该账号生效。' : '官方技能，可直接安装；账号范围与其他账号互不可见，项目范围仅该项目会话可见。'}</div></div>
     </div>
     <div class="slide-foot">
       ${m.locked ? '<button class="btn primary" disabled>全客户端基线</button>' : m.available === false ? '<button class="btn primary" disabled>尚未提供安装包</button>' : `<button class="btn primary" data-toggle>${m.installed ? '卸载' : '安装'}</button>`}
@@ -4198,7 +4198,7 @@ function openPluginReport(sub) {
     </div>
     ${sub.reason ? `<div class="form-note bad-note">退回原因：${esc(sub.reason)}</div>` : ''}
     <div class="form-note">${sub.status === 'approved'
-      ? (sub.kind === 'skill' ? '技能包已入库，可在插件市场一键安装到本机运行时。' : 'Bundle 已入库，可在插件市场一键安装；安装会写入本机 DSH profile，下一轮对话生效。')
+      ? (sub.kind === 'skill' ? '技能包已入库，可在技能市场一键安装。' : 'Bundle 已入库，可在插件市场安装到当前账号；只对该账号的 DSH 运行时生效。')
       : (sub.kind === 'skill' ? '审核通过后技能包会入库并开放安装；审核在「管理中心 · AI 能力管理 · 插件审核」处理。' : '审核通过后 Bundle 会入库并开放安装；审核在「管理中心 · AI 能力管理 · 插件审核」处理。')}</div>
     <div class="form-foot"><span class="mono">提交人 ${esc(sub.author)} · ${esc(sub.unit)} · ${esc(sub.submitted)}</span><span class="spacer"></span><button class="btn primary" data-mclose>知道了</button></div>`)
   mask.querySelector('[data-mclose]').addEventListener('click', () => mask.remove())
