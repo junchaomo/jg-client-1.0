@@ -3815,7 +3815,7 @@ async function renderSkills(el) {
       <div class="pl-grid"${cols ? ` style="grid-template-columns:${cols}"` : ''}>${cards}</div>
     </section>` : ''
 
-  const filterMarket = (type) => state.market.filter((m) => marketType(m) === type).filter((m) => {
+  const filterMarket = (type) => state.market.filter((m) => marketType(m) === type).filter((m) => !(type === 'skill' && m.locked)).filter((m) => {
     const q = String(state.skillQuery || '').trim().toLowerCase()
     if (!q) return true
     return `${m.name} ${m.desc} ${m.publisher || ''}`.toLowerCase().includes(q)
@@ -3839,7 +3839,7 @@ async function renderSkills(el) {
 
   const pluginMarketSection = filterMarket('plugin').length ? marketSections('plugin') : ''
 
-  const skillMarketSections = filterMarket('skill').length ? marketSections('skill') : '<section class="pl-sec"><h2 class="pl-sec-title">技能市场<span class="pl-arrow">›</span></h2><div class="sk-empty">没有匹配的技能</div></section>'
+  const skillMarketSections = filterMarket('skill').length ? marketSections('skill') : '<section class="pl-sec"><h2 class="pl-sec-title">技能市场<span class="pl-arrow">›</span></h2><div class="sk-empty">官方内置技能由平台维护，不在技能市场展示；当前没有员工创建并上架的技能</div></section>'
   const skillSubs = subs.filter((x) => x.kind === 'skill')
   const skillPersonalSections = `
     ${sec('我创建的技能', skillSubs.length ? skillSubs.map((x, i) => {

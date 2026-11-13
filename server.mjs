@@ -3666,6 +3666,8 @@ const api = {
       .filter((m) => m.listed !== false)
       .sort((a, b) => Number(a.order || 0) - Number(b.order || 0))
       .map((m) => marketItemState(m, { userId: user.id }))
+      // 官方内置技能属于平台基线，不是员工市场商品；员工市场不展示。
+      .filter((m) => !(m.kind === 'skill' && m.locked))
     json(res, 200, { items, network: networks[net]?.label || '', installScope: '当前账号或项目技能目录；Bundle 按账号独立 DSH_HOME' })
   },
   'GET /api/plugin-market/download': (req, res, url) => {
@@ -3743,13 +3745,15 @@ const api = {
     const items = [...liveMarket]
       .sort((a, b) => Number(a.order || 0) - Number(b.order || 0))
       .map((m) => marketItemState(m, { any: true }))
+      // 官方内置技能是平台基线，不进入市场台账，管理员也不在这里上下架。
+      .filter((m) => !(m.kind === 'skill' && m.locked))
     json(res, 200, {
       ok: true,
       items,
       counts: {
-        total: liveMarket.length,
-        listed: liveMarket.filter((m) => m.listed !== false).length,
-        installed: liveMarket.filter((m) => marketItemState(m, { any: true }).installed).length,
+        total: items.length,
+        listed: items.filter((m) => m.listed !== false).length,
+        installed: items.filter((m) => m.installed).length,
       },
     })
   },
@@ -4622,8 +4626,9 @@ const api = {
     const installed = installedSkillPlugins()
     const capabilityCount = platformCapabilities().filter((p) => p.enabled).length
     const skillCount = installed.filter((p) => p.kind === 'personal').length
-    const listedCount = liveMarket.filter((m) => m.listed !== false).length
-    const pluginMarketCount = liveMarket.filter((m) => m.listed !== false && (m.kind === 'bundle' || m.kind === 'plugin')).length
+    const listedMarket = liveMarket.filter((m) => m.listed !== false && !(m.kind === 'skill' && marketSkillGlobalBaseline(m.id)))
+    const listedCount = listedMarket.length
+    const pluginMarketCount = listedMarket.filter((m) => m.kind === 'bundle' || m.kind === 'plugin').length
     const skillMarketCount = listedCount - pluginMarketCount
     const pendingCount = pluginSubs.filter((s) => s.status === 'pending').length
     const sections = {
