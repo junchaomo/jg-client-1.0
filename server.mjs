@@ -336,6 +336,46 @@ function installedSkillPlugins() {
   }
   return list
 }
+/* 账号技能目录里由市场安装的技能；官方基线不复制到这里，因此不会混入“已安装”。 */
+function installedUserSkillPlugins(userId) {
+  const skillsDir = join(userAgentHome(userId), 'skills')
+  let dirs = []
+  try {
+    dirs = readdirSync(skillsDir, { withFileTypes: true }).filter((entry) => entry.isDirectory()).map((entry) => entry.name)
+  } catch {}
+  const list = []
+  for (const dir of dirs) {
+    const target = join(skillsDir, dir)
+    const manifest = marketSkillManifestAt(target)
+    const item = manifest?.marketId ? liveMarket.find((m) => m.id === manifest.marketId) : null
+    let name = item?.name || dir
+    let desc = item?.desc || '当前账号安装的技能'
+    try {
+      const text = readFileSync(join(target, 'SKILL.md'), 'utf8')
+      const fm = text.match(/^---\s*\n([\s\S]*?)\n---/)
+      if (fm) {
+        name = (fm[1].match(/^name:\s*(.+)$/m) || [])[1]?.trim() || name
+        desc = (fm[1].match(/^description:\s*(.+)$/m) || [])[1]?.trim() || desc
+      }
+    } catch {}
+    list.push({
+      id: `S-user-${dir}`,
+      name,
+      kind: 'personal',
+      publisher: item?.publisher || '当前账号安装',
+      version: item?.version || '',
+      status: 'enabled',
+      nets: ['inet', 'gov', 'secret'],
+      deps: '账号技能目录',
+      scope: '当前账号',
+      risk: '只读',
+      desc,
+      source: 'dsh-skill',
+      dir,
+    })
+  }
+  return list
+}
 
 /*
  * 平台公共能力是系统级模块，不属于插件市场：
@@ -3541,7 +3581,7 @@ const api = {
   'GET /api/plugins': (req, res) => {
     const user = roleOf(req)
     const net = netOf(req)
-    const list = installedSkillPlugins()
+    const list = [...installedSkillPlugins(), ...installedUserSkillPlugins(user.id)]
       .filter((p) => (p.nets || ['inet']).includes(net))
       .map((p) => ({ ...p, status: pluginEnabledFor(user.id, p) }))
     json(res, 200, { items: list, canManage: canManage(user) })
