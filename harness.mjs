@@ -33,8 +33,8 @@ let sdkPromise = null
 const active = new Map()
 const MAX_ACTIVE_HARNESSES = 6
 
-function keyOf({ apiKey, baseUrl, model, reasoningEffort }) {
-  return createHash('sha256').update(`${apiKey}|${baseUrl}|${model}|${reasoningEffort || ''}`).digest('hex')
+function keyOf({ apiKey, baseUrl, model, reasoningEffort, agentsHome }) {
+  return createHash('sha256').update(`${apiKey}|${baseUrl}|${model}|${reasoningEffort || ''}|${agentsHome || ''}`).digest('hex')
 }
 
 function runtimeEntryKey(cfg, cwd, scope = '') {
@@ -96,6 +96,12 @@ async function getHarness(cfg, handlers = null, cwd = '', runtimeScope = '') {
   if (!env.JG_MCP_URL && env.PORT) env.JG_MCP_URL = `http://127.0.0.1:${env.PORT}`
   if (!env.JG_MCP_SCRIPT) env.JG_MCP_SCRIPT = join(root, 'mcp-jg.mjs')
   if (!env.JG_DSH_NODE) env.JG_DSH_NODE = process.execPath
+  if (cfg.agentsHome) {
+    // 每个账号独立的 agent 配置根，skill-filesystem 会扫描其 skills 子目录；
+    // 这样市场里按账号安装的技能只对该账号的运行时可见。
+    mkdirSync(join(cfg.agentsHome, 'skills'), { recursive: true })
+    env.DSH_AGENTS_HOME = cfg.agentsHome
+  }
   if (!env.JG_MCP_DEBUG) env.JG_MCP_DEBUG = join(baseHome, 'mcp-debug.log')
   const harness = new DeepSeekHarness({
     dshBin,
@@ -499,10 +505,10 @@ export async function runtimeRequest(method, params = {}, cfg = {}) {
  * 在 DSH 会话中运行一轮 agent。已存在 dshSessionId 时续用同一会话，
  * 不存在时自动创建新会话并返回 id。
  */
-export async function runAgent({ apiKey, baseUrl, model, text, sessionId, context, images, handlers, reasoningEffort, cwd, executionPolicy = 'auto', runKey = '', runtimeScope = '', onStart = null, shouldCancel = null }) {
+export async function runAgent({ apiKey, baseUrl, model, text, sessionId, context, images, handlers, reasoningEffort, cwd, agentsHome = '', executionPolicy = 'auto', runKey = '', runtimeScope = '', onStart = null, shouldCancel = null }) {
   if (!apiKey) throw new HarnessError('没有可用的模型密钥', { code: 'MODEL_KEY_MISSING', status: 503 })
   const effort = ['off', 'low', 'medium', 'high', 'max'].includes(String(reasoningEffort || '')) ? String(reasoningEffort) : ''
-  const cfg = { apiKey, baseUrl, model, reasoningEffort: effort }
+  const cfg = { apiKey, baseUrl, model, reasoningEffort: effort, agentsHome }
   const harness = await getHarness(cfg, handlers, cwd, runtimeScope)
   const entryKey = runtimeEntryKey(cfg, cwd, runtimeScope)
   const entry = active.get(entryKey)

@@ -72,7 +72,7 @@
 | MCP 客户端/资源 | 已落地 | base 有 `mcp-resources`；profile insert `mcp-jg`；产品有资源目录与读取接口。 |
 | 产品 MCP 工具 | 已落地 | `mcp-jg.mjs` 注册 10 个工具：`drive_search`、`drive_read`、`notice_list`、`notice_read`、`academy_search`、`contacts_find`、`im_send`、`notebook_search`、`resource_query`、`task_create`。 |
 | 插件管理器 | 部分 | `plugin-manager`、`tool-plugin-manager` 已启用；产品库存按当前 profile 用 `dsh --dump-config` 即时生成，启停只改 profile patch 并提示重启。`server.mjs:617-690` |
-| 插件市场/用户插件真实挂载 | 已落地 | 2026-11-12 市场统一收口为 12 条：4 个 DSH 默认技能、集团技能、客户端内置插件与社区技能；`/api/plugins` 只返回本机实际加载的 9 项。社区包审核通过后入库，DSH Bundle 用内置 pnpm 安装进 `data/dsh-home`，补写 profile `bundles`，失败自动回滚；管理中心可上下架、编辑、删除。安装范围仍是本机全局，不是按账号隔离。 |
+| 插件市场/用户插件真实挂载 | 已落地 | 2026-11-13 市场收口为 10 条：4 个 DSH 默认技能、集团技能与社区技能；`/api/plugins` 只返回本机实际加载的 9 项，其中 Office/MCP 为 `kind='capability'` 底层能力，不进入市场。社区包审核通过后入库，DSH Bundle 用内置 pnpm 安装进 `data/dsh-home`，补写 profile `bundles`，失败自动回滚；管理中心可上下架、编辑、排序、改发布单位、查看安装用户。技能安装按账号写 `data/agents/<userId>/skills`、按项目写 `<cwd>/.dsh/skills`，已互不可见；Bundle 仍为本机运行时级。 |
 | 选中插件注入 | 部分 | 产品把选中的插件名称/描述拼进上下文提示，不是运行时能力。`server.mjs:3479-3483` |
 | DSH 原生设置/配置编辑 | 已确定边界 | `settings`、`config-editor` 运行时已挂载；产品设置是唯一可写入口，设置中心只读展示原生挂载状态，不提供编辑表单。 |
 | 凭据管理 | 已确定边界 | `authorization`、`credentials-local` 已挂载；模型密钥由产品设置中心按会话注入子进程环境，产品不读取 DSH `.credentials.yaml` 内容。 |
@@ -111,11 +111,11 @@
 
 ### P1：插件市场已统一收口，DSH Bundle 一键安装已落地
 
-2026-11-12 已把市场安装改成真实挂载：4 个 DSH 默认技能、集团技能与客户端内置插件统一进入 12 条市场目录；技能包安装时复制到 `$DSH_HOME/skills/<原名>`，关闭空闲运行时后下一轮对话重新发现；上传的技能包（根目录含 `SKILL.md`）经检测、审核后入库到 `data/market-packages`，同样可安装。
+2026-11-13 市场安装已按产品边界收口：4 个 DSH 默认技能、集团技能与社区技能进入 10 条市场目录；Office 文档与九规内部工具（MCP）不再作为市场条目，改为运行时底层能力（`CAP-OFFICE` / `CAP-MCP-JG`）展示，不提供安装/卸载。技能包安装时，账号范围复制到 `data/agents/<userId>/skills/<原名>`，项目范围复制到 `<cwd>/.dsh/skills/<原名>`，关闭空闲运行时后下一轮对话重新发现；上传的技能包（根目录含 `SKILL.md`）经检测、审核后入库到 `data/market-packages`，同样可安装。
 
-同轮已补齐社区闭环与 Bundle：普通用户只看自己的提交，管理员看全部；审核通过后条目进入市场并开放下载；管理中心可上下架、编辑名称/描述/分组、删除社区条目。DSH Bundle 使用内置 pnpm 11.21.0 安装，服务端注入 `DSH_HOME=data/dsh-home`，装完补写 profile `bundles`，`dsh --dump-config` 校验失败时自动 `dsh plugin remove` 并回滚；实测上传 → 审核 → 解压 → 市场可见 → 安装 → dump 退出码 0 → 卸载全链路通过。
+同轮已补齐社区闭环与 Bundle：普通用户只看自己的提交，管理员看全部；审核通过后条目进入市场并开放下载；管理中心可上下架、编辑名称/描述/分组/发布单位、排序、查看安装用户、删除社区条目。DSH Bundle 使用内置 pnpm 11.21.0 安装，服务端注入 `DSH_HOME=data/dsh-home`，装完补写 profile `bundles`，`dsh --dump-config` 校验失败时自动 `dsh plugin remove` 并回滚；实测上传 → 审核 → 解压 → 市场可见 → 安装 → dump 退出码 0 → 卸载全链路通过。
 
-仍需补齐：技能与 Bundle 安装都是**本机运行时全局挂载**，不是按账号隔离；要按账号隔离，需要每个用户独立 DSH_HOME 或独立运行时。
+仍需补齐：技能已按账号/项目隔离；DSH Bundle 仍是**本机运行时全局挂载**，对同一客户端所有账号可见，详情页已标注“Bundle 全局可见”。
 
 ### P1：后台任务已有队列，但重启后不自动续跑
 
@@ -128,7 +128,7 @@
 ## 五、建议推进顺序
 
 1. **审批矩阵继续扩面**：MCP 写工具已走人工审批；下一步把插件管理、网络外发也纳入同一套人工确认，并补拒绝路径的回归测试。
-2. **插件市场已完成统一收口**：技能包与 DSH Bundle 都已通过市场安装，pnpm 已内置，默认技能、集团技能与客户端内置插件都进入市场目录；管理中心可上/下架和编辑条目。后续只剩“按账号/项目隔离安装范围”与安装权限细分。
+2. **插件市场已完成统一收口**：技能包与 DSH Bundle 都已通过市场安装，pnpm 已内置（`installAvailable=true`），默认技能、集团技能进入市场目录；Office/MCP 作为底层能力保留在运行时。管理中心可上/下架、编辑、排序、改发布单位、查看安装用户。后续只剩 Bundle 的账号/项目隔离与安装权限细分。
 3. **持久任务队列继续补断点**：现有 `chat-run` 已有入队、并发槽、取消与中断标记；下一步补幂等键、断点快照与可选的自动续跑，仍不做无条件重放。
 4. **最后收口原生导出与账号隔离**：补齐 `dsh-session-log-export` 的原生 ZIP/Markdown 导出，并评估按账号/项目隔离 `DSH_HOME` 或运行时。
 

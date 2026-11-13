@@ -753,3 +753,32 @@
 
 - 当前 DSH SDK JSON-RPC 服务只暴露 `session/prompt|query|resume|wait` 与工作目录方法，没有 `session/cancel`；产品先用“会话独占运行时 + 关闭该运行时”实现等价停止，真正的单会话回合取消要等 SDK 暴露接口。
 - 队列是进程内调度器，任务记录持久化但重启后不自动续跑；自动续跑需要幂等键与副作用边界，当前刻意不做。
+## 28. 市场语义收口、账号/项目安装隔离与后台管理补齐（2026-11-13）
+
+**目标**：让市场只承载可安装项，把 Office/MCP 明确为底层能力；技能安装支持账号与项目隔离；管理中心补齐排序、发布单位修改与安装用户查看。
+
+**实现**：
+
+- `Office 文档`、`九规内部工具（MCP）`从 `MARKET_BUILTIN` 移除，不再作为市场商品；运行时 `/api/plugins` 仍保留，但 `kind` 改为 `capability`、`id` 改为 `CAP-OFFICE` / `CAP-MCP-JG`、`source='runtime-capability'`，市场页以“底层能力”分组展示，不提供安装/卸载。旧持久快照中的 `kind='plugin'` 内置条目在 hydrate 时过滤。
+- 市场目录收敛为 10 条：`D-01`~`D-04`、`JG-01`、`M-01`、`M-02`、`M-03`、`M-07`、`M-08`。
+- 技能安装范围：账号范围写 `data/agents/<userId>/skills/<目录>`，Harness 运行时注入 `DSH_AGENTS_HOME=data/agents/<userId>`；项目范围写 `<project.cwd>/.dsh/skills/<目录>`，DSH 项目根扫描 `.dsh/skills`。两种目录互不可见。
+- 安装台账新增 `marketInstalls`（`id -> [{userId,userName,scope,projectId,installedAt}]`），用于“当前账号已安装”判断和后台安装用户查看；成功安装/卸载后持久化。
+- 市场详情页新增“安装范围”选择，未安装条目可直接点行打开详情后选择“仅当前账号”或“当前项目”；已安装条目锁定原安装位置，卸载按原范围执行，避免改范围后卸错目录。
+- 历史全局安装（`D-01`~`D-04`、`JG-01`、`M-01`、`M-03`）作为“全客户端基线”保留，市场显示 `locked`，不允许按单个账号卸载。
+- 管理后台市场条目新增 `order`；`POST /api/admin/plugin-market` 支持 `action:'sort'` 与 `publisher` 更新；`GET` 返回 `installUsers`。后台表格展示发布单位、排序按钮与安装用户弹窗，操作行独立成行避免窄栏挤压。
+- 管理中心 KPI 改为“底层能力 / 技能”，值为 `2 / 7`，并注明 `0 个企业插件 · 市场 10 个已上架`；设置页原“企业插件”改为“运行时能力与技能”。
+
+**实测**：
+
+- 重启后 `/api/plugin-market` 返回 10 条；`/api/plugins` 返回 9 项（7 技能 + 2 capability）；市场页显示“底层能力”分组，Office/MCP 不再出现市场卡。
+- admin 账号 `A-7788-01` 安装 `M-02` 到账号范围：`data/agents/A-7788-01/skills/market-M-02` 存在，admin 市场 `installed=true`，ops 账号 `installed=false`。
+- admin 安装 `M-07` 到项目 `PRJ-D1F5D4`：`workspaces/traffic-counter/.dsh/skills/market-M-07` 存在，台账显示项目范围；通过页面把 `M-02` 安装到同一项目后，文件同样落在 `.dsh/skills`，详情页显示“安装位置 项目 车流量分析工具”。
+- 上述测试安装均通过 API 或页面卸载，文件删除、台账清空，空的 `data/agents/A-7788-01` 与项目 `.dsh` 目录清理。
+- 后台 `M-02` 上移/下移后顺序变化并可恢复；发布单位改为“智数中心（测试）”后恢复“智数中心”；表格改名后名称列可见，排序按钮、安装用户弹窗、发布单位输入框均在页面验证。
+- `GET /api/runtime/bundles` 返回 `installAvailable=true`；内置 pnpm 为 `runtime/pnpm/node_modules/pnpm/bin/pnpm.cjs`，`pnpm --version` 输出 11.21.0，因此“缺 pnpm”不再是当前版本的 Bundle 安装阻塞项。
+- 截图：`D:\project-test3\shots\market-capabilities.png`、`plugin-market-admin.png`、`plugin-market-users.png`。
+
+**边界**：
+
+- 账号/项目隔离只覆盖技能；DSH Bundle 仍通过 `dsh plugin add` 安装到本机运行时，对同一客户端所有账号可见，详情页已标注。
+- 全客户端基线技能按产品级共享处理，未迁移为某个账号的私有安装。

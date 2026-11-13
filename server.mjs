@@ -123,15 +123,29 @@ const MARKET_BUILTIN = [
   { id: 'D-03', section: '官方与内置', name: 'DSH 插件开发', desc: '设计、审查、安装、启停和调试 Harness 插件、Bundle、页面、工具与 MCP 连接', publisher: 'DeepSeek Harness', scope: '企业公开', kind: 'skill', version: '0.2.2-rc.1' },
   { id: 'D-04', section: '官方与内置', name: 'Agent 预设编辑', desc: '创建、修改和校验 Agent 预设与其他 Cordis 组合，判断 Host 与预设的正确放置位置', publisher: 'DeepSeek Harness', scope: '企业公开', kind: 'skill', version: '0.2.2-rc.1' },
   { id: 'JG-01', section: '企业内部', name: '九规智能中枢内部工具', desc: '检索云空间、通知公告、教学园地、通讯录、数据中心资源与智能笔记本，并发送 IM、创建待办', publisher: '集团总部', scope: '企业公开', kind: 'skill', version: '1.0.0' },
-  { id: 'P-OFFICE', section: '官方与内置', name: 'Office 文档', desc: '通过 skill-office 插件加载的 Word / Excel / PPT / PDF 文档处理技能，随客户端内置', publisher: '九规智能中枢', scope: '企业公开', kind: 'plugin', version: '1.0.0' },
-  { id: 'P-MCP-JG', section: '官方与内置', name: '九规内部工具（MCP）', desc: '通过 mcp-jg 插件连接集团内部 MCP 工具，按当前员工与网络授权执行', publisher: '集团总部', scope: '企业公开', kind: 'plugin', version: '1.0.0' },
   { id: 'M-01', section: '热门', name: '规范条文核查', desc: '对规划、建筑、市政图纸与文本做条文级合规核查，输出带依据、位置与整改建议的问题清单', publisher: '智数中心', scope: '企业公开', kind: 'skill', version: '1.0.0' },
   { id: 'M-02', section: '热门', name: '用地指标测算', desc: '按用地、基底、建筑面积与绿地数据测算容积率、建筑密度、绿地率，并输出计算过程', publisher: '智数中心', scope: '企业公开', kind: 'skill', version: '1.0.0' },
   { id: 'M-03', section: '热门', name: '公文格式校对', desc: '按党政机关公文格式校对版头、发文字号、标题、主送、附件、落款与页码', publisher: '集团办公室', scope: '企业公开', kind: 'skill', version: '1.0.0' },
   { id: 'M-07', section: '新品推荐', name: '会议纪要整理', desc: '把会议转写或笔记整理成议定事项、责任人、时限与待确认问题', publisher: '集团办公室', scope: '企业公开', kind: 'skill', version: '1.0.0' },
   { id: 'M-08', section: '新品推荐', name: '合同条款比对', desc: '比对合同两版条款差异，标记付款、工期、违约、知识产权与保密风险', publisher: '法务合规部', scope: '需授权', kind: 'skill', version: '1.0.0' },
 ]
-const liveMarket = MARKET_BUILTIN.map((m) => ({ ...m }))
+const liveMarket = MARKET_BUILTIN.map((m, i) => ({ ...m, order: i }))
+/* 市场安装台账：按市场条目记录“哪个账号、装到哪个范围”，用于隔离与后台查看。 */
+const liveMarketInstalls = new Map()
+function marketInstallRecords(id) {
+  const list = liveMarketInstalls.get(String(id))
+  return Array.isArray(list) ? list : []
+}
+function addMarketInstallRecord(id, record) {
+  const list = marketInstallRecords(id).filter((r) => !(r.userId === record.userId && r.scope === record.scope && String(r.projectId || '') === String(record.projectId || '')))
+  list.unshift(record)
+  liveMarketInstalls.set(String(id), list.slice(0, 200))
+}
+function removeMarketInstallRecord(id, record) {
+  const list = marketInstallRecords(id).filter((r) => !(r.userId === record.userId && r.scope === record.scope && String(r.projectId || '') === String(record.projectId || '')))
+  if (list.length) liveMarketInstalls.set(String(id), list)
+  else liveMarketInstalls.delete(String(id))
+}
 /* 插件安装与启停按用户独立保存，避免一个账号的操作影响其他人。 */
 const livePluginInstalls = new Map()
 const livePluginToggles = new Map()
@@ -370,34 +384,34 @@ function installedSkillPlugins() {
   const row = (id) => inventory.find((x) => x.id === id)
   if (row('skill-office')?.enabled) {
     list.push({
-      id: 'P-OFFICE',
+      id: 'CAP-OFFICE',
       name: 'Office 文档',
-      kind: 'enterprise',
-      publisher: 'DSH 运行时',
-      version: '',
-      status: 'enabled',
-      nets: ['inet', 'gov', 'secret'],
-      deps: 'skill-office 插件',
-      scope: '本机 DSH 运行时',
-      risk: '只读',
-      desc: '通过 skill-office 插件加载的 Word / Excel / PPT / PDF 文档处理技能。',
-      source: 'dsh-plugin',
-    })
-  }
-  if (row('mcp-jg')?.enabled) {
-    list.push({
-      id: 'P-MCP-JG',
-      name: '九规内部工具（MCP）',
-      kind: 'enterprise',
+      kind: 'capability',
       publisher: '九规智能中枢',
       version: '',
       status: 'enabled',
       nets: ['inet', 'gov', 'secret'],
-      deps: 'mcp-jg 插件',
-      scope: '本机 DSH 运行时',
+      deps: 'skill-office 运行时能力',
+      scope: '底层能力 · 随客户端提供',
+      risk: '只读',
+      desc: 'Word / Excel / PPT / PDF 文档处理能力，由运行时的 skill-office 插件直接提供，不作为市场插件安装。',
+      source: 'runtime-capability',
+    })
+  }
+  if (row('mcp-jg')?.enabled) {
+    list.push({
+      id: 'CAP-MCP-JG',
+      name: '九规内部工具（MCP）',
+      kind: 'capability',
+      publisher: '九规智能中枢',
+      version: '',
+      status: 'enabled',
+      nets: ['inet', 'gov', 'secret'],
+      deps: 'mcp-jg 运行时能力',
+      scope: '底层能力 · 随客户端提供',
       risk: '写操作需确认',
-      desc: '云空间、公告、课程、通讯录、IM 与待办等内部工具的 MCP 桥。',
-      source: 'dsh-plugin',
+      desc: '云空间、公告、课程、通讯录、IM 与待办等内部工具的 MCP 桥，由运行时直接提供，不作为市场插件安装。',
+      source: 'runtime-capability',
     })
   }
   return list
@@ -987,6 +1001,7 @@ function snapshotPersistentState() {
     pluginSubs,
     pluginInstalls: [...livePluginInstalls.entries()],
     pluginToggles: [...livePluginToggles.entries()],
+    marketInstalls: [...liveMarketInstalls.entries()],
     cloudLog,
     drive: liveDrive,
     clouds: liveClouds,
@@ -1053,11 +1068,13 @@ function hydratePersistentState() {
   const builtinIds = new Set(MARKET_BUILTIN.map((m) => m.id))
   replaceArray(liveMarket, [
     ...MARKET_BUILTIN.map((m) => ({ ...m })),
-    ...persistedMarket.filter((m) => m && m.id && !builtinIds.has(m.id)),
+    ...persistedMarket.filter((m) => m && m.id && !builtinIds.has(m.id) && m.kind !== 'plugin'),
   ])
+  liveMarket.forEach((m, i) => { m.order = Number.isFinite(Number(m.order)) ? Number(m.order) : i })
   replaceArray(pluginSubs, snap.pluginSubs)
   replaceMap(livePluginInstalls, Object.fromEntries(snap.pluginInstalls || []))
   replaceMap(livePluginToggles, Object.fromEntries(snap.pluginToggles || []))
+  replaceMap(liveMarketInstalls, Object.fromEntries(snap.marketInstalls || []))
   replaceArray(cloudLog, snap.cloudLog)
   replaceArray(liveDrive, snap.drive)
   replaceArray(liveClouds, snap.clouds)
@@ -2527,8 +2544,22 @@ const SKILL_INSTALL_DIR = {
 }
 const MARKET_PACKAGE_ROOT = join(dataDirPath(), 'market-packages')
 const MARKET_MANIFEST = '.jg-market.json'
-function marketSkillTarget(id) {
-  return join(dataDirPath(), 'dsh-home', 'skills', SKILL_INSTALL_DIR[id] || `market-${id}`)
+const USER_AGENT_ROOT = join(dataDirPath(), 'agents')
+function userAgentHome(userId) {
+  return join(USER_AGENT_ROOT, String(userId || 'guest'))
+}
+function projectCwdOf(projectId) {
+  const p = liveProjects.find((x) => x.id === projectId)
+  return p && p.cwd ? String(p.cwd) : ''
+}
+function marketSkillDirName(id) {
+  return SKILL_INSTALL_DIR[id] || `market-${id}`
+}
+function marketSkillTarget(id, ctx = {}) {
+  const dir = marketSkillDirName(id)
+  if (ctx.scope === 'project' && ctx.projectCwd) return join(ctx.projectCwd, '.dsh', 'skills', dir)
+  if (ctx.scope === 'user' && ctx.userId) return join(userAgentHome(ctx.userId), 'skills', dir)
+  return join(dataDirPath(), 'dsh-home', 'skills', dir)
 }
 function marketSkillSource(id) {
   const mapped = SKILL_SOURCE_DIR[id]
@@ -2539,28 +2570,39 @@ function marketSkillSource(id) {
 function marketSkillAvailable(id) {
   return Boolean(marketSkillSource(id))
 }
-function marketSkillManifest(id) {
+function marketSkillManifestAt(target) {
   try {
-    return JSON.parse(readFileSync(join(marketSkillTarget(id), MARKET_MANIFEST), 'utf8'))
+    return JSON.parse(readFileSync(join(target, MARKET_MANIFEST), 'utf8'))
   } catch {
     return null
   }
 }
-function marketSkillInstalled(id) {
-  const manifest = marketSkillManifest(id)
-  if (manifest && manifest.marketId === id) return true
-  return Boolean(SKILL_INSTALL_DIR[id] && existsSync(join(marketSkillTarget(id), 'SKILL.md')))
+function marketSkillManifest(id, ctx = {}) {
+  return marketSkillManifestAt(marketSkillTarget(id, ctx))
 }
-async function installMarketSkill(item, user) {
+function marketSkillGlobalBaseline(id) {
+  const physical = marketSkillTarget(id)
+  return Boolean((marketSkillManifestAt(physical)?.marketId === id) || (SKILL_INSTALL_DIR[id] && existsSync(join(physical, 'SKILL.md'))))
+}
+function marketSkillInstalled(id, ctx = {}) {
+  const manifest = marketSkillManifest(id, ctx)
+  if (manifest && manifest.marketId === id) return true
+  if (existsSync(join(marketSkillTarget(id, ctx), 'SKILL.md'))) return true
+  return marketSkillGlobalBaseline(id)
+}
+async function installMarketSkill(item, user, ctx = {}) {
   const source = marketSkillSource(item.id)
   if (!source) {
     throw new Error('该插件尚未提供可安装的技能包')
   }
-  const target = marketSkillTarget(item.id)
+  if (marketSkillGlobalBaseline(item.id)) {
+    throw new Error('该技能已作为全客户端基线安装，不能再按账号或项目重复安装')
+  }
+  const target = marketSkillTarget(item.id, ctx)
   if (existsSync(target)) {
-    const manifest = marketSkillManifest(item.id)
-    if (!manifest && !SKILL_INSTALL_DIR[item.id]) {
-      throw new Error('本机已存在同名技能目录，且不是插件市场安装的，拒绝覆盖')
+    const manifest = marketSkillManifestAt(target)
+    if (!manifest || manifest.marketId !== item.id) {
+      throw new Error('目标技能目录已存在且不是本市场安装的，拒绝覆盖')
     }
     rmSync(target, { recursive: true, force: true })
   }
@@ -2572,15 +2614,20 @@ async function installMarketSkill(item, user) {
     version: '1.0.0',
     installedAt: Date.now(),
     installedBy: String(user.id || ''),
+    scope: ctx.scope || 'user',
+    projectId: ctx.projectId || '',
   }, null, 2)}\n`, 'utf8')
   // 关闭空闲运行时，下一轮对话重新加载技能目录；有会话执行时由调用方先拒绝。
   await closeHarness()
 }
-async function uninstallMarketSkill(item) {
-  const target = marketSkillTarget(item.id)
-  const manifest = marketSkillManifest(item.id)
-  if ((!manifest || manifest.marketId !== item.id) && !SKILL_INSTALL_DIR[item.id]) {
-    throw new Error('该插件不是由本机插件市场安装的，拒绝删除')
+async function uninstallMarketSkill(item, user, ctx = {}) {
+  if (marketSkillGlobalBaseline(item.id)) {
+    throw new Error('该技能是全客户端基线，不能按单个账号卸载')
+  }
+  const target = marketSkillTarget(item.id, ctx)
+  const manifest = marketSkillManifestAt(target)
+  if (!manifest || manifest.marketId !== item.id) {
+    throw new Error('该技能不是由当前安装范围的市场记录安装的，拒绝删除')
   }
   rmSync(target, { recursive: true, force: true })
   await closeHarness()
@@ -2655,21 +2702,33 @@ async function uninstallMarketBundle(item) {
   setProfileBundle(pkg.name, false)
   await closeHarness()
 }
-function marketItemState(item) {
+function marketItemState(item, ctx = {}) {
   const sub = item.subId ? pluginSubs.find((s) => s.id === item.subId) : null
   const isBundle = item.kind === 'bundle'
-  const isSystemPlugin = item.kind === 'plugin'
+  const globalBaseline = !isBundle && marketSkillGlobalBaseline(item.id)
+  const records = marketInstallRecords(item.id)
+  const userRecord = records.find((r) => r.userId === ctx.userId)
+  const installed = isBundle
+    ? marketBundleInstalled(item.id)
+    : ctx.any
+      ? (globalBaseline || records.length > 0)
+      : (globalBaseline || Boolean(userRecord))
   return {
     ...item,
     listed: item.listed !== false,
     origin: sub ? 'community' : 'builtin',
     submittedBy: sub ? sub.author : '',
     submittedUnit: sub ? sub.unit : '',
-    available: isSystemPlugin ? true : isBundle ? marketBundleAvailable(item.id) : marketSkillAvailable(item.id),
-    installed: isSystemPlugin ? true : isBundle ? marketBundleInstalled(item.id) : marketSkillInstalled(item.id),
-    locked: isSystemPlugin,
+    available: isBundle ? marketBundleAvailable(item.id) : marketSkillAvailable(item.id),
+    installed,
+    locked: globalBaseline,
+    installedScope: userRecord ? userRecord.scope : '',
+    installedProjectId: userRecord ? userRecord.projectId || '' : '',
+    installScope: isBundle ? '本机 DSH 运行时（Bundle 全局可见）' : '当前账号或项目技能目录（互不可见）',
+    installUsers: globalBaseline
+      ? [{ userId: '*', userName: '全客户端基线', scope: 'baseline', projectId: '', installedAt: 0 }]
+      : records,
     downloadUrl: sub && sub.fileId ? `/api/plugin-market/download?id=${encodeURIComponent(item.id)}` : '',
-    installScope: isSystemPlugin ? '随客户端内置，不可单独卸载' : '本机 DSH 运行时（同一客户端全局可见）',
   }
 }
 
@@ -3439,8 +3498,11 @@ const api = {
   'GET /api/plugin-market': (req, res) => {
     const user = roleOf(req)
     const net = netOf(req)
-    const items = liveMarket.filter((m) => m.listed !== false).map((m) => marketItemState(m))
-    json(res, 200, { items, network: networks[net]?.label || '', installScope: '本机 DSH 运行时（同一客户端全局可见）' })
+    const items = [...liveMarket]
+      .filter((m) => m.listed !== false)
+      .sort((a, b) => Number(a.order || 0) - Number(b.order || 0))
+      .map((m) => marketItemState(m, { userId: user.id }))
+    json(res, 200, { items, network: networks[net]?.label || '', installScope: '当前账号或项目技能目录；Bundle 为运行时级共享' })
   },
   'GET /api/plugin-market/download': (req, res, url) => {
     const id = String(url.searchParams.get('id') || '')
@@ -3476,34 +3538,53 @@ const api = {
     }
     if (item.scope === '需授权' && !canManage(user)) return json(res, 403, { error: '该插件需部门负责人授权后安装' })
     if (activeRuns.size) return json(res, 409, { error: '有会话正在执行，安装或卸载会在下一轮生效，请稍后再试', code: 'RUNTIME_BUSY' })
-    const has = isBundle ? marketBundleInstalled(item.id) : marketSkillInstalled(item.id)
+    const scope = isBundle ? 'global' : (body.scope === 'project' ? 'project' : 'user')
+    const projectId = scope === 'project' ? String(body.projectId || '') : ''
+    if (scope === 'project' && !projectCwdOf(projectId)) return json(res, 400, { error: '请选择有本地工作目录的项目后再安装' })
+    const ctx = { scope, userId: user.id, projectId, projectCwd: projectCwdOf(projectId) }
+    const has = isBundle ? marketBundleInstalled(item.id) : Boolean(marketSkillManifestAt(marketSkillTarget(item.id, ctx))?.marketId === item.id)
     try {
       if (isBundle) {
         if (!pnpmAvailable()) return json(res, 501, { error: '客户端未内置 pnpm，无法安装 DSH Bundle', code: 'PNPM_MISSING' })
         if (has) await uninstallMarketBundle(item)
         else await installMarketBundle(item)
-      } else if (has) await uninstallMarketSkill(item)
-      else await installMarketSkill(item, user)
+      } else if (has) {
+        await uninstallMarketSkill(item, user, ctx)
+      } else {
+        await installMarketSkill(item, user, ctx)
+      }
     } catch (error) {
       return json(res, 409, { error: error.message || (has ? '卸载失败' : '安装失败') })
     }
-    logAudit(user, has ? 'plugin.remove' : 'plugin.install', item.id, `install(${user.id})`, netOf(req))
+    if (isBundle) {
+      if (has) removeMarketInstallRecord(item.id, { userId: user.id, scope: 'global', projectId: '' })
+      else addMarketInstallRecord(item.id, { userId: user.id, userName: user.name, scope: 'global', projectId: '', installedAt: Date.now() })
+    } else {
+      if (has) removeMarketInstallRecord(item.id, { userId: user.id, scope, projectId })
+      else addMarketInstallRecord(item.id, { userId: user.id, userName: user.name, scope, projectId, installedAt: Date.now() })
+    }
+    logAudit(user, has ? 'plugin.remove' : 'plugin.install', item.id, `${scope}(${user.id})${projectId ? `:${projectId}` : ''}`, netOf(req))
     json(res, 200, {
       ok: true,
-      item: { ...marketItemState(item), installed: !has },
-      message: has ? '已从本机运行时卸载，下一轮对话生效' : '已安装到本机运行时，下一轮对话生效',
+      item: { ...marketItemState(item, { userId: user.id }), installed: !has },
+      message: has
+        ? (scope === 'project' ? '已从该项目卸下，对项目外会话不可见' : '已从当前账号卸下，其他账号不受影响')
+        : (scope === 'project' ? '已安装到当前项目，仅该项目会话可见' : '已安装到当前账号，其他账号不可见'),
     })
   },
   'GET /api/admin/plugin-market': (req, res) => {
     const user = roleOf(req)
     if (!canManage(user)) return json(res, 403, { error: '仅管理员可管理插件市场' })
+    const items = [...liveMarket]
+      .sort((a, b) => Number(a.order || 0) - Number(b.order || 0))
+      .map((m) => marketItemState(m, { any: true }))
     json(res, 200, {
       ok: true,
-      items: liveMarket.map((m) => marketItemState(m)),
+      items,
       counts: {
         total: liveMarket.length,
         listed: liveMarket.filter((m) => m.listed !== false).length,
-        installed: liveMarket.filter((m) => marketItemState(m).installed).length,
+        installed: liveMarket.filter((m) => marketItemState(m, { any: true }).installed).length,
       },
     })
   },
@@ -3516,15 +3597,31 @@ const api = {
     const action = String(body.action || '')
     if (action === 'list' || action === 'unlist') {
       item.listed = action === 'list'
+      persistPersistentState()
       logAudit(user, `plugin-market.${action}`, item.id, 'allow', netOf(req))
-      return json(res, 200, { ok: true, item: marketItemState(item) })
+      return json(res, 200, { ok: true, item: marketItemState(item, { any: true }) })
     }
     if (action === 'update') {
       if (typeof body.name === 'string' && body.name.trim()) item.name = body.name.trim().slice(0, 40)
       if (typeof body.desc === 'string') item.desc = body.desc.trim().slice(0, 200)
       if (typeof body.section === 'string' && ['官方与内置', '热门', '新品推荐', '企业内部'].includes(body.section)) item.section = body.section
+      if (typeof body.publisher === 'string' && body.publisher.trim()) item.publisher = body.publisher.trim().slice(0, 40)
+      persistPersistentState()
       logAudit(user, 'plugin-market.update', item.id, 'allow', netOf(req))
-      return json(res, 200, { ok: true, item: marketItemState(item) })
+      return json(res, 200, { ok: true, item: marketItemState(item, { any: true }) })
+    }
+    if (action === 'sort') {
+      const direction = body.direction === 'up' ? -1 : 1
+      const ordered = [...liveMarket].sort((a, b) => Number(a.order || 0) - Number(b.order || 0))
+      const index = ordered.findIndex((x) => x.id === item.id)
+      const next = index + direction
+      if (index < 0 || next < 0 || next >= ordered.length) return json(res, 400, { error: '已经到边界，无法继续移动' })
+      ordered[index] = ordered[next]
+      ordered[next] = item
+      ordered.forEach((x, i) => { x.order = i })
+      persistPersistentState()
+      logAudit(user, 'plugin-market.sort', item.id, `move-${body.direction === 'up' ? 'up' : 'down'}`, netOf(req))
+      return json(res, 200, { ok: true, items: ordered.map((m) => marketItemState(m, { any: true })) })
     }
     if (action === 'delete') {
       if (!item.subId) return json(res, 400, { error: '内置市场条目不能删除，只能下架' })
@@ -3533,6 +3630,8 @@ const api = {
       rmSync(item.kind === 'bundle' ? bundlePackageDir(item.id) : join(MARKET_PACKAGE_ROOT, item.id), { recursive: true, force: true })
       const sub = pluginSubs.findIndex((s) => s.id === item.subId)
       if (sub >= 0) pluginSubs.splice(sub, 1)
+      liveMarketInstalls.delete(item.id)
+      persistPersistentState()
       logAudit(user, 'plugin-market.delete', item.id, 'allow', netOf(req))
       return json(res, 200, { ok: true, deleted: item.id })
     }
@@ -4079,6 +4178,7 @@ const api = {
         sessionId: conv.dshSessionId,
         context,
         cwd: conv.agentCwd,
+        agentsHome: userAgentHome(user.id),
         executionPolicy,
         runKey: conv.id,
         runtimeScope: conv.id,
@@ -4354,7 +4454,8 @@ const api = {
   },
   'GET /api/console': (req, res) => {
     const installed = installedSkillPlugins()
-    const pluginCount = installed.filter((p) => p.kind !== 'personal').length
+    const capabilityCount = installed.filter((p) => p.kind === 'capability').length
+    const pluginCount = installed.filter((p) => p.kind === 'enterprise').length
     const skillCount = installed.filter((p) => p.kind === 'personal').length
     const listedCount = liveMarket.filter((m) => m.listed !== false).length
     const pendingCount = pluginSubs.filter((s) => s.status === 'pending').length
@@ -4362,8 +4463,8 @@ const api = {
       ...consoleSections,
       ai: {
         ...consoleSections.ai,
-        kpis: consoleSections.ai.kpis.map((k) => (k.k === '插件 / 技能'
-          ? { ...k, v: `${pluginCount} / ${skillCount}`, note: `市场 ${listedCount} 个已上架 · 待审核 ${pendingCount}`, tone: pendingCount ? 'warn' : 'ok' }
+        kpis: consoleSections.ai.kpis.map((k) => (k.k === '底层能力 / 技能'
+          ? { ...k, v: `${capabilityCount} / ${skillCount}`, note: `${pluginCount} 个企业插件 · 市场 ${listedCount} 个已上架 · 待审核 ${pendingCount}`, tone: pendingCount ? 'warn' : 'ok' }
           : k)),
       },
     }

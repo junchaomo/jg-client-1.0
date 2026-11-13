@@ -1832,7 +1832,7 @@ function composerPlusItems() {
 function composerToolPickerItems(kind) {
   const installed = (state.plugins || []).filter((p) => p.status === 'enabled')
   const title = kind === 'skill' ? '选择技能' : '选择插件'
-  const list = installed.filter((p) => (kind === 'skill' ? p.kind === 'personal' : p.kind !== 'personal'))
+  const list = installed.filter((p) => (kind === 'skill' ? p.kind === 'personal' : p.kind === 'enterprise'))
   const rows = list.length ? list.map((p) => ({
     act: 'plugin',
     plugin: p.id,
@@ -3784,14 +3784,14 @@ async function renderSkills(el) {
   const tone = (i) => 't' + (i % 8)
 
   const marketCard = (m, i) => `
-    <div class="pl-item">
+    <div class="pl-item" data-mopen="${esc(m.id)}" style="cursor:pointer">
       <span class="pl-ico ${tone(i)}">${icon('plugin')}</span>
       <div class="pl-item-main"><div class="pl-item-name">${esc(m.name)}</div><div class="pl-item-desc">${esc(m.desc)}</div></div>
       ${m.installed
         ? `<button class="pl-act" data-mdetail="${m.id}" title="已安装，查看详情">${icon('dots')}</button>`
         : m.available === false
           ? `<span class="tag" style="font-size:10px">待上架</span>`
-          : `<button class="pl-act add" data-minstall="${m.id}" title="安装">${icon('plus')}</button>`}
+          : `<button class="pl-act add" data-minstall="${m.id}" title="安装到当前账号">${icon('plus')}</button>`}
     </div>`
 
   const skillDesc = (p) => (state.market || []).find((m) => m.kind === 'skill' && m.name === p.name)?.desc || p.desc
@@ -3817,8 +3817,10 @@ async function renderSkills(el) {
     return list.length ? sec(name, list.map(marketCard).join('')) : ''
   }).join('')
 
-  const pluginSections = sec('已安装插件',
-    state.plugins.filter((p) => p.kind !== 'personal').map(skillCard).join(''))
+  const pluginSections = `
+    ${sec('底层能力', state.plugins.filter((p) => p.kind === 'capability').map(skillCard).join(''))}
+    ${sec('已安装插件', state.plugins.filter((p) => p.kind === 'enterprise').map(skillCard).join(''))}`
+  const capabilitySections = sec('底层能力', state.plugins.filter((p) => p.kind === 'capability').map(skillCard).join(''))
 
   const personalSections = `
     ${sec('我的插件提交', subs.length ? subs.map((x, i) => {
@@ -3876,7 +3878,7 @@ async function renderSkills(el) {
           <button class="pl-tab${scop === 'public' ? ' on' : ''}" data-skscope="public">公开</button>
           <button class="pl-tab${scop === 'personal' ? ' on' : ''}" data-skscope="personal">个人</button>
         </div>` : ''}
-        ${tab === 'plugin' && scop === 'public' ? marketSections : ''}
+        ${tab === 'plugin' && scop === 'public' ? capabilitySections + marketSections : ''}
         ${tab === 'plugin' && scop === 'personal' ? personalSections : ''}
         ${tab === 'skill' ? skillSections : ''}
       </div>
@@ -3894,13 +3896,18 @@ async function renderSkills(el) {
   el.querySelector('#skAddLeft').addEventListener('click', () => {
     openPluginPublish()
   })
-  el.querySelectorAll('[data-minstall]').forEach((b) => b.addEventListener('click', async () => {
+  el.querySelectorAll('[data-minstall]').forEach((b) => b.addEventListener('click', async (e) => {
+    e.stopPropagation()
     const { ok, body } = await api('/api/plugin-market/install', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: b.dataset.minstall }) })
     if (!ok) return toast(body.error || '安装失败', true)
     toast(body.message || (body.item.installed ? `已安装「${body.item.name}」，下一轮对话生效` : `已卸载「${body.item.name}」`))
     renderView()
   }))
-  el.querySelectorAll('[data-mdetail]').forEach((b) => b.addEventListener('click', () => openPluginSlide(b.dataset.mdetail)))
+  el.querySelectorAll('[data-mdetail]').forEach((b) => b.addEventListener('click', (e) => {
+    e.stopPropagation()
+    openPluginSlide(b.dataset.mdetail)
+  }))
+  el.querySelectorAll('[data-mopen]').forEach((b) => b.addEventListener('click', () => openPluginSlide(b.dataset.mopen)))
   el.querySelectorAll('[data-market-download]').forEach((b) => b.addEventListener('click', () => {
     const a = document.createElement('a')
     a.href = b.dataset.marketDownload
@@ -3927,18 +3934,40 @@ function openPluginSlide(id) {
       <div class="field"><div class="field-label">功能说明</div><div class="field-value">${esc(m.desc)}</div></div>
       <div class="field"><div class="field-label">来源</div><div class="field-value">${m.origin === 'community' ? `${esc(m.submittedUnit || '')} · 提交人 ${esc(m.submittedBy || '')} · v${esc(m.version || '1.0.0')}` : `DSH 官方 / 产品内置 · v${esc(m.version || '1.0.0')}`}</div></div>
       <div class="field"><div class="field-label">权限与数据</div><div class="field-value">按当前授权与网络范围返回数据；敏感字段最小必要展示，读取与调用进审计。写操作需人工确认。</div></div>
-      <div class="field"><div class="field-label">安装状态</div><div class="field-value">${m.locked ? '该插件随客户端内置，由平台统一维护，不支持单独安装或卸载。' : m.available === false ? '该插件尚未提供可安装的技能包，暂不能安装。上架后会显示安装入口。' : `安装到${esc(m.installScope || '本机 DSH 运行时')}；安装或卸载后，下一轮对话生效。`}</div></div>
-      <div class="field"><div class="field-label">安装要求</div><div class="field-value">${m.locked ? '系统内置插件，无需安装；按当前网络与授权范围生效。' : m.scope === '需授权' ? '需部门负责人授权后安装，授权范围按岗位与项目参与关系核定。' : '企业公开插件，可直接安装；启用后仅在当前网络与已授权范围生效。'}</div></div>
+      <div class="field"><div class="field-label">安装状态</div><div class="field-value">${m.locked ? '该技能已作为全客户端基线安装，由平台统一维护，不能按单个账号卸载。' : m.available === false ? '该插件尚未提供可安装的技能包，暂不能安装。上架后会显示安装入口。' : `安装到${esc(m.installScope || '当前账号或项目技能目录')}；安装或卸载后，下一轮对话生效。`}</div></div>
+      ${(m.kind !== 'bundle' && !m.locked && m.available !== false && !m.installed) ? `<div class="field"><div class="field-label">安装范围</div><div class="field-value">
+        <select class="text-input" id="mktInstallScope"><option value="user">仅当前账号</option><option value="project">当前项目（仅该项目会话可见）</option></select>
+        <select class="text-input" id="mktInstallProject" style="display:none;margin-top:6px">${(state.projects || []).filter((p) => p.cwd).map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('')}</select>
+      </div></div>` : ''}
+      ${m.installed && m.installedScope ? `<div class="field"><div class="field-label">安装位置</div><div class="field-value">${m.installedScope === 'project' ? `项目 ${esc((state.projects || []).find((p) => p.id === m.installedProjectId)?.name || m.installedProjectId)}` : '当前账号'}</div></div>` : ''}
+      <div class="field"><div class="field-label">安装要求</div><div class="field-value">${m.locked ? '全客户端基线能力，无需安装；按当前网络与授权范围生效。' : m.scope === '需授权' ? '需部门负责人授权后安装，授权范围按岗位与项目参与关系核定。' : m.kind === 'bundle' ? 'Bundle 会安装到本机 DSH 运行时，对同一客户端的所有账号生效。' : '企业公开技能，可直接安装；账号范围与其他账号互不可见，项目范围仅该项目会话可见。'}</div></div>
     </div>
     <div class="slide-foot">
-      ${m.locked ? '<button class="btn primary" disabled>系统内置</button>' : m.available === false ? '<button class="btn primary" disabled>尚未提供安装包</button>' : `<button class="btn primary" data-toggle>${m.installed ? '卸载' : '安装'}</button>`}
+      ${m.locked ? '<button class="btn primary" disabled>全客户端基线</button>' : m.available === false ? '<button class="btn primary" disabled>尚未提供安装包</button>' : `<button class="btn primary" data-toggle>${m.installed ? '卸载' : '安装'}</button>`}
       ${m.downloadUrl ? '<button class="btn" data-download>下载原始包</button>' : ''}
       <button class="btn" data-log>调用记录</button>
       <button class="btn" data-close>关闭</button>
     </div>`
   wireSlide(slide)
+  const scopeSelect = slide.querySelector('#mktInstallScope')
+  const projectSelect = slide.querySelector('#mktInstallProject')
+  if (scopeSelect && projectSelect) {
+    scopeSelect.addEventListener('change', () => {
+      projectSelect.style.display = scopeSelect.value === 'project' ? '' : 'none'
+    })
+  }
   slide.querySelector('[data-toggle]')?.addEventListener('click', async () => {
-    const { ok, body } = await api('/api/plugin-market/install', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: m.id }) })
+    const scopeEl = slide.querySelector('#mktInstallScope')
+    const projectEl = slide.querySelector('#mktInstallProject')
+    const payload = { id: m.id }
+    if (m.installed) {
+      payload.scope = m.installedScope || 'user'
+      if (m.installedScope === 'project') payload.projectId = m.installedProjectId || ''
+    } else {
+      if (scopeEl) payload.scope = scopeEl.value
+      if (scopeEl?.value === 'project') payload.projectId = projectEl?.value || ''
+    }
+    const { ok, body } = await api('/api/plugin-market/install', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) })
     if (!ok) return toast(body.error, true)
     slide.classList.remove('open')
     toast(body.message || (body.item.installed ? `已安装「${m.name}」，下一轮对话生效` : `已卸载「${m.name}」`))
@@ -3962,7 +3991,7 @@ function openSkillSlide(id) {
   const desc = (state.market || []).find((m) => m.kind === 'skill' && m.name === p.name)?.desc || p.desc
   const slide = ensureSlide()
   slide.innerHTML = `
-    <div class="slide-head"><div><div class="slide-title">${esc(p.name)}</div><div class="slide-sub">${esc(p.publisher)} · v${esc(p.version)} · ${p.kind === 'enterprise' ? '企业技能' : '个人技能'}</div></div><span class="spacer"></span><button class="btn subtle" data-close>${icon('close')}</button></div>
+    <div class="slide-head"><div><div class="slide-title">${esc(p.name)}</div><div class="slide-sub">${esc(p.publisher)} · v${esc(p.version)} · ${p.kind === 'capability' ? '底层能力' : p.kind === 'enterprise' ? '企业插件' : '个人技能'}</div></div><span class="spacer"></span><button class="btn subtle" data-close>${icon('close')}</button></div>
     <div class="slide-body">
       <div style="display:flex;gap:6px;margin-bottom:12px"><span class="tag ${p.status === 'enabled' ? 'ok' : ''}">${p.status === 'enabled' ? '已启用' : '未启用'}</span><span class="tag">${esc(p.scope)}</span></div>
       <div class="field"><div class="field-label">能力说明</div><div class="field-value">${esc(desc)}</div></div>
@@ -10021,14 +10050,17 @@ async function renderAdmin(el) {
       const wrap = document.createElement('div')
       wrap.className = 'mc-block'
       wrap.innerHTML = `<div class="mc-block-head"><b>插件市场已上架管理</b><span class="spacer"></span><span class="mc-count">${marketAdmin.counts?.listed ?? items.length} 个已上架 / ${items.length} 个条目</span></div>
-        <div class="mc-table" style="--mc-cols:1.8fr .9fr .8fr .8fr 1.2fr">
-          <div class="mc-thead"><span>插件 / 技能</span><span>分组</span><span>来源</span><span>状态</span><span>操作</span></div>
-          ${items.map((x) => `<div class="mc-trow">
+        <div class="mc-table" style="--mc-cols:minmax(110px,1.6fr) minmax(54px,.7fr) minmax(80px,.9fr) minmax(64px,.8fr)">
+          <div class="mc-thead"><span>插件 / 技能</span><span>分组</span><span>发布单位</span><span>状态</span></div>
+          ${items.map((x, i) => `<div class="mc-trow">
             <span class="mc-first">${esc(x.name)} <span class="mc-dim mono">${esc(x.id)}</span></span>
             <span>${esc(x.section || '')}</span>
-            <span>${x.origin === 'community' ? '社区提交' : '官方 / 内置'}</span>
-            <span><span class="mc-tag ${x.listed === false ? 'warn' : 'ok'}">${x.listed === false ? '已下架' : '已上架'}</span>${x.installed ? ' <span class="mc-tag ok">本机已安装</span>' : ''}</span>
-            <span class="mc-acts">
+            <span>${esc(x.publisher || '')}${x.origin === 'community' ? ' <span class="mc-dim">社区</span>' : ''}</span>
+            <span><span class="mc-tag ${x.listed === false ? 'warn' : 'ok'}">${x.listed === false ? '已下架' : '已上架'}</span>${x.installed ? ` <span class="mc-tag ok">${(x.installUsers || []).length && x.installUsers[0]?.scope === 'baseline' ? '基线' : '已安装'}</span>` : ''}</span>
+            <span class="mc-acts" style="grid-column:1/-1;flex-wrap:wrap">
+              <button class="btn sm" data-mkt-sort="${esc(x.id)}" data-dir="up" ${i === 0 ? 'disabled' : ''}>↑</button>
+              <button class="btn sm" data-mkt-sort="${esc(x.id)}" data-dir="down" ${i === items.length - 1 ? 'disabled' : ''}>↓</button>
+              <button class="btn sm" data-mkt-users="${esc(x.id)}">安装用户 ${(x.installUsers || []).filter((u) => u.scope !== 'baseline').length}</button>
               <button class="btn sm" data-mkt-edit="${esc(x.id)}">编辑</button>
               <button class="btn sm ${x.listed === false ? 'primary' : ''}" data-mkt-list="${esc(x.id)}" data-next="${x.listed === false ? 'list' : 'unlist'}">${x.listed === false ? '重新上架' : '下架'}</button>
               ${x.origin === 'community' ? `<button class="btn sm" data-mkt-del="${esc(x.id)}">删除</button>` : ''}
@@ -10048,12 +10080,31 @@ async function renderAdmin(el) {
         toast('已删除该社区条目及其安装包')
         renderView()
       }))
+      wrap.querySelectorAll('[data-mkt-sort]').forEach((b) => b.addEventListener('click', async () => {
+        const { ok, body } = await api('/api/admin/plugin-market', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: b.dataset.mktSort, action: 'sort', direction: b.dataset.dir }) })
+        if (!ok) return toast(body.error || '排序失败', true)
+        toast('已调整市场顺序')
+        renderView()
+      }))
+      wrap.querySelectorAll('[data-mkt-users]').forEach((b) => b.addEventListener('click', () => {
+        const item = items.find((x) => x.id === b.dataset.mktUsers)
+        if (!item) return
+        const users = item.installUsers || []
+        const scopeText = (u) => u.scope === 'baseline' ? '全客户端基线' : u.scope === 'project' ? `项目 ${u.projectId || ''}` : '当前账号'
+        const m = openModal('安装用户', users.length ? `
+          <div class="mc-table" style="--mc-cols:1fr .8fr 1.4fr">
+            <div class="mc-thead"><span>账号</span><span>范围</span><span>项目 / 时间</span></div>
+            ${users.map((u) => `<div class="mc-trow"><span>${esc(u.userName || u.userId || '—')}</span><span>${esc(scopeText(u))}</span><span>${esc(u.projectId || (u.installedAt ? new Date(u.installedAt).toLocaleString('zh-CN') : '—'))}</span></div>`).join('')}
+          </div>` : '<div class="mc-row">还没有安装记录</div>', )
+        m.querySelector('[data-mclose]')?.addEventListener('click', () => m.remove())
+      }))
       wrap.querySelectorAll('[data-mkt-edit]').forEach((b) => b.addEventListener('click', () => {
         const item = items.find((x) => x.id === b.dataset.mktEdit)
         if (!item) return
         const m = openModal('编辑市场条目', `
           <div class="form-label">名称</div><input class="text-input" id="mktName" value="${esc(item.name)}" />
           <div class="form-label" style="margin-top:8px">描述</div><textarea class="form-area" id="mktDesc" rows="3">${esc(item.desc || '')}</textarea>
+          <div class="form-label" style="margin-top:8px">发布单位</div><input class="text-input" id="mktPublisher" value="${esc(item.publisher || '')}" />
           <div class="form-label" style="margin-top:8px">分组</div>
           <select class="text-input" id="mktSection">
             ${['官方与内置', '热门', '新品推荐', '企业内部'].map((s) => `<option value="${s}"${item.section === s ? ' selected' : ''}>${s}</option>`).join('')}
@@ -10061,7 +10112,7 @@ async function renderAdmin(el) {
           <div class="form-foot"><span class="spacer"></span><button class="btn" data-mclose>取消</button><button class="btn primary" id="mktSave">保存</button></div>`)
         m.querySelector('[data-mclose]').addEventListener('click', () => m.remove())
         m.querySelector('#mktSave').addEventListener('click', async () => {
-          const { ok, body } = await api('/api/admin/plugin-market', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: item.id, action: 'update', name: m.querySelector('#mktName').value, desc: m.querySelector('#mktDesc').value, section: m.querySelector('#mktSection').value }) })
+          const { ok, body } = await api('/api/admin/plugin-market', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: item.id, action: 'update', name: m.querySelector('#mktName').value, desc: m.querySelector('#mktDesc').value, publisher: m.querySelector('#mktPublisher').value, section: m.querySelector('#mktSection').value }) })
           m.remove()
           if (!ok) return toast(body.error || '保存失败', true)
           toast('市场条目已更新')
@@ -10917,7 +10968,7 @@ function settingsBody(tab) {
       title: '插件与工具',
       groups: [
         sgroup('已启用', [
-          srow('企业插件', '由平台统一发布与回滚，按网络环境可裁剪', `<span class="set-value mono">${counts.plugins} 个</span><span class="set-btn-gap"></span>${sbtn('gotoSkills', '管理')}`),
+          srow('运行时能力与技能', '底层能力随客户端提供；技能按账号或项目安装，可在这里查看', `<span class="set-value mono">${counts.plugins} 项</span><span class="set-btn-gap"></span>${sbtn('gotoSkills', '查看')}`),
           srow('个人技能', '仅本人可用；发布给他人需走企业技能审核', `<span class="set-value mono">${state.plugins.filter((p0) => p0.kind === 'personal').length} 个</span><span class="set-btn-gap"></span>${sbtn('gotoSkills', '管理')}`),
         ]),
         sgroup('MCP 与接口', [
