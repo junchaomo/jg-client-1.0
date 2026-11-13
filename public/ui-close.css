@@ -1,0 +1,29 @@
+/* 全站弹窗关闭控件统一：右上角同一个 X，不再在底部重复关闭按钮 */
+.ac-close,
+#deClose {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid #e6e9ee;
+  border-radius: 6px;
+  background: #f7f8fa;
+  color: #6b7280;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  cursor: pointer;
+}
+.ac-close:hover,
+#deClose:hover {
+  background: #eef1f4;
+  color: #1b1d21;
+  border-color: #d8dde4;
+}
+.ac-close svg,
+#deClose svg {
+  width: 15px;
+  height: 15px;
+  display: block;
+  stroke: #5c6470;
+}

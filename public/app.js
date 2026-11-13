@@ -1219,8 +1219,7 @@ function openAboutModal() {
       <div class="kv-box"><span>当前身份</span><b>${esc(state.boot.user.name)} · ${esc(state.boot.user.duty)}</b></div>
       <div class="kv-box"><span>部署</span><b>集团私有化</b></div>
     </div>
-    <div class="form-foot"><span class="mono">Chromium 开源内核 · 凭据不落地</span><span class="spacer"></span><button class="btn" data-mclose>关闭</button></div>`)
-  mask.querySelector('[data-mclose]').addEventListener('click', () => mask.remove())
+    <div class="form-note" style="margin-top:12px">Chromium 开源内核 · 凭据不落地</div>`)
 }
 
 function bindSidebarResize() {
@@ -1362,8 +1361,7 @@ function openStoragePanel() {
       <div class="stor-cell"><span>个人总容量</span><b>${PERSONAL_STORAGE.totalGB} GB</b><small>个人云盘与智能笔记本共用</small></div>
     </div>
     <div class="form-note">个人云盘和智能笔记本共用每人 50GB 总容量；部门云空间、数据中心与云空间引用不占个人容量。</div>
-    <div class="form-foot"><span class="mono">容量按账户统计，跨设备一致</span><span class="spacer"></span><button class="btn" data-mclose>关闭</button><button class="btn primary" data-go-mycloud>在云空间中查看</button></div>`)
-  mask.querySelector('[data-mclose]').addEventListener('click', () => mask.remove())
+    <div class="form-foot"><span class="mono">容量按账户统计，跨设备一致</span><span class="spacer"></span><button class="btn primary" data-go-mycloud>在云空间中查看</button></div>`)
   mask.querySelector('[data-go-mycloud]').addEventListener('click', () => {
     mask.remove()
     state.view = 'drive'
@@ -2776,7 +2774,6 @@ function openProject(id) {
       <button class="btn primary" data-ask ${p.cwd ? '' : 'disabled'}>在项目中提问</button>
       <button class="btn" data-rename>重命名</button>
       <button class="btn" data-remove>移除项目</button>
-      <button class="btn" data-close>关闭</button>
     </div>`
   wireSlide(slide)
   slide.querySelector('[data-ask]')?.addEventListener('click', () => {
@@ -3569,7 +3566,7 @@ async function openResource(id) {
         <div class="field"><div class="field-label">判定位置</div><div class="field-value">数据中心 API（服务端校验）；前端隐藏不作为安全边界</div></div>
         <div class="field"><div class="field-label">审计</div><div class="field-value">已记录 deny(403) 至本网络独立审计日志</div></div>
       </div>
-      <div class="slide-foot"><button class="btn" data-close>关闭</button><button class="btn primary" data-audit>查看审计记录</button></div>`
+      <div class="slide-foot"><button class="btn primary" data-audit>查看审计记录</button></div>`
     wireSlide(slide)
     await refreshAuditIfOpen()
     return
@@ -3761,7 +3758,7 @@ async function attemptUnauthorized() {
       </div>
       <div class="notice neutral">该拦截发生在数据中心 API 侧：即使绕过前端直接请求接口，也无法越权取数（PRD 2.3 / 9.3 要求）。</div>
     </div>
-    <div class="slide-foot"><button class="btn" data-close>关闭</button><button class="btn primary" data-audit>查看审计</button></div>`
+    <div class="slide-foot"><button class="btn primary" data-audit>查看审计</button></div>`
   wireSlide(slide)
   await loadResources()
   await refreshAuditIfOpen()
@@ -3961,7 +3958,7 @@ function openCapabilitySlide(id) {
   slide.innerHTML = `
     <div class="slide-head"><div><div class="slide-title">${esc(c.name)}</div><div class="slide-sub">平台公共能力 · ${esc(c.id)}</div></div><span class="spacer"></span><button class="btn subtle" data-close>${icon('close')}</button></div>
     <div class="slide-body">
-      <div style="display:flex;gap:6px;margin-bottom:12px"><span class="tag ${c.enabled ? 'ok' : 'warn'}">${c.enabled ? '系统已启用' : '运行时未加载'}</span><span class="tag">默认安装</span><span class="tag">全部授权用户</span><span class="tag">不可卸载</span></div>
+      <div style="display:flex;gap:6px;margin-bottom:12px"><span class="tag ${c.enabled ? 'ok' : 'warn'}">${c.enabled ? '系统已启用' : '运行时未加载'}</span><span class="tag">默认安装</span><span class="tag">${esc(c.accessibleTo || '全部授权用户')}</span><span class="tag">不可卸载</span></div>
       <div class="field"><div class="field-label">能力说明</div><div class="field-value">${esc(c.desc)}</div></div>
       <div class="field"><div class="field-label">维护方式</div><div class="field-value">${esc(c.managedBy)}；${esc(c.upgradedBy)}；${esc(c.installScope)}</div></div>
       <div class="field"><div class="field-label">标准协议</div><div class="field-value">${esc(c.protocol)}</div></div>
@@ -3972,10 +3969,7 @@ function openCapabilitySlide(id) {
       <div class="field"><div class="field-label">资源限制</div><div class="field-value">${capabilityLimitsText(c)}</div></div>
       ${c.policyUpdatedAt ? `<div class="field"><div class="field-label">最近配置</div><div class="field-value">${esc(c.policyUpdatedBy || '系统管理员')} · ${new Date(c.policyUpdatedAt).toLocaleString('zh-CN')}</div></div>` : ''}
     </div>
-    <div class="slide-foot">
-      ${state.capabilityCanManage ? '<button class="btn primary" data-cappolicy>配置权限与资源</button>' : ''}
-      <button class="btn" data-close>关闭</button>
-    </div>`
+    ${state.capabilityCanManage ? `<div class="slide-foot"><button class="btn primary" data-cappolicy>配置权限与资源</button></div>` : ''}`
   wireSlide(slide)
   slide.querySelector('[data-cappolicy]')?.addEventListener('click', () => openCapabilityPolicy(c))
 }
@@ -4041,7 +4035,6 @@ function openPluginSlide(id) {
       ${m.locked ? '<button class="btn primary" disabled>全客户端基线</button>' : m.available === false ? '<button class="btn primary" disabled>尚未提供安装包</button>' : `<button class="btn primary" data-toggle>${m.installed ? '卸载' : '安装'}</button>`}
       ${m.downloadUrl ? '<button class="btn" data-download>下载原始包</button>' : ''}
       <button class="btn" data-log>调用记录</button>
-      <button class="btn" data-close>关闭</button>
     </div>`
   wireSlide(slide)
   const scopeSelect = slide.querySelector('#mktInstallScope')
@@ -4093,7 +4086,7 @@ function openSkillSlide(id) {
       <div class="field"><div class="field-label">依赖</div><div class="field-value">${esc(p.deps)}</div></div>
       <div class="field"><div class="field-label">风险等级</div><div class="field-value">${esc(p.risk)}；写操作与高危调用执行前二次确认。</div></div>
     </div>
-    <div class="slide-foot">${p.source ? '<span class="tag">由 DSH 运行时加载，产品内只读</span>' : `<button class="btn primary" data-toggle>停用</button>`}<button class="btn" data-log>运行记录</button><button class="btn" data-close>关闭</button></div>`
+    <div class="slide-foot">${p.source ? '<span class="tag">由 DSH 运行时加载，产品内只读</span>' : `<button class="btn primary" data-toggle>停用</button>`}<button class="btn" data-log>运行记录</button></div>`
   wireSlide(slide)
   if (!p.source) slide.querySelector('[data-toggle]').addEventListener('click', async () => {
     const { ok, body } = await api('/api/plugins/toggle', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: p.id }) })
@@ -4199,9 +4192,7 @@ my-plugin.zip
       <div class="spec-row"><b>安全</b><span>禁止动态执行远程代码、读取凭据、静默外联；平台先做静态扫描，审核通过后才进入市场。</span></div>
       <div class="spec-row"><b>版本与更新</b><span>每次更新上传新 ZIP，版本号递增，重新检测与审核；旧版本在审核期间保持可用。</span></div>
     </div>
-    <div class="form-note">AI 可直接按本规范生成技能包：说明技能要做什么、需要哪些参考材料，产出 SKILL.md 与目录结构，再压缩为 ZIP。</div>
-    <div class="form-foot"><span class="spacer"></span><button class="btn primary" data-mclose>知道了</button></div>`)
-  mask.querySelector('[data-mclose]').addEventListener('click', () => mask.remove())
+    <div class="form-note">AI 可直接按本规范生成技能包：说明技能要做什么、需要哪些参考材料，产出 SKILL.md 与目录结构，再压缩为 ZIP。</div>`)
 }
 
 function openPluginReport(sub) {
@@ -4219,8 +4210,7 @@ function openPluginReport(sub) {
     <div class="form-note">${sub.status === 'approved'
       ? (sub.kind === 'skill' ? '技能包已入库，可在技能市场一键安装。' : 'Bundle 已入库，可在插件市场安装到当前账号；只对该账号的 DSH 运行时生效。')
       : (sub.kind === 'skill' ? '审核通过后技能包会入库并开放安装；审核在「管理中心 · AI 能力管理 · 插件审核」处理。' : '审核通过后 Bundle 会入库并开放安装；审核在「管理中心 · AI 能力管理 · 插件审核」处理。')}</div>
-    <div class="form-foot"><span class="mono">提交人 ${esc(sub.author)} · ${esc(sub.unit)} · ${esc(sub.submitted)}</span><span class="spacer"></span><button class="btn primary" data-mclose>知道了</button></div>`)
-  mask.querySelector('[data-mclose]').addEventListener('click', () => mask.remove())
+    <div class="form-foot"><span class="mono">提交人 ${esc(sub.author)} · ${esc(sub.unit)} · ${esc(sub.submitted)}</span></div>`)
 }
 
 /* ------------------------------- apps ------------------------------- */
@@ -4302,7 +4292,6 @@ function notebookNoteModal(note) {
       <div class="jg-modal-foot">
         <button class="btn sm" id="nbDelNote">删除</button>
         <span class="spacer"></span>
-        <button class="btn subtle" id="nbNoteClose2">关闭</button>
         <button class="btn primary" id="nbSaveNote">保存</button>
       </div>
     </div>
@@ -4315,7 +4304,6 @@ function bindNotebookStudio(el, ctx) {
   el.querySelector('#nbStudioPanel')?.addEventListener('click', () => toast('Studio 固定在右侧，可拖动分栏调整宽度'))
   el.querySelectorAll('[data-note]').forEach((b) => b.addEventListener('click', () => { state.noteId = b.dataset.note; state.noteOpen = true; renderView() }))
   el.querySelector('#nbNoteClose')?.addEventListener('click', () => { state.noteOpen = false; renderView() })
-  el.querySelector('#nbNoteClose2')?.addEventListener('click', () => { state.noteOpen = false; renderView() })
   el.querySelectorAll('[data-studio]').forEach((b) => b.addEventListener('click', async () => {
     const type = b.dataset.studio
     const label = type === 'docx' ? 'DOCX 文档' : type === 'xlsx' ? 'XLSX 表格' : 'PPTX 演示'
@@ -6119,7 +6107,7 @@ function openModal(title, body, opts = {}) {
   const mask = document.createElement('div')
   mask.className = 'jg-modal-mask open'
   mask.innerHTML = `<div class="jg-modal ${opts.wide ? 'wide' : ''}">
-    <div class="jg-modal-head"><div class="jg-modal-title">${title}</div><span class="spacer"></span><button class="btn subtle" data-mclose>${icon('close')}</button></div>
+    <div class="jg-modal-head"><div class="jg-modal-title">${title}</div><span class="spacer"></span><button class="btn subtle jg-modal-x" data-mclose title="关闭" aria-label="关闭">${icon('close')}</button></div>
     <div class="jg-modal-body">${body}</div>
   </div>`
   document.body.appendChild(mask)
@@ -7782,9 +7770,7 @@ async function openCloudPreview(id) {
     <div class="form-foot"><span class="mono">预览为只读，原始文件以下载件为准</span><span class="spacer"></span>
       <button class="btn" data-dl2="${esc(it.name)}">下载</button>
       ${['docx', 'xlsx', 'pptx'].includes(it.type) ? `<button class="btn primary" data-edit2="${esc(it.id)}">在线编辑</button>` : ''}
-      <button class="btn" data-cancel>关闭</button>
     </div>`, { wide: true })
-  mask.querySelector('[data-cancel]').addEventListener('click', () => mask.remove())
   const dl = mask.querySelector('[data-dl2]')
   if (dl) dl.addEventListener('click', () => toast(`已下载：${dl.dataset.dl2}（演示）`))
   const ed = mask.querySelector('[data-edit2]')
@@ -7809,8 +7795,7 @@ async function openAssetCard(id) {
     </div>
     <div class="asset-layers">${(read.layers || layers).map((l, i) => `<span class="asset-layer"><span class="mono">${String(i + 1).padStart(2, '0')}</span>${esc(l)}</span>`).join('')}</div>
     <div class="form-note">${esc(read.note || '查看图层与元数据；原始要素需按要素级授权审批后导出。')}</div>
-    <div class="form-foot"><span class="mono">AI 已通过 drive_read 读取元数据</span><span class="spacer"></span><button class="btn" data-aclose>关闭</button></div>`, { wide: true })
-  mask.querySelector('[data-aclose]').addEventListener('click', () => mask.remove())
+    <div class="form-foot"><span class="mono">AI 已通过 drive_read 读取元数据</span></div>`, { wide: true })
 }
 
 async function openShareCard(id, anchor) {
@@ -8510,7 +8495,6 @@ async function openDocEditor(id, editable) {
       <div class="de-foot">
         <span class="de-hint">评论、段落权限、版本对比与共享动作均写入审计</span>
         <span class="spacer"></span>
-        <button class="dd-btn" id="deCancel">关闭</button>
         ${canEdit ? '<button class="dd-btn primary" id="deSave">保存</button>' : ''}
       </div>
     </div>`
@@ -8518,7 +8502,6 @@ async function openDocEditor(id, editable) {
   const close = () => { clearInterval(timer); mask.remove() }
   mask.addEventListener('click', (e) => { if (e.target === mask) close() })
   mask.querySelector('#deClose').addEventListener('click', close)
-  mask.querySelector('#deCancel').addEventListener('click', close)
 
   const main = mask.querySelector('#deMain')
 
@@ -8597,8 +8580,7 @@ async function openDocEditor(id, editable) {
       const dm = openModal(`版本对比 v${from} → v${to}`, `
         <div class="diff-meta">新增 ${r.added} 行 · 删除 ${r.removed} 行 · 仅比较正文，表格与演示按行展开</div>
         <div class="diff-box">${r.rows.map((row) => `<div class="diff-row ${row.type}"><span class="diff-sign">${row.type === 'add' ? '+' : row.type === 'del' ? '−' : ' '}</span><span>${esc(row.text)}</span></div>`).join('')}</div>
-        <div class="form-foot"><span class="mono">对比结果来自编辑历史快照</span><span class="spacer"></span><button class="btn" data-x>关闭</button></div>`)
-      dm.querySelector('[data-x]').addEventListener('click', () => dm.remove())
+        <div class="form-foot"><span class="mono">对比结果来自编辑历史快照</span></div>`)
     }))
   }
 
@@ -8741,7 +8723,7 @@ async function renderNotices(el) {
           <span class="nt-cat ${catClass(n)}">${esc(n.category)}</span>
           <span class="ac-modal-hmeta">${esc(n.dept)} · ${esc(n.author)} · ${esc(n.time)}</span>
           <span class="spacer"></span>
-          <button class="icon-btn ac-close" data-ntclose title="关闭">×</button>
+          <button class="icon-btn ac-close" data-ntclose title="关闭" aria-label="关闭">${icon('close')}</button>
         </div>
         <div class="ac-modal-body nt-modal-body">
           <div class="nt-h-title">${esc(n.title)}</div>
@@ -8938,7 +8920,7 @@ async function renderAcademy(el) {
           <span class="ac-kind ${it.kind}">${esc(it.fmt)}</span>
           <span class="ac-modal-hmeta">${esc(it.dept)} · ${esc(it.time)}</span>
           <span class="spacer"></span>
-          <button class="icon-btn ac-close" data-acclose title="关闭">×</button>
+          <button class="icon-btn ac-close" data-acclose title="关闭" aria-label="关闭">${icon('close')}</button>
         </div>
         <div class="ac-modal-body">${detailHTML(it)}</div>
       </div>`
@@ -9166,8 +9148,7 @@ async function openAiTools() {
           <span class="tool-act"><button class="dr-btn" data-tooltry="${esc(t.name)}">试调用</button></span>
         </div>`).join('')}
     </div>
-    <div class="form-foot"><span class="mono">共 ${tools.length} 个工具 · 按模块授权并写审计</span><span class="spacer"></span><button class="btn" data-mclose>关闭</button></div>`, { wide: true })
-  mask.querySelector('[data-mclose]').addEventListener('click', () => mask.remove())
+    <div class="form-foot"><span class="mono">共 ${tools.length} 个工具 · 按模块授权并写审计</span></div>`, { wide: true })
   mask.querySelectorAll('[data-tooltry]').forEach((b) => b.addEventListener('click', () => openToolTry(b.dataset.tooltry, tools)))
 }
 
@@ -9183,8 +9164,7 @@ async function openToolTry(name, tools) {
       <div><span>结果</span><b>${body.ok ? '成功' : '被拒绝'}</b></div>
     </div>
     <div class="tool-json"><pre>${esc(JSON.stringify(body.result || body.error, null, 2))}</pre></div>
-    <div class="form-foot"><span class="mono">ai.invoke · allow</span><span class="spacer"></span><button class="btn" data-mclose>关闭</button></div>`, { wide: true })
-  mask.querySelector('[data-mclose]').addEventListener('click', () => mask.remove())
+    <div class="form-foot"><span class="mono">ai.invoke · allow</span></div>`, { wide: true })
 }
 
 
@@ -9696,8 +9676,7 @@ function openTaskRuns(a) {
         </div>`
       }).join('') || '<div class="tk-doc-empty">暂无执行记录</div>'}
     </div>
-    <div class="form-foot"><span class="mono">每次执行都是一次真实的 AI 运行，失败保留原因</span><span class="spacer"></span><button class="btn" data-cancel>关闭</button></div>`)
-  mask.querySelector('[data-cancel]').addEventListener('click', () => mask.remove())
+    <div class="form-foot"><span class="mono">每次执行都是一次真实的 AI 运行，失败保留原因</span></div>`)
   mask.querySelectorAll('[data-resume]').forEach((row) => row.addEventListener('click', async () => {
     const task = (state.tasks || []).find((x) => x.id === row.dataset.resume)
     if (!task?.conversationId) return
@@ -9723,8 +9702,7 @@ function openTaskFiles(a) {
         <span class="tk-file-open">${icon('arrow')}</span>
       </button>`).join('')}
     </div>
-    <div class="form-foot"><span class="mono">任务产出与来源文件统一归档在该任务下</span><span class="spacer"></span><button class="btn" data-cancel>关闭</button></div>`)
-  mask.querySelector('[data-cancel]').addEventListener('click', () => mask.remove())
+    <div class="form-foot"><span class="mono">任务产出与来源文件统一归档在该任务下</span></div>`)
   mask.querySelectorAll('[data-task-file]').forEach((b) => b.addEventListener('click', () => toast(`打开文件「${b.dataset.taskFile}」（演示）`)))
 }
 
@@ -10296,9 +10274,7 @@ async function renderAdmin(el) {
           <div style="max-height:52vh;overflow:auto;border:1px solid var(--line);border-radius:8px">
             <div class="mc-thead" style="--mc-cols:minmax(120px,1fr) minmax(230px,2fr) minmax(54px,.6fr);position:sticky;top:0;background:var(--panel);z-index:1"><span>运行时 ID</span><span>插件包</span><span>状态</span></div>
             ${rows}
-          </div>
-          <div class="form-foot"><span class="spacer"></span><button class="btn" data-mclose>关闭</button></div>`)
-        m.querySelector('[data-mclose]').addEventListener('click', () => m.remove())
+          </div>`)
       })
     }
     const { body: marketAdmin } = await api('/api/admin/plugin-market')
@@ -10460,8 +10436,7 @@ async function renderTickets(box) {
           ${t.history.map((h) => `<div class="timeline-row"><span class="mono">${esc(h.time)}</span><span>${esc(h.text)}</span></div>`).join('')}
         </div>
         <div class="notice neutral">复核证据保留：账号停用记录、权限回收结果、会话终止时间；异常超时自动升级提醒。</div>
-      </div>
-      <div class="slide-foot"><button class="btn" data-close>关闭</button></div>`
+      </div>`
     wireSlide(slide)
   }))
 }
@@ -10729,7 +10704,6 @@ async function openRuntimePlugins() {
     <div id="rtpList" style="margin-top:10px;max-height:52vh;overflow:auto">${plugins.map((p) => runtimePluginRow(p, protectedIds)).join('')}</div>
     <div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px">
       <button class="btn sm" data-rt-restart-in-modal>重启运行时</button>
-      <button class="btn" data-rtp-close>关闭</button>
     </div>`)
   const list = mask.querySelector('#rtpList')
   const paint = (q = '') => {
@@ -10753,7 +10727,6 @@ async function openRuntimePlugins() {
   }
   paint()
   mask.querySelector('#rtpQuery').addEventListener('input', (e) => paint(e.target.value))
-  mask.querySelector('[data-rtp-close]').addEventListener('click', () => mask.remove())
   mask.querySelector('[data-rt-restart-in-modal]').addEventListener('click', async () => {
     const { ok: done, body: result } = await api('/api/runtime/restart', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
     toast(done ? '运行时已关闭，下次会话按新配置启动' : (result.error || '重启失败'), !done)
