@@ -445,13 +445,14 @@ function capabilityPolicyOf(cap) {
   const saved = liveCapabilityPolicies.get(cap.id) || {}
   const permissions = Array.isArray(saved.permissions) && saved.permissions.length ? saved.permissions : cap.permissions
   const limits = { ...cap.limits, ...(saved.limits || {}) }
-  return { permissions, limits, updatedAt: saved.updatedAt || 0, updatedBy: saved.updatedBy || '' }
+  return { permissions, limits, disabled: Boolean(saved.disabled), disabledAt: saved.disabledAt || 0, disabledBy: saved.disabledBy || '', updatedAt: saved.updatedAt || 0, updatedBy: saved.updatedBy || '' }
 }
 function platformCapabilities() {
   const inventory = runtimePluginInventory()
   const rowEnabled = (id) => Boolean(inventory.find((x) => x.id === id)?.enabled)
   return PLATFORM_CAPABILITIES.map((cap) => {
     const policy = capabilityPolicyOf(cap)
+    const runtimeEnabled = cap.sourceIds.every(rowEnabled)
     return {
       ...cap,
       kind: 'capability',
@@ -460,8 +461,12 @@ function platformCapabilities() {
       managedBy: '平台运维',
       accessibleTo: '全部授权用户',
       defaultEnabled: true,
-      enabled: cap.sourceIds.every(rowEnabled),
-      status: 'enabled',
+      runtimeEnabled,
+      enabled: runtimeEnabled && !policy.disabled,
+      disabled: policy.disabled,
+      disabledAt: policy.disabledAt,
+      disabledBy: policy.disabledBy,
+      status: policy.disabled ? 'disabled' : runtimeEnabled ? 'enabled' : 'missing',
       nets: ['inet', 'gov', 'secret'],
       installScope: '系统级模块 · 默认安装，不可卸载',
       upgradedBy: '平台发布，独立升级',
@@ -3684,6 +3689,22 @@ const api = {
     const body = JSON.parse(req.__body || '{}')
     const cap = PLATFORM_CAPABILITIES.find((x) => x.id === body.id)
     if (!cap) return json(res, 404, { error: '平台能力不存在' })
+    if (body.action === 'enable' || body.action === 'disable') {
+      const prev = capabilityPolicyOf(cap)
+      const enabled = body.action === 'enable'
+      liveCapabilityPolicies.set(cap.id, {
+        permissions: prev.permissions,
+        limits: prev.limits,
+        disabled: !enabled,
+        disabledAt: enabled ? 0 : Date.now(),
+        disabledBy: enabled ? '' : user.name,
+        updatedAt: Date.now(),
+        updatedBy: user.name,
+      })
+      persistPersistentState()
+      logAudit(user, 'platform-capability.toggle', cap.id, enabled ? 'enable' : 'disable', netOf(req))
+      return json(res, 200, { ok: true, item: platformCapabilities().find((x) => x.id === cap.id) })
+    }
     if (body.reset === true) {
       liveCapabilityPolicies.delete(cap.id)
       persistPersistentState()

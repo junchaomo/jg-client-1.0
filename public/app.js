@@ -10241,12 +10241,14 @@ async function renderAdmin(el) {
         <div class="mc-table" style="--mc-cols:minmax(110px,1.5fr) minmax(84px,1fr) minmax(64px,.8fr) minmax(80px,.9fr)">
           <div class="mc-thead"><span>系统模块</span><span>运行时模块</span><span>权限</span><span>资源上限</span></div>
           ${caps.map((c) => `<div class="mc-trow">
-            <span class="mc-first" title="${esc(c.name)}">${esc(c.shortName || c.name)} <span class="mc-tag ${c.enabled ? 'ok' : 'warn'}">${c.enabled ? '默认启用' : '未加载'}</span></span>
+            <span class="mc-first" title="${esc(c.name)}">${esc(c.shortName || c.name)} <span class="mc-tag ${c.disabled ? 'warn' : c.enabled ? 'ok' : 'bad'}">${c.disabled ? '已停用' : c.enabled ? '默认启用' : '未加载'}</span></span>
             <span class="mono" style="font-size:10px">${esc(c.module)}</span>
             <span>${(c.permissions || []).length} 项</span>
             <span>${esc(capabilityLimitsText(c))}</span>
             <span class="mc-acts" style="grid-column:1/-1;flex-wrap:wrap">
+              <button class="btn sm ${c.disabled ? 'primary' : ''}" data-captoggle="${esc(c.id)}" data-next="${c.disabled ? 'enable' : 'disable'}">${c.disabled ? '启用' : '停用'}</button>
               <button class="btn sm" data-cappolicy-admin="${esc(c.id)}">权限与资源</button>
+              ${c.disabled ? `<span class="mc-dim">停用后不向授权用户开放</span>` : ''}
             </span>
           </div>`).join('') || '<div class="mc-row">暂无平台能力</div>'}
         </div>`
@@ -10257,6 +10259,24 @@ async function renderAdmin(el) {
         state.capabilities = caps
         state.capabilityCanManage = true
         openCapabilityPolicy(c)
+      }))
+      wrap.querySelectorAll('[data-captoggle]').forEach((b) => b.addEventListener('click', async () => {
+        const c = caps.find((x) => x.id === b.dataset.captoggle)
+        if (!c) return
+        const action = b.dataset.next
+        const run = async () => {
+          const { ok, body } = await api('/api/admin/platform-capabilities', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: c.id, action }) })
+          if (!ok) return toast(body.error || '操作失败', true)
+          state.capabilities = (state.capabilities || []).map((x) => (x.id === c.id ? body.item : x))
+          toast(action === 'disable' ? '平台公共能力已停用，不再向授权用户开放' : '平台公共能力已启用')
+          renderView()
+        }
+        if (action === 'enable') return run()
+        const m = openModal('停用平台公共能力', `
+          <div class="form-note">停用后「${esc(c.name)}」不再向所有授权用户开放，但运行时模块与已有数据不会被删除。可随时重新启用。</div>
+          <div class="form-foot"><span class="spacer"></span><button class="btn" data-mclose>取消</button><button class="btn primary" id="capToggleOk">确认停用</button></div>`)
+        m.querySelector('[data-mclose]').addEventListener('click', () => m.remove())
+        m.querySelector('#capToggleOk').addEventListener('click', async () => { m.remove(); await run() })
       }))
     }
     if (blocks) {

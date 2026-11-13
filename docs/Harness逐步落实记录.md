@@ -932,3 +932,15 @@
 **自动化归属**：自动化任务是员工自己创建的定时任务，不属于管理中心。AI 能力管理删去“自动化任务”分段、Harness 定时任务块和对应 KPI，结构由五段收敛为四段：运行基线 / 模型与网关 / Agent 与 MCP / 插件与技能。用户侧仍保留“定时任务”入口。
 
 **实测**：米乐登录后 AI 能力管理显示四个分段；系统内核 6/6 只读；“插件与技能”显示插件审核 0、技能审核 0、插件市场 0、技能市场 0。当前服务端口 `53351`。
+
+
+## 36. 平台公共能力支持停用/启用（2026-11-13）
+
+平台公共能力从“只读默认启用”改为“可停用、可重新启用”：
+- 每项能力新增 `disabled` 状态，写入 `liveCapabilityPolicies`，随持久状态保存；停用记录 `disabledAt`、`disabledBy`。
+- `GET /api/platform-capabilities` 返回 `runtimeEnabled`、`enabled`、`disabled` 与 `status`；KPI 会把停用项从已启用数中扣除。
+- `POST /api/admin/platform-capabilities` 新增 `action=enable|disable`，保留原有权限与资源限制配置；停用不删除运行时模块与已有数据，可随时启用。
+- 管理中心“平台公共能力”表新增“停用/启用”按钮；停用前弹出确认，说明只关闭平台能力，不删除模块和数据。
+- 实测 Office/PDF 停用后 `enabled=false / status=disabled`，恢复后 `enabled=true / status=enabled`，状态持久化。
+
+**边界**：停用是平台能力管理开关，运行时插件本身不卸载；内置模块仍保留，便于重新启用和独立升级。
