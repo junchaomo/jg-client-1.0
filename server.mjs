@@ -3643,7 +3643,8 @@ const api = {
   },
   'POST /api/admin/official-baseline': async (req, res) => {
     const user = roleOf(req)
-    if (!canManage(user)) return json(res, 403, { error: '仅超级管理员可管理官方基线' })
+    if (!canManage(user)) return json(res, 403, { error: '仅超级管理员可查看系统内核' })
+    return json(res, 403, { error: '系统内核是运行时基线，不允许停用或卸载' })
     const body = JSON.parse(req.__body || '{}')
     const dir = String(body.dir || '').trim()
     if (!OFFICIAL_SKILL_DIRS.includes(dir)) return json(res, 404, { error: '不是官方内置技能' })

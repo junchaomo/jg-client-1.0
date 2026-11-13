@@ -10035,16 +10035,16 @@ async function renderAdmin(el) {
   const tab = allowed(state.consoleTab) ? state.consoleTab : 'overview'
   state.consoleTab = tab
   const AI_SEGMENTS = [
-    { id: 'baseline', no: '01', label: '运行基线', note: '官方内置技能、核心插件与平台公共能力；系统级默认启用，不进入员工市场' },
+    { id: 'baseline', no: '01', label: '运行基线', note: '系统内核与平台公共能力；系统内核不可停用或卸载，也不进入员工市场' },
     { id: 'models', no: '02', label: '模型与网关', note: '当前账号真实模型网关配置；没有真实用量数据时不展示虚构配额' },
     { id: 'agents', no: '03', label: 'Agent 与 MCP', note: '运行时实际加载的 Agent、MCP、技能与调度模块' },
-    { id: 'plugins', no: '04', label: '插件与技能', note: '员工提交的市场条目、审核与上下架管理' },
-    { id: 'automation', no: '05', label: '自动化任务', note: '来自 Harness schedule.json 的真实定时任务' },
+    { id: 'plugins', no: '04', label: '插件与技能', note: '员工提交的插件与技能、审核与分类上架管理' },
   ]
   const aiTab = AI_SEGMENTS.some((s) => s.id === state.aiTab) ? state.aiTab : 'baseline'
   state.aiTab = aiTab
   const AI_BLOCK_GROUP = {
     '官方内置插件与技能': 'baseline',
+    '系统内核': 'baseline',
     '平台公共能力': 'baseline',
     '模型管理': 'models',
     '模型网关': 'models',
@@ -10052,9 +10052,9 @@ async function renderAdmin(el) {
     'Agent 与 MCP': 'agents',
     'Agent、MCP 与技能运行时': 'agents',
     '插件审核': 'plugins',
+    '插件 / 技能审核': 'plugins',
     '插件市场已上架管理': 'plugins',
-    '自动化任务': 'automation',
-    'Harness 定时任务': 'automation',
+    '插件 / 技能上架管理': 'plugins',
   }
   const sec = body.sections[tab]
   const STATUS = /^(正常|在线|成功|已发布|已通过|已闭环|已回收|已恢复|已修复|可用|开启|允许|通过|已入库|已生效|已显示|—)$/
@@ -10103,7 +10103,7 @@ async function renderAdmin(el) {
         </div>
         ${tab === 'overview' ? `<div class="mc-note">${esc(sec.meta)}</div>` : `<div class="mc-note">${esc(sec.meta)}</div>`}
         <div class="mc-kpis"${tab === 'ai' ? ' id="aiKpis"' : ''}>${tab === 'ai' ? '' : sec.kpis.map((k) => `<div class="mc-kpi"><div class="mc-kpi-k">${esc(k.k)}</div><div class="mc-kpi-v ${k.tone || ''}">${esc(k.v)}</div><div class="mc-kpi-note">${esc(k.note)}</div></div>`).join('')}</div>
-        ${tab === 'ai' ? `<style>.mc-seg{display:grid!important;grid-template-columns:repeat(5,minmax(0,1fr));gap:3px;margin-top:14px;padding:3px;border:1px solid #e7ebf1;border-radius:10px;background:#f7f8fa}.mc-seg-item{display:inline-flex;align-items:center;justify-content:center;gap:5px;border:1px solid transparent;background:transparent;border-radius:7px;padding:7px 3px;font-size:11px;color:#4a5057;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.mc-seg-item.on{background:#17191c;color:#fff;border-color:#17191c}.mc-seg-no{font-family:ui-monospace,Consolas,monospace;font-size:9px;color:#9aa1aa;flex:none}.mc-seg-item.on .mc-seg-no{color:#c9ced6}.mc-seg-note{margin:9px 0 0;font-size:var(--fs-dense);color:#7b828b;line-height:1.6}@media (max-width:760px){.mc-seg-no{display:none}}</style><div class="mc-seg" id="aiSeg">${AI_SEGMENTS.map((s) => `<button class="mc-seg-item${aiTab === s.id ? ' on' : ''}" style="${aiTab === s.id ? 'background:#17191c!important;color:#fff!important;border-color:#17191c!important' : ''}" data-aitab="${s.id}"><span class="mc-seg-no">${s.no}</span>${s.label}</button>`).join('')}</div>
+        ${tab === 'ai' ? `<style>.mc-seg{display:grid!important;grid-template-columns:repeat(4,minmax(0,1fr));gap:3px;margin-top:14px;padding:3px;border:1px solid #e7ebf1;border-radius:10px;background:#f7f8fa}.mc-seg-item{display:inline-flex;align-items:center;justify-content:center;gap:5px;border:1px solid transparent;background:transparent;border-radius:7px;padding:7px 3px;font-size:11px;color:#4a5057;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.mc-seg-item.on{background:#17191c;color:#fff;border-color:#17191c}.mc-seg-no{font-family:ui-monospace,Consolas,monospace;font-size:9px;color:#9aa1aa;flex:none}.mc-seg-item.on .mc-seg-no{color:#c9ced6}.mc-seg-note{margin:9px 0 0;font-size:var(--fs-dense);color:#7b828b;line-height:1.6}@media (max-width:760px){.mc-seg-no{display:none}}</style><div class="mc-seg" id="aiSeg">${AI_SEGMENTS.map((s) => `<button class="mc-seg-item${aiTab === s.id ? ' on' : ''}" style="${aiTab === s.id ? 'background:#17191c!important;color:#fff!important;border-color:#17191c!important' : ''}" data-aitab="${s.id}"><span class="mc-seg-no">${s.no}</span>${s.label}</button>`).join('')}</div>
           <div class="mc-seg-note">${esc(AI_SEGMENTS.find((s) => s.id === aiTab).note)}</div>` : ''}
         <div class="mc-blocks">${sec.blocks.map(block).join('')}</div>
       </div>
@@ -10123,28 +10123,35 @@ async function renderAdmin(el) {
   })
 
   if (tab === 'ai') {
-    const [{ body: sub }, { body: runtimeInfo }, { body: modelCfg }, { body: autoBody }] = await Promise.all([
+    const [{ body: sub }, { body: runtimeInfo }, { body: modelCfg }] = await Promise.all([
       api('/api/plugin-subs'),
       api('/api/runtime/plugins'),
       api('/api/model/config'),
-      api('/api/automations'),
     ])
     const pending = (sub.items || []).filter((x) => x.status === 'pending')
+    const pendingPlugins = pending.filter((x) => x.kind !== 'skill')
+    const pendingSkills = pending.filter((x) => x.kind === 'skill')
     const runtimePlugins = runtimeInfo.plugins || []
-    const harnessAutos = (autoBody.items || []).filter((x) => x.source === 'harness')
     const blocks = el.querySelector('.mc-blocks')
     if (blocks) {
+      const reviewRows = (items, emptyText, type) => items.map((x) => {
+        const bad = (x.checks || []).some((c) => c[1] === '不通过')
+        const warn = (x.checks || []).some((c) => c[1] === '待复核')
+        const tone = bad ? 'bad' : warn ? 'warn' : 'ok'
+        return `<div class="mc-trow"><span class="mc-first">${esc(x.name)} <span class="tag" style="font-size:10px">${type}</span> <span class="mc-dim mono">v${esc(x.version)}</span></span><span>${esc(x.author)} · ${esc(x.unit)}</span><span><span class="mc-tag ${tone}">${bad ? '存在不通过项' : warn ? '有权限待复核' : '全部通过'}</span></span><span class="mc-acts"><button class="btn sm" data-review="reject" data-subid="${x.id}">退回</button><button class="btn sm primary" data-review="approve" data-subid="${x.id}">通过上架</button></span></div>`
+      }).join('') || `<div class="mc-row">${emptyText}</div>`
       const wrap = document.createElement('div')
       wrap.className = 'mc-block'
-      wrap.innerHTML = `<div class="mc-block-head"><b>插件审核</b><span class="spacer"></span><span class="mc-count">${pending.length} 项待处理</span></div>
+      wrap.innerHTML = `<div class="mc-block-head"><b>插件 / 技能审核</b><span class="spacer"></span><span class="mc-count">${pending.length} 项待处理</span></div>
+        <div style="display:flex;align-items:center;gap:8px;padding:8px 10px 4px"><b style="font-size:12px">插件审核</b><span class="mc-count">${pendingPlugins.length} 项待处理</span></div>
         <div class="mc-table" style="--mc-cols:1.4fr 1fr 1.2fr 1fr">
           <div class="mc-thead"><span>插件</span><span>提交人</span><span>自动检测</span><span>操作</span></div>
-          ${pending.map((x) => {
-            const bad = (x.checks || []).some((c) => c[1] === '不通过')
-            const warn = (x.checks || []).some((c) => c[1] === '待复核')
-            const tone = bad ? 'bad' : warn ? 'warn' : 'ok'
-            return `<div class="mc-trow"><span class="mc-first">${esc(x.name)} <span class="mc-dim mono">v${esc(x.version)}</span></span><span>${esc(x.author)} · ${esc(x.unit)}</span><span><span class="mc-tag ${tone}">${bad ? '存在不通过项' : warn ? '有权限待复核' : '全部通过'}</span></span><span class="mc-acts"><button class="btn sm" data-review="reject" data-subid="${x.id}">退回</button><button class="btn sm primary" data-review="approve" data-subid="${x.id}">通过上架</button></span></div>`
-          }).join('') || '<div class="mc-row">当前没有待审核插件</div>'}
+          ${reviewRows(pendingPlugins, '当前没有待审核插件', '插件')}
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;padding:12px 10px 4px"><b style="font-size:12px">技能审核</b><span class="mc-count">${pendingSkills.length} 项待处理</span></div>
+        <div class="mc-table" style="--mc-cols:1.4fr 1fr 1.2fr 1fr">
+          <div class="mc-thead"><span>技能</span><span>提交人</span><span>自动检测</span><span>操作</span></div>
+          ${reviewRows(pendingSkills, '当前没有待审核技能', '技能')}
         </div>`
       blocks.appendChild(wrap)
       wrap.querySelectorAll('[data-review]').forEach((b) => b.addEventListener('click', async () => {
@@ -10178,30 +10185,25 @@ async function renderAdmin(el) {
       const bundles = baselineAdmin.bundles || []
       const wrap = document.createElement('div')
       wrap.className = 'mc-block'
-      wrap.innerHTML = `<div class="mc-block-head"><b>官方内置插件与技能</b><span class="spacer"></span><span class="mc-count">${skills.filter((s) => s.enabled).length + bundles.filter((b) => b.enabled).length} / ${skills.length + bundles.length} 项启用</span></div>
+      wrap.innerHTML = `<div class="mc-block-head"><b>系统内核</b><span class="spacer"></span><span class="mc-count">${skills.filter((s) => s.enabled).length + bundles.filter((b) => b.enabled).length} / ${skills.length + bundles.length} 项启用</span></div>
         <div class="mc-table" style="--mc-cols:minmax(120px,1.8fr) minmax(54px,.7fr) minmax(70px,.9fr) minmax(62px,.7fr)">
-          <div class="mc-thead"><span>官方基线</span><span>类型</span><span>运行时位置</span><span>状态</span></div>
+          <div class="mc-thead"><span>内核组件</span><span>类型</span><span>运行时位置</span><span>状态</span></div>
           ${skills.map((s) => {
             const stateText = !s.installed ? '已卸载' : s.enabled ? '已启用' : '已停用'
             const stateTone = !s.installed ? 'warn' : s.enabled ? 'ok' : 'warn'
             return `<div class="mc-trow">
-            <span class="mc-first" title="${esc(s.name)}">${esc(s.name)} <span class="mc-tag">基线</span></span>
+            <span class="mc-first" title="${esc(s.name)}">${esc(s.name)} <span class="mc-tag">内核</span></span>
             <span>技能</span>
             <span class="mono" style="font-size:10px">skills/${esc(s.dir)}</span>
             <span><span class="mc-tag ${stateTone}">${stateText}</span> ${s.installed ? `<span class="mc-dim">${s.usedBy} 个账号</span>` : ''}</span>
-            <span class="mc-acts" style="grid-column:1/-1">
-              ${!s.installed
-                ? `<button class="btn sm primary" data-ob-skill="${esc(s.dir)}" data-next="install">重新安装</button>`
-                : `<button class="btn sm ${s.enabled ? '' : 'primary'}" data-ob-skill="${esc(s.dir)}" data-next="${s.enabled ? 'disable' : 'enable'}">${s.enabled ? '停用' : '启用'}</button>
-                   <button class="btn sm" data-ob-skill="${esc(s.dir)}" data-next="uninstall">卸载</button>`}
-            </span>
+            <span class="mc-acts" style="grid-column:1/-1"><span class="mc-dim">系统内核不可停用或卸载</span></span>
           </div>`}).join('')}
           ${bundles.map((b) => `<div class="mc-trow">
             <span class="mc-first" title="${esc(b.label)}">${esc(b.label)} <span class="mc-dim mono">${esc(b.name)}</span></span>
             <span>插件</span>
             <span>核心运行时</span>
             <span><span class="mc-tag ${b.enabled ? 'ok' : 'warn'}">${b.enabled ? '已启用' : '缺失'}</span></span>
-            <span class="mc-acts" style="grid-column:1/-1"><span class="mc-dim">核心运行时插件不可停用或卸载</span></span>
+            <span class="mc-acts" style="grid-column:1/-1"><span class="mc-dim">系统内核不可停用或卸载</span></span>
           </div>`).join('')}
         </div>`
       blocks.appendChild(wrap)
@@ -10288,25 +10290,36 @@ async function renderAdmin(el) {
     const { body: marketAdmin } = await api('/api/admin/plugin-market')
     if (blocks) {
       const items = marketAdmin.items || []
-      const wrap = document.createElement('div')
-      wrap.className = 'mc-block'
-      wrap.innerHTML = `<div class="mc-block-head"><b>插件市场已上架管理</b><span class="spacer"></span><span class="mc-count">${marketAdmin.counts?.listed ?? items.length} 个已上架 / ${items.length} 个条目</span></div>
-        <div class="mc-table" style="--mc-cols:minmax(110px,1.6fr) minmax(54px,.7fr) minmax(80px,.9fr) minmax(64px,.8fr)">
-          <div class="mc-thead"><span>插件 / 技能</span><span>分组</span><span>发布单位</span><span>状态</span></div>
-          ${items.map((x, i) => `<div class="mc-trow">
-            <span class="mc-first">${esc(x.name)} <span class="tag" style="font-size:10px">${x.type === 'plugin' ? '插件' : '技能'}</span> <span class="mc-dim mono">${esc(x.id)}</span></span>
+      const pluginItems = items.filter((x) => x.type !== 'skill')
+      const skillItems = items.filter((x) => x.type === 'skill')
+      const listedPlugins = pluginItems.filter((x) => x.listed !== false).length
+      const listedSkills = skillItems.filter((x) => x.listed !== false).length
+      const marketRows = (rows, len) => rows.map((x, i) => `<div class="mc-trow">
+            <span class="mc-first">${esc(x.name)} <span class="mc-dim mono">${esc(x.id)}</span></span>
             <span>${esc(x.section || '')}</span>
             <span>${esc(x.publisher || '')}${x.origin === 'community' ? ' <span class="mc-dim">社区</span>' : ''}</span>
             <span><span class="mc-tag ${x.listed === false ? 'warn' : 'ok'}">${x.listed === false ? '已下架' : '已上架'}</span>${x.installed ? ` <span class="mc-tag ok">${(x.installUsers || []).length && x.installUsers[0]?.scope === 'baseline' ? '基线' : '已安装'}</span>` : ''}</span>
             <span class="mc-acts" style="grid-column:1/-1;flex-wrap:wrap">
               <button class="btn sm" data-mkt-sort="${esc(x.id)}" data-dir="up" ${i === 0 ? 'disabled' : ''}>↑</button>
-              <button class="btn sm" data-mkt-sort="${esc(x.id)}" data-dir="down" ${i === items.length - 1 ? 'disabled' : ''}>↓</button>
+              <button class="btn sm" data-mkt-sort="${esc(x.id)}" data-dir="down" ${i === len - 1 ? 'disabled' : ''}>↓</button>
               <button class="btn sm" data-mkt-users="${esc(x.id)}">安装用户 ${(x.installUsers || []).filter((u) => u.scope !== 'baseline').length}</button>
               <button class="btn sm" data-mkt-edit="${esc(x.id)}">编辑</button>
               <button class="btn sm ${x.listed === false ? 'primary' : ''}" data-mkt-list="${esc(x.id)}" data-next="${x.listed === false ? 'list' : 'unlist'}">${x.listed === false ? '重新上架' : '下架'}</button>
               ${x.origin === 'community' ? `<button class="btn sm" data-mkt-del="${esc(x.id)}">删除</button>` : ''}
             </span>
-          </div>`).join('') || '<div class="mc-row">市场还没有条目</div>'}
+          </div>`).join('')
+      const wrap = document.createElement('div')
+      wrap.className = 'mc-block'
+      wrap.innerHTML = `<div class="mc-block-head"><b>插件 / 技能上架管理</b><span class="spacer"></span><span class="mc-count">${listedPlugins} / ${pluginItems.length} 个插件 · ${listedSkills} / ${skillItems.length} 个技能已上架</span></div>
+        <div style="display:flex;align-items:center;gap:8px;padding:8px 10px 4px"><b style="font-size:12px">插件市场</b><span class="mc-count">${pluginItems.length} 个条目</span></div>
+        <div class="mc-table" style="--mc-cols:minmax(110px,1.6fr) minmax(54px,.7fr) minmax(80px,.9fr) minmax(64px,.8fr)">
+          <div class="mc-thead"><span>插件</span><span>分组</span><span>发布单位</span><span>状态</span></div>
+          ${marketRows(pluginItems, pluginItems.length) || '<div class="mc-row">市场还没有插件</div>'}
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;padding:12px 10px 4px"><b style="font-size:12px">技能市场</b><span class="mc-count">${skillItems.length} 个条目</span></div>
+        <div class="mc-table" style="--mc-cols:minmax(110px,1.6fr) minmax(54px,.7fr) minmax(80px,.9fr) minmax(64px,.8fr)">
+          <div class="mc-thead"><span>技能</span><span>分组</span><span>发布单位</span><span>状态</span></div>
+          ${marketRows(skillItems, skillItems.length) || '<div class="mc-row">市场还没有技能</div>'}
         </div>`
       blocks.appendChild(wrap)
       wrap.querySelectorAll('[data-mkt-list]').forEach((b) => b.addEventListener('click', async () => {
@@ -10361,16 +10374,6 @@ async function renderAdmin(el) {
         })
       }))
     }
-    if (blocks) {
-      const wrap = document.createElement('div')
-      wrap.className = 'mc-block'
-      wrap.innerHTML = `<div class="mc-block-head"><b>Harness 定时任务</b><span class="spacer"></span><span class="mc-count">${harnessAutos.length} 个任务</span></div>
-        <div class="mc-table" style="--mc-cols:minmax(130px,1.6fr) minmax(110px,1.2fr) minmax(100px,1fr) minmax(64px,.6fr)">
-          <div class="mc-thead"><span>任务</span><span>执行规则</span><span>下次执行</span><span>状态</span></div>
-          ${harnessAutos.map((a) => `<div class="mc-trow"><span class="mc-first" title="${esc(a.name)}">${esc(a.name)}</span><span class="mono" style="font-size:10px">${esc(a.schedule)}</span><span>${esc(a.next)}</span><span><span class="mc-tag ${a.status === 'active' ? 'ok' : 'warn'}">${a.status === 'active' ? '运行中' : '已暂停'}</span></span></div>`).join('') || '<div class="mc-row">当前没有 Harness 定时任务</div>'}
-        </div>`
-      blocks.appendChild(wrap)
-    }
     const kpiBox = document.getElementById('aiKpis')
     if (kpiBox) {
       const marketItems = marketAdmin.items || []
@@ -10384,7 +10387,6 @@ async function renderAdmin(el) {
         { k: '运行时插件', v: `${enabledRuntime} / ${runtimePlugins.length}`, note: `${runtimePlugins.length - enabledRuntime} 个停用` },
         { k: '平台公共能力', v: `${enabledCaps} / ${capRows.length}`, note: '系统级模块，不属于员工市场' },
         { k: '市场条目', v: `${marketItems.length}`, note: `待审核 ${pending.length}` },
-        { k: 'Harness 定时任务', v: `${harnessAutos.length}`, note: '来自 schedule.json' },
       ]
       kpiBox.innerHTML = kpis.map((x) => `<div class="mc-kpi"><div class="mc-kpi-k">${esc(x.k)}</div><div class="mc-kpi-v">${esc(x.v)}</div><div class="mc-kpi-note">${esc(x.note)}</div></div>`).join('')
     }
