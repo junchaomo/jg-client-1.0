@@ -3826,8 +3826,7 @@ async function renderSkills(el) {
   }).join('')
 
   const personalSections = `
-    ${sec('我安装的插件', installed.length ? installed.map((p, i) => `<div class="pl-item"><span class="pl-ico ${tone(i)}">${icon('plugin')}</span><div class="pl-item-main"><div class="pl-item-name">${esc(p.name)} <span class="tag" style="font-size:10px">插件</span></div><div class="pl-item-desc">${esc(p.desc)}</div></div><button class="pl-act" data-plug="${p.id}">${icon('dots')}</button></div>`).join('') : '<div class="sk-empty">当前账号还没有安装插件，去「公开」选择安装</div>')}
-    ${sec('我提交的插件', subs.length ? subs.map((x, i) => {
+    ${sec('我创建的插件', subs.length ? subs.map((x, i) => {
       const st = { pending: ['warn', '待审核'], approved: ['ok', '已上架'], rejected: ['bad', '已退回'] }[x.status] || ['', x.status]
       const t = x.kind === 'skill' ? 'skill' : 'plugin'
       return `<div class="pl-item">
@@ -3836,15 +3835,14 @@ async function renderSkills(el) {
         <span class="tag ${st[0]}">${st[1]}</span>
         <button class="pl-act" data-subreport="${x.id}" title="查看检测报告">${icon('doc')}</button>
       </div>`
-    }).join('') : '<div class="sk-empty">当前账号还没有提交记录，点右上「添加」开始</div>')}`
+    }).join('') : '<div class="sk-empty">当前账号还没有创建插件，点右上「添加」开始创建</div>')}`
 
   const pluginMarketSection = filterMarket('plugin').length ? marketSections('plugin') : ''
 
   const skillMarketSections = filterMarket('skill').length ? marketSections('skill') : '<section class="pl-sec"><h2 class="pl-sec-title">技能市场<span class="pl-arrow">›</span></h2><div class="sk-empty">没有匹配的技能</div></section>'
   const skillSubs = subs.filter((x) => x.kind === 'skill')
   const skillPersonalSections = `
-    ${sec('我安装的技能', installed.length ? installed.map(skillCard).join('') : '<div class="sk-empty">当前账号还没有安装技能，去「公开」选择安装</div>')}
-    ${sec('我提交的技能', skillSubs.length ? skillSubs.map((x, i) => {
+    ${sec('我创建的技能', skillSubs.length ? skillSubs.map((x, i) => {
       const st = { pending: ['warn', '待审核'], approved: ['ok', '已上架'], rejected: ['bad', '已退回'] }[x.status] || ['', x.status]
       return `<div class="pl-item">
         <span class="pl-ico ${tone(i)}">${icon('spark')}</span>
@@ -3852,13 +3850,13 @@ async function renderSkills(el) {
         <span class="tag ${st[0]}">${st[1]}</span>
         <button class="pl-act" data-subreport="${x.id}" title="查看检测报告">${icon('doc')}</button>
       </div>`
-    }).join('') : '<div class="sk-empty">当前账号还没有提交技能，点右上「添加」开始</div>')}`
+    }).join('') : '<div class="sk-empty">当前账号还没有创建技能，点右上「添加」开始创建</div>')}`
 
   const instAttr = (x) => `data-plug="${x.id}"`
   const title = tab === 'plugin' ? '插件' : '技能'
   const sub = tab === 'plugin'
-    ? (scop === 'personal' ? '只显示你自己安装的插件，不共享给其他账号' : '员工开发的插件通过市场提交、审核和安装')
-    : (scop === 'personal' ? '只显示你自己安装的技能，不共享给其他账号' : '技能定义模型可以完成的任务流程，同样通过市场提交、审核和安装')
+    ? (scop === 'personal' ? '只显示你自己创建的插件与提交审核记录' : '员工开发的插件通过市场提交、审核和安装')
+    : (scop === 'personal' ? '只显示你自己创建的技能与提交审核记录' : '技能定义模型可以完成的任务流程，同样通过市场提交、审核和安装')
 
   el.innerHTML = `
     <div class="sk-wrap pl-wrap${state.sbPinned ? '' : ' sb-off'}">
