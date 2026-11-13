@@ -855,3 +855,23 @@
 
 - ops 账号技能页左侧显示“暂无已安装技能”，公开区显示“官方内置技能由平台维护，不在技能市场展示；当前没有员工创建并上架的技能”，个人区“我创建的技能”为空态；`GET /api/plugin-market` 返回 0 条，`GET /api/admin/plugin-market` 返回 0 条。
 - 截图：`D:\project-test3\shots\market-skills-split.png`、`market-skills-personal.png`。
+
+## 32. 官方基线纳入管理中心，米乐升级超级管理员（2026-11-13）
+
+**目标**：官方内置插件与技能不再进入市场，但必须由运维人员在管理中心配置；米乐作为超级管理员拥有管理中心权限。
+
+**实现**：
+
+- 侧边栏“管理中心”入口改为按 `visibleModules` 判断，不再只对 ops 开放；admin 账号（米乐）现在可见并进入管理中心。
+- `roles.admin` 的展示名与岗位改为“超级管理员”，保留 `admin` 模块与全组织、涉密范围。
+- 管理中心「AI 能力管理」新增“官方内置插件与技能”块：
+  - 4 个官方技能显示运行时目录、启用状态、使用账号数，可停用/启用；
+  - 2 个官方核心 Bundle（`@deepseek-ai/dsh-base`、`@deepseek-ai/dsh-sdk-app`）显示为“核心基线不可停用”。
+- 新增 `GET/POST /api/admin/official-baseline`：停用官方技能会从所有账号 `dsh-home/skills` 移除并关闭对应 Harness；启用时重新复制到各账号；状态持久化到 `officialDisabledSkills`。
+- 官方技能停用后 `GET /api/plugins` 同步减少，市场仍不展示官方基线。
+
+**实测**：
+
+- admin（米乐）登录后侧边栏出现「管理中心」，`/api/admin/official-baseline` 返回 4 技能 + 2 Bundle。
+- 停用 `agent-experience`：`/api/plugins` 从 4 变 3，两个账号的 `dsh-home/skills/agent-experience` 均被移除；重新启用后恢复 4 条与两个账号目录。
+- 截图：`D:\project-test3\shots\official-baseline-admin.png`。

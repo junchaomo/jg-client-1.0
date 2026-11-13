@@ -285,7 +285,7 @@ function renderRail() {
   const { user, modules } = state.boot
   const visible = (id) => user.visibleModules.includes(id)
   const sep = '<div class="rail-sep"></div>'
-  const adminCol = state.boot.user.role === 'ops' && visible('admin')
+  const adminCol = visible('admin')
   const plan = railPlan()
   const order = ['home', ...plan.core, '__sep1', ...plan.entShown, ...plan.pinned, 'more', ...(adminCol ? ['admin'] : [])]
   const badge = (id) => {
@@ -10128,6 +10128,38 @@ async function renderAdmin(el) {
           toast('已退回，提交人会收到检测报告与原因')
           renderView()
         })
+      }))
+    }
+    const { body: baselineAdmin } = await api('/api/admin/official-baseline')
+    if (blocks) {
+      const skills = baselineAdmin.skills || []
+      const bundles = baselineAdmin.bundles || []
+      const wrap = document.createElement('div')
+      wrap.className = 'mc-block'
+      wrap.innerHTML = `<div class="mc-block-head"><b>官方内置插件与技能</b><span class="spacer"></span><span class="mc-count">${skills.filter((s) => s.enabled).length + bundles.filter((b) => b.enabled).length} / ${skills.length + bundles.length} 项启用</span></div>
+        <div class="mc-table" style="--mc-cols:minmax(120px,1.8fr) minmax(54px,.7fr) minmax(70px,.9fr) minmax(62px,.7fr)">
+          <div class="mc-thead"><span>官方基线</span><span>类型</span><span>运行时位置</span><span>状态</span></div>
+          ${skills.map((s) => `<div class="mc-trow">
+            <span class="mc-first" title="${esc(s.name)}">${esc(s.name)} <span class="mc-tag">基线</span></span>
+            <span>技能</span>
+            <span class="mono" style="font-size:10px">skills/${esc(s.dir)}</span>
+            <span><span class="mc-tag ${s.enabled ? 'ok' : 'warn'}">${s.enabled ? '已启用' : '已停用'}</span> <span class="mc-dim">${s.usedBy} 个账号</span></span>
+            <span class="mc-acts" style="grid-column:1/-1"><button class="btn sm ${s.enabled ? '' : 'primary'}" data-ob-skill="${esc(s.dir)}" data-next="${s.enabled ? 'disable' : 'enable'}">${s.enabled ? '停用' : '启用'}</button></span>
+          </div>`).join('')}
+          ${bundles.map((b) => `<div class="mc-trow">
+            <span class="mc-first" title="${esc(b.label)}">${esc(b.label)} <span class="mc-dim mono">${esc(b.name)}</span></span>
+            <span>插件</span>
+            <span>核心运行时</span>
+            <span><span class="mc-tag ${b.enabled ? 'ok' : 'warn'}">${b.enabled ? '已启用' : '缺失'}</span></span>
+            <span class="mc-acts" style="grid-column:1/-1"><span class="mc-dim">核心基线不可停用</span></span>
+          </div>`).join('')}
+        </div>`
+      blocks.appendChild(wrap)
+      wrap.querySelectorAll('[data-ob-skill]').forEach((b) => b.addEventListener('click', async () => {
+        const { ok, body } = await api('/api/admin/official-baseline', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ dir: b.dataset.obSkill, action: b.dataset.next }) })
+        if (!ok) return toast(body.error || '操作失败', true)
+        toast(b.dataset.next === 'disable' ? '已停用，并已从各账号 DSH 技能目录移除' : '已启用，各账号 DSH 技能目录已恢复')
+        renderView()
       }))
     }
     const { body: capAdmin } = await api('/api/platform-capabilities')

@@ -29,10 +29,10 @@ export const roles = {
   },
   admin: {
     id: 'admin',
-    label: '管理员',
+    label: '超级管理员',
     name: '米乐',
     unit: '集团总部',
-    duty: '系统管理员',
+    duty: '超级管理员',
     org: '九江市规划设计集团',
     visibleModules: [...['home', 'projects', 'tasks', 'skills', 'imagegen', 'datacenter', 'knowledge', 'oneMap', 'review', 'oa', 'finance', 'drive', 'contacts', 'im', 'notice', 'academy', 'bid', 'monitor', 'renewal', 'hr', 'adminops', 'more', 'cloudbrowser', 'settings'], 'admin'],
     scopes: ['public', 'internal', 'all-org', 'secret'],

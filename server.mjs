@@ -143,6 +143,7 @@ function removeMarketInstallRecord(id, record) {
 /* 插件安装与启停按用户独立保存，避免一个账号的操作影响其他人。 */
 const livePluginInstalls = new Map()
 const livePluginToggles = new Map()
+const liveOfficialDisabledSkills = new Set()
 function installedIdsOf(userId) {
   const list = livePluginInstalls.get(userId)
   return Array.isArray(list) ? list : []
@@ -288,7 +289,7 @@ function runtimeOverview() {
     },
   }
 }
-function installedSkillPlugins() {
+function officialSkillCatalog() {
   const home = join(dataDirPath(), 'dsh-home')
   const skillsDir = join(home, 'skills')
   const inventory = runtimePluginInventory()
@@ -323,8 +324,9 @@ function installedSkillPlugins() {
       name,
       kind: 'personal',
       publisher: 'DeepSeek Harness',
-      version: '',
-      status: 'enabled',
+      version: '0.2.2-rc.1',
+      status: liveOfficialDisabledSkills.has(dir) ? 'disabled' : 'enabled',
+      enabled: !liveOfficialDisabledSkills.has(dir),
       nets: ['inet', 'gov', 'secret'],
       deps: 'DSH 官方技能',
       scope: '平台官方基线',
@@ -335,6 +337,26 @@ function installedSkillPlugins() {
     })
   }
   return list
+}
+function installedSkillPlugins() {
+  return officialSkillCatalog().filter((p) => p.enabled)
+}
+function officialBaselineBundles() {
+  const home = join(dataDirPath(), 'dsh-home')
+  const bundles = profileManifest(home)?.dsh?.profile?.bundles || []
+  return [
+    { name: '@deepseek-ai/dsh-base', label: 'Harness 基础运行时', desc: '文件、Shell、会话、工具执行与权限基础模块', core: true },
+    { name: '@deepseek-ai/dsh-sdk-app', label: 'Harness SDK 应用层', desc: '本产品 JSON-RPC 会话接入所需的 SDK 应用组合', core: true },
+  ].map((b) => ({
+    ...b,
+    id: `B-${b.name}`,
+    kind: 'plugin',
+    publisher: 'DeepSeek Harness',
+    version: '0.2.2-rc.1',
+    scope: '平台官方基线 · 核心运行时',
+    enabled: bundles.includes(b.name),
+    status: bundles.includes(b.name) ? 'enabled' : 'missing',
+  }))
 }
 /* 账号技能目录里由市场安装的技能；官方基线不复制到这里，因此不会混入“已安装”。 */
 function installedUserSkillPlugins(userId) {
@@ -1043,6 +1065,7 @@ function snapshotPersistentState() {
     pluginSubs,
     pluginInstalls: [...livePluginInstalls.entries()],
     pluginToggles: [...livePluginToggles.entries()],
+    officialDisabledSkills: [...liveOfficialDisabledSkills],
     marketInstalls: [...liveMarketInstalls.entries()],
     capabilityPolicies: [...liveCapabilityPolicies.entries()],
     cloudLog,
@@ -1121,6 +1144,8 @@ function hydratePersistentState() {
   liveMarket.forEach((m, i) => { m.order = Number.isFinite(Number(m.order)) ? Number(m.order) : i })
   replaceMap(livePluginInstalls, Object.fromEntries(snap.pluginInstalls || []))
   replaceMap(livePluginToggles, Object.fromEntries(snap.pluginToggles || []))
+  liveOfficialDisabledSkills.clear()
+  for (const dir of snap.officialDisabledSkills || []) liveOfficialDisabledSkills.add(dir)
   replaceMap(liveMarketInstalls, Object.fromEntries(snap.marketInstalls || []))
   const marketIds = new Set(liveMarket.map((m) => m.id))
   for (const id of [...liveMarketInstalls.keys()]) {
@@ -2628,6 +2653,10 @@ function ensureUserDshHome(userId) {
   for (const name of OFFICIAL_SKILL_DIRS) {
     const source = join(dataDirPath(), 'dsh-home', 'skills', name)
     const target = join(targetSkills, name)
+    if (liveOfficialDisabledSkills.has(name)) {
+      try { rmSync(target, { recursive: true, force: true }) } catch {}
+      continue
+    }
     if (!existsSync(source) || existsSync(target)) continue
     try { cpSync(source, target, { recursive: true }) } catch {}
   }
@@ -3595,6 +3624,42 @@ const api = {
       layer: 'platform',
       installScope: '系统级模块 · 默认安装启用，不进入插件市场',
     })
+  },
+  'GET /api/admin/official-baseline': (req, res) => {
+    const user = roleOf(req)
+    if (!canManage(user)) return json(res, 403, { error: '仅超级管理员可管理官方基线' })
+    const skills = officialSkillCatalog().map((s) => {
+      let usedBy = 0
+      try {
+        usedBy = readdirSync(USER_AGENT_ROOT, { withFileTypes: true })
+          .filter((entry) => entry.isDirectory() && !entry.name.startsWith('_'))
+          .filter((entry) => existsSync(join(userDshHome(entry.name), 'skills', s.dir))).length
+      } catch {}
+      return { ...s, usedBy, type: 'skill' }
+    })
+    const bundles = officialBaselineBundles().map((b) => ({ ...b, type: 'plugin', usedBy: 0 }))
+    json(res, 200, { ok: true, skills, bundles, canManage: true })
+  },
+  'POST /api/admin/official-baseline': async (req, res) => {
+    const user = roleOf(req)
+    if (!canManage(user)) return json(res, 403, { error: '仅超级管理员可管理官方基线' })
+    const body = JSON.parse(req.__body || '{}')
+    const dir = String(body.dir || '').trim()
+    if (!OFFICIAL_SKILL_DIRS.includes(dir)) return json(res, 404, { error: '不是官方内置技能' })
+    if (body.action !== 'enable' && body.action !== 'disable') return json(res, 400, { error: 'action 只能是 enable 或 disable' })
+    if (body.action === 'disable') liveOfficialDisabledSkills.add(dir)
+    else liveOfficialDisabledSkills.delete(dir)
+    let accounts = []
+    try { accounts = readdirSync(USER_AGENT_ROOT, { withFileTypes: true }).filter((e) => e.isDirectory() && !e.name.startsWith('_')).map((e) => e.name) } catch {}
+    for (const userId of accounts) {
+      const home = userDshHome(userId)
+      await closeHarnessForHome(home)
+      ensureUserDshHome(userId)
+    }
+    persistPersistentState()
+    logAudit(user, 'official-baseline.skill', dir, body.action, netOf(req))
+    const item = officialSkillCatalog().find((s) => s.dir === dir)
+    json(res, 200, { ok: true, item })
   },
   'POST /api/admin/platform-capabilities': (req, res) => {
     const user = roleOf(req)
