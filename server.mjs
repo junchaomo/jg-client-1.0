@@ -118,10 +118,10 @@ const liveTasks = tasks.map((t) => ({ ...t }))
 const liveCloud = cloudSystems.map((s) => ({ ...s }))
 const liveProjects = projects.map((p) => ({ ...p }))
 const MARKET_BUILTIN = [
-  { id: 'D-01', section: '官方与内置', name: 'Agent 经验与工具设计', desc: '设计模型可见的工具名称、描述、参数与技能加载方式，让信息更易发现、上下文更省', publisher: 'DeepSeek Harness', scope: '企业公开', kind: 'skill', version: '0.2.2-rc.1' },
-  { id: 'D-02', section: '官方与内置', name: 'Cordis 组合参考', desc: '编写或阅读 Cordis 组合补丁与 Agent 预设时，查询 YAML 方言与可安装插件包清单', publisher: 'DeepSeek Harness', scope: '企业公开', kind: 'skill', version: '0.2.2-rc.1' },
-  { id: 'D-03', section: '官方与内置', name: 'DSH 插件开发', desc: '设计、审查、安装、启停和调试 Harness 插件、Bundle、页面、工具与 MCP 连接', publisher: 'DeepSeek Harness', scope: '企业公开', kind: 'skill', version: '0.2.2-rc.1' },
-  { id: 'D-04', section: '官方与内置', name: 'Agent 预设编辑', desc: '创建、修改和校验 Agent 预设与其他 Cordis 组合，判断 Host 与预设的正确放置位置', publisher: 'DeepSeek Harness', scope: '企业公开', kind: 'skill', version: '0.2.2-rc.1' },
+  { id: 'D-01', section: '官方与内置', name: 'Agent 经验与工具设计', desc: '设计模型可见的工具名称、描述、参数与技能加载方式，让信息更易发现、上下文更省', publisher: '平台开发运维', scope: '企业公开', kind: 'skill', version: '0.2.2-rc.1' },
+  { id: 'D-02', section: '官方与内置', name: 'Cordis 组合参考', desc: '编写或阅读 Cordis 组合补丁与 Agent 预设时，查询 YAML 方言与可安装插件包清单', publisher: '平台开发运维', scope: '企业公开', kind: 'skill', version: '0.2.2-rc.1' },
+  { id: 'D-03', section: '官方与内置', name: 'DSH 插件开发', desc: '设计、审查、安装、启停和调试 Harness 插件、Bundle、页面、工具与 MCP 连接', publisher: '平台开发运维', scope: '企业公开', kind: 'skill', version: '0.2.2-rc.1' },
+  { id: 'D-04', section: '官方与内置', name: 'Agent 预设编辑', desc: '创建、修改和校验 Agent 预设与其他 Cordis 组合，判断 Host 与预设的正确放置位置', publisher: '平台开发运维', scope: '企业公开', kind: 'skill', version: '0.2.2-rc.1' },
 ]
 const liveMarket = MARKET_BUILTIN.map((m, i) => ({ ...m, order: i }))
 /* 市场安装台账：按市场条目记录“哪个账号、装到哪个范围”，用于隔离与后台查看。 */
@@ -316,7 +316,7 @@ function officialSkillCatalog() {
       id: `S-${dir}`,
       name,
       kind: 'personal',
-      publisher: 'DeepSeek Harness',
+      publisher: '平台开发运维',
       version: '0.2.2-rc.1',
       status: !installed ? 'uninstalled' : enabled ? 'enabled' : 'disabled',
       installed,
@@ -345,7 +345,7 @@ function officialBaselineBundles() {
     ...b,
     id: `B-${b.name}`,
     kind: 'plugin',
-    publisher: 'DeepSeek Harness',
+    publisher: '平台开发运维',
     version: '0.2.2-rc.1',
     scope: '平台官方基线 · 核心运行时',
     enabled: bundles.includes(b.name),
@@ -354,7 +354,7 @@ function officialBaselineBundles() {
 }
 /* 账号技能目录里由市场安装的技能；官方基线不复制到这里，因此不会混入“已安装”。 */
 function installedUserSkillPlugins(userId) {
-  const skillsDir = join(userAgentHome(userId), 'skills')
+  const skillsDir = join(userDshHome(userId), 'skills')
   let dirs = []
   try {
     dirs = readdirSync(skillsDir, { withFileTypes: true }).filter((entry) => entry.isDirectory()).map((entry) => entry.name)
@@ -369,7 +369,7 @@ function installedUserSkillPlugins(userId) {
     try {
       const text = readFileSync(join(target, 'SKILL.md'), 'utf8')
       const fm = text.match(/^---\s*\n([\s\S]*?)\n---/)
-      if (fm) {
+      if (fm && !item) {
         name = (fm[1].match(/^name:\s*(.+)$/m) || [])[1]?.trim() || name
         desc = (fm[1].match(/^description:\s*(.+)$/m) || [])[1]?.trim() || desc
       }
@@ -406,22 +406,26 @@ const PLATFORM_CAPABILITIES = [
     limits: { cpu: 1, memory: 512, timeout: 120, concurrency: 2 },
     deps: ['@deepseek-ai/dsh-skill'],
     desc: 'Word、Excel、PPT、PDF 的读取、生成、转换与导出，由平台内置的 Office 模块统一提供。',
+    accessibleTo: '全部授权用户', role: '基础能力', risk: '只读或白名单写入',
   },
   {
-    id: 'CAP-MCP-JG', name: '九规内部工具（MCP）', shortName: '内部工具 (MCP)', icon: 'globe', module: 'dsh-mcp-client',
+    id: 'CAP-MCP-JG', name: '业务系统接入（MCP）', shortName: '业务系统接入', icon: 'globe', module: 'dsh-mcp-client',
     sourceIds: ['mcp-jg'], version: '1.0.0', protocol: 'MCP 标准调用协议',
     permissions: ['内部数据检索', 'IM 发送', '待办创建'],
     limits: { cpu: 1, memory: 256, timeout: 60, concurrency: 2 },
     deps: ['@deepseek-ai/dsh-mcp-client'],
-    desc: '云空间、公告、课程、通讯录、数据中心与 IM、待办等内部工具的 MCP 桥，按当前员工授权执行。',
+    desc: '云空间、公告、课程、通讯录、数据中心与 IM、待办等内部工具的 MCP 桥；按当前员工身份与网络授权执行，不是全员同权。',
+    accessibleTo: '按员工身份与网络授权', role: '业务集成', risk: '写操作需确认',
   },
   {
-    id: 'CAP-FILES', name: '文件管理', shortName: '文件管理', icon: 'folder', module: 'dsh-file-reference-local',
+    id: 'CAP-FILES', name: '文件附件与交付物', shortName: '文件附件', icon: 'folder', module: 'dsh-file-reference-local',
     sourceIds: ['file-reference-local', 'file-upload', 'deliverable-file-references'], version: '1.0.0', protocol: 'DSH 标准工具协议',
     permissions: ['文件读取', '文件上传', '交付物引用'],
     limits: { cpu: 1, memory: 256, timeout: 60, concurrency: 4 },
     deps: ['@deepseek-ai/dsh-file-reference-local', '@deepseek-ai/dsh-client-file-upload'],
-    desc: '本地附件、云空间文件与交付物的统一读取、引用和上传，是所有插件共用的文件入口。',
+    desc: '本地附件、云空间文件与交付物的统一读取、引用和上传，是聊天与所有插件的文件入口，属于只读基础内核。',
+    accessibleTo: '全部授权用户', role: '基础内核', risk: '只读或白名单写入',
+    layer: 'kernel', stoppable: false,
   },
   {
     id: 'CAP-PYTHON', name: 'Python / 脚本运行环境', shortName: 'Python 环境', icon: 'tool', module: 'dsh-shell-env',
@@ -429,15 +433,44 @@ const PLATFORM_CAPABILITIES = [
     permissions: ['命令执行', '脚本运行'],
     limits: { cpu: 2, memory: 1024, timeout: 300, concurrency: 1 },
     deps: ['@deepseek-ai/dsh-shell-env'],
-    desc: '平台内置的脚本执行环境，供插件运行 Python、数据处理与格式转换脚本。',
+    desc: '平台内置的脚本执行环境，供插件运行 Python、数据处理与格式转换脚本；属于高权限高级能力。',
+    accessibleTo: '按角色授权', role: '高级能力', risk: '命令执行，需审批',
   },
   {
-    id: 'CAP-DATA', name: '数据检索与解析', shortName: '数据检索', icon: 'search', module: 'dsh-session-query-sqlite',
+    id: 'CAP-DATA', name: '会话与数据检索', shortName: '会话检索', icon: 'search', module: 'dsh-session-query-sqlite',
     sourceIds: ['optional-tool-session-query', 'session-query-sqlite'], version: '1.0.0', protocol: 'DSH 标准工具协议',
-    permissions: ['历史会话检索', '本地索引读取', '外部数据解析'],
+    permissions: ['历史会话检索', '本地索引读取'],
     limits: { cpu: 1, memory: 512, timeout: 90, concurrency: 2 },
     deps: ['@deepseek-ai/dsh-session-query-sqlite', '@deepseek-ai/dsh-tool-session-query'],
-    desc: '历史会话、附件与外部资料的检索、解析和引用，不包含具体业务口径。',
+    desc: '历史会话与本地索引的检索、读取和引用，不包含外部资料解析。',
+    accessibleTo: '全部授权用户', role: '基础能力', risk: '只读',
+  },
+  {
+    id: 'CAP-WEB', name: 'Web 搜索与网页抓取', shortName: 'Web 搜索', icon: 'globe', module: 'dsh-tool-web',
+    sourceIds: ['web-search-deepseek', 'web-fetch-http', 'tool-web'], version: '1.0.0', protocol: 'DSH 标准工具协议',
+    permissions: ['网页搜索', '网页读取', '来源引用'],
+    limits: { cpu: 1, memory: 256, timeout: 60, concurrency: 2 },
+    deps: ['@deepseek-ai/dsh-web', '@deepseek-ai/dsh-web-search-deepseek', '@deepseek-ai/dsh-web-fetch-http'],
+    desc: '官方 Web 搜索与网页抓取能力，按网络域和白名单提供搜索结果与页面正文。',
+    accessibleTo: '全部授权用户', role: '基础能力', risk: '只读，受网络域限制',
+  },
+  {
+    id: 'CAP-JOBS', name: '后台作业', shortName: '后台作业', icon: 'tool', module: 'dsh-tool-jobs',
+    sourceIds: ['jobs', 'tool-jobs'], version: '1.0.0', protocol: 'DSH 标准工具协议',
+    permissions: ['后台任务', '任务查询', '任务取消'],
+    limits: { cpu: 2, memory: 512, timeout: 600, concurrency: 2 },
+    deps: ['@deepseek-ai/dsh-jobs-local', '@deepseek-ai/dsh-tool-jobs'],
+    desc: '运行长时间任务、查询进度和取消后台作业；与员工个人“定时任务”不同，属于平台运行时能力。',
+    accessibleTo: '全部授权用户', role: '高级能力', risk: '后台执行，需保留审计',
+  },
+  {
+    id: 'CAP-AGENT', name: 'Agent 编排与工作流', shortName: 'Agent 编排', icon: 'spark', module: 'dsh-workflow-ptc',
+    sourceIds: ['subagent', 'tool-subagent', 'ptc-runtime', 'workflow-ptc', 'tool-workflow'], version: '1.0.0', protocol: 'DSH 标准工具协议',
+    permissions: ['子 Agent 调用', '工作流编排', '沙箱脚本'],
+    limits: { cpu: 2, memory: 1024, timeout: 300, concurrency: 2 },
+    deps: ['@deepseek-ai/dsh-subagent', '@deepseek-ai/dsh-workflow-ptc'],
+    desc: '官方子 Agent、PTC 运行时与工作流编排能力；属于高级能力，先按角色开放并限制并发。',
+    accessibleTo: '按角色授权', role: '高级能力', risk: '多 Agent 与沙箱执行',
   },
 ]
 const liveCapabilityPolicies = new Map()
@@ -456,10 +489,11 @@ function platformCapabilities() {
     return {
       ...cap,
       kind: 'capability',
-      layer: 'platform',
+      layer: cap.layer || 'platform',
       source: 'platform-module',
-      managedBy: '平台运维',
-      accessibleTo: '全部授权用户',
+      managedBy: '平台开发运维',
+      accessibleTo: cap.accessibleTo || '全部授权用户',
+      stoppable: cap.stoppable !== false && cap.layer !== 'kernel',
       defaultEnabled: true,
       runtimeEnabled,
       enabled: runtimeEnabled && !policy.disabled,
@@ -2627,7 +2661,7 @@ function userAgentHome(userId) {
 }
 /**
  * Bundle 与 DSH profile 按账号隔离：每个账号一个 DSH_HOME，
- * 只复制平台官方 profile 的基线 bundles 与官方技能，不继承其他账号安装的 Bundle。
+ * 只复制平台官方 profile 的基线 bundles 与配置，不继承其他账号安装的 Bundle 或技能。
  */
 const OFFICIAL_SKILL_DIRS = ['agent-experience', 'cordis-composition-reference', 'cordis-plugin-development', 'editing-cordis-compositions']
 function userDshHome(userId) {
@@ -2649,23 +2683,8 @@ function ensureUserDshHome(userId) {
     pkg.dsh.profile.bundles = Array.isArray(pkg.dsh.profile.bundles) ? [...new Set(pkg.dsh.profile.bundles)] : []
     writeFileSync(profileFile, `${JSON.stringify(pkg, null, 2)}\n`)
   }
-  // 官方技能是平台基线，随账号 DSH_HOME 各放一份；非官方技能不复制。
-  const targetSkills = join(home, 'skills')
-  mkdirSync(targetSkills, { recursive: true })
-  for (const name of OFFICIAL_SKILL_DIRS) {
-    const source = join(dataDirPath(), 'dsh-home', 'skills', name)
-    const target = join(targetSkills, name)
-    if (liveOfficialUninstalledSkills.has(name)) {
-      try { rmSync(target, { recursive: true, force: true }) } catch {}
-      continue
-    }
-    if (liveOfficialDisabledSkills.has(name)) {
-      try { rmSync(target, { recursive: true, force: true }) } catch {}
-      continue
-    }
-    if (!existsSync(source) || existsSync(target)) continue
-    try { cpSync(source, target, { recursive: true }) } catch {}
-  }
+  // 官方技能不再作为账号基线自动复制：它们以市场条目发布，由用户自行安装。
+  mkdirSync(join(home, 'skills'), { recursive: true })
   // profile 的 patch 层决定 MCP、Office、会话检索等平台模块是否挂载；
   // 初建账号必须复制官方 patch 与 pnpm 配置，否则新 DSH_HOME 会退回空 profile。
   const globalProfile = join(dataDirPath(), 'dsh-home', 'profiles', RUNTIME_PROFILE)
@@ -2688,7 +2707,7 @@ function marketSkillDirName(id) {
 function marketSkillTarget(id, ctx = {}) {
   const dir = marketSkillDirName(id)
   if (ctx.scope === 'project' && ctx.projectCwd) return join(ctx.projectCwd, '.dsh', 'skills', dir)
-  if (ctx.scope === 'user' && ctx.userId) return join(userAgentHome(ctx.userId), 'skills', dir)
+  if (ctx.scope === 'user' && ctx.userId) return join(userDshHome(ctx.userId), 'skills', dir)
   return join(dataDirPath(), 'dsh-home', 'skills', dir)
 }
 function marketSkillSource(id) {
@@ -2905,7 +2924,7 @@ const api = {
         resources: visible.length,
         resourcesTotal: liveResources.length,
         plugins: installedSkillPlugins().filter((p) => (p.nets || ['inet']).includes(net)).length,
-        capabilities: platformCapabilities().filter((p) => p.enabled && (p.nets || ['inet']).includes(net)).length,
+        capabilities: platformCapabilities().filter((p) => p.layer !== 'kernel' && p.enabled && (p.nets || ['inet']).includes(net)).length,
         apps: liveApps.filter((a) => (a.nets || []).includes(net)).length,
         tasks: liveTasks.length,
       },
@@ -3625,7 +3644,7 @@ const api = {
     const user = roleOf(req)
     const net = netOf(req)
     json(res, 200, {
-      items: platformCapabilities().filter((p) => (p.nets || ['inet']).includes(net)),
+      items: platformCapabilities().filter((p) => p.layer !== 'kernel' && (p.nets || ['inet']).includes(net)),
       canManage: canManage(user),
       layer: 'platform',
       installScope: '系统级模块 · 默认安装启用，不进入插件市场',
@@ -3633,18 +3652,10 @@ const api = {
   },
   'GET /api/admin/official-baseline': (req, res) => {
     const user = roleOf(req)
-    if (!canManage(user)) return json(res, 403, { error: '仅超级管理员可管理官方基线' })
-    const skills = officialSkillCatalog().map((s) => {
-      let usedBy = 0
-      try {
-        usedBy = readdirSync(USER_AGENT_ROOT, { withFileTypes: true })
-          .filter((entry) => entry.isDirectory() && !entry.name.startsWith('_'))
-          .filter((entry) => existsSync(join(userDshHome(entry.name), 'skills', s.dir))).length
-      } catch {}
-      return { ...s, usedBy, type: 'skill' }
-    })
+    if (!canManage(user)) return json(res, 403, { error: '仅超级管理员可管理系统内核' })
     const bundles = officialBaselineBundles().map((b) => ({ ...b, type: 'plugin', usedBy: 0 }))
-    json(res, 200, { ok: true, skills, bundles, canManage: true })
+    const infrastructure = platformCapabilities().filter((p) => p.layer === 'kernel')
+    json(res, 200, { ok: true, skills: [], bundles, infrastructure, canManage: true })
   },
   'POST /api/admin/official-baseline': async (req, res) => {
     const user = roleOf(req)
@@ -3769,8 +3780,6 @@ const api = {
       .filter((m) => m.listed !== false)
       .sort((a, b) => Number(a.order || 0) - Number(b.order || 0))
       .map((m) => marketItemState(m, { userId: user.id }))
-      // 官方内置技能属于平台基线，不是员工市场商品；员工市场不展示。
-      .filter((m) => !(m.kind === 'skill' && m.locked))
     json(res, 200, { items, network: networks[net]?.label || '', installScope: '当前账号或项目技能目录；Bundle 按账号独立 DSH_HOME' })
   },
   'GET /api/plugin-market/download': (req, res, url) => {
@@ -3848,8 +3857,6 @@ const api = {
     const items = [...liveMarket]
       .sort((a, b) => Number(a.order || 0) - Number(b.order || 0))
       .map((m) => marketItemState(m, { any: true }))
-      // 官方内置技能是平台基线，不进入市场台账，管理员也不在这里上下架。
-      .filter((m) => !(m.kind === 'skill' && m.locked))
     json(res, 200, {
       ok: true,
       items,

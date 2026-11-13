@@ -3792,7 +3792,7 @@ async function renderSkills(el) {
     return `
     <div class="pl-item" data-mopen="${esc(m.id)}" style="cursor:pointer">
       <span class="pl-ico ${tone(i)}">${icon(typeIcon(t))}</span>
-      <div class="pl-item-main"><div class="pl-item-name">${esc(m.name)} <span class="tag" style="font-size:10px">${typeLabel(t)}</span></div><div class="pl-item-desc">${esc(m.desc)}</div></div>
+      <div class="pl-item-main"><div class="pl-item-name">${esc(m.name)} <span class="tag" style="font-size:10px">${typeLabel(t)}</span></div><div class="pl-item-desc">${esc(m.desc)}</div><div class="pl-item-desc" style="font-size:11px;opacity:.72">发布：${esc(m.publisher || '未标注')}</div></div>
       ${m.installed
         ? `<button class="pl-act" data-muninstall="${m.id}" title="卸载，仅影响当前账号">${icon('close')}</button>`
         : m.available === false
@@ -3815,15 +3815,17 @@ async function renderSkills(el) {
       <div class="pl-grid"${cols ? ` style="grid-template-columns:${cols}"` : ''}>${cards}</div>
     </section>` : ''
 
-  const filterMarket = (type) => state.market.filter((m) => marketType(m) === type).filter((m) => !(type === 'skill' && m.locked)).filter((m) => {
+  const filterMarket = (type) => state.market.filter((m) => marketType(m) === type).filter((m) => {
     const q = String(state.skillQuery || '').trim().toLowerCase()
     if (!q) return true
     return `${m.name} ${m.desc} ${m.publisher || ''}`.toLowerCase().includes(q)
   })
-  const marketSections = (type) => ['官方与内置', '热门', '新品推荐', '企业内部'].map((name) => {
-    const list = filterMarket(type).filter((m) => m.section === name)
-    return list.length ? sec(name, list.map(marketCard).join(''), '1fr') : ''
-  }).join('')
+  const marketSections = (type) => {
+    const list = filterMarket(type)
+    if (!list.length) return ''
+    const title = type === 'plugin' ? '插件市场' : '技能市场'
+    return sec(title, list.map(marketCard).join(''), '1fr')
+  }
 
   const personalSections = `
     ${sec('我创建的插件', subs.length ? subs.map((x, i) => {
@@ -3839,7 +3841,7 @@ async function renderSkills(el) {
 
   const pluginMarketSection = filterMarket('plugin').length ? marketSections('plugin') : ''
 
-  const skillMarketSections = filterMarket('skill').length ? marketSections('skill') : '<section class="pl-sec"><h2 class="pl-sec-title">技能市场<span class="pl-arrow">›</span></h2><div class="sk-empty">官方内置技能由平台维护，不在技能市场展示；当前没有员工创建并上架的技能</div></section>'
+  const skillMarketSections = filterMarket('skill').length ? marketSections('skill') : '<section class="pl-sec"><h2 class="pl-sec-title">技能市场<span class="pl-arrow">›</span></h2><div class="sk-empty">当前没有可安装的技能；官方与员工创建的上架技能都会出现在这里</div></section>'
   const skillSubs = subs.filter((x) => x.kind === 'skill')
   const skillPersonalSections = `
     ${sec('我创建的技能', skillSubs.length ? skillSubs.map((x, i) => {
@@ -10035,7 +10037,7 @@ async function renderAdmin(el) {
   const tab = allowed(state.consoleTab) ? state.consoleTab : 'overview'
   state.consoleTab = tab
   const AI_SEGMENTS = [
-    { id: 'baseline', no: '01', label: '运行基线', note: '系统内核与平台公共能力；系统内核不可停用或卸载，也不进入员工市场' },
+    { id: 'baseline', no: '01', label: '运行基线', note: '系统内核只读；平台公共能力可停用；官方技能在市场按需安装' },
     { id: 'models', no: '02', label: '模型与网关', note: '当前账号真实模型网关配置；没有真实用量数据时不展示虚构配额' },
     { id: 'agents', no: '03', label: 'Agent 与 MCP', note: '运行时实际加载的 Agent、MCP、技能与调度模块' },
     { id: 'plugins', no: '04', label: '插件与技能', note: '员工提交的插件与技能、审核与分类上架管理' },
@@ -10181,23 +10183,20 @@ async function renderAdmin(el) {
     }
     const { body: baselineAdmin } = await api('/api/admin/official-baseline')
     if (blocks) {
-      const skills = baselineAdmin.skills || []
       const bundles = baselineAdmin.bundles || []
+      const infra = baselineAdmin.infrastructure || []
       const wrap = document.createElement('div')
       wrap.className = 'mc-block'
-      wrap.innerHTML = `<div class="mc-block-head"><b>系统内核</b><span class="spacer"></span><span class="mc-count">${skills.filter((s) => s.enabled).length + bundles.filter((b) => b.enabled).length} / ${skills.length + bundles.length} 项启用</span></div>
+      wrap.innerHTML = `<div class="mc-block-head"><b>系统内核</b><span class="spacer"></span><span class="mc-count">${infra.filter((x) => x.enabled).length + bundles.filter((b) => b.enabled).length} / ${infra.length + bundles.length} 项启用</span></div>
         <div class="mc-table" style="--mc-cols:minmax(120px,1.8fr) minmax(54px,.7fr) minmax(70px,.9fr) minmax(62px,.7fr)">
           <div class="mc-thead"><span>内核组件</span><span>类型</span><span>运行时位置</span><span>状态</span></div>
-          ${skills.map((s) => {
-            const stateText = !s.installed ? '已卸载' : s.enabled ? '已启用' : '已停用'
-            const stateTone = !s.installed ? 'warn' : s.enabled ? 'ok' : 'warn'
-            return `<div class="mc-trow">
-            <span class="mc-first" title="${esc(s.name)}">${esc(s.name)} <span class="mc-tag">内核</span></span>
-            <span>技能</span>
-            <span class="mono" style="font-size:10px">skills/${esc(s.dir)}</span>
-            <span><span class="mc-tag ${stateTone}">${stateText}</span> ${s.installed ? `<span class="mc-dim">${s.usedBy} 个账号</span>` : ''}</span>
+          ${infra.map((x) => `<div class="mc-trow">
+            <span class="mc-first" title="${esc(x.name)}">${esc(x.name)} <span class="mc-tag">内核</span></span>
+            <span>基础能力</span>
+            <span class="mono" style="font-size:10px">${esc(x.module)}</span>
+            <span><span class="mc-tag ${x.enabled ? 'ok' : 'warn'}">${x.enabled ? '已启用' : '缺失'}</span></span>
             <span class="mc-acts" style="grid-column:1/-1"><span class="mc-dim">系统内核不可停用或卸载</span></span>
-          </div>`}).join('')}
+          </div>`).join('')}
           ${bundles.map((b) => `<div class="mc-trow">
             <span class="mc-first" title="${esc(b.label)}">${esc(b.label)} <span class="mc-dim mono">${esc(b.name)}</span></span>
             <span>插件</span>
@@ -10207,30 +10206,8 @@ async function renderAdmin(el) {
           </div>`).join('')}
         </div>`
       blocks.appendChild(wrap)
-      wrap.querySelectorAll('[data-ob-skill]').forEach((b) => b.addEventListener('click', async () => {
-        const action = b.dataset.next
-        if (action === 'uninstall') {
-          const m = openModal('卸载官方技能', `
-            <div class="form-note">卸载会删除平台基线目录和所有账号的运行时副本，员工侧将不再加载该技能。之后可在本表重新安装。</div>
-            <div class="form-foot"><span class="spacer"></span><button class="btn" data-mclose>取消</button><button class="btn primary" id="obUninstall">确认卸载</button></div>`)
-          m.querySelector('[data-mclose]').addEventListener('click', () => m.remove())
-          m.querySelector('#obUninstall').addEventListener('click', async () => {
-            const { ok, body } = await api('/api/admin/official-baseline', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ dir: b.dataset.obSkill, action }) })
-            m.remove()
-            if (!ok) return toast(body.error || '操作失败', true)
-            toast('已卸载，并从所有账号 DSH 技能目录移除')
-            renderView()
-          })
-          return
-        }
-        const { ok, body } = await api('/api/admin/official-baseline', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ dir: b.dataset.obSkill, action }) })
-        if (!ok) return toast(body.error || '操作失败', true)
-        toast({ disable: '已停用，并已从各账号 DSH 技能目录移除', enable: '已启用，各账号 DSH 技能目录已恢复', install: '已重新安装，各账号 DSH 技能目录已恢复' }[action] || '操作完成')
-        renderView()
-      }))
     }
     const { body: capAdmin } = await api('/api/platform-capabilities')
-    const baselineSkillRows = baselineAdmin.skills || []
     const baselineBundleRows = baselineAdmin.bundles || []
     const capRows = capAdmin.items || []
     if (blocks) {
@@ -10238,10 +10215,10 @@ async function renderAdmin(el) {
       const wrap = document.createElement('div')
       wrap.className = 'mc-block'
       wrap.innerHTML = `<div class="mc-block-head"><b>平台公共能力</b><span class="spacer"></span><span class="mc-count">${caps.filter((c) => c.enabled).length} / ${caps.length} 项已启用</span></div>
-        <div class="mc-table" style="--mc-cols:minmax(110px,1.5fr) minmax(84px,1fr) minmax(64px,.8fr) minmax(80px,.9fr)">
+        <div class="mc-table" style="--mc-cols:minmax(136px,1.7fr) minmax(90px,1fr) minmax(58px,.7fr) minmax(80px,.9fr)">
           <div class="mc-thead"><span>系统模块</span><span>运行时模块</span><span>权限</span><span>资源上限</span></div>
           ${caps.map((c) => `<div class="mc-trow">
-            <span class="mc-first" title="${esc(c.name)}">${esc(c.shortName || c.name)} <span class="mc-tag ${c.disabled ? 'warn' : c.enabled ? 'ok' : 'bad'}">${c.disabled ? '已停用' : c.enabled ? '默认启用' : '未加载'}</span></span>
+            <span class="mc-first" title="${esc(c.name)}">${esc(c.shortName || c.name)} <span class="mc-tag ${c.disabled ? 'warn' : c.enabled ? 'ok' : 'bad'}">${c.disabled ? '已停用' : c.enabled ? '默认启用' : '未加载'}</span><span class="mc-dim" style="display:block;font-size:10px">${esc(c.accessibleTo || '全部授权用户')}</span></span>
             <span class="mono" style="font-size:10px">${esc(c.module)}</span>
             <span>${(c.permissions || []).length} 项</span>
             <span>${esc(capabilityLimitsText(c))}</span>
@@ -10316,8 +10293,7 @@ async function renderAdmin(el) {
       const listedSkills = skillItems.filter((x) => x.listed !== false).length
       const marketRows = (rows, len) => rows.map((x, i) => `<div class="mc-trow">
             <span class="mc-first">${esc(x.name)} <span class="mc-dim mono">${esc(x.id)}</span></span>
-            <span>${esc(x.section || '')}</span>
-            <span>${esc(x.publisher || '')}${x.origin === 'community' ? ' <span class="mc-dim">社区</span>' : ''}</span>
+            <span>${esc(x.publisher || '')}</span>
             <span><span class="mc-tag ${x.listed === false ? 'warn' : 'ok'}">${x.listed === false ? '已下架' : '已上架'}</span>${x.installed ? ` <span class="mc-tag ok">${(x.installUsers || []).length && x.installUsers[0]?.scope === 'baseline' ? '基线' : '已安装'}</span>` : ''}</span>
             <span class="mc-acts" style="grid-column:1/-1;flex-wrap:wrap">
               <button class="btn sm" data-mkt-sort="${esc(x.id)}" data-dir="up" ${i === 0 ? 'disabled' : ''}>↑</button>
@@ -10332,13 +10308,13 @@ async function renderAdmin(el) {
       wrap.className = 'mc-block'
       wrap.innerHTML = `<div class="mc-block-head"><b>插件 / 技能上架管理</b><span class="spacer"></span><span class="mc-count">${listedPlugins} / ${pluginItems.length} 个插件 · ${listedSkills} / ${skillItems.length} 个技能已上架</span></div>
         <div style="display:flex;align-items:center;gap:8px;padding:8px 10px 4px"><b style="font-size:12px">插件市场</b><span class="mc-count">${pluginItems.length} 个条目</span></div>
-        <div class="mc-table" style="--mc-cols:minmax(110px,1.6fr) minmax(54px,.7fr) minmax(80px,.9fr) minmax(64px,.8fr)">
-          <div class="mc-thead"><span>插件</span><span>分组</span><span>发布单位</span><span>状态</span></div>
+        <div class="mc-table" style="--mc-cols:minmax(130px,1.7fr) minmax(100px,1fr) minmax(64px,.8fr)">
+          <div class="mc-thead"><span>插件</span><span>发布单位</span><span>状态</span></div>
           ${marketRows(pluginItems, pluginItems.length) || '<div class="mc-row">市场还没有插件</div>'}
         </div>
         <div style="display:flex;align-items:center;gap:8px;padding:12px 10px 4px"><b style="font-size:12px">技能市场</b><span class="mc-count">${skillItems.length} 个条目</span></div>
-        <div class="mc-table" style="--mc-cols:minmax(110px,1.6fr) minmax(54px,.7fr) minmax(80px,.9fr) minmax(64px,.8fr)">
-          <div class="mc-thead"><span>技能</span><span>分组</span><span>发布单位</span><span>状态</span></div>
+        <div class="mc-table" style="--mc-cols:minmax(130px,1.7fr) minmax(100px,1fr) minmax(64px,.8fr)">
+          <div class="mc-thead"><span>技能</span><span>发布单位</span><span>状态</span></div>
           ${marketRows(skillItems, skillItems.length) || '<div class="mc-row">市场还没有技能</div>'}
         </div>`
       blocks.appendChild(wrap)
@@ -10397,16 +10373,17 @@ async function renderAdmin(el) {
     const kpiBox = document.getElementById('aiKpis')
     if (kpiBox) {
       const marketItems = marketAdmin.items || []
-      const enabledSkills = baselineSkillRows.filter((x) => x.installed && x.enabled).length
+      const infraRows = baselineAdmin.infrastructure || []
       const enabledBundles = baselineBundleRows.filter((x) => x.enabled).length
+      const enabledInfra = infraRows.filter((x) => x.enabled).length
+      const kernelTotal = baselineBundleRows.length + infraRows.length
       const enabledRuntime = runtimePlugins.filter((x) => x.enabled).length
       const enabledCaps = capRows.filter((x) => x.enabled).length
       const kpis = [
-        { k: '官方技能', v: `${enabledSkills} / ${baselineSkillRows.length}`, note: '来自 DSH 官方预设' },
-        { k: '核心 Bundle', v: `${enabledBundles} / ${baselineBundleRows.length}`, note: `账号独立 profile` },
+        { k: '系统内核', v: `${enabledBundles + enabledInfra} / ${kernelTotal}`, note: '启动底座与文件基础，只读' },
+        { k: '平台公共能力', v: `${enabledCaps} / ${capRows.length}`, note: '系统级模块，可停用' },
         { k: '运行时插件', v: `${enabledRuntime} / ${runtimePlugins.length}`, note: `${runtimePlugins.length - enabledRuntime} 个停用` },
-        { k: '平台公共能力', v: `${enabledCaps} / ${capRows.length}`, note: '系统级模块，不属于员工市场' },
-        { k: '市场条目', v: `${marketItems.length}`, note: `待审核 ${pending.length}` },
+        { k: '市场条目', v: `${marketItems.length}`, note: `官方 4 · 待审核 ${pending.length}` },
       ]
       kpiBox.innerHTML = kpis.map((x) => `<div class="mc-kpi"><div class="mc-kpi-k">${esc(x.k)}</div><div class="mc-kpi-v">${esc(x.v)}</div><div class="mc-kpi-note">${esc(x.note)}</div></div>`).join('')
     }
