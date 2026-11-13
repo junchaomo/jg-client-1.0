@@ -10053,6 +10053,7 @@ async function renderAdmin(el) {
     '用量与配额': 'models',
     'Agent 与 MCP': 'agents',
     'Agent、MCP 与技能运行时': 'agents',
+    'DSH 运行时诊断': 'agents',
     '插件审核': 'plugins',
     '插件 / 技能审核': 'plugins',
     '插件市场已上架管理': 'plugins',
@@ -10277,12 +10278,28 @@ async function renderAdmin(el) {
       const keyIds = ['agent', 'agent-loop', 'llm-deepseek', 'mcp-jg', 'skill-office', 'optional-session-search', 'schedule']
       const keyRows = keyIds.map((id) => runtimePlugins.find((p) => p.id === id)).filter(Boolean)
       const enabledCount = runtimePlugins.filter((p) => p.enabled).length
-      wrap.innerHTML = `<div class="mc-block-head"><b>Agent、MCP 与技能运行时</b><span class="spacer"></span><span class="mc-count">${enabledCount} / ${runtimePlugins.length} 个运行时插件启用</span></div>
+      wrap.innerHTML = `<div class="mc-block-head"><b>DSH 运行时诊断</b><span class="spacer"></span><span class="mc-count">${enabledCount} / ${runtimePlugins.length} 启用 · ${runtimePlugins.filter((p) => !p.enabled).length} 停用</span><button class="btn sm" data-runtime-all>查看全部</button></div>
+        <div class="form-note" style="margin:0 0 8px">这里是 DSH 内部运行时模块，不是员工在插件市场安装的插件；停用项由当前 sdk profile 配置决定，属于运行诊断，不作为业务能力指标。</div>
         <div class="mc-table" style="--mc-cols:minmax(100px,.9fr) minmax(210px,1.9fr) minmax(60px,.6fr)">
           <div class="mc-thead"><span>运行时 ID</span><span>插件包</span><span>状态</span></div>
           ${keyRows.map((p) => `<div class="mc-trow"><span class="mono" style="font-size:11px">${esc(p.id)}</span><span class="mono" style="font-size:10px">${esc(p.name)}</span><span><span class="mc-tag ${p.enabled ? 'ok' : 'warn'}">${p.enabled ? '启用' : '停用'}</span></span></div>`).join('') || '<div class="mc-row">运行时未返回插件清单</div>'}
         </div>`
       blocks.appendChild(wrap)
+      wrap.querySelector('[data-runtime-all]').addEventListener('click', () => {
+        const rows = runtimePlugins.map((p) => `<div class="mc-trow" style="--mc-cols:minmax(120px,1fr) minmax(230px,2fr) minmax(54px,.6fr)">
+          <span class="mono" style="font-size:11px">${esc(p.id)}</span>
+          <span class="mono" style="font-size:10px">${esc(p.name)}</span>
+          <span><span class="mc-tag ${p.enabled ? 'ok' : 'warn'}">${p.enabled ? '启用' : '停用'}</span></span>
+        </div>`).join('')
+        const m = openModal('DSH 运行时插件', `
+          <div class="form-note">共 ${runtimePlugins.length} 个 DSH 内部模块，其中 ${runtimePlugins.filter((p) => !p.enabled).length} 个由当前 profile 配置为停用：${runtimePlugins.filter((p) => !p.enabled).map((p) => `<span class="mono">${esc(p.id)}</span>`).join('、')}。它们不是员工插件市场的商品，也不等同于平台公共能力。</div>
+          <div style="max-height:52vh;overflow:auto;border:1px solid var(--line);border-radius:8px">
+            <div class="mc-thead" style="--mc-cols:minmax(120px,1fr) minmax(230px,2fr) minmax(54px,.6fr);position:sticky;top:0;background:var(--panel);z-index:1"><span>运行时 ID</span><span>插件包</span><span>状态</span></div>
+            ${rows}
+          </div>
+          <div class="form-foot"><span class="spacer"></span><button class="btn" data-mclose>关闭</button></div>`)
+        m.querySelector('[data-mclose]').addEventListener('click', () => m.remove())
+      })
     }
     const { body: marketAdmin } = await api('/api/admin/plugin-market')
     if (blocks) {
@@ -10377,13 +10394,12 @@ async function renderAdmin(el) {
       const enabledBundles = baselineBundleRows.filter((x) => x.enabled).length
       const enabledInfra = infraRows.filter((x) => x.enabled).length
       const kernelTotal = baselineBundleRows.length + infraRows.length
-      const enabledRuntime = runtimePlugins.filter((x) => x.enabled).length
       const enabledCaps = capRows.filter((x) => x.enabled).length
       const kpis = [
         { k: '系统内核', v: `${enabledBundles + enabledInfra} / ${kernelTotal}`, note: '启动底座与文件基础，只读' },
         { k: '平台公共能力', v: `${enabledCaps} / ${capRows.length}`, note: '系统级模块，可停用' },
-        { k: '运行时插件', v: `${enabledRuntime} / ${runtimePlugins.length}`, note: `${runtimePlugins.length - enabledRuntime} 个停用` },
         { k: '市场条目', v: `${marketItems.length}`, note: `官方 4 · 待审核 ${pending.length}` },
+        { k: '待审核', v: `${pending.length}`, note: '员工插件与技能提交' },
       ]
       kpiBox.innerHTML = kpis.map((x) => `<div class="mc-kpi"><div class="mc-kpi-k">${esc(x.k)}</div><div class="mc-kpi-v">${esc(x.v)}</div><div class="mc-kpi-note">${esc(x.note)}</div></div>`).join('')
     }
