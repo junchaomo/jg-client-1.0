@@ -875,3 +875,28 @@
 - admin（米乐）登录后侧边栏出现「管理中心」，`/api/admin/official-baseline` 返回 4 技能 + 2 Bundle。
 - 停用 `agent-experience`：`/api/plugins` 从 4 变 3，两个账号的 `dsh-home/skills/agent-experience` 均被移除；重新启用后恢复 4 条与两个账号目录。
 - 截图：`D:\project-test3\shots\official-baseline-admin.png`。
+
+
+## 33. AI 能力管理重构与官方基线卸载（2026-11-13）
+
+**结构**：AI 能力管理改为五段式，先运行基线，再模型资源，再 Agent/MCP，再员工市场，最后自动化：
+1. 运行基线：官方内置插件与技能 + 平台公共能力；
+2. 模型与配额：企业/个人模型、部门用量与限额；
+3. Agent 与 MCP：Agent 注册表与 MCP 工具目录；
+4. 插件与技能：员工提交审核 + 市场上架管理；
+5. 自动化任务：定时任务与执行记录。
+
+顶部 KPI 保留全局概况；切换分段只显示本段块，不再把审核、市场、基线、模型全部堆在一页。
+
+**官方基线盘点**：
+- 官方技能 4 个：Agent 经验与工具设计、Cordis 组合参考、DSH 插件开发、Agent 预设编辑，均来自 `@deepseek-ai/dsh-agent-preset/skills`。
+- 官方核心 Bundle 2 个：`@deepseek-ai/dsh-base`（基础运行时）、`@deepseek-ai/dsh-sdk-app`（SDK 应用层）。
+- 平台公共能力 5 个：Office/PDF、九规内部工具 MCP、文件管理、Python/脚本环境、数据检索；它们是系统级模块，不属于员工市场插件。
+
+**卸载**：
+- 官方技能支持“停用 / 启用 / 卸载 / 重新安装”。卸载会删除平台基线目录和所有账号 `dsh-home/skills` 副本，状态持久化到 `officialUninstalledSkills`；重新安装从官方 preset 源恢复。
+- 两个核心 Bundle 是产品运行时底座，管理中心只展示状态，不允许停用或卸载，避免客户端无法启动。
+
+**实测**：
+- 卸载 `agent-experience`：`/api/plugins` 4→3，平台目录与两个账号副本均删除；重新安装后恢复 4 条与副本。
+- 米乐登录后可见管理中心，可切换五个分段；截图 `shots/ai-admin-baseline.png`、`shots/ai-admin-plugins.png`。

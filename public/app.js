@@ -3779,7 +3779,7 @@ async function renderSkills(el) {
 
   const isOfficialBaseline = (p) => String(p.scope || '') === '平台官方基线'
   const installed = tab === 'plugin'
-    ? state.plugins.filter((p) => p.kind === 'enterprise')
+    ? state.market.filter((m) => (m.type === 'plugin' || m.kind === 'bundle') && m.installed)
     : state.plugins.filter((p) => p.kind === 'personal' && !isOfficialBaseline(p))
 
   const tone = (i) => 't' + (i % 8)
@@ -3794,7 +3794,7 @@ async function renderSkills(el) {
       <span class="pl-ico ${tone(i)}">${icon(typeIcon(t))}</span>
       <div class="pl-item-main"><div class="pl-item-name">${esc(m.name)} <span class="tag" style="font-size:10px">${typeLabel(t)}</span></div><div class="pl-item-desc">${esc(m.desc)}</div></div>
       ${m.installed
-        ? `<button class="pl-act" data-mdetail="${m.id}" title="已安装，查看详情">${icon('dots')}</button>`
+        ? `<button class="pl-act" data-muninstall="${m.id}" title="卸载，仅影响当前账号">${icon('close')}</button>`
         : m.available === false
           ? `<span class="tag" style="font-size:10px">待上架</span>`
           : `<button class="pl-act add" data-minstall="${m.id}" title="安装到当前账号">${icon('plus')}</button>`}
@@ -3852,7 +3852,7 @@ async function renderSkills(el) {
       </div>`
     }).join('') : '<div class="sk-empty">当前账号还没有创建技能，点右上「添加」开始创建</div>')}`
 
-  const instAttr = (x) => `data-plug="${x.id}"`
+  const instAttr = (x) => (tab === 'plugin' ? `data-mopen="${x.id}"` : `data-plug="${x.id}"`)
   const title = tab === 'plugin' ? '插件' : '技能'
   const sub = tab === 'plugin'
     ? (scop === 'personal' ? '只显示你自己创建的插件与提交审核记录' : '员工开发的插件通过市场提交、审核和安装')
@@ -3917,6 +3917,13 @@ async function renderSkills(el) {
     const { ok, body } = await api('/api/plugin-market/install', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: b.dataset.minstall }) })
     if (!ok) return toast(body.error || '安装失败', true)
     toast(body.message || (body.item.installed ? `已安装「${body.item.name}」，下一轮对话生效` : `已卸载「${body.item.name}」`))
+    renderView()
+  }))
+  el.querySelectorAll('[data-muninstall]').forEach((b) => b.addEventListener('click', async (e) => {
+    e.stopPropagation()
+    const { ok, body } = await api('/api/plugin-market/install', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: b.dataset.muninstall }) })
+    if (!ok) return toast(body.error || '卸载失败', true)
+    toast(body.message || `已卸载「${body.item?.name || ''}」，下一轮对话生效`)
     renderView()
   }))
   el.querySelectorAll('[data-mdetail]').forEach((b) => b.addEventListener('click', (e) => {
@@ -10027,6 +10034,25 @@ async function renderAdmin(el) {
   const navItems = (g) => g.items.filter(allowed)
   const tab = allowed(state.consoleTab) ? state.consoleTab : 'overview'
   state.consoleTab = tab
+  const AI_SEGMENTS = [
+    { id: 'baseline', no: '01', label: '运行基线', note: '官方内置技能、核心插件与平台公共能力；系统级默认启用，不进入员工市场' },
+    { id: 'models', no: '02', label: '模型与配额', note: '企业模型、个人模型、部门用量与限额' },
+    { id: 'agents', no: '03', label: 'Agent 与 MCP', note: 'Agent 注册表与 MCP 工具目录，实际调用按会话权限判定' },
+    { id: 'plugins', no: '04', label: '插件与技能', note: '员工提交的市场条目、审核与上下架管理' },
+    { id: 'automation', no: '05', label: '自动化任务', note: '定时任务、触发规则与最近执行结果' },
+  ]
+  const aiTab = AI_SEGMENTS.some((s) => s.id === state.aiTab) ? state.aiTab : 'baseline'
+  state.aiTab = aiTab
+  const AI_BLOCK_GROUP = {
+    '官方内置插件与技能': 'baseline',
+    '平台公共能力': 'baseline',
+    '模型管理': 'models',
+    '用量与配额': 'models',
+    'Agent 与 MCP': 'agents',
+    '插件审核': 'plugins',
+    '插件市场已上架管理': 'plugins',
+    '自动化任务': 'automation',
+  }
   const sec = body.sections[tab]
   const STATUS = /^(正常|在线|成功|已发布|已通过|已闭环|已回收|已恢复|已修复|可用|开启|允许|通过|已入库|已生效|已显示|—)$/
   const WARN = /^(待审核|待审批|待分派|待复核|待受理|待补录|处理中|草稿|降级|延迟|分发中|灰度|待发布|已暂停|待处理|预警|待确认)$/
@@ -10074,12 +10100,18 @@ async function renderAdmin(el) {
         </div>
         ${tab === 'overview' ? `<div class="mc-note">${esc(sec.meta)}</div>` : `<div class="mc-note">${esc(sec.meta)}</div>`}
         <div class="mc-kpis">${sec.kpis.map((k) => `<div class="mc-kpi"><div class="mc-kpi-k">${esc(k.k)}</div><div class="mc-kpi-v ${k.tone || ''}">${esc(k.v)}</div><div class="mc-kpi-note">${esc(k.note)}</div></div>`).join('')}</div>
+        ${tab === 'ai' ? `<style>.mc-seg{display:grid!important;grid-template-columns:repeat(5,minmax(0,1fr));gap:3px;margin-top:14px;padding:3px;border:1px solid #e7ebf1;border-radius:10px;background:#f7f8fa}.mc-seg-item{display:inline-flex;align-items:center;justify-content:center;gap:5px;border:1px solid transparent;background:transparent;border-radius:7px;padding:7px 3px;font-size:11px;color:#4a5057;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.mc-seg-item.on{background:#17191c;color:#fff;border-color:#17191c}.mc-seg-no{font-family:ui-monospace,Consolas,monospace;font-size:9px;color:#9aa1aa;flex:none}.mc-seg-item.on .mc-seg-no{color:#c9ced6}.mc-seg-note{margin:9px 0 0;font-size:var(--fs-dense);color:#7b828b;line-height:1.6}@media (max-width:760px){.mc-seg-no{display:none}}</style><div class="mc-seg" id="aiSeg">${AI_SEGMENTS.map((s) => `<button class="mc-seg-item${aiTab === s.id ? ' on' : ''}" style="${aiTab === s.id ? 'background:#17191c!important;color:#fff!important;border-color:#17191c!important' : ''}" data-aitab="${s.id}"><span class="mc-seg-no">${s.no}</span>${s.label}</button>`).join('')}</div>
+          <div class="mc-seg-note">${esc(AI_SEGMENTS.find((s) => s.id === aiTab).note)}</div>` : ''}
         <div class="mc-blocks">${sec.blocks.map(block).join('')}</div>
       </div>
     </div>`
 
   el.querySelectorAll('[data-mc]').forEach((b) => b.addEventListener('click', () => {
     state.consoleTab = b.dataset.mc
+    renderView()
+  }))
+  el.querySelectorAll('[data-aitab]').forEach((b) => b.addEventListener('click', () => {
+    state.aiTab = b.dataset.aitab
     renderView()
   }))
   el.querySelector('#mcRefresh').addEventListener('click', () => {
@@ -10139,26 +10171,49 @@ async function renderAdmin(el) {
       wrap.innerHTML = `<div class="mc-block-head"><b>官方内置插件与技能</b><span class="spacer"></span><span class="mc-count">${skills.filter((s) => s.enabled).length + bundles.filter((b) => b.enabled).length} / ${skills.length + bundles.length} 项启用</span></div>
         <div class="mc-table" style="--mc-cols:minmax(120px,1.8fr) minmax(54px,.7fr) minmax(70px,.9fr) minmax(62px,.7fr)">
           <div class="mc-thead"><span>官方基线</span><span>类型</span><span>运行时位置</span><span>状态</span></div>
-          ${skills.map((s) => `<div class="mc-trow">
+          ${skills.map((s) => {
+            const stateText = !s.installed ? '已卸载' : s.enabled ? '已启用' : '已停用'
+            const stateTone = !s.installed ? 'warn' : s.enabled ? 'ok' : 'warn'
+            return `<div class="mc-trow">
             <span class="mc-first" title="${esc(s.name)}">${esc(s.name)} <span class="mc-tag">基线</span></span>
             <span>技能</span>
             <span class="mono" style="font-size:10px">skills/${esc(s.dir)}</span>
-            <span><span class="mc-tag ${s.enabled ? 'ok' : 'warn'}">${s.enabled ? '已启用' : '已停用'}</span> <span class="mc-dim">${s.usedBy} 个账号</span></span>
-            <span class="mc-acts" style="grid-column:1/-1"><button class="btn sm ${s.enabled ? '' : 'primary'}" data-ob-skill="${esc(s.dir)}" data-next="${s.enabled ? 'disable' : 'enable'}">${s.enabled ? '停用' : '启用'}</button></span>
-          </div>`).join('')}
+            <span><span class="mc-tag ${stateTone}">${stateText}</span> ${s.installed ? `<span class="mc-dim">${s.usedBy} 个账号</span>` : ''}</span>
+            <span class="mc-acts" style="grid-column:1/-1">
+              ${!s.installed
+                ? `<button class="btn sm primary" data-ob-skill="${esc(s.dir)}" data-next="install">重新安装</button>`
+                : `<button class="btn sm ${s.enabled ? '' : 'primary'}" data-ob-skill="${esc(s.dir)}" data-next="${s.enabled ? 'disable' : 'enable'}">${s.enabled ? '停用' : '启用'}</button>
+                   <button class="btn sm" data-ob-skill="${esc(s.dir)}" data-next="uninstall">卸载</button>`}
+            </span>
+          </div>`}).join('')}
           ${bundles.map((b) => `<div class="mc-trow">
             <span class="mc-first" title="${esc(b.label)}">${esc(b.label)} <span class="mc-dim mono">${esc(b.name)}</span></span>
             <span>插件</span>
             <span>核心运行时</span>
             <span><span class="mc-tag ${b.enabled ? 'ok' : 'warn'}">${b.enabled ? '已启用' : '缺失'}</span></span>
-            <span class="mc-acts" style="grid-column:1/-1"><span class="mc-dim">核心基线不可停用</span></span>
+            <span class="mc-acts" style="grid-column:1/-1"><span class="mc-dim">核心运行时插件不可停用或卸载</span></span>
           </div>`).join('')}
         </div>`
       blocks.appendChild(wrap)
       wrap.querySelectorAll('[data-ob-skill]').forEach((b) => b.addEventListener('click', async () => {
-        const { ok, body } = await api('/api/admin/official-baseline', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ dir: b.dataset.obSkill, action: b.dataset.next }) })
+        const action = b.dataset.next
+        if (action === 'uninstall') {
+          const m = openModal('卸载官方技能', `
+            <div class="form-note">卸载会删除平台基线目录和所有账号的运行时副本，员工侧将不再加载该技能。之后可在本表重新安装。</div>
+            <div class="form-foot"><span class="spacer"></span><button class="btn" data-mclose>取消</button><button class="btn primary" id="obUninstall">确认卸载</button></div>`)
+          m.querySelector('[data-mclose]').addEventListener('click', () => m.remove())
+          m.querySelector('#obUninstall').addEventListener('click', async () => {
+            const { ok, body } = await api('/api/admin/official-baseline', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ dir: b.dataset.obSkill, action }) })
+            m.remove()
+            if (!ok) return toast(body.error || '操作失败', true)
+            toast('已卸载，并从所有账号 DSH 技能目录移除')
+            renderView()
+          })
+          return
+        }
+        const { ok, body } = await api('/api/admin/official-baseline', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ dir: b.dataset.obSkill, action }) })
         if (!ok) return toast(body.error || '操作失败', true)
-        toast(b.dataset.next === 'disable' ? '已停用，并已从各账号 DSH 技能目录移除' : '已启用，各账号 DSH 技能目录已恢复')
+        toast({ disable: '已停用，并已从各账号 DSH 技能目录移除', enable: '已启用，各账号 DSH 技能目录已恢复', install: '已重新安装，各账号 DSH 技能目录已恢复' }[action] || '操作完成')
         renderView()
       }))
     }
@@ -10264,6 +10319,13 @@ async function renderAdmin(el) {
           renderView()
         })
       }))
+    }
+    if (blocks) {
+      blocks.querySelectorAll('.mc-block').forEach((b) => {
+        const title = b.querySelector('.mc-block-head b')?.textContent.trim() || ''
+        const group = AI_BLOCK_GROUP[title]
+        b.style.display = group === aiTab ? '' : 'none'
+      })
     }
   }
 }

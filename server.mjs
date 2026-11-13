@@ -144,6 +144,7 @@ function removeMarketInstallRecord(id, record) {
 const livePluginInstalls = new Map()
 const livePluginToggles = new Map()
 const liveOfficialDisabledSkills = new Set()
+const liveOfficialUninstalledSkills = new Set()
 function installedIdsOf(userId) {
   const list = livePluginInstalls.get(userId)
   return Array.isArray(list) ? list : []
@@ -290,9 +291,7 @@ function runtimeOverview() {
   }
 }
 function officialSkillCatalog() {
-  const home = join(dataDirPath(), 'dsh-home')
-  const skillsDir = join(home, 'skills')
-  const inventory = runtimePluginInventory()
+  const skillsDir = join(dataDirPath(), 'dsh-home', 'skills')
   const labels = {
     'agent-experience': 'Agent 经验与工具设计',
     'cordis-composition-reference': 'Cordis 组合参考',
@@ -300,33 +299,28 @@ function officialSkillCatalog() {
     'editing-cordis-compositions': 'Agent 预设编辑',
   }
   const list = []
-  let dirs = []
-  try {
-    dirs = readdirSync(skillsDir, { withFileTypes: true }).filter((entry) => entry.isDirectory()).map((entry) => entry.name)
-  } catch {}
-  for (const dir of dirs) {
-    let name = dir
-    let desc = '平台已加载的官方 Harness 技能'
+  for (const dir of OFFICIAL_SKILL_DIRS) {
+    const installed = existsSync(join(skillsDir, dir))
+    const readDir = installed ? join(skillsDir, dir) : join(DSH_DEFAULT_SKILL_SOURCE, dir)
+    let name = labels[dir] || dir
+    let desc = 'DeepSeek Harness 官方内置技能'
     try {
-      const text = readFileSync(join(skillsDir, dir, 'SKILL.md'), 'utf8')
+      const text = readFileSync(join(readDir, 'SKILL.md'), 'utf8')
       const fm = text.match(/^---\s*\n([\s\S]*?)\n---/)
       if (fm) {
-        name = (fm[1].match(/^name:\s*(.+)$/m) || [])[1]?.trim() || name
         desc = (fm[1].match(/^description:\s*(.+)$/m) || [])[1]?.trim() || desc
       }
-      if (/^[\x00-\x7F]+$/.test(name)) {
-        const heading = (text.match(/^#\s+(.+)$/m) || [])[1]?.trim()
-        name = labels[dir] || heading || name
-      }
     } catch {}
+    const enabled = installed && !liveOfficialDisabledSkills.has(dir)
     list.push({
       id: `S-${dir}`,
       name,
       kind: 'personal',
       publisher: 'DeepSeek Harness',
       version: '0.2.2-rc.1',
-      status: liveOfficialDisabledSkills.has(dir) ? 'disabled' : 'enabled',
-      enabled: !liveOfficialDisabledSkills.has(dir),
+      status: !installed ? 'uninstalled' : enabled ? 'enabled' : 'disabled',
+      installed,
+      enabled,
       nets: ['inet', 'gov', 'secret'],
       deps: 'DSH 官方技能',
       scope: '平台官方基线',
@@ -1066,6 +1060,7 @@ function snapshotPersistentState() {
     pluginInstalls: [...livePluginInstalls.entries()],
     pluginToggles: [...livePluginToggles.entries()],
     officialDisabledSkills: [...liveOfficialDisabledSkills],
+    officialUninstalledSkills: [...liveOfficialUninstalledSkills],
     marketInstalls: [...liveMarketInstalls.entries()],
     capabilityPolicies: [...liveCapabilityPolicies.entries()],
     cloudLog,
@@ -1146,6 +1141,8 @@ function hydratePersistentState() {
   replaceMap(livePluginToggles, Object.fromEntries(snap.pluginToggles || []))
   liveOfficialDisabledSkills.clear()
   for (const dir of snap.officialDisabledSkills || []) liveOfficialDisabledSkills.add(dir)
+  liveOfficialUninstalledSkills.clear()
+  for (const dir of snap.officialUninstalledSkills || []) liveOfficialUninstalledSkills.add(dir)
   replaceMap(liveMarketInstalls, Object.fromEntries(snap.marketInstalls || []))
   const marketIds = new Set(liveMarket.map((m) => m.id))
   for (const id of [...liveMarketInstalls.keys()]) {
@@ -2653,6 +2650,10 @@ function ensureUserDshHome(userId) {
   for (const name of OFFICIAL_SKILL_DIRS) {
     const source = join(dataDirPath(), 'dsh-home', 'skills', name)
     const target = join(targetSkills, name)
+    if (liveOfficialUninstalledSkills.has(name)) {
+      try { rmSync(target, { recursive: true, force: true }) } catch {}
+      continue
+    }
     if (liveOfficialDisabledSkills.has(name)) {
       try { rmSync(target, { recursive: true, force: true }) } catch {}
       continue
@@ -3646,9 +3647,24 @@ const api = {
     const body = JSON.parse(req.__body || '{}')
     const dir = String(body.dir || '').trim()
     if (!OFFICIAL_SKILL_DIRS.includes(dir)) return json(res, 404, { error: '不是官方内置技能' })
-    if (body.action !== 'enable' && body.action !== 'disable') return json(res, 400, { error: 'action 只能是 enable 或 disable' })
-    if (body.action === 'disable') liveOfficialDisabledSkills.add(dir)
-    else liveOfficialDisabledSkills.delete(dir)
+    const action = String(body.action || '')
+    if (!['enable', 'disable', 'install', 'uninstall'].includes(action)) return json(res, 400, { error: 'action 只能是 enable、disable、install 或 uninstall' })
+    const globalDir = join(dataDirPath(), 'dsh-home', 'skills', dir)
+    if (action === 'uninstall') {
+      rmSync(globalDir, { recursive: true, force: true })
+      liveOfficialUninstalledSkills.add(dir)
+      liveOfficialDisabledSkills.delete(dir)
+    } else if (action === 'install') {
+      mkdirSync(dirname(globalDir), { recursive: true })
+      rmSync(globalDir, { recursive: true, force: true })
+      cpSync(join(DSH_DEFAULT_SKILL_SOURCE, dir), globalDir, { recursive: true })
+      liveOfficialUninstalledSkills.delete(dir)
+      liveOfficialDisabledSkills.delete(dir)
+    } else {
+      if (liveOfficialUninstalledSkills.has(dir)) return json(res, 409, { error: '该官方技能已卸载，请先重新安装' })
+      if (action === 'disable') liveOfficialDisabledSkills.add(dir)
+      else liveOfficialDisabledSkills.delete(dir)
+    }
     let accounts = []
     try { accounts = readdirSync(USER_AGENT_ROOT, { withFileTypes: true }).filter((e) => e.isDirectory() && !e.name.startsWith('_')).map((e) => e.name) } catch {}
     for (const userId of accounts) {
