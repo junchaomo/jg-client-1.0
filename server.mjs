@@ -1068,7 +1068,7 @@ function hydratePersistentState() {
   const builtinIds = new Set(MARKET_BUILTIN.map((m) => m.id))
   replaceArray(liveMarket, [
     ...MARKET_BUILTIN.map((m) => ({ ...m })),
-    ...persistedMarket.filter((m) => m && m.id && !builtinIds.has(m.id) && m.kind !== 'plugin'),
+    ...persistedMarket.filter((m) => m && m.id && !builtinIds.has(m.id) && !['P-OFFICE', 'P-MCP-JG'].includes(m.id)),
   ])
   liveMarket.forEach((m, i) => { m.order = Number.isFinite(Number(m.order)) ? Number(m.order) : i })
   replaceArray(pluginSubs, snap.pluginSubs)
