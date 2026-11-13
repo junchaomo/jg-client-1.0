@@ -10036,10 +10036,10 @@ async function renderAdmin(el) {
   state.consoleTab = tab
   const AI_SEGMENTS = [
     { id: 'baseline', no: '01', label: '运行基线', note: '官方内置技能、核心插件与平台公共能力；系统级默认启用，不进入员工市场' },
-    { id: 'models', no: '02', label: '模型与配额', note: '企业模型、个人模型、部门用量与限额' },
-    { id: 'agents', no: '03', label: 'Agent 与 MCP', note: 'Agent 注册表与 MCP 工具目录，实际调用按会话权限判定' },
+    { id: 'models', no: '02', label: '模型与网关', note: '当前账号真实模型网关配置；没有真实用量数据时不展示虚构配额' },
+    { id: 'agents', no: '03', label: 'Agent 与 MCP', note: '运行时实际加载的 Agent、MCP、技能与调度模块' },
     { id: 'plugins', no: '04', label: '插件与技能', note: '员工提交的市场条目、审核与上下架管理' },
-    { id: 'automation', no: '05', label: '自动化任务', note: '定时任务、触发规则与最近执行结果' },
+    { id: 'automation', no: '05', label: '自动化任务', note: '来自 Harness schedule.json 的真实定时任务' },
   ]
   const aiTab = AI_SEGMENTS.some((s) => s.id === state.aiTab) ? state.aiTab : 'baseline'
   state.aiTab = aiTab
@@ -10047,11 +10047,14 @@ async function renderAdmin(el) {
     '官方内置插件与技能': 'baseline',
     '平台公共能力': 'baseline',
     '模型管理': 'models',
+    '模型网关': 'models',
     '用量与配额': 'models',
     'Agent 与 MCP': 'agents',
+    'Agent、MCP 与技能运行时': 'agents',
     '插件审核': 'plugins',
     '插件市场已上架管理': 'plugins',
     '自动化任务': 'automation',
+    'Harness 定时任务': 'automation',
   }
   const sec = body.sections[tab]
   const STATUS = /^(正常|在线|成功|已发布|已通过|已闭环|已回收|已恢复|已修复|可用|开启|允许|通过|已入库|已生效|已显示|—)$/
@@ -10099,7 +10102,7 @@ async function renderAdmin(el) {
           <button class="btn sm" id="mcRefresh">${icon('refresh')}刷新</button>
         </div>
         ${tab === 'overview' ? `<div class="mc-note">${esc(sec.meta)}</div>` : `<div class="mc-note">${esc(sec.meta)}</div>`}
-        <div class="mc-kpis">${sec.kpis.map((k) => `<div class="mc-kpi"><div class="mc-kpi-k">${esc(k.k)}</div><div class="mc-kpi-v ${k.tone || ''}">${esc(k.v)}</div><div class="mc-kpi-note">${esc(k.note)}</div></div>`).join('')}</div>
+        <div class="mc-kpis"${tab === 'ai' ? ' id="aiKpis"' : ''}>${tab === 'ai' ? '' : sec.kpis.map((k) => `<div class="mc-kpi"><div class="mc-kpi-k">${esc(k.k)}</div><div class="mc-kpi-v ${k.tone || ''}">${esc(k.v)}</div><div class="mc-kpi-note">${esc(k.note)}</div></div>`).join('')}</div>
         ${tab === 'ai' ? `<style>.mc-seg{display:grid!important;grid-template-columns:repeat(5,minmax(0,1fr));gap:3px;margin-top:14px;padding:3px;border:1px solid #e7ebf1;border-radius:10px;background:#f7f8fa}.mc-seg-item{display:inline-flex;align-items:center;justify-content:center;gap:5px;border:1px solid transparent;background:transparent;border-radius:7px;padding:7px 3px;font-size:11px;color:#4a5057;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.mc-seg-item.on{background:#17191c;color:#fff;border-color:#17191c}.mc-seg-no{font-family:ui-monospace,Consolas,monospace;font-size:9px;color:#9aa1aa;flex:none}.mc-seg-item.on .mc-seg-no{color:#c9ced6}.mc-seg-note{margin:9px 0 0;font-size:var(--fs-dense);color:#7b828b;line-height:1.6}@media (max-width:760px){.mc-seg-no{display:none}}</style><div class="mc-seg" id="aiSeg">${AI_SEGMENTS.map((s) => `<button class="mc-seg-item${aiTab === s.id ? ' on' : ''}" style="${aiTab === s.id ? 'background:#17191c!important;color:#fff!important;border-color:#17191c!important' : ''}" data-aitab="${s.id}"><span class="mc-seg-no">${s.no}</span>${s.label}</button>`).join('')}</div>
           <div class="mc-seg-note">${esc(AI_SEGMENTS.find((s) => s.id === aiTab).note)}</div>` : ''}
         <div class="mc-blocks">${sec.blocks.map(block).join('')}</div>
@@ -10120,8 +10123,15 @@ async function renderAdmin(el) {
   })
 
   if (tab === 'ai') {
-    const { body: sub } = await api('/api/plugin-subs')
+    const [{ body: sub }, { body: runtimeInfo }, { body: modelCfg }, { body: autoBody }] = await Promise.all([
+      api('/api/plugin-subs'),
+      api('/api/runtime/plugins'),
+      api('/api/model/config'),
+      api('/api/automations'),
+    ])
     const pending = (sub.items || []).filter((x) => x.status === 'pending')
+    const runtimePlugins = runtimeInfo.plugins || []
+    const harnessAutos = (autoBody.items || []).filter((x) => x.source === 'harness')
     const blocks = el.querySelector('.mc-blocks')
     if (blocks) {
       const wrap = document.createElement('div')
@@ -10218,6 +10228,9 @@ async function renderAdmin(el) {
       }))
     }
     const { body: capAdmin } = await api('/api/platform-capabilities')
+    const baselineSkillRows = baselineAdmin.skills || []
+    const baselineBundleRows = baselineAdmin.bundles || []
+    const capRows = capAdmin.items || []
     if (blocks) {
       const caps = capAdmin.items || []
       const wrap = document.createElement('div')
@@ -10243,6 +10256,34 @@ async function renderAdmin(el) {
         state.capabilityCanManage = true
         openCapabilityPolicy(c)
       }))
+    }
+    if (blocks) {
+      const wrap = document.createElement('div')
+      wrap.className = 'mc-block'
+      const modelReady = Boolean(modelCfg.apiKeySaved && modelCfg.defaultModel)
+      wrap.innerHTML = `<div class="mc-block-head"><b>模型网关</b><span class="spacer"></span><span class="mc-count">${modelReady ? '1 套已配置' : '未配置'}</span></div>
+        <div class="mc-table" style="--mc-cols:minmax(90px,.7fr) minmax(200px,1.6fr)">
+          <div class="mc-thead"><span>配置项</span><span>当前值</span></div>
+          <div class="mc-trow"><span>供应商</span><span>${esc(modelCfg.provider || '未配置')}</span></div>
+          <div class="mc-trow"><span>接口地址</span><span class="mono" style="font-size:11px">${esc(modelCfg.endpoint || '未配置')}</span></div>
+          <div class="mc-trow"><span>默认模型</span><span>${esc(modelCfg.defaultModel || '未配置')}</span></div>
+          <div class="mc-trow"><span>API Key</span><span><span class="mc-tag ${modelCfg.apiKeySaved ? 'ok' : 'warn'}">${modelCfg.apiKeySaved ? '已保存' : '未保存'}</span> <span class="mc-dim mono">${esc(modelCfg.key || '—')}</span></span></div>
+          <div class="mc-trow"><span>连接测试</span><span>${modelCfg.testedAt ? `${esc(modelCfg.testedAt)} · ${esc(modelCfg.latency || '—')}` : '<span class="mc-dim">尚未测试</span>'}</span></div>
+        </div>`
+      blocks.appendChild(wrap)
+    }
+    if (blocks) {
+      const wrap = document.createElement('div')
+      wrap.className = 'mc-block'
+      const keyIds = ['agent', 'agent-loop', 'llm-deepseek', 'mcp-jg', 'skill-office', 'optional-session-search', 'schedule']
+      const keyRows = keyIds.map((id) => runtimePlugins.find((p) => p.id === id)).filter(Boolean)
+      const enabledCount = runtimePlugins.filter((p) => p.enabled).length
+      wrap.innerHTML = `<div class="mc-block-head"><b>Agent、MCP 与技能运行时</b><span class="spacer"></span><span class="mc-count">${enabledCount} / ${runtimePlugins.length} 个运行时插件启用</span></div>
+        <div class="mc-table" style="--mc-cols:minmax(100px,.9fr) minmax(210px,1.9fr) minmax(60px,.6fr)">
+          <div class="mc-thead"><span>运行时 ID</span><span>插件包</span><span>状态</span></div>
+          ${keyRows.map((p) => `<div class="mc-trow"><span class="mono" style="font-size:11px">${esc(p.id)}</span><span class="mono" style="font-size:10px">${esc(p.name)}</span><span><span class="mc-tag ${p.enabled ? 'ok' : 'warn'}">${p.enabled ? '启用' : '停用'}</span></span></div>`).join('') || '<div class="mc-row">运行时未返回插件清单</div>'}
+        </div>`
+      blocks.appendChild(wrap)
     }
     const { body: marketAdmin } = await api('/api/admin/plugin-market')
     if (blocks) {
@@ -10321,8 +10362,38 @@ async function renderAdmin(el) {
       }))
     }
     if (blocks) {
+      const wrap = document.createElement('div')
+      wrap.className = 'mc-block'
+      wrap.innerHTML = `<div class="mc-block-head"><b>Harness 定时任务</b><span class="spacer"></span><span class="mc-count">${harnessAutos.length} 个任务</span></div>
+        <div class="mc-table" style="--mc-cols:minmax(130px,1.6fr) minmax(110px,1.2fr) minmax(100px,1fr) minmax(64px,.6fr)">
+          <div class="mc-thead"><span>任务</span><span>执行规则</span><span>下次执行</span><span>状态</span></div>
+          ${harnessAutos.map((a) => `<div class="mc-trow"><span class="mc-first" title="${esc(a.name)}">${esc(a.name)}</span><span class="mono" style="font-size:10px">${esc(a.schedule)}</span><span>${esc(a.next)}</span><span><span class="mc-tag ${a.status === 'active' ? 'ok' : 'warn'}">${a.status === 'active' ? '运行中' : '已暂停'}</span></span></div>`).join('') || '<div class="mc-row">当前没有 Harness 定时任务</div>'}
+        </div>`
+      blocks.appendChild(wrap)
+    }
+    const kpiBox = document.getElementById('aiKpis')
+    if (kpiBox) {
+      const marketItems = marketAdmin.items || []
+      const enabledSkills = baselineSkillRows.filter((x) => x.installed && x.enabled).length
+      const enabledBundles = baselineBundleRows.filter((x) => x.enabled).length
+      const enabledRuntime = runtimePlugins.filter((x) => x.enabled).length
+      const enabledCaps = capRows.filter((x) => x.enabled).length
+      const kpis = [
+        { k: '官方技能', v: `${enabledSkills} / ${baselineSkillRows.length}`, note: '来自 DSH 官方预设' },
+        { k: '核心 Bundle', v: `${enabledBundles} / ${baselineBundleRows.length}`, note: `账号独立 profile` },
+        { k: '运行时插件', v: `${enabledRuntime} / ${runtimePlugins.length}`, note: `${runtimePlugins.length - enabledRuntime} 个停用` },
+        { k: '平台公共能力', v: `${enabledCaps} / ${capRows.length}`, note: '系统级模块，不属于员工市场' },
+        { k: '市场条目', v: `${marketItems.length}`, note: `待审核 ${pending.length}` },
+        { k: 'Harness 定时任务', v: `${harnessAutos.length}`, note: '来自 schedule.json' },
+      ]
+      kpiBox.innerHTML = kpis.map((x) => `<div class="mc-kpi"><div class="mc-kpi-k">${esc(x.k)}</div><div class="mc-kpi-v">${esc(x.v)}</div><div class="mc-kpi-note">${esc(x.note)}</div></div>`).join('')
+    }
+    if (blocks) {
+      const seenTitles = new Set()
       blocks.querySelectorAll('.mc-block').forEach((b) => {
         const title = b.querySelector('.mc-block-head b')?.textContent.trim() || ''
+        if (seenTitles.has(title)) { b.remove(); return }
+        seenTitles.add(title)
         const group = AI_BLOCK_GROUP[title]
         b.style.display = group === aiTab ? '' : 'none'
       })

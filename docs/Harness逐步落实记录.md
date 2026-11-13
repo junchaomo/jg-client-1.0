@@ -900,3 +900,22 @@
 **实测**：
 - 卸载 `agent-experience`：`/api/plugins` 4→3，平台目录与两个账号副本均删除；重新安装后恢复 4 条与副本。
 - 米乐登录后可见管理中心，可切换五个分段；截图 `shots/ai-admin-baseline.png`、`shots/ai-admin-plugins.png`。
+
+
+## 34. AI 能力管理去除演示数据（2026-11-13）
+
+**原则**：AI 能力管理只展示真实来源，无法取得真实数据的指标直接不展示，不用演示值填充。
+
+**已移除**：`console.mjs` AI 分段原来的 6 个假 KPI 和 4 张假表（企业模型/个人模型/Agent/MCP/自动化任务、模型管理、部门用量与配额、Agent 与 MCP、自动化任务）。该分段现返回空 `kpis` 与 `blocks`，由前端按真实接口组装。
+
+**真实数据源**：
+- 官方技能与核心 Bundle：`/api/admin/official-baseline`；
+- 平台公共能力与运行时启用状态：`/api/platform-capabilities` 与 `/api/runtime/plugins`；
+- 运行时插件总数与启用数：`/api/runtime/plugins`；
+- 当前账号模型网关：`/api/model/config`（供应商、端点、默认模型、Key 状态、最近测试）；
+- 员工市场与待审核：`/api/admin/plugin-market`、`/api/plugin-subs`；
+- Harness 定时任务：`/api/automations` 中 `source='harness'` 的真实条目（来自 `schedule.json`）。
+
+**当前真实值**：官方技能 4/4、核心 Bundle 2/2、运行时插件 112/115、平台公共能力 5/5、市场条目 0、待审核 0、Harness 定时任务 0；模型网关为当前账号真实配置（OpenAI 兼容端点 / `deepseek-chat` / Key 已保存 / 尚未测试）。
+
+**边界**：原“企业模型 / 个人模型 / 部门 Token 用量 / MCP 工具 18 / 今日执行 412 次”等平台级统计没有真实数据源，已删除而不是改成 0 占位；没有虚构配额和虚构执行次数。
