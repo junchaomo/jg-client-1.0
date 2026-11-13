@@ -1842,7 +1842,7 @@ function composerToolPickerItems(kind) {
   })) : [{ act: 'empty', ic: 'tool', label: `暂无已启用${kind === 'skill' ? '技能' : '插件'}`, desc: '可在「插件与技能」页安装', off: true }]
   return [
     { act: 'back', ic: 'back', label: '返回', desc: '上一级' },
-    { act: 'picker-head', ic: kind === 'skill' ? 'layers' : 'plugin', label: title, desc: '可多选 · 再次点击取消', off: true },
+    { act: 'picker-head', ic: kind === 'skill' ? 'spark' : 'plugin', label: title, desc: '可多选 · 再次点击取消', off: true },
     ...rows,
   ]
 }
@@ -3778,70 +3778,76 @@ async function renderSkills(el) {
   const scop = state.skillScope || 'public'
 
   const installed = tab === 'plugin'
-    ? state.plugins.filter((p) => p.kind !== 'personal')
+    ? state.plugins.filter((p) => p.kind === 'enterprise')
     : state.plugins.filter((p) => p.kind === 'personal')
 
   const tone = (i) => 't' + (i % 8)
+  const marketType = (m) => m.type || (m.kind === 'bundle' ? 'plugin' : 'skill')
+  const typeLabel = (t) => (t === 'plugin' ? '插件' : '技能')
+  const typeIcon = (t) => (t === 'plugin' ? 'plugin' : 'spark')
 
-  const marketCard = (m, i) => `
+  const marketCard = (m, i) => {
+    const t = marketType(m)
+    return `
     <div class="pl-item" data-mopen="${esc(m.id)}" style="cursor:pointer">
-      <span class="pl-ico ${tone(i)}">${icon('plugin')}</span>
-      <div class="pl-item-main"><div class="pl-item-name">${esc(m.name)}</div><div class="pl-item-desc">${esc(m.desc)}</div></div>
+      <span class="pl-ico ${tone(i)}">${icon(typeIcon(t))}</span>
+      <div class="pl-item-main"><div class="pl-item-name">${esc(m.name)} <span class="tag" style="font-size:10px">${typeLabel(t)}</span></div><div class="pl-item-desc">${esc(m.desc)}</div></div>
       ${m.installed
         ? `<button class="pl-act" data-mdetail="${m.id}" title="已安装，查看详情">${icon('dots')}</button>`
         : m.available === false
           ? `<span class="tag" style="font-size:10px">待上架</span>`
           : `<button class="pl-act add" data-minstall="${m.id}" title="安装到当前账号">${icon('plus')}</button>`}
     </div>`
+  }
 
   const skillDesc = (p) => (state.market || []).find((m) => m.kind === 'skill' && m.name === p.name)?.desc || p.desc
   const skillCard = (p, i) => `
     <div class="pl-item">
-      <span class="pl-ico ${tone(i)}">${icon('tool')}</span>
-      <div class="pl-item-main"><div class="pl-item-name">${esc(p.name)}</div><div class="pl-item-desc">${esc(skillDesc(p))}</div></div>
+      <span class="pl-ico ${tone(i)}">${icon('spark')}</span>
+      <div class="pl-item-main"><div class="pl-item-name">${esc(p.name)} <span class="tag" style="font-size:10px">技能</span></div><div class="pl-item-desc">${esc(skillDesc(p))}</div></div>
       <button class="pl-act" data-plug="${p.id}" title="技能详情">${icon('dots')}</button>
     </div>`
 
-  const sec = (title, cards) => cards ? `
+  const sec = (title, cards, cols) => cards ? `
     <section class="pl-sec">
       <h2 class="pl-sec-title">${title}<span class="pl-arrow">›</span></h2>
-      <div class="pl-grid">${cards}</div>
+      <div class="pl-grid"${cols ? ` style="grid-template-columns:${cols}"` : ''}>${cards}</div>
     </section>` : ''
 
-  const marketSections = ['官方与内置', '热门', '新品推荐', '企业内部'].map((name) => {
-    const list = state.market.filter((m) => m.section === name).filter((m) => {
-      const q = String(state.skillQuery || '').trim().toLowerCase()
-      if (!q) return true
-      return `${m.name} ${m.desc} ${m.publisher || ''}`.toLowerCase().includes(q)
-    })
-    return list.length ? sec(name, list.map(marketCard).join('')) : ''
+  const filterMarket = (type) => state.market.filter((m) => marketType(m) === type).filter((m) => {
+    const q = String(state.skillQuery || '').trim().toLowerCase()
+    if (!q) return true
+    return `${m.name} ${m.desc} ${m.publisher || ''}`.toLowerCase().includes(q)
+  })
+  const marketSections = (type) => ['官方与内置', '热门', '新品推荐', '企业内部'].map((name) => {
+    const list = filterMarket(type).filter((m) => m.section === name)
+    return list.length ? sec(name, list.map(marketCard).join(''), '1fr') : ''
   }).join('')
 
-  const pluginSections = `
-    ${sec('底层能力', state.plugins.filter((p) => p.kind === 'capability').map(skillCard).join(''))}
-    ${sec('已安装插件', state.plugins.filter((p) => p.kind === 'enterprise').map(skillCard).join(''))}`
-  const capabilitySections = sec('底层能力', state.plugins.filter((p) => p.kind === 'capability').map(skillCard).join(''))
-
   const personalSections = `
-    ${sec('我的插件提交', subs.length ? subs.map((x, i) => {
+    ${sec('我安装的插件', installed.length ? installed.map((p, i) => `<div class="pl-item"><span class="pl-ico ${tone(i)}">${icon('plugin')}</span><div class="pl-item-main"><div class="pl-item-name">${esc(p.name)} <span class="tag" style="font-size:10px">插件</span></div><div class="pl-item-desc">${esc(p.desc)}</div></div><button class="pl-act" data-plug="${p.id}">${icon('dots')}</button></div>`).join('') : '<div class="sk-empty">当前账号还没有安装插件，去「公开」选择安装</div>')}
+    ${sec('我提交的插件', subs.length ? subs.map((x, i) => {
       const st = { pending: ['warn', '待审核'], approved: ['ok', '已上架'], rejected: ['bad', '已退回'] }[x.status] || ['', x.status]
+      const t = x.kind === 'skill' ? 'skill' : 'plugin'
       return `<div class="pl-item">
-        <span class="pl-ico ${tone(i)}">${icon('plugin')}</span>
-        <div class="pl-item-main"><div class="pl-item-name">${esc(x.name)}</div><div class="pl-item-desc">${esc(x.file)} · v${esc(x.version)} · ${esc(x.scope)} · ${esc(x.submitted)}</div></div>
+        <span class="pl-ico ${tone(i)}">${icon(typeIcon(t))}</span>
+        <div class="pl-item-main"><div class="pl-item-name">${esc(x.name)} <span class="tag" style="font-size:10px">${typeLabel(t)}</span></div><div class="pl-item-desc">${esc(x.file)} · v${esc(x.version)} · ${esc(x.scope)} · ${esc(x.submitted)}</div></div>
         <span class="tag ${st[0]}">${st[1]}</span>
         <button class="pl-act" data-subreport="${x.id}" title="查看检测报告">${icon('doc')}</button>
       </div>`
-    }).join('') : '<div class="sk-empty">还没有提交过插件，点右上「添加」开始</div>')}
-    ${sec('已安装', installed.length ? installed.map(marketCard).join('') : '<div class="sk-empty">还没有安装插件</div>')}`
+    }).join('') : '<div class="sk-empty">当前账号还没有提交记录，点右上「添加」开始</div>')}`
 
-  const skillSections = sec('已安装技能',
-    state.plugins.filter((p) => p.kind === 'personal').map(skillCard).join(''))
+  const pluginMarketSection = filterMarket('plugin').length ? marketSections('plugin') : ''
+
+  const skillSections = `
+    ${sec('已安装技能', state.plugins.filter((p) => p.kind === 'personal').length ? state.plugins.filter((p) => p.kind === 'personal').map(skillCard).join('') : '<div class="sk-empty">还没有安装技能</div>', '1fr')}
+    ${filterMarket('skill').length ? marketSections('skill') : '<section class="pl-sec"><h2 class="pl-sec-title">技能市场<span class="pl-arrow">›</span></h2><div class="sk-empty">没有匹配的技能</div></section>'}`
 
   const instAttr = (x) => `data-plug="${x.id}"`
   const title = tab === 'plugin' ? '插件' : '技能'
   const sub = tab === 'plugin'
-    ? '连接插件，让九规智能中枢在你的各类工具中协同工作'
-    : '技能定义模型可以完成的任务流程，可在对话中直接调用'
+    ? (scop === 'personal' ? '只显示你自己安装的插件，不共享给其他账号' : '员工开发的插件通过市场提交、审核和安装')
+    : '技能定义模型可以完成的任务流程，同样通过市场提交、审核和安装'
 
   el.innerHTML = `
     <div class="sk-wrap pl-wrap${state.sbPinned ? '' : ' sb-off'}">
@@ -3849,16 +3855,16 @@ async function renderSkills(el) {
         <div class="pl-brand">插件与技能</div>
         <nav class="pl-nav">
           <button class="pl-nav-item${tab === 'plugin' ? ' on' : ''}" data-sktab="plugin"><span class="pl-nav-ico">${icon('plugin')}</span>插件</button>
-          <button class="pl-nav-item${tab === 'skill' ? ' on' : ''}" data-sktab="skill"><span class="pl-nav-ico">${icon('grid')}</span>技能</button>
+          <button class="pl-nav-item${tab === 'skill' ? ' on' : ''}" data-sktab="skill"><span class="pl-nav-ico">${icon('spark')}</span>技能</button>
         </nav>
-        <div class="pl-label">已安装</div>
+        <div class="pl-label">${tab === 'plugin' ? '已安装插件' : '已安装技能'}</div>
         <div class="pl-installed">
           ${installed.map((x, i) => `
             <button class="pl-inst" ${instAttr(x)}>
-              <span class="pl-inst-ico ${tone(i)}">${icon(tab === 'plugin' ? 'plugin' : 'tool')}</span><span>${esc(x.name)}</span>
-            </button>`).join('') || '<div class="sk-empty">暂无已安装项</div>'}
+              <span class="pl-inst-ico ${tone(i)}">${icon(tab === 'plugin' ? 'plugin' : 'spark')}</span><span>${esc(x.name)}</span>
+            </button>`).join('') || `<div class="sk-empty">${tab === 'plugin' ? '暂无已安装插件' : '暂无已安装技能'}</div>`}
         </div>
-        <div class="pl-foot">插件与技能按授权与网络可用；企业内部插件需经过安全审核后上架。</div>
+        <div class="pl-foot">插件与技能经安全审核后上架；个人安装只在本账号生效。</div>
       </aside>
       <div class="sk-main pl-main">
         <div class="pl-head" style="display:block">
@@ -3867,7 +3873,7 @@ async function renderSkills(el) {
               <h1 class="pl-title">${title}</h1>
             </div>
             <div class="pl-acts">
-              <input class="text-input" id="skSearch" placeholder="搜索插件" value="${esc(state.skillQuery || '')}" style="width:180px;height:32px" />
+              <input class="text-input" id="skSearch" placeholder="搜索${tab === 'plugin' ? '插件' : '技能'}" value="${esc(state.skillQuery || '')}" style="width:180px;height:32px" />
               <button class="pl-ico-btn" id="skRefresh" title="刷新">${icon('refresh')}</button>
               <button class="pl-add" id="skAddLeft" style="background:#111;color:#fff;border-color:#111">添加</button>
             </div>
@@ -3878,7 +3884,7 @@ async function renderSkills(el) {
           <button class="pl-tab${scop === 'public' ? ' on' : ''}" data-skscope="public">公开</button>
           <button class="pl-tab${scop === 'personal' ? ' on' : ''}" data-skscope="personal">个人</button>
         </div>` : ''}
-        ${tab === 'plugin' && scop === 'public' ? capabilitySections + marketSections : ''}
+        ${tab === 'plugin' && scop === 'public' ? pluginMarketSection : ''}
         ${tab === 'plugin' && scop === 'personal' ? personalSections : ''}
         ${tab === 'skill' ? skillSections : ''}
       </div>
@@ -3916,11 +3922,81 @@ async function renderSkills(el) {
     a.click()
     a.remove()
   }))
-  el.querySelectorAll('[data-subreport]').forEach((b) => b.addEventListener('click', () => {
+  el.querySelectorAll('[data-subreport]').forEach((b) => b.addEventListener('click', (e) => {
+    e.stopPropagation()
     const x = subs.find((y) => y.id === b.dataset.subreport)
     if (x) openPluginReport(x)
   }))
   el.querySelectorAll('[data-plug]').forEach((b) => b.addEventListener('click', () => openSkillSlide(b.dataset.plug)))
+}
+
+function capabilityLimitsText(c) {
+  const l = c.limits || {}
+  return `${l.cpu || '-'}核 / ${l.memory || '-'}MB / ${l.timeout || '-'}s / 并发${l.concurrency || '-'}`
+}
+
+function openCapabilitySlide(id) {
+  const c = (state.capabilities || []).find((x) => x.id === id)
+  if (!c) return
+  const slide = ensureSlide()
+  slide.innerHTML = `
+    <div class="slide-head"><div><div class="slide-title">${esc(c.name)}</div><div class="slide-sub">平台公共能力 · ${esc(c.id)}</div></div><span class="spacer"></span><button class="btn subtle" data-close>${icon('close')}</button></div>
+    <div class="slide-body">
+      <div style="display:flex;gap:6px;margin-bottom:12px"><span class="tag ${c.enabled ? 'ok' : 'warn'}">${c.enabled ? '系统已启用' : '运行时未加载'}</span><span class="tag">默认安装</span><span class="tag">全部授权用户</span><span class="tag">不可卸载</span></div>
+      <div class="field"><div class="field-label">能力说明</div><div class="field-value">${esc(c.desc)}</div></div>
+      <div class="field"><div class="field-label">维护方式</div><div class="field-value">${esc(c.managedBy)}；${esc(c.upgradedBy)}；${esc(c.installScope)}</div></div>
+      <div class="field"><div class="field-label">标准协议</div><div class="field-value">${esc(c.protocol)}</div></div>
+      <div class="field"><div class="field-label">模块与版本</div><div class="field-value mono">${esc(c.module)} · v${esc(c.version)}</div></div>
+      <div class="field"><div class="field-label">依赖</div><div class="field-value">${(c.deps || []).map(esc).join('<br>') || '无'}</div></div>
+      <div class="field"><div class="field-label">授权范围</div><div class="field-value">${esc(c.accessibleTo)}；按当前账号与网络授权生效。</div></div>
+      <div class="field"><div class="field-label">权限</div><div class="field-value">${(c.permissions || []).map(esc).join(' · ')}</div></div>
+      <div class="field"><div class="field-label">资源限制</div><div class="field-value">${capabilityLimitsText(c)}</div></div>
+      ${c.policyUpdatedAt ? `<div class="field"><div class="field-label">最近配置</div><div class="field-value">${esc(c.policyUpdatedBy || '系统管理员')} · ${new Date(c.policyUpdatedAt).toLocaleString('zh-CN')}</div></div>` : ''}
+    </div>
+    <div class="slide-foot">
+      ${state.capabilityCanManage ? '<button class="btn primary" data-cappolicy>配置权限与资源</button>' : ''}
+      <button class="btn" data-close>关闭</button>
+    </div>`
+  wireSlide(slide)
+  slide.querySelector('[data-cappolicy]')?.addEventListener('click', () => openCapabilityPolicy(c))
+}
+
+function openCapabilityPolicy(c) {
+  const l = c.limits || {}
+  const m = openModal('配置平台能力', `
+    <div class="form-note">该配置对所有授权用户生效，只限制平台模块的权限与资源上限；权限变更写入审计。</div>
+    <div class="form-label">权限（逗号分隔）</div>
+    <input class="text-input" id="capPerms" value="${esc((c.permissions || []).join('，'))}" />
+    <div class="form-grid">
+      <label>CPU 上限（核）<input class="text-input" id="capCpu" value="${esc(l.cpu || '')}" /></label>
+      <label>内存上限（MB）<input class="text-input" id="capMem" value="${esc(l.memory || '')}" /></label>
+    </div>
+    <div class="form-grid">
+      <label>超时（秒）<input class="text-input" id="capTimeout" value="${esc(l.timeout || '')}" /></label>
+      <label>并发上限<input class="text-input" id="capConc" value="${esc(l.concurrency || '')}" /></label>
+    </div>
+    <div class="form-foot"><span class="spacer"></span><button class="btn" data-mclose>取消</button><button class="btn primary" id="capSave">保存配置</button></div>`)
+  m.querySelector('[data-mclose]').addEventListener('click', () => m.remove())
+  m.querySelector('#capSave').addEventListener('click', async () => {
+    const { ok, body } = await api('/api/admin/platform-capabilities', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        id: c.id,
+        permissions: m.querySelector('#capPerms').value,
+        limits: {
+          cpu: m.querySelector('#capCpu').value,
+          memory: m.querySelector('#capMem').value,
+          timeout: m.querySelector('#capTimeout').value,
+          concurrency: m.querySelector('#capConc').value,
+        },
+      }),
+    })
+    if (!ok) return toast(body.error || '保存失败', true)
+    m.remove()
+    toast('平台能力配置已保存，新会话生效')
+    state.capabilities = state.capabilities.map((x) => (x.id === c.id ? body.item : x))
+    renderView()
+  })
 }
 
 function openPluginSlide(id) {
@@ -10044,6 +10120,33 @@ async function renderAdmin(el) {
         })
       }))
     }
+    const { body: capAdmin } = await api('/api/platform-capabilities')
+    if (blocks) {
+      const caps = capAdmin.items || []
+      const wrap = document.createElement('div')
+      wrap.className = 'mc-block'
+      wrap.innerHTML = `<div class="mc-block-head"><b>平台公共能力</b><span class="spacer"></span><span class="mc-count">${caps.filter((c) => c.enabled).length} / ${caps.length} 项已启用</span></div>
+        <div class="mc-table" style="--mc-cols:minmax(110px,1.5fr) minmax(84px,1fr) minmax(64px,.8fr) minmax(80px,.9fr)">
+          <div class="mc-thead"><span>系统模块</span><span>运行时模块</span><span>权限</span><span>资源上限</span></div>
+          ${caps.map((c) => `<div class="mc-trow">
+            <span class="mc-first" title="${esc(c.name)}">${esc(c.shortName || c.name)} <span class="mc-tag ${c.enabled ? 'ok' : 'warn'}">${c.enabled ? '默认启用' : '未加载'}</span></span>
+            <span class="mono" style="font-size:10px">${esc(c.module)}</span>
+            <span>${(c.permissions || []).length} 项</span>
+            <span>${esc(capabilityLimitsText(c))}</span>
+            <span class="mc-acts" style="grid-column:1/-1;flex-wrap:wrap">
+              <button class="btn sm" data-cappolicy-admin="${esc(c.id)}">权限与资源</button>
+            </span>
+          </div>`).join('') || '<div class="mc-row">暂无平台能力</div>'}
+        </div>`
+      blocks.appendChild(wrap)
+      wrap.querySelectorAll('[data-cappolicy-admin]').forEach((b) => b.addEventListener('click', () => {
+        const c = caps.find((x) => x.id === b.dataset.cappolicyAdmin)
+        if (!c) return
+        state.capabilities = caps
+        state.capabilityCanManage = true
+        openCapabilityPolicy(c)
+      }))
+    }
     const { body: marketAdmin } = await api('/api/admin/plugin-market')
     if (blocks) {
       const items = marketAdmin.items || []
@@ -10053,7 +10156,7 @@ async function renderAdmin(el) {
         <div class="mc-table" style="--mc-cols:minmax(110px,1.6fr) minmax(54px,.7fr) minmax(80px,.9fr) minmax(64px,.8fr)">
           <div class="mc-thead"><span>插件 / 技能</span><span>分组</span><span>发布单位</span><span>状态</span></div>
           ${items.map((x, i) => `<div class="mc-trow">
-            <span class="mc-first">${esc(x.name)} <span class="mc-dim mono">${esc(x.id)}</span></span>
+            <span class="mc-first">${esc(x.name)} <span class="tag" style="font-size:10px">${x.type === 'plugin' ? '插件' : '技能'}</span> <span class="mc-dim mono">${esc(x.id)}</span></span>
             <span>${esc(x.section || '')}</span>
             <span>${esc(x.publisher || '')}${x.origin === 'community' ? ' <span class="mc-dim">社区</span>' : ''}</span>
             <span><span class="mc-tag ${x.listed === false ? 'warn' : 'ok'}">${x.listed === false ? '已下架' : '已上架'}</span>${x.installed ? ` <span class="mc-tag ok">${(x.installUsers || []).length && x.installUsers[0]?.scope === 'baseline' ? '基线' : '已安装'}</span>` : ''}</span>
@@ -10968,7 +11071,7 @@ function settingsBody(tab) {
       title: '插件与工具',
       groups: [
         sgroup('已启用', [
-          srow('运行时能力与技能', '底层能力随客户端提供；技能按账号或项目安装，可在这里查看', `<span class="set-value mono">${counts.plugins} 项</span><span class="set-btn-gap"></span>${sbtn('gotoSkills', '查看')}`),
+          srow('运行时技能', '技能按账号或项目安装；平台公共能力由管理中心统一配置', `<span class="set-value mono">${counts.plugins || 0} 项</span><span class="set-btn-gap"></span>${sbtn('gotoSkills', '查看')}`),
           srow('个人技能', '仅本人可用；发布给他人需走企业技能审核', `<span class="set-value mono">${state.plugins.filter((p0) => p0.kind === 'personal').length} 个</span><span class="set-btn-gap"></span>${sbtn('gotoSkills', '管理')}`),
         ]),
         sgroup('MCP 与接口', [

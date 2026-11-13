@@ -782,3 +782,32 @@
 
 - 账号/项目隔离只覆盖技能；DSH Bundle 仍通过 `dsh plugin add` 安装到本机运行时，对同一客户端所有账号可见，详情页已标注。
 - 全客户端基线技能按产品级共享处理，未迁移为某个账号的私有安装。
+
+## 29. 按三层架构拆分公共能力、业务插件与技能（2026-11-13）
+
+**目标**：按架构图把插件市场拆成三层：Harness 核心运行时、平台公共能力、业务插件；公共能力不进可卸载市场，业务插件与技能共用市场但必须显式区分类型与图标。
+
+**实现**：
+
+- 新增 `PLATFORM_CAPABILITIES` 作为系统级模块清单，与 `MARKET_BUILTIN` 完全分离；平台能力不出现在市场目录，也不提供安装/卸载入口。
+- 公共能力只收录运行时真正加载的模块：`Office / PDF 文档处理`（`skill-office`）、`九规内部工具（MCP）`（`mcp-jg`）、`文件管理`（`file-reference-local` + `file-upload` + `deliverable-file-references`）、`Python / 脚本运行环境`（`shell-env`）、`数据检索与解析`（`session-query-sqlite` + `tool-session-query`）。GIS/CAD 当前没有可用运行时模块，PDF 也由 Office 模块统一承担，均不伪造独立能力条目。
+- 每个能力带 `managedBy`、`accessibleTo`、`defaultEnabled`、`protocol`、`module`、`version`、`deps`、`upgradedBy`、`permissions`、`limits`，默认启用并对全部授权用户开放。
+- `installedSkillPlugins()` 不再返回 `kind='capability'`；`/api/plugins` 只返回真实技能。新增 `GET /api/platform-capabilities`，返回平台能力清单与 `canManage`。
+- 市场条目新增 `type`：`bundle`/`plugin` 映射为 `plugin`，`skill` 映射为 `skill`。市场页拆成插件与技能两个入口：插件 tab 不展示技能，技能 tab 同时展示已安装技能与技能市场。
+- 员工端市场页不展示平台公共能力：左侧只列当前账号已安装的插件/技能，主区插件页只保留“公开 / 个人”与插件市场；个人页先列“我安装的插件”，再列“我提交的插件”，明确说明不共享给其他账号。公共能力的权限与资源统一在管理中心配置。
+- 类型图标分离：业务插件用 `plugin` 图标，技能用 `spark` 图标；左侧“插件与技能”入口使用插件 logo，插件 tab 与技能 tab 分别使用插件、技能图标。
+- 管理后台新增“平台公共能力”表，展示模块、权限数、资源上限，并提供“权限与资源”配置入口；`POST /api/admin/platform-capabilities` 保存权限与 CPU/内存/超时/并发上限，写入审计并持久化到 `capabilityPolicies`。
+- 管理中心 KPI 改为“公共能力 / 技能”，动态值 `5 / 7`，备注区分市场插件与技能数量。
+
+**实测**：
+
+- 重启后 `GET /api/platform-capabilities` 返回 5 项，全部 `enabled=true`；`GET /api/plugins` 返回 7 个技能，不再混入能力。
+- 市场仍为 10 条，`type` 全部为 `skill`；员工端插件页标题为“插件”，左侧不再出现平台能力，公开页无“业务插件”空分区，个人页只显示本账号安装与提交；技能页显示已安装技能与技能市场。
+- 后台“平台公共能力”表可见 5/5 已启用；修改 `CAP-PYTHON` 权限与内存后返回新值，重置后 `policyUpdatedAt=0`，测试配置未残留。
+- 截图：`D:\project-test3\shots\market-three-layers.png`、`market-skills-split.png`、`market-personal.png`、`platform-capabilities-admin.png`。
+
+**边界**：
+
+- 当前市场没有真实业务插件包，架构图中的“智能技术标编制 / 建筑材质提取 / 交通流量统计 / 规划成果质检”只是业务示例，未作为演示条目上架；员工提交的 Bundle 会以“插件”类型进入市场。
+- 平台能力的权限与资源上限是平台策略配置，已落库并在界面展示；运行时实际执行仍受 DSH 工具白名单与人工审批约束，尚未做进程级 cgroup/Job Object 资源限额。
+- PDF 尚未独立成模块，GIS/CAD 没有真实运行时模块，因此公共能力清单是 5 项而不是架构图中的 6 项。

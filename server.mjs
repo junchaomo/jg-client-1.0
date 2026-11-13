@@ -381,40 +381,89 @@ function installedSkillPlugins() {
       dir,
     })
   }
-  const row = (id) => inventory.find((x) => x.id === id)
-  if (row('skill-office')?.enabled) {
-    list.push({
-      id: 'CAP-OFFICE',
-      name: 'Office 文档',
-      kind: 'capability',
-      publisher: '九规智能中枢',
-      version: '',
-      status: 'enabled',
-      nets: ['inet', 'gov', 'secret'],
-      deps: 'skill-office 运行时能力',
-      scope: '底层能力 · 随客户端提供',
-      risk: '只读',
-      desc: 'Word / Excel / PPT / PDF 文档处理能力，由运行时的 skill-office 插件直接提供，不作为市场插件安装。',
-      source: 'runtime-capability',
-    })
-  }
-  if (row('mcp-jg')?.enabled) {
-    list.push({
-      id: 'CAP-MCP-JG',
-      name: '九规内部工具（MCP）',
-      kind: 'capability',
-      publisher: '九规智能中枢',
-      version: '',
-      status: 'enabled',
-      nets: ['inet', 'gov', 'secret'],
-      deps: 'mcp-jg 运行时能力',
-      scope: '底层能力 · 随客户端提供',
-      risk: '写操作需确认',
-      desc: '云空间、公告、课程、通讯录、IM 与待办等内部工具的 MCP 桥，由运行时直接提供，不作为市场插件安装。',
-      source: 'runtime-capability',
-    })
-  }
   return list
+}
+
+/*
+ * 平台公共能力是系统级模块，不属于插件市场：
+ * 默认安装启用、对全部授权用户开放、随平台独立升级，管理员只配置权限与资源上限。
+ * 只有运行时确实加载的模块才进入这份清单，未交付的能力不伪造“已启用”。
+ */
+const PLATFORM_CAPABILITIES = [
+  {
+    id: 'CAP-OFFICE', name: 'Office / PDF 文档处理', shortName: 'Office / PDF', icon: 'doc', module: 'dsh-skill-office',
+    sourceIds: ['skill-office'], version: '1.0.0', protocol: 'DSH 标准工具协议',
+    permissions: ['文件读取', '文件写入', '格式转换', 'PDF 导出'],
+    limits: { cpu: 1, memory: 512, timeout: 120, concurrency: 2 },
+    deps: ['@deepseek-ai/dsh-skill'],
+    desc: 'Word、Excel、PPT、PDF 的读取、生成、转换与导出，由平台内置的 Office 模块统一提供。',
+  },
+  {
+    id: 'CAP-MCP-JG', name: '九规内部工具（MCP）', shortName: '内部工具 (MCP)', icon: 'globe', module: 'dsh-mcp-client',
+    sourceIds: ['mcp-jg'], version: '1.0.0', protocol: 'MCP 标准调用协议',
+    permissions: ['内部数据检索', 'IM 发送', '待办创建'],
+    limits: { cpu: 1, memory: 256, timeout: 60, concurrency: 2 },
+    deps: ['@deepseek-ai/dsh-mcp-client'],
+    desc: '云空间、公告、课程、通讯录、数据中心与 IM、待办等内部工具的 MCP 桥，按当前员工授权执行。',
+  },
+  {
+    id: 'CAP-FILES', name: '文件管理', shortName: '文件管理', icon: 'folder', module: 'dsh-file-reference-local',
+    sourceIds: ['file-reference-local', 'file-upload', 'deliverable-file-references'], version: '1.0.0', protocol: 'DSH 标准工具协议',
+    permissions: ['文件读取', '文件上传', '交付物引用'],
+    limits: { cpu: 1, memory: 256, timeout: 60, concurrency: 4 },
+    deps: ['@deepseek-ai/dsh-file-reference-local', '@deepseek-ai/dsh-client-file-upload'],
+    desc: '本地附件、云空间文件与交付物的统一读取、引用和上传，是所有插件共用的文件入口。',
+  },
+  {
+    id: 'CAP-PYTHON', name: 'Python / 脚本运行环境', shortName: 'Python 环境', icon: 'tool', module: 'dsh-shell-env',
+    sourceIds: ['shell-env'], version: '1.0.0', protocol: 'DSH Shell 工具协议',
+    permissions: ['命令执行', '脚本运行'],
+    limits: { cpu: 2, memory: 1024, timeout: 300, concurrency: 1 },
+    deps: ['@deepseek-ai/dsh-shell-env'],
+    desc: '平台内置的脚本执行环境，供插件运行 Python、数据处理与格式转换脚本。',
+  },
+  {
+    id: 'CAP-DATA', name: '数据检索与解析', shortName: '数据检索', icon: 'search', module: 'dsh-session-query-sqlite',
+    sourceIds: ['optional-tool-session-query', 'session-query-sqlite'], version: '1.0.0', protocol: 'DSH 标准工具协议',
+    permissions: ['历史会话检索', '本地索引读取', '外部数据解析'],
+    limits: { cpu: 1, memory: 512, timeout: 90, concurrency: 2 },
+    deps: ['@deepseek-ai/dsh-session-query-sqlite', '@deepseek-ai/dsh-tool-session-query'],
+    desc: '历史会话、附件与外部资料的检索、解析和引用，不包含具体业务口径。',
+  },
+]
+const liveCapabilityPolicies = new Map()
+function capabilityPolicyOf(cap) {
+  const saved = liveCapabilityPolicies.get(cap.id) || {}
+  const permissions = Array.isArray(saved.permissions) && saved.permissions.length ? saved.permissions : cap.permissions
+  const limits = { ...cap.limits, ...(saved.limits || {}) }
+  return { permissions, limits, updatedAt: saved.updatedAt || 0, updatedBy: saved.updatedBy || '' }
+}
+function platformCapabilities() {
+  const inventory = runtimePluginInventory()
+  const rowEnabled = (id) => Boolean(inventory.find((x) => x.id === id)?.enabled)
+  return PLATFORM_CAPABILITIES.map((cap) => {
+    const policy = capabilityPolicyOf(cap)
+    return {
+      ...cap,
+      kind: 'capability',
+      layer: 'platform',
+      source: 'platform-module',
+      managedBy: '平台运维',
+      accessibleTo: '全部授权用户',
+      defaultEnabled: true,
+      enabled: cap.sourceIds.every(rowEnabled),
+      status: 'enabled',
+      nets: ['inet', 'gov', 'secret'],
+      installScope: '系统级模块 · 默认安装，不可卸载',
+      upgradedBy: '平台发布，独立升级',
+      permissions: policy.permissions,
+      limits: policy.limits,
+      policyUpdatedAt: policy.updatedAt,
+      policyUpdatedBy: policy.updatedBy,
+      role: '基础能力',
+      risk: cap.id === 'CAP-MCP-JG' ? '写操作需确认' : '只读或白名单写入',
+    }
+  })
 }
 
 const liveToolLedger = toolLedger.map((t) => ({ ...t }))
@@ -1002,6 +1051,7 @@ function snapshotPersistentState() {
     pluginInstalls: [...livePluginInstalls.entries()],
     pluginToggles: [...livePluginToggles.entries()],
     marketInstalls: [...liveMarketInstalls.entries()],
+    capabilityPolicies: [...liveCapabilityPolicies.entries()],
     cloudLog,
     drive: liveDrive,
     clouds: liveClouds,
@@ -1075,6 +1125,7 @@ function hydratePersistentState() {
   replaceMap(livePluginInstalls, Object.fromEntries(snap.pluginInstalls || []))
   replaceMap(livePluginToggles, Object.fromEntries(snap.pluginToggles || []))
   replaceMap(liveMarketInstalls, Object.fromEntries(snap.marketInstalls || []))
+  replaceMap(liveCapabilityPolicies, Object.fromEntries(snap.capabilityPolicies || []))
   replaceArray(cloudLog, snap.cloudLog)
   replaceArray(liveDrive, snap.drive)
   replaceArray(liveClouds, snap.clouds)
@@ -2715,6 +2766,7 @@ function marketItemState(item, ctx = {}) {
       : (globalBaseline || Boolean(userRecord))
   return {
     ...item,
+    type: isBundle || item.kind === 'plugin' ? 'plugin' : 'skill',
     listed: item.listed !== false,
     origin: sub ? 'community' : 'builtin',
     submittedBy: sub ? sub.author : '',
@@ -2749,6 +2801,7 @@ const api = {
         resources: visible.length,
         resourcesTotal: liveResources.length,
         plugins: installedSkillPlugins().filter((p) => (p.nets || ['inet']).includes(net)).length,
+        capabilities: platformCapabilities().filter((p) => p.enabled && (p.nets || ['inet']).includes(net)).length,
         apps: liveApps.filter((a) => (a.nets || []).includes(net)).length,
         tasks: liveTasks.length,
       },
@@ -3458,6 +3511,43 @@ const api = {
       .filter((p) => (p.nets || ['inet']).includes(net))
       .map((p) => ({ ...p, status: pluginEnabledFor(user.id, p) }))
     json(res, 200, { items: list, canManage: canManage(user) })
+  },
+  'GET /api/platform-capabilities': (req, res) => {
+    const user = roleOf(req)
+    const net = netOf(req)
+    json(res, 200, {
+      items: platformCapabilities().filter((p) => (p.nets || ['inet']).includes(net)),
+      canManage: canManage(user),
+      layer: 'platform',
+      installScope: '系统级模块 · 默认安装启用，不进入插件市场',
+    })
+  },
+  'POST /api/admin/platform-capabilities': (req, res) => {
+    const user = roleOf(req)
+    if (!canManage(user)) return json(res, 403, { error: '仅系统管理员可配置平台公共能力' })
+    const body = JSON.parse(req.__body || '{}')
+    const cap = PLATFORM_CAPABILITIES.find((x) => x.id === body.id)
+    if (!cap) return json(res, 404, { error: '平台能力不存在' })
+    if (body.reset === true) {
+      liveCapabilityPolicies.delete(cap.id)
+      persistPersistentState()
+      logAudit(user, 'platform-capability.reset', cap.id, 'allow', netOf(req))
+      return json(res, 200, { ok: true, item: platformCapabilities().find((x) => x.id === cap.id) })
+    }
+    const rawPermissions = Array.isArray(body.permissions)
+      ? body.permissions
+      : typeof body.permissions === 'string' ? body.permissions.split(/[,，\n]/) : []
+    const permissions = [...new Set(rawPermissions.map((x) => String(x).trim()).filter(Boolean))].slice(0, 12)
+    if (!permissions.length) return json(res, 400, { error: '至少保留一项权限' })
+    const limits = {}
+    for (const key of ['cpu', 'memory', 'timeout', 'concurrency']) {
+      const n = Number(body.limits?.[key])
+      if (Number.isFinite(n) && n > 0) limits[key] = Math.min(key === 'timeout' ? 3600 : key === 'memory' ? 16384 : 64, Math.round(n))
+    }
+    liveCapabilityPolicies.set(cap.id, { permissions, limits: { ...cap.limits, ...limits }, updatedAt: Date.now(), updatedBy: user.name })
+    persistPersistentState()
+    logAudit(user, 'platform-capability.policy', cap.id, 'allow', netOf(req))
+    json(res, 200, { ok: true, item: platformCapabilities().find((x) => x.id === cap.id) })
   },
   'GET /api/plugin-review': (req, res) => {
     const user = roleOf(req)
@@ -4454,17 +4544,18 @@ const api = {
   },
   'GET /api/console': (req, res) => {
     const installed = installedSkillPlugins()
-    const capabilityCount = installed.filter((p) => p.kind === 'capability').length
-    const pluginCount = installed.filter((p) => p.kind === 'enterprise').length
+    const capabilityCount = platformCapabilities().filter((p) => p.enabled).length
     const skillCount = installed.filter((p) => p.kind === 'personal').length
     const listedCount = liveMarket.filter((m) => m.listed !== false).length
+    const pluginMarketCount = liveMarket.filter((m) => m.listed !== false && (m.kind === 'bundle' || m.kind === 'plugin')).length
+    const skillMarketCount = listedCount - pluginMarketCount
     const pendingCount = pluginSubs.filter((s) => s.status === 'pending').length
     const sections = {
       ...consoleSections,
       ai: {
         ...consoleSections.ai,
-        kpis: consoleSections.ai.kpis.map((k) => (k.k === '底层能力 / 技能'
-          ? { ...k, v: `${capabilityCount} / ${skillCount}`, note: `${pluginCount} 个企业插件 · 市场 ${listedCount} 个已上架 · 待审核 ${pendingCount}`, tone: pendingCount ? 'warn' : 'ok' }
+        kpis: consoleSections.ai.kpis.map((k) => (k.k === '公共能力 / 技能'
+          ? { ...k, v: `${capabilityCount} / ${skillCount}`, note: `${capabilityCount} 项公共能力 · 市场 ${pluginMarketCount} 个插件 / ${skillMarketCount} 个技能 · 待审核 ${pendingCount}`, tone: pendingCount ? 'warn' : 'ok' }
           : k)),
       },
     }
