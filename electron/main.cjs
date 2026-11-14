@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, ipcMain, shell, dialog } = require('electron')
+const { app, BrowserWindow, Menu, ipcMain, shell, dialog, WebContentsView } = require('electron')
 const path = require('path')
 const fs = require('fs')
 const { spawn } = require('child_process')
@@ -11,6 +11,7 @@ const ENTRY = path.join(ROOT, 'server.mjs')
 // 与旧客户端彻底隔离，避免沿用旧客户端的登录态、缓存与窗口状态。
 app.setName('jg-client-1.0')
 app.setPath('userData', path.join(app.getPath('appData'), 'jg-client-1.0'))
+if (process.platform === 'win32') app.setAppUserModelId('com.jiugui.harness')
 const BRIDGE = `
 (() => {
   if (window.__jgClientWindowBridge) return
@@ -37,6 +38,9 @@ const BRIDGE = `
 `
 
 let mainWindow = null
+let browserView = null
+let browserAttached = false
+let browserUrl = ''
 let serverProcess = null
 let serverPort = null
 let quitting = false
@@ -121,6 +125,132 @@ function installBridge(contents) {
   })
 }
 
+let browserDownloads = []
+let browserDownloadSeq = 0
+let browserSessionHooked = false
+const BROWSER_PARTITION = 'persist:jg-cloud-browser'
+
+function downloadDir() {
+  const dir = path.join(app.getPath('downloads'), '九规智能中枢')
+  try { fs.mkdirSync(dir, { recursive: true }) } catch (_) {}
+  return dir
+}
+
+function emitDownload(entry) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('browser:download-state', entry)
+  }
+}
+
+function diskDownloads() {
+  const dir = downloadDir()
+  try {
+    return fs.readdirSync(dir, { withFileTypes: true })
+      .filter((item) => item.isFile() && !/\.(crdownload|part|tmp)$/i.test(item.name))
+      .map((item) => {
+        const full = path.join(dir, item.name)
+        let stat = null
+        try { stat = fs.statSync(full) } catch (_) {}
+        return {
+          id: `FS-${item.name}`,
+          name: item.name,
+          path: full,
+          url: '',
+          state: 'completed',
+          bytes: stat ? stat.size : 0,
+          total: stat ? stat.size : 0,
+          received: stat ? stat.size : 0,
+          completedAt: stat ? stat.mtimeMs : 0,
+        }
+      })
+      .sort((a, b) => b.completedAt - a.completedAt)
+  } catch (_) {
+    return []
+  }
+}
+
+function hookBrowserDownloads(session) {
+  if (browserSessionHooked) return
+  browserSessionHooked = true
+  session.on('will-download', (_event, item) => {
+    const id = `DL-${Date.now()}-${++browserDownloadSeq}`
+    const filename = path.basename(String(item.getFilename() || 'download.bin'))
+    const dir = downloadDir()
+    let savePath = path.join(dir, filename)
+    const ext = path.extname(filename)
+    const base = path.basename(filename, ext)
+    let n = 1
+    while (fs.existsSync(savePath)) {
+      savePath = path.join(dir, `${base} (${n})${ext}`)
+      n += 1
+    }
+    item.setSavePath(savePath)
+    const entry = {
+      id, name: path.basename(savePath), path: savePath,
+      url: String(item.getURL() || ''), state: 'downloading',
+      received: 0, total: Number(item.getTotalBytes() || 0), startedAt: Date.now(),
+    }
+    browserDownloads = [entry, ...browserDownloads].slice(0, 40)
+    emitDownload({ ...entry })
+    item.on('updated', (_e, state) => {
+      entry.state = state === 'interrupted' ? 'interrupted' : 'downloading'
+      entry.received = Number(item.getReceivedBytes() || 0)
+      entry.total = Number(item.getTotalBytes() || 0)
+      emitDownload({ ...entry })
+    })
+    item.once('done', (_e, state) => {
+      entry.state = state === 'completed' ? 'completed' : state === 'cancelled' ? 'cancelled' : 'failed'
+      entry.received = Number(item.getReceivedBytes() || 0)
+      entry.total = Number(item.getTotalBytes() || entry.received)
+      if (entry.state === 'completed') {
+        try { entry.bytes = fs.statSync(savePath).size } catch (_) {}
+      }
+      emitDownload({ ...entry })
+    })
+  })
+}
+
+function ensureBrowserView() {
+  if (!mainWindow) return null
+  if (!browserView) {
+    browserView = new WebContentsView({
+      webPreferences: {
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+        spellcheck: false,
+        partition: BROWSER_PARTITION,
+      },
+    })
+    hookBrowserDownloads(browserView.webContents.session)
+    browserView.setBackgroundColor('#ffffff')
+    browserView.webContents.setWindowOpenHandler(({ url }) => {
+      if (/^https?:\/\//i.test(url)) shell.openExternal(url)
+      return { action: 'deny' }
+    })
+    browserView.webContents.on('will-navigate', (event, url) => {
+      if (!/^https?:\/\//i.test(url)) event.preventDefault()
+    })
+  }
+  if (!browserAttached) {
+    mainWindow.contentView.addChildView(browserView)
+    browserAttached = true
+  }
+  browserView.setVisible(true)
+  return browserView
+}
+
+function closeBrowserView() {
+  if (!browserView || !mainWindow) return
+  if (browserAttached) {
+    try { mainWindow.contentView.removeChildView(browserView) } catch (_) {}
+    browserAttached = false
+  }
+  try { browserView.webContents.close() } catch (_) {}
+  browserView = null
+  browserUrl = ''
+}
+
 function createWindow() {
   const window = new BrowserWindow({
     width: 1440,
@@ -131,6 +261,7 @@ function createWindow() {
     show: false,
     backgroundColor: '#ffffff',
     title: '九规智能中枢 · 企业级 AI 中枢',
+    icon: path.join(__dirname, 'jg-app-icon.ico'),
     autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
@@ -143,7 +274,23 @@ function createWindow() {
 
   window.once('ready-to-show', () => window.show())
   window.on('closed', () => {
-    if (mainWindow === window) mainWindow = null
+    if (mainWindow === window) {
+      mainWindow = null
+      browserView = null
+      browserAttached = false
+      browserUrl = ''
+    }
+  })
+
+  window.webContents.on('will-attach-webview', (event, webPreferences, params) => {
+    if (!/^https?:\/\//i.test(String(params.src || ''))) {
+      event.preventDefault()
+      return
+    }
+    delete webPreferences.preload
+    webPreferences.nodeIntegration = false
+    webPreferences.contextIsolation = true
+    webPreferences.sandbox = true
   })
 
   window.webContents.setWindowOpenHandler(({ url }) => {
@@ -158,6 +305,7 @@ function createWindow() {
           frame: false,
           backgroundColor: '#ffffff',
           autoHideMenuBar: true,
+          icon: path.join(__dirname, 'jg-app-icon.ico'),
           webPreferences: {
             preload: path.join(__dirname, 'preload.cjs'),
             contextIsolation: true,
@@ -197,6 +345,99 @@ ipcMain.on('window:toggle-maximize', (event) => {
 
 ipcMain.on('window:close', (event) => {
   BrowserWindow.fromWebContents(event.sender)?.close()
+})
+
+ipcMain.on('browser:open', (_event, url) => {
+  if (!/^https?:\/\//i.test(String(url || ''))) return
+  const view = ensureBrowserView()
+  if (!view) return
+  const next = String(url)
+  if (browserUrl !== next) {
+    browserUrl = next
+    view.webContents.loadURL(next).catch(() => {})
+  }
+})
+
+ipcMain.on('browser:bounds', (_event, rect = {}) => {
+  if (!browserView || !browserAttached) return
+  const x = Math.max(0, Math.round(Number(rect.x) || 0))
+  const y = Math.max(0, Math.round(Number(rect.y) || 0))
+  const width = Math.max(1, Math.round(Number(rect.width) || 1))
+  const height = Math.max(1, Math.round(Number(rect.height) || 1))
+  browserView.setBounds({ x, y, width, height })
+})
+
+ipcMain.on('browser:reload', () => {
+  if (browserView) browserView.webContents.reload()
+})
+
+ipcMain.on('browser:close', () => closeBrowserView())
+
+ipcMain.on('browser:open-external', (_event, url) => {
+  if (/^https?:\/\//i.test(String(url || ''))) shell.openExternal(String(url))
+})
+
+ipcMain.handle('browser:page-info', () => {
+  if (!browserView) return { ok: false, error: '自带浏览器未打开' }
+  try {
+    const wc = browserView.webContents
+    return {
+      ok: true,
+      url: String(wc.getURL() || ''),
+      title: String(wc.getTitle() || ''),
+      canGoBack: wc.canGoBack(),
+      canGoForward: wc.canGoForward(),
+    }
+  } catch (error) {
+    return { ok: false, error: String(error?.message || error) }
+  }
+})
+
+ipcMain.handle('browser:page-text', async () => {
+  if (!browserView) return { ok: false, error: '自带浏览器未打开' }
+  try {
+    const text = await browserView.webContents.executeJavaScript(
+      `(() => { try { return String(document.body ? document.body.innerText : '').slice(0, 20000) } catch (_) { return '' } })()`,
+      true,
+    )
+    return { ok: true, text: String(text || '') }
+  } catch (error) {
+    return { ok: false, error: String(error?.message || error) }
+  }
+})
+
+ipcMain.handle('browser:downloads', () => {
+  const live = browserDownloads.map((entry) => ({ ...entry }))
+  const paths = new Set(live.map((entry) => String(entry.path || '').toLowerCase()))
+  const disk = diskDownloads().filter((entry) => !paths.has(entry.path.toLowerCase()))
+  return { ok: true, items: [...live, ...disk].slice(0, 40) }
+})
+
+ipcMain.on('browser:download-open', (_event, target) => {
+  const file = String(target || '')
+  const entry = browserDownloads.find((item) => item.path === file)
+    || diskDownloads().find((item) => item.path === file)
+  if (!entry || entry.state !== 'completed') return
+  shell.openPath(entry.path).then((err) => { if (err) shell.showItemInFolder(entry.path) }).catch(() => {})
+})
+
+ipcMain.on('browser:download-reveal', (_event, target) => {
+  const file = String(target || '')
+  const entry = browserDownloads.find((item) => item.path === file)
+    || diskDownloads().find((item) => item.path === file)
+  if (entry) shell.showItemInFolder(entry.path)
+})
+
+ipcMain.handle('shell:reveal-path', async (_event, target) => {
+  const dir = String(target || '')
+  if (!dir || !path.isAbsolute(dir)) return { ok: false, error: '项目目录无效' }
+  if (!fs.existsSync(dir)) return { ok: false, error: '项目目录不存在或已离线' }
+  const error = await shell.openPath(dir)
+  if (error) {
+    shell.showItemInFolder(dir)
+    return { ok: false, error }
+  }
+  return { ok: true }
 })
 
 ipcMain.handle('dialog:choose-folder', async (event, options = {}) => {

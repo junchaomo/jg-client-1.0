@@ -4,7 +4,7 @@
  * 说明：
  * - 使用 Node 内置的 node:sqlite，不引入第三方数据库驱动。
  * - 当前定位是单机 1.0 客户端的 P0 底座，后续可替换为内网 PostgreSQL。
- * - 会话只保存随机 ID，不保存密码；登录仍沿用原型的“选择角色”方式。
+ * - 会话只保存随机 ID；账号密码以 scrypt 哈希保存在 accounts 表，不保存明文。
  * - 文件不塞进数据库 BLOB：数据库存元数据，正文落在 data/files 下，按版本分目录。
  */
 import { DatabaseSync } from 'node:sqlite'
@@ -53,10 +53,15 @@ db.exec(`
     role TEXT NOT NULL,
     unit TEXT NOT NULL DEFAULT '',
     duty TEXT NOT NULL DEFAULT '',
+    username TEXT NOT NULL DEFAULT '',
+    phone TEXT NOT NULL DEFAULT '',
     api_key TEXT NOT NULL DEFAULT '',
     api_provider TEXT NOT NULL DEFAULT '',
     api_endpoint TEXT NOT NULL DEFAULT '',
     api_model TEXT NOT NULL DEFAULT '',
+    password_hash TEXT NOT NULL DEFAULT '',
+    must_change_password INTEGER NOT NULL DEFAULT 1,
+    password_updated_at INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
   );
@@ -73,6 +78,27 @@ db.exec(`
     created_at INTEGER NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_audit_created ON audit(created_at DESC);
+
+  CREATE TABLE IF NOT EXISTS approval_decisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    decision_id TEXT NOT NULL UNIQUE,
+    conversation_id TEXT NOT NULL DEFAULT '',
+    call_id TEXT NOT NULL DEFAULT '',
+    tool TEXT NOT NULL DEFAULT '',
+    operation TEXT NOT NULL DEFAULT '',
+    args_summary TEXT NOT NULL DEFAULT '',
+    decision TEXT NOT NULL DEFAULT '',
+    rule TEXT NOT NULL DEFAULT '',
+    risk TEXT NOT NULL DEFAULT '',
+    actor TEXT NOT NULL DEFAULT '',
+    approver TEXT NOT NULL DEFAULT '',
+    net TEXT NOT NULL DEFAULT '',
+    time TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL,
+    decided_at INTEGER
+  );
+  CREATE INDEX IF NOT EXISTS idx_approval_decisions_created ON approval_decisions(created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_approval_decisions_conversation ON approval_decisions(conversation_id, created_at DESC);
 
   CREATE TABLE IF NOT EXISTS app_state (
     key TEXT PRIMARY KEY,
@@ -118,6 +144,21 @@ try {
   if (!/duplicate column name/i.test(String(error && error.message))) throw error
 }
 
+// 账号密码登录：给旧库补字段；空哈希由服务启动时的默认密码迁移补齐。
+for (const sql of [
+  'ALTER TABLE accounts ADD COLUMN username TEXT NOT NULL DEFAULT \'\'',
+  'ALTER TABLE accounts ADD COLUMN phone TEXT NOT NULL DEFAULT \'\'',
+  'ALTER TABLE accounts ADD COLUMN password_hash TEXT NOT NULL DEFAULT \'\'',
+  'ALTER TABLE accounts ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 1',
+  'ALTER TABLE accounts ADD COLUMN password_updated_at INTEGER NOT NULL DEFAULT 0',
+]) {
+  try {
+    db.exec(sql)
+  } catch (error) {
+    if (!/duplicate column name/i.test(String(error && error.message))) throw error
+  }
+}
+
 export const SESSION_TTL_MS = 8 * 60 * 60 * 1000
 
 const stmt = {
@@ -138,6 +179,31 @@ const stmt = {
   latestAudit: db.prepare('SELECT time, actor, action, object, result, net FROM audit ORDER BY id DESC LIMIT ?'),
   countAudit: db.prepare('SELECT COUNT(*) AS count FROM audit'),
   clearAudit: db.prepare('DELETE FROM audit'),
+  insertApprovalDecision: db.prepare(`
+    INSERT INTO approval_decisions (
+      decision_id, conversation_id, call_id, tool, operation, args_summary,
+      decision, rule, risk, actor, approver, net, time, created_at, decided_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `),
+  updateApprovalDecision: db.prepare(`
+    UPDATE approval_decisions
+    SET decision = COALESCE(?, decision),
+        rule = COALESCE(?, rule),
+        risk = COALESCE(?, risk),
+        approver = COALESCE(?, approver),
+        decided_at = ?
+    WHERE decision_id = ?
+  `),
+  latestApprovalDecisions: db.prepare(`
+    SELECT decision_id, conversation_id, call_id, tool, operation, args_summary,
+           decision, rule, risk, actor, approver, net, time, created_at, decided_at
+    FROM approval_decisions ORDER BY id DESC LIMIT ?
+  `),
+  expirePendingApprovalDecisions: db.prepare(`
+    UPDATE approval_decisions
+    SET decision = 'expired', approver = ?, decided_at = ?
+    WHERE decision = 'pending'
+  `),
   putState: db.prepare(`
     INSERT INTO app_state (key, value, updated_at) VALUES (?, ?, ?)
     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
@@ -147,6 +213,7 @@ const stmt = {
   listAccounts: db.prepare('SELECT * FROM accounts ORDER BY created_at ASC'),
   getAccount: db.prepare('SELECT * FROM accounts WHERE id = ?'),
   getAccountByRole: db.prepare('SELECT * FROM accounts WHERE role = ? ORDER BY created_at ASC LIMIT 1'),
+  getAccountByUsername: db.prepare('SELECT * FROM accounts WHERE lower(username) = lower(?) OR (phone != \'\' AND phone = ?) ORDER BY created_at ASC LIMIT 1'),
   upsertAccount: db.prepare(`
     INSERT INTO accounts (id, name, role, unit, duty, api_key, api_provider, api_endpoint, api_model, created_at, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -165,6 +232,17 @@ const stmt = {
       api_model = ?,
       updated_at = ?
     WHERE id = ?
+  `),
+  updateAccountPassword: db.prepare(`
+    UPDATE accounts SET
+      password_hash = ?,
+      must_change_password = ?,
+      password_updated_at = ?,
+      updated_at = ?
+    WHERE id = ?
+  `),
+  updateAccountUsername: db.prepare(`
+    UPDATE accounts SET username = ?, updated_at = ? WHERE id = ?
   `),
 
   getFile: db.prepare('SELECT * FROM files WHERE id = ?'),
@@ -275,6 +353,65 @@ export function clearAudit() {
   stmt.clearAudit.run()
 }
 
+/* --------------------------- approval decisions --------------------------- */
+
+export function appendApprovalDecision(entry = {}) {
+  stmt.insertApprovalDecision.run(
+    String(entry.decisionId || ''),
+    String(entry.conversationId || ''),
+    String(entry.callId || ''),
+    String(entry.tool || ''),
+    String(entry.operation || ''),
+    String(entry.argsSummary || ''),
+    String(entry.decision || ''),
+    String(entry.rule || ''),
+    String(entry.risk || ''),
+    String(entry.actor || ''),
+    String(entry.approver || ''),
+    String(entry.net || ''),
+    String(entry.time || ''),
+    Number(entry.createdAt || Date.now()),
+    entry.decidedAt ? Number(entry.decidedAt) : null
+  )
+}
+
+export function updateApprovalDecision(decisionId, patch = {}) {
+  if (!decisionId) return
+  stmt.updateApprovalDecision.run(
+    patch.decision ? String(patch.decision) : null,
+    patch.rule ? String(patch.rule) : null,
+    patch.risk ? String(patch.risk) : null,
+    patch.approver ? String(patch.approver) : null,
+    Number(patch.decidedAt || Date.now()),
+    String(decisionId)
+  )
+}
+
+export function latestApprovalDecisions(limit = 50) {
+  const rows = stmt.latestApprovalDecisions.all(Math.max(1, Math.min(Number(limit) || 50, 200)))
+  return rows.map((row) => ({
+    decisionId: row.decision_id,
+    conversationId: row.conversation_id,
+    callId: row.call_id,
+    tool: row.tool,
+    operation: row.operation,
+    argsSummary: row.args_summary,
+    decision: row.decision,
+    rule: row.rule,
+    risk: row.risk,
+    actor: row.actor,
+    approver: row.approver,
+    net: row.net,
+    time: row.time,
+    createdAt: row.created_at,
+    decidedAt: row.decided_at || 0,
+  }))
+}
+
+export function expirePendingApprovalDecisions(approver = 'system-restart') {
+  stmt.expirePendingApprovalDecisions.run(String(approver), Date.now())
+}
+
 /* ------------------------------ accounts -------------------------------- */
 
 function mapAccount(row) {
@@ -285,10 +422,15 @@ function mapAccount(row) {
     role: row.role,
     unit: row.unit,
     duty: row.duty,
+    username: row.username || '',
+    phone: row.phone || '',
     apiKey: row.api_key || '',
     apiProvider: row.api_provider || '',
     apiEndpoint: row.api_endpoint || '',
     apiModel: row.api_model || '',
+    passwordHash: row.password_hash || '',
+    mustChangePassword: row.must_change_password === 1 || row.must_change_password === true,
+    passwordUpdatedAt: Number(row.password_updated_at || 0),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   }
@@ -320,6 +462,17 @@ export function getAccountByRole(role) {
   return mapAccount(stmt.getAccountByRole.get(String(role || '')))
 }
 
+export function getAccountByUsername(username) {
+  const key = String(username || '').trim()
+  if (!key) return null
+  return mapAccount(stmt.getAccountByUsername.get(key, key))
+}
+
+export function setAccountUsername(id, username) {
+  stmt.updateAccountUsername.run(String(username || '').trim(), Date.now(), String(id || ''))
+  return getAccount(id)
+}
+
 export function listAccounts() {
   return stmt.listAccounts.all().map(mapAccount)
 }
@@ -331,6 +484,18 @@ export function updateAccountSecret(id, secret = {}) {
     String(secret.apiEndpoint || ''),
     String(secret.apiModel || ''),
     Date.now(),
+    String(id || '')
+  )
+  return getAccount(id)
+}
+
+export function setAccountPassword(id, passwordHash, mustChangePassword = true) {
+  const now = Date.now()
+  stmt.updateAccountPassword.run(
+    String(passwordHash || ''),
+    mustChangePassword ? 1 : 0,
+    now,
+    now,
     String(id || '')
   )
   return getAccount(id)

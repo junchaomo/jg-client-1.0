@@ -5,17 +5,18 @@
  */
 import { spawnSync } from 'node:child_process'
 import { createServer } from 'node:http'
-import { createHmac, randomBytes } from 'node:crypto'
+import { createHmac, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto'
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
-import { basename, dirname, extname, isAbsolute, join, normalize, sep } from 'node:path'
+import { basename, dirname, extname, isAbsolute, join, normalize, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
-  SESSION_TTL_MS, appendAudit, auditCount, backupNow, cleanupSessions, clearAudit, clearSessions, closeStore, createSession,
-  dataDirPath, deleteSession, getAccount, getAccountByRole, getFile, getSession, latestAudit,
+  SESSION_TTL_MS, appendAudit, appendApprovalDecision, auditCount, backupNow, cleanupSessions, clearAudit, clearSessions, closeStore, createSession,
+  dataDirPath, deleteSession, expirePendingApprovalDecisions, getAccount, getAccountByRole, getAccountByUsername, getFile, getSession, latestApprovalDecisions, latestAudit,
   listAccounts, listFiles, loadState, putFile, readFileBuffer, saveState, touchSession,
-  updateAccountSecret, updateSessionNet, upsertAccount,
+  updateAccountSecret, updateApprovalDecision, updateSessionNet, upsertAccount, setAccountPassword, setAccountUsername,
 } from './db.mjs'
+import { describeToolCall, summarizeToolCall } from './approval-rules.mjs'
 import {
   academy, academyStats, accessAnomalies, aiTools,
   apps, auditSeed, automations, cloudCredentials, cloudPolicy, cloudSessions,
@@ -27,13 +28,40 @@ import {
   notebookSeed, notebookTopics, collabCommentSeed,
 } from './data.mjs'
 import { buildDocument, supportedFormats } from './docs.mjs'
+import { extractText as extractPdfText, inspectPdf, mergePdfs, splitPdf } from './pdf.mjs'
+import { inspectSpatial } from './geo.mjs'
+import { FORMAT_REGISTRY, detectDataFormat, exportDataFormat, extractDataFormat, inspectDataFormat } from './formats.mjs'
+import { inspectGeoFiles } from './gis-datasets.mjs'
+import { HARNESS_BASE_SERVICES, runHarnessService } from './harness-services.mjs'
 import { ModelError, chatCompletion, resolveModelConfig } from './model.mjs'
+import { prepareSpeech, modelStatus, transcribeSpeech } from './speech.mjs'
+import { pinyin } from 'pinyin-pro'
 import { HarnessError, cancelRun, closeHarness, closeHarnessForHome, dshBin, runAgent, stopBackgroundRuntime } from './harness.mjs'
 import { extractBundlePackage, extractSkillPackage, inspectPluginZip } from './plugin-scan.mjs'
+import { buildRunStats, buildSessionLogArchive, listTraces, newTraceId as makeTraceId, readTrace, writeTrace } from './trace.mjs'
+import { execTerminal, resetTerminal, terminalStatus } from './terminal.mjs'
 import { consoleRoles, consoleNav, consoleModules, consoleSections, consoleScopeOptions } from './console.mjs'
 
 const root = fileURLToPath(new URL('./', import.meta.url))
 const publicDir = join(root, 'public')
+function packageVersionAt(filePath) {
+  try {
+    return JSON.parse(readFileSync(filePath, 'utf8')).version || 'unknown'
+  } catch {
+    return 'unknown'
+  }
+}
+const productVersion = packageVersionAt(join(root, 'package.json'))
+const electronVersion = packageVersionAt(join(root, 'node_modules', 'electron', 'package.json'))
+const frontendVersion = (() => {
+  try {
+    const html = readFileSync(join(publicDir, 'index.html'), 'utf8')
+    return (html.match(/app\.js\?v=(\d+)/) || [])[1] || 'unknown'
+  } catch {
+    return 'unknown'
+  }
+})()
+
 // 本地 MCP 桥使用进程内随机令牌，只允许本机 Harness 子进程调用产品工具。
 if (!process.env.JG_MCP_TOKEN) process.env.JG_MCP_TOKEN = randomBytes(24).toString('hex')
 if (!process.env.JG_MCP_ACCOUNT) process.env.JG_MCP_ACCOUNT = 'A-7788-01'
@@ -114,7 +142,8 @@ function bulkSampleResources() {
 const liveApps = apps.map((a) => ({ ...a }))
 const liveTickets = tickets.map((t) => ({ ...t, history: [...t.history] }))
 const liveFeedback = [...feedback]
-const liveTasks = tasks.map((t) => ({ ...t }))
+const liveTasks = []
+const liveAutomations = []
 const liveCloud = cloudSystems.map((s) => ({ ...s }))
 const liveProjects = projects.map((p) => ({ ...p }))
 const MARKET_BUILTIN = [
@@ -156,6 +185,8 @@ function pluginEnabledFor(userId, plugin) {
 }
 /* ===== 插件提交与审核（演示内存态） ===== */
 const pluginSubs = []
+/* 市场包版本备份：用于管理员升级失败回滚；只保存真实存在的包目录。 */
+const marketVersions = new Map()
 
 const cloudLog = cloudSessions.map((s) => ({ ...s }))
 const liveDrive = driveItems.map((d) => ({ ...d, shared: [...d.shared] }))
@@ -219,10 +250,16 @@ function sanitizeRuntimeSettings(input = {}) {
 }
 
 /** 设置中心展示的运行时事实：全部来自本机真实文件与进程状态。 */
-function runtimeOverview() {
-  const home = join(dataDirPath(), 'dsh-home')
+function runtimeDumpPath(home = process.env.JG_DSH_HOME || join(dataDirPath(), 'dsh-home')) {
+  // 配置快照必须跟 DSH Home 走；保留全局 home 的历史路径，账号 home 各写各的。
+  const defaultHome = normalize(join(dataDirPath(), 'dsh-home')).toLowerCase()
+  if (normalize(String(home)).toLowerCase() === defaultHome) return join(dataDirPath(), 'dsh-dump-config.txt')
+  return join(home, 'dsh-dump-config.txt')
+}
+
+function runtimeOverview(home = join(dataDirPath(), 'dsh-home')) {
   const configPath = join(home, 'profiles', 'sdk', 'cordis.patch.yml')
-  const dumpPath = join(dataDirPath(), 'dsh-dump-config.txt')
+  const dumpPath = runtimeDumpPath(home)
   const sessionsPath = join(home, 'sessions')
   let dshVersion = 'unknown'
   try {
@@ -238,7 +275,7 @@ function runtimeOverview() {
     dumpText = readFileSync(dumpPath, 'utf8')
     configEntries = (dumpText.match(/^\s*name: '@deepseek-ai\//gm) || []).length
   } catch {}
-  const inventory = runtimePluginInventory()
+  const inventory = runtimePluginInventory(home)
   const nativeRow = (id) => {
     const row = inventory.find((x) => x.id === id)
     if (!row) return '未挂载'
@@ -388,6 +425,7 @@ function installedUserSkillPlugins(userId) {
       desc,
       source: 'dsh-skill',
       dir,
+      marketId: manifest?.marketId || '',
     })
   }
   return list
@@ -400,12 +438,39 @@ function installedUserSkillPlugins(userId) {
  */
 const PLATFORM_CAPABILITIES = [
   {
-    id: 'CAP-OFFICE', name: 'Office / PDF 文档处理', shortName: 'Office / PDF', icon: 'doc', module: 'dsh-skill-office',
+    id: 'CAP-OFFICE', name: 'Office 文档处理', shortName: 'Office', icon: 'doc', module: 'dsh-skill-office',
     sourceIds: ['skill-office'], version: '1.0.0', protocol: 'DSH 标准工具协议',
-    permissions: ['文件读取', '文件写入', '格式转换', 'PDF 导出'],
+    permissions: ['Word / Excel / PPT 读取', '文档生成', '格式转换', '导出'],
     limits: { cpu: 1, memory: 512, timeout: 120, concurrency: 2 },
     deps: ['@deepseek-ai/dsh-skill'],
-    desc: 'Word、Excel、PPT、PDF 的读取、生成、转换与导出，由平台内置的 Office 模块统一提供。',
+    desc: 'Word、Excel、PPT 的读取、生成、转换与导出，由平台内置的 Office 模块统一提供；PDF 由独立的 PDF 数据格式能力处理。',
+    accessibleTo: '全部授权用户', role: '基础能力', risk: '只读或白名单写入',
+  },
+  {
+    id: 'CAP-PDF', name: 'PDF 文档处理', shortName: 'PDF', icon: 'doc', module: 'formats.mjs#pdf',
+    sourceIds: ['formats'], runtime: 'product', version: '1.0.0', protocol: '格式基座协议',
+    permissions: ['PDF 解析', '文本提取', '按页拆分', '合并', 'PDF 导出'],
+    limits: { cpu: 1, memory: 512, timeout: 120, concurrency: 2 },
+    deps: ['pdf-lib'],
+    desc: '平台级 PDF 数据格式基座：校验文件头、读取页数与页面尺寸、提取文本、合并与按页范围拆分；数据中心、Agent 与 MCP 工具统一通过 formats.mjs 调用。',
+    accessibleTo: '全部授权用户', role: '基础能力', risk: '只读或白名单写入',
+  },
+  {
+    id: 'CAP-GIS', name: 'GIS 空间数据', shortName: 'GIS', icon: 'globe', module: 'formats.mjs#gis',
+    sourceIds: ['formats'], runtime: 'product', version: '1.0.0', protocol: '格式基座协议',
+    permissions: ['GeoJSON 读取', '要素与图层识别', 'bbox 计算', '规范化 GeoJSON 输出'],
+    limits: { cpu: 1, memory: 512, timeout: 120, concurrency: 2 },
+    deps: ['geo.mjs'],
+    desc: '平台级 GIS 数据格式基座：读取点、线、面、Multi* 与 GeometryCollection，识别图层与范围，输出规范化 FeatureCollection；不做投影转换。',
+    accessibleTo: '全部授权用户', role: '基础能力', risk: '只读或白名单写入',
+  },
+  {
+    id: 'CAP-CAD', name: 'CAD 图纸数据', shortName: 'CAD', icon: 'grid', module: 'formats.mjs#cad',
+    sourceIds: ['formats'], runtime: 'product', version: '1.0.0', protocol: '格式基座协议',
+    permissions: ['ASCII DXF 读取', '实体与图层识别', 'bbox 计算', 'DXF 导出'],
+    limits: { cpu: 1, memory: 512, timeout: 120, concurrency: 2 },
+    deps: ['geo.mjs'],
+    desc: '平台级 CAD 数据格式基座：读取 ASCII DXF 实体、图层与范围，回写 LINE / LWPOLYLINE / CIRCLE / TEXT 为 DXF；DWG 需先转换为 DXF。',
     accessibleTo: '全部授权用户', role: '基础能力', risk: '只读或白名单写入',
   },
   {
@@ -425,6 +490,16 @@ const PLATFORM_CAPABILITIES = [
     deps: ['@deepseek-ai/dsh-file-reference-local', '@deepseek-ai/dsh-client-file-upload'],
     desc: '本地附件、云空间文件与交付物的统一读取、引用和上传，是聊天与所有插件的文件入口，属于只读基础内核。',
     accessibleTo: '全部授权用户', role: '基础内核', risk: '只读或白名单写入',
+    layer: 'kernel', stoppable: false,
+  },
+  {
+    id: 'CAP-CODEREVIEW', name: '代码审查服务', shortName: '代码审查', icon: 'shield', module: 'harness-services.mjs#code-review',
+    sourceIds: ['harness-services'], runtime: 'product', version: '1.0.0', protocol: 'Harness 服务协议',
+    permissions: ['只读源码扫描', '语法检查', 'JSON 校验', '静态规则提示'],
+    limits: { cpu: 1, memory: 512, timeout: 300, concurrency: 1 },
+    deps: ['harness-services.mjs'],
+    desc: 'Harness 通用基础服务：按项目目录只读扫描源码，执行语法与 JSON 校验，返回可定位的低风险静态提示；不自动修改项目文件。',
+    accessibleTo: '全部授权用户', role: '基础内核', risk: '只读',
     layer: 'kernel', stoppable: false,
   },
   {
@@ -465,8 +540,8 @@ const PLATFORM_CAPABILITIES = [
   },
   {
     id: 'CAP-AGENT', name: 'Agent 编排与工作流', shortName: 'Agent 编排', icon: 'spark', module: 'dsh-workflow-ptc',
-    sourceIds: ['subagent', 'tool-subagent', 'ptc-runtime', 'workflow-ptc', 'tool-workflow'], version: '1.0.0', protocol: 'DSH 标准工具协议',
-    permissions: ['子 Agent 调用', '工作流编排', '沙箱脚本'],
+    sourceIds: ['subagent', 'agent-team', 'tool-agent-team', 'ptc-runtime', 'workflow-ptc', 'tool-workflow'], version: '1.0.0', protocol: 'DSH 标准工具协议',
+    permissions: ['子 Agent 调用', 'Agent 团队编排', '工作流编排', '沙箱脚本'],
     limits: { cpu: 2, memory: 1024, timeout: 300, concurrency: 2 },
     deps: ['@deepseek-ai/dsh-subagent', '@deepseek-ai/dsh-workflow-ptc'],
     desc: '官方子 Agent、PTC 运行时与工作流编排能力；属于高级能力，先按角色开放并限制并发。',
@@ -480,12 +555,12 @@ function capabilityPolicyOf(cap) {
   const limits = { ...cap.limits, ...(saved.limits || {}) }
   return { permissions, limits, disabled: Boolean(saved.disabled), disabledAt: saved.disabledAt || 0, disabledBy: saved.disabledBy || '', updatedAt: saved.updatedAt || 0, updatedBy: saved.updatedBy || '' }
 }
-function platformCapabilities() {
-  const inventory = runtimePluginInventory()
+function platformCapabilities(home) {
+  const inventory = runtimePluginInventory(home)
   const rowEnabled = (id) => Boolean(inventory.find((x) => x.id === id)?.enabled)
   return PLATFORM_CAPABILITIES.map((cap) => {
     const policy = capabilityPolicyOf(cap)
-    const runtimeEnabled = cap.sourceIds.every(rowEnabled)
+    const runtimeEnabled = cap.runtime === 'product' ? true : cap.sourceIds.every(rowEnabled)
     return {
       ...cap,
       kind: 'capability',
@@ -512,6 +587,24 @@ function platformCapabilities() {
       risk: cap.id === 'CAP-MCP-JG' ? '写操作需确认' : '只读或白名单写入',
     }
   })
+}
+
+function maskGatewayEndpoint(value = '') {
+  const text = String(value || '').trim()
+  if (!text) return '—'
+  try {
+    const url = new URL(text)
+    return `${url.protocol}//${url.host}${url.pathname && url.pathname !== '/' ? '/…' : ''}`
+  } catch {
+    return text
+      .replace(/([?&](?:key|token|api_key|apikey)=)[^&]+/gi, '$1••••')
+      .replace(/\/\/[^/@]+@/, '//••••@')
+  }
+}
+
+function accountRuntimeHome(user) {
+  if (!user || !user.id || user.id === 'guest' || user.role === 'guest') return undefined
+  return ensureUserDshHome(user.id)
 }
 
 const liveToolLedger = toolLedger.map((t) => ({ ...t }))
@@ -725,17 +818,32 @@ function createPendingInteraction(kind, conversationId, payload) {
   return new Promise((resolve) => {
     const id = `${kind === 'approval' ? 'AP' : 'AQ'}-${randomBytes(6).toString('hex')}`
     const timer = setTimeout(() => {
-      settlePendingInteraction(id, kind === 'approval' ? { outcome: 'cancelled' } : { cancelled: true })
+      settlePendingInteraction(id, kind === 'approval' ? { outcome: 'cancelled' } : { cancelled: true }, {
+        approver: 'system-timeout',
+        decision: 'expired',
+      })
     }, 8 * 60 * 1000)
     pendingInteractions.set(id, { id, kind, conversationId, payload, resolve, timer, createdAt: Date.now() })
   })
 }
 
-function settlePendingInteraction(id, result) {
+function settlePendingInteraction(id, result, meta = {}) {
   const item = pendingInteractions.get(id)
   if (!item) return null
   pendingInteractions.delete(id)
   clearTimeout(item.timer)
+  if (item.kind === 'approval' && item.payload?.decisionId) {
+    const decision = meta.decision || (result.outcome === 'allowed-once' ? 'allowed' : result.outcome === 'rejected' ? 'rejected' : 'cancelled')
+    try {
+      updateApprovalDecision(item.payload.decisionId, {
+        decision,
+        approver: String(meta.approver || 'system'),
+        decidedAt: Date.now(),
+      })
+    } catch (err) {
+      console.error('[jg-server] approval decision update failed:', err && err.message ? err.message : err)
+    }
+  }
   item.resolve(result)
   return item
 }
@@ -743,15 +851,130 @@ function settlePendingInteraction(id, result) {
 function cancelPendingInteractions(conversationId) {
   for (const [id, item] of pendingInteractions) {
     if (item.conversationId !== conversationId) continue
-    settlePendingInteraction(id, item.kind === 'approval' ? { outcome: 'cancelled' } : { cancelled: true })
+    settlePendingInteraction(id, item.kind === 'approval' ? { outcome: 'cancelled' } : { cancelled: true }, {
+      approver: 'system-cancel',
+      decision: 'cancelled',
+    })
   }
+}
+
+function defaultPasswordForName(name, accountId = '') {
+  const key = String(name || '').trim()
+  let phonetic = ''
+  try {
+    phonetic = pinyin(key, { toneType: 'none', type: 'array' }).join('')
+  } catch {}
+  phonetic = String(phonetic || '').replace(/[^A-Za-z0-9]/g, '')
+  if (!phonetic) phonetic = String(accountId || '').replace(/[^A-Za-z0-9]/g, '') || 'User'
+  const full = `${phonetic.charAt(0).toUpperCase()}${phonetic.slice(1)}`
+  return `${full}@123`
+}
+
+function hashPassword(password, salt = randomBytes(16).toString('hex')) {
+  const digest = scryptSync(String(password), salt, 64).toString('hex')
+  return `scrypt$${salt}$${digest}`
+}
+
+function verifyPassword(password, stored = '') {
+  const parts = String(stored || '').split('$')
+  if (parts.length !== 3 || parts[0] !== 'scrypt' || !parts[1] || !parts[2]) return false
+  const expected = Buffer.from(parts[2], 'hex')
+  const actual = scryptSync(String(password), parts[1], expected.length || 64)
+  return expected.length === actual.length && timingSafeEqual(expected, actual)
+}
+
+function ensureAccountPasswords() {
+  for (const account of listAccounts()) {
+    if (account.passwordHash) continue
+    setAccountPassword(account.id, hashPassword(defaultPasswordForName(account.name, account.id)), true)
+  }
+}
+
+function usernameForName(name, accountId = '') {
+  const key = String(name || '').trim()
+  let phonetic = ''
+  try {
+    phonetic = pinyin(key, { toneType: 'none', type: 'array' }).join('')
+  } catch {}
+  phonetic = String(phonetic || '').replace(/[^A-Za-z0-9]/g, '').toLowerCase()
+  if (!phonetic) phonetic = String(accountId || '').replace(/[^A-Za-z0-9]/g, '').toLowerCase() || 'user'
+  return phonetic
+}
+
+function ensureAccountUsernames() {
+  const used = new Set(listAccounts().map((account) => String(account.username || '').toLowerCase()).filter(Boolean))
+  for (const account of listAccounts()) {
+    if (account.username) continue
+    const base = usernameForName(account.name, account.id)
+    let candidate = base
+    let suffix = 2
+    while (used.has(candidate)) candidate = `${base}${suffix++}`
+    setAccountUsername(account.id, candidate)
+    used.add(candidate)
+  }
+}
+
+const CAPTCHA_TTL_MS = 5 * 60 * 1000
+const captchaChallenges = new Map()
+
+function createCaptchaChallenge() {
+  for (const [id, item] of captchaChallenges) {
+    if (item.expiresAt <= Date.now()) captchaChallenges.delete(id)
+  }
+  const a = 2 + Math.floor(Math.random() * 18)
+  const b = 2 + Math.floor(Math.random() * 18)
+  let question = ''
+  let answer = 0
+  const op = Math.floor(Math.random() * 4)
+  if (op === 0) {
+    answer = a + b
+    question = `${a} + ${b} = ?`
+  } else if (op === 1) {
+    const left = Math.max(a, b)
+    const right = Math.min(a, b)
+    answer = left - right
+    question = `${left} - ${right} = ?`
+  } else if (op === 2) {
+    const left = 2 + Math.floor(Math.random() * 8)
+    const right = 2 + Math.floor(Math.random() * 8)
+    answer = left * right
+    question = `${left} × ${right} = ?`
+  } else {
+    const divisor = 2 + Math.floor(Math.random() * 8)
+    const quotient = 2 + Math.floor(Math.random() * 8)
+    answer = quotient
+    question = `${divisor * quotient} ÷ ${divisor} = ?`
+  }
+  const captchaId = randomBytes(9).toString('hex')
+  captchaChallenges.set(captchaId, { answer: String(answer), expiresAt: Date.now() + CAPTCHA_TTL_MS })
+  return { captchaId, question, expiresIn: CAPTCHA_TTL_MS }
+}
+
+function consumeCaptcha(captchaId, captchaAnswer) {
+  const id = String(captchaId || '')
+  const item = captchaChallenges.get(id)
+  if (!item) return false
+  captchaChallenges.delete(id)
+  if (item.expiresAt <= Date.now()) return false
+  return String(captchaAnswer == null ? '' : captchaAnswer).trim() === item.answer
 }
 
 // 启动时恢复上次进程落盘的状态；首次运行则保留原型演示数据。
 hydratePersistentState()
 seedLocalAccounts()
+ensureAccountPasswords()
+ensureAccountUsernames()
+// 已有账号只在首次建号时复制全局 profile；启动时按账号幂等补齐平台级模型能力。
+for (const account of listAccounts()) {
+  try { ensureUserDshHome(account.id) } catch {}
+}
 clearDemoData()
+// 重启会丢弃内存里的待审批交互；将上一进程遗留的 pending 记录收口为 expired，
+// 避免审计列表长期显示“待审批”。
+expirePendingApprovalDecisions('system-restart')
 recoverChatRunTasks()
+for (const a of liveAutomations) if (a && a.status === 'active' && !a.nextRunAt) scheduleAutomationNext(a, Date.now())
+setInterval(automationTick, 30_000).unref()
 
 // 2026-11-11：按用户要求清空所有演示业务数据，仅保留真实账号与模型配置。
 // 演示数组已在 data.mjs 模块加载时置空；这里只做一次旧快照清理，避免重启后又回来。
@@ -760,7 +983,7 @@ function clearDemoData() {
   if (existsSync(marker)) return
 
   const liveArrays = [
-    liveResources, liveDataServices, liveApps, liveTickets, liveFeedback, liveTasks,
+    liveResources, liveDataServices, liveApps, liveTickets, liveFeedback, liveTasks, liveAutomations,
     liveCloud, liveProjects, liveMarket, pluginSubs, cloudLog, liveDrive, liveClouds,
     liveIm, liveNotices, liveAcademy, liveMessages, liveToolLedger, liveMembers,
     LIVE_NOTEBOOKS, NOTEBOOK_COLLECTIONS, conversations, audit,
@@ -792,6 +1015,7 @@ function userOfAccount(account) {
     ...role,
     id: account.id,
     accountId: account.id,
+    username: account.username || '',
     name: account.name || role.name,
     unit: account.unit || role.unit,
     duty: account.duty || role.duty,
@@ -861,9 +1085,8 @@ const DSH_BIN = join(root, 'dsh-runtime', 'node_modules', '@deepseek-ai', 'dsh',
  * 旧实现只在 data/dsh-dump-config.txt 存在时读取，文件可能停在第一次生成时的旧配置；
  * 这里在服务启动和管理页打开时重新 dump，保证插件清单、profile patch 覆盖与当前一致。
  */
-function refreshRuntimeConfigDump() {
-  const dumpPath = join(dataDirPath(), 'dsh-dump-config.txt')
-  const home = process.env.JG_DSH_HOME || join(dataDirPath(), 'dsh-home')
+function refreshRuntimeConfigDump(home = process.env.JG_DSH_HOME || join(dataDirPath(), 'dsh-home')) {
+  const dumpPath = runtimeDumpPath(home)
   const result = spawnSync(process.execPath, [DSH_BIN, '--profile', RUNTIME_PROFILE, '--dump-config'], {
     cwd: root,
     encoding: 'utf8',
@@ -932,8 +1155,8 @@ function runtimeProfileDir(home = process.env.JG_DSH_HOME || join(dataDirPath(),
  * 从 dsh 的配置快照读取当前 profile 的插件清单。
  * 快照是启动时的权威挂载组合；启停写入 profile patch，重启后生效。
  */
-function runtimePluginInventory() {
-  const dumpPath = join(dataDirPath(), 'dsh-dump-config.txt')
+function runtimePluginInventory(home = process.env.JG_DSH_HOME || join(dataDirPath(), 'dsh-home')) {
+  const dumpPath = runtimeDumpPath(home)
   if (!existsSync(dumpPath)) return []
   const lines = readFileSync(dumpPath, 'utf8').split(/\r?\n/)
   const rows = []
@@ -960,7 +1183,7 @@ function runtimePluginInventory() {
   const inventory = rows.filter((row) => row.id && row.name)
   // 把 profile patch 的最后一层覆盖合并进来，让界面反映“重启后将要生效”的配置，
   // 而不是永远停留在启动快照上。
-  const patchPath = join(runtimeProfileDir(), 'cordis.patch.yml')
+  const patchPath = join(runtimeProfileDir(home), 'cordis.patch.yml')
   if (existsSync(patchPath)) {
     const patchLines = readFileSync(patchPath, 'utf8').split(/\r?\n/)
     let patchId = ''
@@ -983,12 +1206,12 @@ function runtimePluginInventory() {
   return inventory
 }
 
-function setRuntimePluginEnabled(id, enabled) {
-  const rows = runtimePluginInventory()
+function setRuntimePluginEnabled(id, enabled, home = process.env.JG_DSH_HOME || join(dataDirPath(), 'dsh-home')) {
+  const rows = runtimePluginInventory(home)
   const row = rows.find((x) => x.id === id)
   if (!row) throw new Error('插件条目不存在')
   if (PROTECTED_PLUGIN_IDS.has(id)) throw new Error('该条目是运行时核心组件，不允许从产品界面启停')
-  const dir = runtimeProfileDir()
+  const dir = runtimeProfileDir(home)
   mkdirSync(dir, { recursive: true })
   const patchPath = join(dir, 'cordis.patch.yml')
   const current = existsSync(patchPath) ? readFileSync(patchPath, 'utf8') : '# profile patch\n'
@@ -1092,10 +1315,12 @@ function snapshotPersistentState() {
     tickets: liveTickets,
     feedback: liveFeedback,
     tasks: liveTasks,
+    automations: liveAutomations,
     cloudSystems: liveCloud,
     projects: liveProjects,
     pluginMarket: liveMarket,
     pluginSubs,
+    marketVersions: [...marketVersions.entries()],
     pluginInstalls: [...livePluginInstalls.entries()],
     pluginToggles: [...livePluginToggles.entries()],
     officialDisabledSkills: [...liveOfficialDisabledSkills],
@@ -1161,7 +1386,8 @@ function hydratePersistentState() {
   replaceArray(liveApps, snap.apps)
   replaceArray(liveTickets, snap.tickets)
   replaceArray(liveFeedback, snap.feedback)
-  replaceArray(liveTasks, snap.tasks)
+  replaceArray(liveTasks, Array.isArray(snap.tasks) ? snap.tasks.filter((t) => t && (t.kind === 'chat-run' || t.kind === 'automation-run')) : [])
+  replaceArray(liveAutomations, Array.isArray(snap.automations) ? snap.automations.filter((a) => a && a.id && a.prompt) : [])
   replaceArray(liveCloud, snap.cloudSystems)
   replaceArray(liveProjects, snap.projects)
   const persistedSubs = Array.isArray(snap.pluginSubs)
@@ -1183,6 +1409,7 @@ function hydratePersistentState() {
   liveOfficialUninstalledSkills.clear()
   for (const dir of snap.officialUninstalledSkills || []) liveOfficialUninstalledSkills.add(dir)
   replaceMap(liveMarketInstalls, Object.fromEntries(snap.marketInstalls || []))
+  replaceMap(marketVersions, Object.fromEntries(snap.marketVersions || []))
   const marketIds = new Set(liveMarket.map((m) => m.id))
   for (const id of [...liveMarketInstalls.keys()]) {
     if (!marketIds.has(id)) liveMarketInstalls.delete(id)
@@ -1385,6 +1612,18 @@ const GUEST_GUARD = {
   'GET /api/conversations': 'home',
   'GET /api/conversation': 'home',
   'GET /api/conversation/export': 'home',
+  'GET /api/conversation/trace': 'home',
+  'GET /api/conversation/session-log': 'home',
+  'POST /api/conversation/fork': 'home',
+  'POST /api/terminal/exec': 'admin',
+  'GET /api/terminal': 'admin',
+  'POST /api/terminal/reset': 'admin',
+  'GET /api/files/tree': 'home',
+  'GET /api/files/content': 'home',
+  'GET /api/files/raw': 'home',
+  'GET /api/speech/catalog': 'home',
+  'POST /api/speech/prepare': 'admin',
+  'POST /api/speech/transcribe': 'home',
   'POST /api/conversation/job/kill': 'home',
   'POST /api/conversation/policy': 'home',
   'POST /api/conversation/feedback': 'home',
@@ -1393,6 +1632,7 @@ const GUEST_GUARD = {
   'GET /api/plugin-review': 'admin',
   'POST /api/plugins/review': 'admin',
   'GET /api/audit': 'admin',
+  'GET /api/approval-decisions': 'admin',
   'GET /api/monitor': 'admin',
   'GET /api/tickets': 'admin',
   'POST /api/tickets/create': 'admin',
@@ -1489,8 +1729,29 @@ function findProjectByDir(user, dir, excludeId = '') {
 function chatWorkspaceDir(user, convId) {
   const dir = join(dataDirPath(), 'dsh-workspaces', 'chat', String(user.id || 'user'), String(convId))
   mkdirSync(dir, { recursive: true })
+  ensureWorkspaceAcl(dir)
   return dir
 }
+
+/**
+ * DSH 的 Windows workspace-write 沙箱会在会话开始时给工作区目录追加 capability ACE，
+ * 这要求目标目录对当前用户开放 WRITE_DAC。默认继承的 Modify 权限不含 WRITE_DAC，
+ * 会让 run_code / pwsh 以 Win32 5 启动失败并被迫申请 danger-full-access。
+ * 这里只给当前登录用户本人补显式完全控制，目录仍只对本人开放。
+ */
+function ensureWorkspaceAcl(dir) {
+  if (process.platform !== 'win32') return
+  const account = process.env.USERNAME || ''
+  if (!account) return
+  try {
+    spawnSync('icacls', [dir, '/grant', `${account}:(OI)(CI)F`], {
+      windowsHide: true,
+      timeout: 15000,
+      stdio: 'ignore',
+    })
+  } catch {}
+}
+
 
 // 项目可见/可执行：沿用列表的归属口径，但执行前必须再校验一次。
 function projectVisibleTo(user, item) {
@@ -1508,6 +1769,176 @@ function projectRunnableBy(user, item) {
   return { ok: true }
 }
 
+const FILE_TREE_SKIP = new Set(['.git', 'node_modules', '.jg', '.dsh', 'dist', 'out', '.next', 'coverage', '.turbo'])
+const FILE_TEXT_EXT = new Set(['.md', '.txt', '.json', '.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx', '.css', '.html', '.htm', '.yml', '.yaml', '.xml', '.csv', '.log', '.ini', '.toml', '.ps1', '.bat', '.cmd', '.py', '.java', '.go', '.rs', '.c', '.h', '.cpp', '.sql', '.sh'])
+const FILE_IMAGE_EXT = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp', '.ico'])
+const FILE_RAW_TYPES = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml', '.bmp': 'image/bmp', '.ico': 'image/x-icon', '.pdf': 'application/pdf' }
+
+function isInsidePath(root, target) {
+  const r = root.toLowerCase().replace(/[\\/]+$/, '')
+  const t = target.toLowerCase()
+  return t === r || t.startsWith(r + sep) || t.startsWith(r + '/')
+}
+
+/**
+ * 解析文件浏览请求的工作根目录。项目必须仍对当前账号可见；会话必须属于当前账号。
+ * 所有相对路径随后都经过真实路径校验，防止 ../ 与符号链接越界。
+ */
+function resolveFileRoot(user, url) {
+  const projectId = String(url.searchParams.get('projectId') || '').trim()
+  const conversationId = String(url.searchParams.get('conversationId') || '').trim()
+  if (projectId) {
+    const project = liveProjects.find((p) => p.id === projectId && !p.removed)
+    if (!project || !projectVisibleTo(user, project)) return { error: '无权浏览该项目文件', status: 403 }
+    if (!project.cwd) return { error: '该项目还没有绑定本地文件夹', status: 409 }
+    if (project.deviceId && project.deviceId !== deviceId()) return { error: '该项目绑定在另一台设备上', status: 409 }
+    if (!existsSync(project.cwd)) return { error: '项目目录当前不可访问', status: 404 }
+    return { root: realpathSync(project.cwd), label: project.name, kind: 'project' }
+  }
+  if (conversationId) {
+    const conv = (conversations || []).find((c) => c.id === conversationId && !c.removed)
+    if (!conv) return { error: '会话不存在', status: 404 }
+    if (conversationOwnerId(conv) !== String(user.id || 'admin') && !canManage(user)) return { error: '无权浏览该会话文件', status: 403 }
+    const root = conv.agentCwd || chatWorkspaceDir(user, conv.id)
+    if (!existsSync(root)) return { error: '会话目录当前不可访问', status: 404 }
+    return { root: realpathSync(root), label: conv.title || conv.id, kind: 'conversation' }
+  }
+  return { error: '缺少 projectId 或 conversationId', status: 400 }
+}
+
+function safeFilePath(root, rel) {
+  const raw = String(rel || '').replace(/\\/g, '/')
+  const target = normalize(join(root, raw || '.'))
+  if (!isInsidePath(root, target)) return { error: '路径越界' }
+  if (!existsSync(target)) return { error: '文件或目录不存在', status: 404 }
+  let real
+  try { real = realpathSync(target) } catch { return { error: '文件或目录不可访问', status: 404 } }
+  if (!isInsidePath(root, real)) return { error: '路径越界', status: 403 }
+  return { path: real, rel: relative(root, real).split(sep).join('/') }
+}
+
+function gitAt(cwd, args, timeout = 15000) {
+  try {
+    const result = spawnSync('git', ['-C', cwd, ...args], {
+      encoding: 'utf8', timeout, windowsHide: true, maxBuffer: 4 * 1024 * 1024,
+    })
+    return {
+      ok: result.status === 0 && !result.error,
+      status: result.status,
+      stdout: String(result.stdout || '').trim(),
+      stderr: String(result.stderr || '').trim(),
+      error: result.error ? String(result.error.message || result.error) : '',
+    }
+  } catch (error) {
+    return { ok: false, status: -1, stdout: '', stderr: '', error: String(error?.message || error) }
+  }
+}
+
+function parseWorktreePorcelain(text) {
+  const blocks = String(text || '').split(/\r?\n\r?\n/).map((x) => x.trim()).filter(Boolean)
+  return blocks.map((block) => {
+    const item = { path: '', head: '', branch: '', detached: false, bare: false, locked: '', prunable: false }
+    for (const line of block.split(/\r?\n/)) {
+      const [key, ...rest] = line.split(' ')
+      const value = rest.join(' ')
+      if (key === 'worktree') item.path = value
+      else if (key === 'HEAD') item.head = value
+      else if (key === 'branch') item.branch = value.replace(/^refs\/heads\//, '')
+      else if (key === 'detached') item.detached = true
+      else if (key === 'bare') item.bare = true
+      else if (key === 'locked') item.locked = value || 'locked'
+      else if (key === 'prunable') item.prunable = true
+    }
+    return item
+  }).filter((item) => item.path)
+}
+
+function worktreeStatus(path) {
+  const status = gitAt(path, ['status', '--porcelain=v1', '--branch'], 8000)
+  if (!status.ok) return { dirty: 0, ahead: 0, behind: 0, statusError: status.error || status.stderr || `git status 退出 ${status.status}` }
+  const lines = status.stdout.split(/\r?\n/).filter(Boolean)
+  const head = lines.find((line) => line.startsWith('## ')) || ''
+  const dirty = lines.filter((line) => !line.startsWith('## ')).length
+  const ahead = Number((/ahead (\d+)/.exec(head) || [])[1] || 0)
+  const behind = Number((/behind (\d+)/.exec(head) || [])[1] || 0)
+  return { dirty, ahead, behind, branchLine: head }
+}
+
+function projectWorktreeInfo(user, projectId) {
+  const project = liveProjects.find((p) => p.id === projectId && !p.removed)
+  if (!project || !projectVisibleTo(user, project)) return { error: '无权查看该项目工作树', status: 403 }
+  if (!project.cwd) return { error: '该项目还没有绑定本地文件夹', status: 409 }
+  if (project.deviceId && project.deviceId !== deviceId()) return { error: '该项目绑定在另一台设备上', status: 409 }
+  if (!existsSync(project.cwd)) return { error: '项目目录当前不可访问', status: 404 }
+  const cwd = realpathSync(project.cwd)
+  const inside = gitAt(cwd, ['rev-parse', '--is-inside-work-tree'])
+  if (!inside.ok) {
+    return { project, cwd, repo: false, note: '当前项目不是 Git 仓库，无法创建工作树；请先在项目目录初始化 Git。' }
+  }
+  const list = gitAt(cwd, ['worktree', 'list', '--porcelain'])
+  if (!list.ok) return { error: list.error || list.stderr || '读取 Git 工作树失败', status: 502 }
+  const parsed = parseWorktreePorcelain(list.stdout)
+  const items = parsed.map((item, index) => {
+    const status = worktreeStatus(item.path)
+    return {
+      ...item,
+      path: item.path,
+      exists: existsSync(item.path),
+      main: index === 0,
+      dirty: status.dirty,
+      ahead: status.ahead,
+      behind: status.behind,
+      statusError: status.statusError || '',
+    }
+  })
+  const current = gitAt(cwd, ['branch', '--show-current'])
+  const branchList = gitAt(cwd, ['for-each-ref', 'refs/heads', '--format=%(refname:short)'])
+  const attached = new Set(items.map((item) => item.branch).filter(Boolean))
+  const branches = branchList.ok
+    ? branchList.stdout.split(/\r?\n/).map((name) => name.trim()).filter(Boolean).map((name) => ({
+      name,
+      current: name === current.stdout,
+      orphan: !attached.has(name),
+    }))
+    : []
+  return {
+    project, cwd, repo: true, items, branches,
+    note: items.length > 1 ? `共 ${items.length} 个工作树，主工作树为 ${items[0]?.path || cwd}` : '当前只有主工作树，尚无隔离工作树。',
+  }
+}
+
+function projectFileTree(root, rel, depth = 1) {
+  const safe = safeFilePath(root, rel)
+  if (safe.error) return safe
+  if (!statSync(safe.path).isDirectory()) return { error: '不是目录', status: 400 }
+  const entries = []
+  let truncated = false
+  const list = readdirSync(safe.path, { withFileTypes: true })
+    .filter((entry) => !FILE_TREE_SKIP.has(entry.name))
+    .sort((a, b) => (a.isDirectory() === b.isDirectory() ? a.name.localeCompare(b.name, 'zh-CN') : a.isDirectory() ? -1 : 1))
+  for (const entry of list) {
+    if (entries.length >= 500) { truncated = true; break }
+    const full = join(safe.path, entry.name)
+    let stat
+    try { stat = statSync(full) } catch { continue }
+    const item = {
+      name: entry.name,
+      path: relative(root, full).split(sep).join('/'),
+      type: stat.isDirectory() ? 'dir' : 'file',
+      size: stat.isDirectory() ? 0 : stat.size,
+      ext: stat.isDirectory() ? '' : extname(entry.name).toLowerCase(),
+      mtime: stat.mtimeMs,
+    }
+    if (stat.isDirectory() && depth > 1) {
+      const child = projectFileTree(root, item.path, depth - 1)
+      if (!child.error) item.children = child.entries
+    }
+    entries.push(item)
+  }
+  return { path: safe.rel, entries, truncated }
+}
+
+
 // 会话归属：历史会话没有 userId 时归管理员，避免普通账号读取旧会话。
 function conversationOwnerId(item) {
   return String(item?.userId || 'admin')
@@ -1523,24 +1954,12 @@ function clipText(value, max = 800) {
 }
 
 /** 审批卡需要的“操作 + 资源 + 参数”摘要；approval/request 本身只带 tool/reason/callId。 */
-function approvalDetails(params) {
+function approvalDetails(params, extra = {}) {
   const toolName = String(params?.toolNameResolved || params?.toolName || '工具调用')
   let args = {}
   try { args = JSON.parse(String(params?.toolArgs || '{}')) || {} } catch {}
-  const resource = String(args.path || args.file_path || args.filePath || args.cwd || args.directory || args.dir || '')
-  let summary = ''
-  if (resource) summary = `目标：${resource}`
-  const command = String(args.command || args.cmd || '')
-  if (command) summary = `${summary ? `${summary}；` : ''}命令：${clipText(command, 220)}`
-  const text = String(args.text || args.message || '')
-  if (text && !command) summary = `${summary ? `${summary}；` : ''}内容：${clipText(text, 160)}`
-  const title = String(args.title || '')
-  if (title) summary = `${summary ? `${summary}；` : ''}标题：${clipText(title, 120)}`
-  if (args.content !== undefined) summary = `${summary ? `${summary}；` : ''}写入 ${String(args.content).length} 字符`
-  if (args.old_string !== undefined || args.new_string !== undefined) {
-    summary = `${summary ? `${summary}；` : ''}替换 ${String(args.old_string || '').length} → ${String(args.new_string || '').length} 字符`
-  }
-  if (!summary && params?.reason) summary = clipText(params.reason, 300)
+  const resource = String(args.path || args.file_path || args.filePath || args.cwd || args.directory || args.dir || extra.target || '')
+  const summary = extra.summary || summarizeToolCall(toolName, args)
   return {
     toolName,
     callId: String(params?.callId || ''),
@@ -1549,7 +1968,38 @@ function approvalDetails(params) {
     summary: summary || '未提供可展示的参数',
     externalSideEffect: isExternalSideEffectTool(toolName),
     arguments: clipText(params?.toolArgs || '', 900),
+    operation: String(extra.operation || ''),
+    risk: String(extra.risk || ''),
+    rule: String(extra.rule || ''),
+    decisionId: String(extra.decisionId || ''),
   }
+}
+
+/** 结构化审批决策：工具、参数摘要、命中规则、风险级别、放行人、时间。 */
+function recordApprovalDecision(entry = {}) {
+  const decisionId = String(entry.decisionId || `APD-${randomBytes(6).toString('hex')}`)
+  try {
+    appendApprovalDecision({
+      decisionId,
+      conversationId: entry.conversationId || '',
+      callId: entry.callId || '',
+      tool: entry.tool || '',
+      operation: entry.operation || '',
+      argsSummary: clipText(entry.summary || '', 500),
+      decision: entry.decision || '',
+      rule: entry.rule || '',
+      risk: entry.risk || '',
+      actor: entry.actor || '',
+      approver: entry.approver || '',
+      net: entry.net || 'inet',
+      time: new Date().toISOString(),
+      createdAt: Date.now(),
+      decidedAt: entry.decision && entry.decision !== 'pending' ? Date.now() : 0,
+    })
+  } catch (err) {
+    console.error('[jg-server] approval decision persist failed:', err && err.message ? err.message : err)
+  }
+  return decisionId
 }
 
 const HIGH_RISK_REQUEST_PATTERNS = [
@@ -1565,6 +2015,12 @@ const HIGH_RISK_REQUEST_PATTERNS = [
   /\btaskkill\b[\s\S]*\/f/i,
   /\bgit\s+reset\s+--hard\b/i,
   /\bgit\s+clean\s+-[a-z]*f/i,
+  /\bgit\s+push\b/i,
+  /\b(?:npm|pnpm|yarn)\s+publish\b/i,
+  /\b(?:npm|pnpm|yarn)\s+(?:install|add)\b/i,
+  /\b(?:pip|pip3)\s+install\b/i,
+  /\b(?:curl|wget|invoke-webrequest|iwr)\b/i,
+  /\b(?:docker\s+(?:rm|rmi|push)|kubectl\s+delete|sc\s+delete|reg\s+(?:add|delete)|takeown|icacls)\b/i,
   /\bdrop\s+table\b/i,
   /\btruncate\s+table\b/i,
 ]
@@ -1613,43 +2069,56 @@ function isExternalSideEffectTool(tool) {
   return AUTO_APPROVAL_EXTERNAL_TOOL.some((pattern) => pattern.test(name))
 }
 
-/** Auto 的逐次审批矩阵：低风险且在授权目录内自动放行，其余仍落人工审批。 */
-function autoApprovalAllowed(params, cwd) {
-  const raw = String(params?.toolArgs || '')
-  let args = {}
-  try { args = JSON.parse(raw) || {} } catch { args = {} }
+/** 审批卡元数据：DSH 已决定是否升级审批，这里只生成操作类型、风险级别和参数摘要。 */
+function describeToolApproval(params) {
   const tool = String(params?.toolNameResolved || params?.toolName || '')
-  // MCP 写工具（发消息、建待办等）会改变产品外部状态，必须人工确认。
-  if (isExternalSideEffectTool(tool)) return false
-  const commandText = [args.command, args.cmd, args.script].filter(Boolean).map(String).join('\n')
-  if (commandText && explicitHighRiskRequest(`${tool} ${commandText}`)) return false
-  const target = String(args.path || args.file_path || args.filePath || args.cwd || args.directory || args.dir || '')
-  if (target) {
-    if (!cwd) return false
-    const full = isAbsolute(target) ? target : join(cwd, target)
-    if (!pathInside(full, cwd)) return false
+  const rawArgs = String(params?.toolArgs || '')
+  const reason = String(params?.reason || '').replace(/\s+/g, ' ').trim()
+  const described = describeToolCall({
+    tool,
+    args: rawArgs || '{}',
+    isExternalSideEffect: isExternalSideEffectTool(tool),
+  })
+  // PTC 的嵌套工具审批只带 toolName/reason，不带嵌套参数；把原因落进参数摘要，
+  // 至少让审批卡和 approval_decisions 能看出这次调用的目的与目标。
+  if (!rawArgs && reason) {
+    described.summary = `审批原因：${reason.length > 300 ? `${reason.slice(0, 300)}…` : reason}`
+    // PTC 嵌套工具不带参数时，只能从 DSH 的升级原因判断风险；凡是申请放宽沙箱的，
+    // 展示为 high，避免“工作区外写入”被按普通 write 记成 medium。
+    if (/danger-full-access|workspace-write|工作区外|escalat/i.test(reason)) described.risk = 'high'
   }
-  // 命令里出现授权目录以外的盘符/绝对路径时，必须人工确认。
-  if (commandText) {
-    if (!cwd) return false
-    const decoded = commandText.replace(/\\\\/g, '\\').replace(/\\"/g, '"')
-    const winPaths = decoded.match(/[A-Za-z]:\\[^"',\s}]+/g) || []
-    if (winPaths.some((p) => !pathInside(p.replace(/[\\)\],;]+$/, ''), cwd))) return false
-    const unixPaths = decoded.match(/(?:^|[\s"'])\/(?:[^"'\s]+)/g) || []
-    if (unixPaths.some((p) => !pathInside(p.trim(), cwd))) return false
+  return described
+}
+
+/** 把可能尚不存在的路径解析到最近的已存在父目录真实路径，防止符号链接越界。 */
+function canonicalPath(input) {
+  let current = normalize(String(input || ''))
+  const tail = []
+  while (true) {
+    try {
+      const real = realpathSync(current)
+      return normalize(join(real, ...tail.reverse()))
+    } catch {
+      const parent = dirname(current)
+      if (parent === current || !parent) return normalize(String(input || ''))
+      tail.push(basename(current))
+      current = parent
+    }
   }
-  // 删除、覆盖、格式化等命令即使没命中高危关键字，也不在 Auto 自动放行。
-  if (commandText && /remove-item|del\s|rmdir|\bformat\b|diskpart|shutdown|reg\s+delete|taskkill/i.test(commandText)) return false
-  // 本次矩阵只覆盖命令与路径；没有这两类表面参数的内置工具保持原有放行，
-  // 外部副作用工具已在上方单独拒绝。
-  return true
 }
 
 /** 判断文件是否在某个根目录内（先按字符串，再按真实路径防符号链接越权）。 */
-function pathInside(child, rootDir) {  const c = normalize(String(child || ''))
+function pathInside(child, rootDir) {
+  const c = normalize(String(child || ''))
   const r = normalize(String(rootDir || ''))
   if (!r) return false
-  return c === r || c.toLowerCase().startsWith(`${r.toLowerCase()}${sep}`)
+  const textInside = c === r || c.toLowerCase().startsWith(`${r.toLowerCase()}${sep}`)
+  if (!textInside) return false
+  const realChild = canonicalPath(c)
+  const realRoot = canonicalPath(r)
+  const lowerChild = realChild.toLowerCase()
+  const lowerRoot = realRoot.toLowerCase()
+  return lowerChild === lowerRoot || lowerChild.startsWith(`${lowerRoot}${sep}`)
 }
 
 const MCP_MAX_RESOURCES = 80
@@ -2084,7 +2553,26 @@ function recognizeAdmin(extent) {
   }
 }
 
+function regAutoApproved(kind, body) {
+  const level = /^L[1-5]$/.test(String(body.internalLevel || '')) ? Number(String(body.internalLevel).slice(1)) : 2
+  const secrecy = body.secrecy || (body.security === 'secret' ? '待认定' : '非涉密')
+  const accessScope = body.accessScope || 'dept'
+  if (body.qcRequired === true) return false
+  if (secrecy !== '非涉密' || level >= 4) return false
+  if (['group', 'orgs'].includes(accessScope)) return false
+  if (kind === 'deliverable' && body.formalResult === true) return false
+  return true
+}
+
 function regWorkflow(kind, user, body) {
+  if (regAutoApproved(kind, body)) {
+    return {
+      stage: 'done',
+      steps: [{ key: 'done', label: '登记入库', state: 'done' }],
+      deptLead: '',
+      note: '元数据完整且未申请超出默认范围，登记后直接进入统一资源目录；发布状态另行管理。',
+    }
+  }
   const qcRequired = body.qcRequired === true
   const steps = [
     { key: 'dept', label: '部门负责人同意登记', state: 'pending' },
@@ -2368,7 +2856,7 @@ function releaseChatRunSlot() {
   else chatRunSlots = Math.max(0, chatRunSlots - 1)
 }
 
-function startChatRunTask({ conv, user, text, mode, taskMode, target }) {
+function startChatRunTask({ conv, user, text, mode, taskMode, target, idempotencyKey = '' }) {
   const task = {
     id: `TR-${Date.now()}-${Math.floor(Math.random() * 900 + 100)}`,
     kind: 'chat-run',
@@ -2388,6 +2876,16 @@ function startChatRunTask({ conv, user, text, mode, taskMode, target }) {
     artifacts: 0,
     reason: '',
     queuePosition: chatRunWaiters.length + 1,
+    idempotencyKey: idempotencyKey || '',
+    checkpoint: {
+      conversationId: conv.id,
+      prompt: text,
+      mode,
+      taskMode,
+      phase: 'queued',
+      dshSessionId: conv.dshSessionId || '',
+      updatedAt: Date.now(),
+    },
   }
   liveTasks.unshift(task)
   conv.taskRunId = task.id
@@ -2402,6 +2900,7 @@ function markChatRunStarted(task, sessionId = '') {
   task.started = new Date().toLocaleTimeString('zh-CN', { hour12: false }).slice(0, 5)
   task.dshSessionId = sessionId || task.dshSessionId || ''
   task.queuePosition = 0
+  task.checkpoint = { ...(task.checkpoint || {}), phase: 'running', dshSessionId: task.dshSessionId, updatedAt: Date.now() }
   persistPersistentState()
 }
 
@@ -2411,17 +2910,20 @@ function cancelChatRunTask(task, reason = '用户停止执行') {
   task.finishedAt = Date.now()
   task.reason = String(reason).slice(0, 160)
   task.progress = Math.min(100, Math.max(0, task.progress || 0))
+  task.checkpoint = { ...(task.checkpoint || {}), phase: 'cancelled', updatedAt: Date.now() }
   persistPersistentState()
 }
 
-function finishChatRunTask(task, { steps = 0, artifacts = 0 } = {}) {
+function finishChatRunTask(task, { steps = 0, artifacts = 0, reply = '' } = {}) {
   if (!task) return
   task.state = 'done'
   task.progress = 100
   task.steps = steps
   task.artifacts = artifacts
+  task.replyText = String(reply || '').slice(0, 20000)
   task.finishedAt = Date.now()
   task.reason = ''
+  task.checkpoint = { ...(task.checkpoint || {}), phase: 'done', updatedAt: Date.now() }
   persistPersistentState()
 }
 
@@ -2431,6 +2933,7 @@ function failChatRunTask(task, reason) {
   task.progress = Math.max(task.progress || 0, 10)
   task.finishedAt = Date.now()
   task.reason = String(reason || '执行失败').slice(0, 160)
+  task.checkpoint = { ...(task.checkpoint || {}), phase: 'failed', updatedAt: Date.now() }
   persistPersistentState()
 }
 
@@ -2444,6 +2947,7 @@ function recoverChatRunTasks() {
       t.progress = Math.min(95, Math.max(10, Number(t.progress) || 10))
       t.reason = '服务重启导致任务中断，可在原会话继续'
       t.interruptedAt = Date.now()
+      t.checkpoint = { ...(t.checkpoint || {}), phase: 'interrupted', updatedAt: Date.now() }
       const conv = conversations.find((c) => c.id === t.conversationId)
       if (conv && conv.status === 'running') conv.status = 'failed'
       changed = true
@@ -2452,19 +2956,250 @@ function recoverChatRunTasks() {
   if (changed) persistPersistentState()
 }
 
-function taskTick() {
+/* ---- 定时任务：真实调度与执行 ---- */
+const automationRunning = new Set()
+
+function parseAutomationSchedule(label = '') {
+  const text = String(label || '').trim()
+  let m
+  if ((m = text.match(/每季度首月\s*(\d{1,2})\s*日\s*(\d{1,2}):(\d{2})/))) {
+    return { kind: 'quarterly', day: Math.min(28, Math.max(1, Number(m[1]))), hour: Number(m[2]), minute: Number(m[3]) }
+  }
+  if ((m = text.match(/每月\s*(\d{1,2})\s*日\s*(\d{1,2}):(\d{2})/))) {
+    return { kind: 'monthly', day: Math.min(28, Math.max(1, Number(m[1]))), hour: Number(m[2]), minute: Number(m[3]) }
+  }
+  if ((m = text.match(/每周([一二三四五六日天])\s*(\d{1,2}):(\d{2})/))) {
+    const map = { 日: 0, 天: 0, 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6 }
+    return { kind: 'weekly', weekday: map[m[1]] ?? 1, hour: Number(m[2]), minute: Number(m[3]) }
+  }
+  if ((m = text.match(/每天\s*(\d{1,2}):(\d{2})/))) {
+    return { kind: 'daily', hour: Number(m[1]), minute: Number(m[2]) }
+  }
+  return { kind: 'daily', hour: 8, minute: 30 }
+}
+
+function nextAutomationTime(schedule, from = Date.now()) {
+  const base = new Date(from)
+  base.setSeconds(0, 0)
+  const hour = Math.min(23, Math.max(0, Number(schedule.hour) || 0))
+  const minute = Math.min(59, Math.max(0, Number(schedule.minute) || 0))
+  if (schedule.kind === 'weekly') {
+    const target = Math.min(6, Math.max(0, Number(schedule.weekday) || 0))
+    const candidate = new Date(base)
+    candidate.setHours(hour, minute, 0, 0)
+    let diff = (target - candidate.getDay() + 7) % 7
+    if (diff === 0 && candidate.getTime() <= base.getTime()) diff = 7
+    candidate.setDate(candidate.getDate() + diff)
+    return candidate.getTime()
+  }
+  if (schedule.kind === 'monthly' || schedule.kind === 'quarterly') {
+    const day = Math.min(28, Math.max(1, Number(schedule.day) || 1))
+    const months = schedule.kind === 'quarterly' ? [0, 3, 6, 9] : null
+    for (let offset = 0; offset < 18; offset += 1) {
+      const candidate = new Date(base.getFullYear(), base.getMonth() + offset, 1)
+      if (months && !months.includes(candidate.getMonth())) continue
+      candidate.setDate(day)
+      candidate.setHours(hour, minute, 0, 0)
+      if (candidate.getTime() > base.getTime()) return candidate.getTime()
+    }
+    return base.getTime() + 24 * 3600 * 1000
+  }
+  const candidate = new Date(base)
+  candidate.setHours(hour, minute, 0, 0)
+  if (candidate.getTime() <= base.getTime()) candidate.setDate(candidate.getDate() + 1)
+  return candidate.getTime()
+}
+
+function automationNextLabel(ts) {
+  if (!ts) return '待首次执行'
+  return new Date(ts).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).replace(/\//g, '-')
+}
+
+function scheduleAutomationNext(a, from = Date.now()) {
+  a.schedule = a.schedule || '每天 08:30'
+  a.scheduleRule = parseAutomationSchedule(a.schedule)
+  a.nextRunAt = nextAutomationTime(a.scheduleRule, from)
+  a.next = automationNextLabel(a.nextRunAt)
+}
+
+function setAutomationRunFields(a, task, state, reason = '') {
+  a.lastTaskId = task.id
+  a.lastRunAt = state === 'done' ? Date.now() : a.lastRunAt
+  a.last = `${new Date().toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).replace(/\//g, '-')} ${state === 'done' ? '成功' : state === 'failed' ? '失败' : '执行中'}`
+  if (state === 'failed' && reason) a.last = `${a.last}：${String(reason).slice(0, 60)}`
+  if (a.status === 'active') scheduleAutomationNext(a, Date.now() + 60 * 1000)
+}
+
+async function runAutomation(a, trigger = 'manual') {
+  if (!a) return { ok: false, error: '不存在该定时任务' }
+  if (a.status !== 'active' && trigger === 'schedule') return { ok: false, error: '任务已暂停' }
+  if (automationRunning.has(a.id)) return { ok: false, error: '该定时任务正在执行', code: 'RUNNING' }
+  const account = getAccount(a.userId) || getAccountByRole('admin')
+  if (!account) return { ok: false, error: '任务归属账号不存在' }
+  const user = userOfAccount(account)
+  const task = {
+    id: `T-${Date.now()}-${Math.floor(Math.random() * 900 + 100)}`,
+    kind: 'automation-run',
+    title: `${trigger === 'schedule' ? '定时执行' : '手动执行'} · ${a.name}`,
+    state: 'queued',
+    progress: 0,
+    target: `定时任务 · ${a.deliver || '工作台'}`,
+    started: '—',
+    createdAt: Date.now(),
+    finishedAt: null,
+    automationId: a.id,
+    userId: user.id,
+    prompt: a.prompt || '',
+    steps: 0,
+    artifacts: 0,
+    reason: '',
+  }
+  liveTasks.unshift(task)
+  a.lastTaskId = task.id
+  a.last = '排队中'
+  persistPersistentState()
+
+  if (!String(a.prompt || '').trim()) {
+    task.state = 'failed'
+    task.reason = '定时任务没有执行指令'
+    task.finishedAt = Date.now()
+    setAutomationRunFields(a, task, 'failed', task.reason)
+    persistPersistentState()
+    return { ok: false, error: task.reason, task }
+  }
+  if (explicitHighRiskRequest(a.prompt)) {
+    task.state = 'failed'
+    task.reason = '指令包含高风险删除/覆盖动作，定时任务不自动执行'
+    task.finishedAt = Date.now()
+    setAutomationRunFields(a, task, 'failed', task.reason)
+    persistPersistentState()
+    return { ok: false, error: task.reason, task }
+  }
+
+  const modelCfg = resolveModelConfig({ userConfig: liveModelConfig.get(user.id) || {}, request: {} })
+  if (modelCfg.source === 'none') {
+    task.state = 'failed'
+    task.reason = '当前账号没有配置模型密钥，定时任务无法执行'
+    task.finishedAt = Date.now()
+    setAutomationRunFields(a, task, 'failed', task.reason)
+    persistPersistentState()
+    return { ok: false, error: task.reason, task }
+  }
+
+  automationRunning.add(a.id)
+  const convId = `C-AU-${Date.now()}`
+  const conv = {
+    id: convId,
+    title: `定时任务 · ${a.name}`,
+    time: '刚刚',
+    messages: [],
+    status: 'running',
+    projectId: a.projectId || null,
+    executionPolicy: 'auto',
+    userId: user.id,
+    owner: user.name,
+    createdAt: Date.now(),
+    agentCwd: chatWorkspaceDir(user, convId),
+  }
+  conversations.unshift(conv)
+  a.lastConversationId = convId
+  task.conversationId = convId
+  task.state = 'running'
+  task.started = new Date().toLocaleTimeString('zh-CN', { hour12: false }).slice(0, 5)
+  task.progress = 10
+  setAutomationRunFields(a, task, 'running')
+  persistPersistentState()
+
+  const context = [
+    `当前用户：${user.name}（${user.label}，${user.unit || '—'}）`,
+    '当前任务模式：定时任务（无人值守自动执行；工作目录内常规读写自动批准，越界和高风险动作拒绝）',
+    `定时任务名称：${a.name}`,
+    `投递目标：${a.deliver || '工作台'}（当前仅记录结果，不自动发送到外部系统）`,
+    '执行要求：按指令完成可验证的工作；先检查已有文件与结果，不重复已完成步骤；结果写入当前工作目录并返回摘要。',
+  ].filter(Boolean).join('\n')
+
+  ;(async () => {
+    try {
+      const result = await runAgent({
+        apiKey: modelCfg.apiKey,
+        baseUrl: modelCfg.baseUrl,
+        model: modelCfg.model,
+        text: a.prompt,
+        sessionId: '',
+        context,
+        cwd: conv.agentCwd,
+        agentsHome: userAgentHome(user.id),
+        dshHome: ensureUserDshHome(user.id),
+        executionPolicy: 'auto',
+        runKey: conv.id,
+        runtimeScope: conv.id,
+        shouldCancel: () => false,
+        handlers: {
+          onApproval: (params) => {
+            const evaluation = describeToolApproval(params)
+            // 定时任务无人值守：Auto 的 workspace-write 沙箱内操作不会走到这里；
+            // 一旦 DSH 发起升级请求，因为没有审批人，按拒绝处理。
+            recordApprovalDecision({
+              conversationId: conv.id,
+              callId: params?.callId || '',
+              tool: params?.toolNameResolved || params?.toolName || '',
+              operation: evaluation.operation,
+              summary: evaluation.summary,
+              decision: 'deny',
+              rule: 'dsh-scheduled-escalation-unavailable',
+              risk: evaluation.risk,
+              actor: user.name,
+              approver: 'system-scheduled',
+              net: 'inet',
+            })
+            return { outcome: 'rejected' }
+          },
+        },
+      })
+      conv.dshSessionId = result.sessionId || ''
+      conv.status = 'done'
+      conv.messages.push({ role: 'assistant', text: result.reply || '', time: new Date().toLocaleTimeString('zh-CN', { hour12: false }).slice(0, 5), steps: result.steps || [], model: result.model })
+      task.state = 'done'
+      task.progress = 100
+      task.finishedAt = Date.now()
+      task.steps = Array.isArray(result.steps) ? result.steps.length : 0
+      task.artifacts = Array.isArray(result.deliverables) ? result.deliverables.length : 0
+      task.replyText = String(result.reply || '').slice(0, 20000)
+      a.last = `${new Date().toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).replace(/\//g, '-')} 成功`
+      a.lastResult = String(result.reply || '').slice(0, 4000)
+      a.model = result.model || a.model
+      if (a.status === 'active') scheduleAutomationNext(a, Date.now())
+      persistPersistentState()
+    } catch (err) {
+      conv.status = 'failed'
+      task.state = 'failed'
+      task.finishedAt = Date.now()
+      task.reason = String(err && err.message ? err.message : err || '执行失败').slice(0, 160)
+      a.last = `${new Date().toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).replace(/\//g, '-')} 失败：${task.reason}`
+      if (a.status === 'active') scheduleAutomationNext(a, Date.now())
+      persistPersistentState()
+    } finally {
+      automationRunning.delete(a.id)
+    }
+  })()
+  return { ok: true, task, conversation: conv }
+}
+
+function automationTick() {
   const now = Date.now()
-  for (const t of liveTasks) {
-    // 会话执行记录由真实运行收尾，不参与演示任务的进度推进。
-    if (t.kind === 'chat-run') continue
-    if (t.state === 'queued') {
-      if (now - t.createdAt > 12000) { t.state = 'running'; t.progress = 6; t.started = new Date().toLocaleTimeString('zh-CN', { hour12: false }).slice(0, 5) }
-    } else if (t.state === 'running') {
-      const step = Math.floor((now - t.createdAt) / 7000) * 9
-      t.progress = Math.min(96, 8 + step)
-      if (t.progress >= 96) { t.state = 'done'; t.progress = 100 }
+  for (const a of liveAutomations) {
+    if (!a || a.status !== 'active' || automationRunning.has(a.id)) continue
+    if (!a.nextRunAt) scheduleAutomationNext(a, now)
+    if (a.nextRunAt && now >= a.nextRunAt) {
+      runAutomation(a, 'schedule').catch((err) => {
+        console.error('[jg-server] automation run failed:', err && err.message ? err.message : err)
+      })
     }
   }
+}
+
+function taskTick() {
+  // 任务状态全部由真实运行启动、完成和失败收尾，不再用时间推进假进度。
 }
 
 /** 演示用回复生成：按关键词命中不同工具链，保持"步骤 → 结果"的可见性 */
@@ -2695,7 +3430,51 @@ function ensureUserDshHome(userId) {
       try { cpSync(source, target) } catch {}
     }
   }
+  ensureManagedModelPlugins(home)
   return home
+}
+
+/**
+ * 已有账号的 profile 只在首次创建时复制全局模板，后续平台级模型能力不会自动出现。
+ * 这里按“缺什么补什么”的方式幂等补齐，不覆盖账号已有的自定义配置：
+ * 1) 先读后写守卫；2) PTC 执行器。账号已经显式停用对应条目时，保留其现有配置。
+ */
+function ensureManagedModelPlugins(home) {
+  const profileDir = join(home, 'profiles', RUNTIME_PROFILE)
+  const patchPath = join(profileDir, 'cordis.patch.yml')
+  if (!existsSync(patchPath)) return false
+  let current = readFileSync(patchPath, 'utf8')
+  let changed = false
+  if (!current.includes('fs-observation-policy-guard')) {
+    const block = [
+      '',
+      '- id: fs-observation-policy',
+      '  disabled: true',
+      '- insert:',
+      '    - id: fs-observation-policy-guard',
+      "      name: '@deepseek-ai/dsh-fs-observation-policy'",
+      '',
+    ].join('\n')
+    current = `${current}${current.endsWith('\n') ? '' : '\n'}${block}`
+    changed = true
+  }
+  if (!current.includes('tool-executor-ptc-enabled')) {
+    const block = [
+      '',
+      '- id: tool-executor-native',
+      '  disabled: true',
+      '- insert:',
+      '    - id: tool-executor-ptc-enabled',
+      "      name: '@deepseek-ai/dsh-tool-executor-ptc'",
+      '      config:',
+      '        maxParallelSubCalls: 10',
+      '',
+    ].join('\n')
+    current = `${current}${current.endsWith('\n') ? '' : '\n'}${block}`
+    changed = true
+  }
+  if (changed) writeFileSync(patchPath, current, 'utf8')
+  return changed
 }
 function projectCwdOf(projectId) {
   const p = liveProjects.find((x) => x.id === projectId)
@@ -2794,6 +3573,55 @@ function bundlePackageManifest(id) {
 }
 function marketBundleAvailable(id) {
   return Boolean(bundlePackageManifest(id)?.name)
+}
+const MARKET_BACKUP_ROOT = join(dataDirPath(), 'market-backups')
+function marketPackageDir(item) {
+  if (!item || !item.id) return ''
+  return item.kind === 'skill' ? join(MARKET_PACKAGE_ROOT, item.id) : bundlePackageDir(item.id)
+}
+function marketVersionsOf(id) {
+  const list = marketVersions.get(String(id))
+  return Array.isArray(list) ? list : []
+}
+function backupMarketPackage(item, note = '') {
+  const target = marketPackageDir(item)
+  if (!target || !existsSync(target)) return null
+  const stamp = new Date().toISOString().replace(/[-:T.Z]/g, '').slice(0, 14)
+  const dir = join(MARKET_BACKUP_ROOT, item.id, stamp)
+  mkdirSync(dir, { recursive: true })
+  cpSync(target, dir, { recursive: true })
+  const pkg = item.kind === 'bundle' ? bundlePackageManifest(item.id) : null
+  const entry = {
+    id: `${item.id}-${stamp}`,
+    version: String(pkg?.version || item.version || ''),
+    packageName: String(pkg?.name || ''),
+    at: new Date().toISOString(),
+    rel: relative(dataDirPath(), dir).replace(/\\/g, '/'),
+    note,
+  }
+  const list = marketVersionsOf(item.id).filter((x) => x.rel !== entry.rel)
+  list.unshift(entry)
+  marketVersions.set(String(item.id), list.slice(0, 5))
+  return entry
+}
+function restoreMarketPackage(item) {
+  const list = marketVersionsOf(item.id)
+  const entry = list[0]
+  if (!entry) throw new Error('该市场条目没有可回滚的版本备份')
+  const source = join(dataDirPath(), entry.rel)
+  if (!existsSync(source)) throw new Error('版本备份目录已丢失，无法回滚')
+  const target = marketPackageDir(item)
+  rmSync(target, { recursive: true, force: true })
+  mkdirSync(target, { recursive: true })
+  cpSync(source, target, { recursive: true })
+  const pkg = item.kind === 'bundle' ? bundlePackageManifest(item.id) : null
+  const restoredVersion = String(pkg?.version || entry.version || item.version || '')
+  if (restoredVersion) item.version = restoredVersion
+  item.rolledBackAt = new Date().toISOString()
+  list.shift()
+  if (list.length) marketVersions.set(String(item.id), list)
+  else marketVersions.delete(String(item.id))
+  return { item, restoredVersion, remaining: list.length }
 }
 function profileManifest(home = process.env.JG_DSH_HOME || join(dataDirPath(), 'dsh-home')) {
   try {
@@ -2904,11 +3732,117 @@ function marketItemState(item, ctx = {}) {
         ? [{ userId: '*', userName: '全客户端基线', scope: 'baseline', projectId: '', installedAt: 0 }]
         : records,
     downloadUrl: sub && sub.fileId ? `/api/plugin-market/download?id=${encodeURIComponent(item.id)}` : '',
+    versions: marketVersionsOf(item.id).map((v) => ({ version: v.version, at: v.at, note: v.note || '' })),
+    canRollback: Boolean(sub && marketVersionsOf(item.id).length),
   }
 }
 
+async function runProjectCodeReview(user, body, net) {
+  const projectId = String(body.projectId || '')
+  if (!projectId) return { error: jsonError(400, '请选择要审查的项目') }
+  const project = liveProjects.find((p) => p.id === projectId && !p.removed)
+  if (!project || !projectVisibleTo(user, project)) return { error: jsonError(403, '当前身份无权审查该项目') }
+  if (!project.cwd) return { error: jsonError(400, '该项目尚未绑定本地文件夹；请先在项目设置中绑定代码目录。') }
+  if (projectStatus(project) !== 'online') return { error: jsonError(400, `项目目录当前不可用：${projectStatus(project)}`) }
+  try {
+    const result = await runHarnessService('code-review', { cwd: project.cwd, scope: body.scope, maxFiles: body.maxFiles })
+    const report = result.report
+    logAudit(user, 'harness.code-review', `${projectId}:${report.scanned}`, `findings=${report.summary.total}`, net)
+    return { project: { id: project.id, name: project.name, cwd: project.cwd }, report, service: result.service }
+  } catch (error) {
+    return { error: { status: Number(error?.status) || 500, body: { error: '代码审查执行失败', detail: String(error?.message || error) } } }
+  }
+}
+
+function jsonError(status, error, extra = {}) {
+  return { status, body: { error, ...extra } }
+}
+
 const api = {
+  'GET /api/harness/services': (req, res) => {
+    json(res, 200, { items: HARNESS_BASE_SERVICES })
+  },
+  'POST /api/harness/services/code-review': async (req, res) => {
+    const user = roleOf(req)
+    const body = JSON.parse(req.__body || '{}')
+    const result = await runProjectCodeReview(user, body, netOf(req))
+    if (result.error) return json(res, result.error.status, result.error.body)
+    json(res, 200, { ok: true, ...result })
+  },
+  // 兼容旧路径；内部已统一交给 Harness 基础服务，不再保留第二套实现。
+  'POST /api/code-review/run': async (req, res) => {
+    const user = roleOf(req)
+    const body = JSON.parse(req.__body || '{}')
+    const result = await runProjectCodeReview(user, body, netOf(req))
+    if (result.error) return json(res, result.error.status, result.error.body)
+    json(res, 200, { ok: true, ...result })
+  },
+  'GET /api/usage/summary': (req, res) => {
+    const user = roleOf(req)
+    const mine = conversations.filter((conv) => conv.userId === user.id)
+    const totals = { requests: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0 }
+    const models = new Map()
+    const records = []
+    let assistantMessages = 0
+    let usageMessages = 0
+    for (const conv of mine) {
+      for (const message of (conv.messages || [])) {
+        if (message.role !== 'assistant') continue
+        assistantMessages += 1
+        const usage = message.usage
+        if (!usage || typeof usage !== 'object') continue
+        const input = Number(usage.inputTokens ?? usage.prompt_tokens ?? usage.input_tokens ?? 0) || 0
+        const output = Number(usage.outputTokens ?? usage.completion_tokens ?? usage.output_tokens ?? 0) || 0
+        const total = Number(usage.totalTokens ?? usage.total_tokens ?? (input + output)) || 0
+        const calls = Number(usage.calls ?? 1) || 1
+        if (!input && !output && !total && !usage.calls) continue
+        usageMessages += 1
+        totals.requests += calls
+        totals.inputTokens += input
+        totals.outputTokens += output
+        totals.totalTokens += total || input + output
+        totals.cacheReadTokens += Number(usage.cacheReadTokens ?? usage.cache_read_tokens ?? 0) || 0
+        totals.cacheWriteTokens += Number(usage.cacheWriteTokens ?? usage.cache_write_tokens ?? 0) || 0
+        totals.reasoningTokens += Number(usage.reasoningTokens ?? usage.reasoning_tokens ?? 0) || 0
+        const modelName = String(message.model || conv.model || '未记录模型')
+        const entry = models.get(modelName) || { model: modelName, requests: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0 }
+        entry.requests += calls
+        entry.inputTokens += input
+        entry.outputTokens += output
+        entry.totalTokens += total || input + output
+        models.set(modelName, entry)
+        records.push({
+          conversationId: conv.id,
+          conversationTitle: conv.title || '未命名会话',
+          at: message.usageAt ? new Date(message.usageAt).toISOString() : '',
+          time: message.time || '',
+          model: modelName,
+          calls,
+          inputTokens: input,
+          outputTokens: output,
+          totalTokens: total || input + output,
+        })
+      }
+    }
+    records.sort((a, b) => String(b.at || b.time).localeCompare(String(a.at || a.time)))
+    logAudit(user, 'usage.summary', user.id, `requests=${totals.requests}`, netOf(req))
+    json(res, 200, {
+      ok: true,
+      user: user.name,
+      totals,
+      models: [...models.values()].sort((a, b) => b.totalTokens - a.totalTokens),
+      records: records.slice(0, 50),
+      coverage: {
+        conversations: mine.length,
+        assistantMessages,
+        usageMessages,
+        note: usageMessages ? '仅统计 DSH 实际返回 usage 的轮次，未返回 usage 的历史轮次不估算、不补齐。' : '当前账号尚无带真实 usage 的模型轮次；发起一次模型对话后才会产生计量数据。',
+      },
+    })
+  },
   'GET /api/bootstrap': (req, res) => {
+    const session = sessionOf(req)
+    const account = session?.accountId ? getAccount(session.accountId) : null
     const user = roleOf(req)
     const net = netOf(req)
     const conf = networks[net]
@@ -2917,14 +3851,26 @@ const api = {
       user: { ...user, role: user.id },
       network: { id: net, ...conf },
       allNetworks: networkOrder.map((n) => ({ id: n, label: networks[n].label })),
-      allRoles: Object.values(roles).filter((r) => r.id === 'admin').map((r) => ({ id: r.id, label: r.label, name: r.name, unit: r.unit, duty: r.duty })),
+      allRoles: listAccounts().map((account) => {
+        const role = userOfAccount(account)
+        return {
+          id: account.id,
+          accountId: account.id,
+          username: account.username || '',
+          role: account.role,
+          label: role.label,
+          name: role.name,
+          unit: role.unit,
+          duty: role.duty,
+        }
+      }),
       modules,
       quickPrompts,
       counts: {
         resources: visible.length,
         resourcesTotal: liveResources.length,
         plugins: installedSkillPlugins().filter((p) => (p.nets || ['inet']).includes(net)).length,
-        capabilities: platformCapabilities().filter((p) => p.layer !== 'kernel' && p.enabled && (p.nets || ['inet']).includes(net)).length,
+        capabilities: platformCapabilities(accountRuntimeHome(user)).filter((p) => p.layer !== 'kernel' && p.enabled && (p.nets || ['inet']).includes(net)).length,
         apps: liveApps.filter((a) => (a.nets || []).includes(net)).length,
         tasks: liveTasks.length,
       },
@@ -2937,28 +3883,80 @@ const api = {
       agentPresets: agentPresets.map((p) => ({ ...p })),
       duties: dutiesOf(user),
       dutyCatalog,
-      authed: !!sessionOf(req),
+      authed: !!session,
+      mustChangePassword: !!account?.mustChangePassword,
       messagesUnread: liveMessages.filter((m) => m.unread).length,
       orgSummary: { units: orgUnits.length, members: liveMembers.length, multiPost: liveMembers.filter((m) => m.posts.length > 1).length },
       orgUnits,
       settings: { ...runtimeSettings },
-      runtime: runtimeOverview(),
+      runtime: runtimeOverview(user.id === 'guest' ? undefined : ensureUserDshHome(user.id)),
     })
+  },
+  'GET /api/captcha': (req, res) => {
+    res.setHeader('cache-control', 'no-store')
+    json(res, 200, { ok: true, ...createCaptchaChallenge() })
   },
   'POST /api/login': (req, res) => {
     const body = JSON.parse(req.__body || '{}')
-    const account = body.accountId ? getAccount(body.accountId) : getAccountByRole(body.role)
-    const role = account ? userOfAccount(account) : roles[body.role]
-    if (!role) return json(res, 400, { error: 'unknown role' })
+    const captchaId = String(body.captchaId || '')
+    const captchaAnswer = body.captchaAnswer == null ? '' : String(body.captchaAnswer)
+    if (!captchaId || !captchaAnswer.trim()) {
+      return json(res, 400, { error: '请先填写验证码', code: 'CAPTCHA_REQUIRED' })
+    }
+    if (!consumeCaptcha(captchaId, captchaAnswer)) {
+      return json(res, 400, { error: '验证码不正确或已过期，请换一个', code: 'BAD_CAPTCHA' })
+    }
+    const username = String(body.username || '').trim()
+    const loginRole = String(body.role || '')
+    const accountId = String(body.accountId || loginRole || '')
+    let account = username ? getAccountByUsername(username) : null
+    if (!account && accountId) account = getAccount(accountId)
+    if (!account && loginRole) account = getAccountByRole(loginRole)
+    if (!account) return json(res, 400, { error: '用户名或密码不正确', code: 'BAD_CREDENTIALS' })
+    const password = String(body.password || '')
+    if (!password) return json(res, 400, { error: '请输入登录密码', code: 'PASSWORD_REQUIRED' })
+    if (!account.passwordHash) {
+      setAccountPassword(account.id, hashPassword(defaultPasswordForName(account.name, account.id)), true)
+      account = getAccount(account.id)
+    }
+    if (!verifyPassword(password, account.passwordHash)) {
+      logAudit(userOfAccount(account), 'auth.login', account.id, 'deny', netOf(req))
+      return json(res, 401, { error: '用户名或密码不正确', code: 'BAD_CREDENTIALS' })
+    }
+    const role = userOfAccount(account)
     closeAllCloudSessions('身份切换，云会话由服务端强制结束')
-    const sessionRole = account ? account.role : role.id
-    const sid = createSession(sessionRole, netOf(req), undefined, account ? account.id : null)
+    const sid = createSession(account.role, netOf(req), undefined, account.id)
     res.setHeader('set-cookie', [
       sessionCookie(sid),
       'jg_role=; Path=/; Max-Age=0; SameSite=Lax',
     ])
     logAudit(role, 'auth.login', role.id, 'allow', netOf(req))
-    json(res, 200, { ok: true, user: role, accountId: account ? account.id : null })
+    json(res, 200, {
+      ok: true,
+      user: role,
+      accountId: account.id,
+      username: account.username || username,
+      mustChangePassword: !!account.mustChangePassword,
+    })
+  },
+  'POST /api/account/password': (req, res) => {
+    const session = sessionOf(req)
+    const account = session?.accountId ? getAccount(session.accountId) : null
+    if (!session || !account) return json(res, 401, { error: '未登录或账号会话已失效', code: 'AUTH_REQUIRED' })
+    const body = JSON.parse(req.__body || '{}')
+    const currentPassword = String(body.currentPassword || '')
+    const nextPassword = String(body.nextPassword || body.newPassword || '')
+    if (!verifyPassword(currentPassword, account.passwordHash)) {
+      logAudit(userOfAccount(account), 'auth.password.change', account.id, 'deny', netOf(req))
+      return json(res, 401, { error: '当前密码不正确', code: 'BAD_CURRENT_PASSWORD' })
+    }
+    if (nextPassword.length < 8 || nextPassword.length > 64 || !/[A-Za-z]/.test(nextPassword) || !/\d/.test(nextPassword)) {
+      return json(res, 400, { error: '新密码需 8–64 位，且至少包含字母和数字', code: 'WEAK_PASSWORD' })
+    }
+    if (nextPassword === currentPassword) return json(res, 400, { error: '新密码不能与当前密码相同', code: 'PASSWORD_UNCHANGED' })
+    setAccountPassword(account.id, hashPassword(nextPassword), false)
+    logAudit(userOfAccount(account), 'auth.password.change', account.id, 'allow', netOf(req))
+    json(res, 200, { ok: true, mustChangePassword: false })
   },
   'POST /api/network': (req, res) => {
     const body = JSON.parse(req.__body || '{}')
@@ -2976,7 +3974,7 @@ const api = {
     Object.assign(runtimeSettings, sanitizeRuntimeSettings({ ...runtimeSettings, ...body }))
     persistPersistentState()
     logAudit(user, 'settings.runtime.update', 'runtime', JSON.stringify(runtimeSettings), netOf(req))
-    json(res, 200, { ok: true, settings: { ...runtimeSettings }, runtime: runtimeOverview() })
+    json(res, 200, { ok: true, settings: { ...runtimeSettings }, runtime: runtimeOverview(user.id === 'guest' ? undefined : ensureUserDshHome(user.id)) })
   },
   'GET /api/agent-presets': (req, res) => {
     json(res, 200, { ok: true, items: agentPresets.map((p) => ({ ...p })) })
@@ -3014,12 +4012,13 @@ const api = {
   'GET /api/runtime/plugins': (req, res) => {
     const user = roleOf(req)
     if (!canManage(user)) return json(res, 403, { error: '仅管理员可管理运行时插件' })
-    refreshRuntimeConfigDump()
-    const plugins = runtimePluginInventory()
+    const home = ensureUserDshHome(user.id)
+    refreshRuntimeConfigDump(home)
+    const plugins = runtimePluginInventory(home)
     json(res, 200, {
       ok: true,
       profile: RUNTIME_PROFILE,
-      source: 'dsh-dump-config.txt（按当前 profile 即时生成）',
+      source: 'dsh-dump-config.txt（按当前账号 DSH_HOME 生成）',
       protectedIds: [...PROTECTED_PLUGIN_IDS],
       plugins,
     })
@@ -3031,9 +4030,11 @@ const api = {
     const id = String(body.id || '').trim()
     if (!id) return json(res, 400, { error: '缺少插件条目 id' })
     try {
-      const result = setRuntimePluginEnabled(id, Boolean(body.enabled))
+      const home = ensureUserDshHome(user.id)
+      const result = setRuntimePluginEnabled(id, Boolean(body.enabled), home)
+      refreshRuntimeConfigDump(home)
       logAudit(user, 'runtime-plugin.toggle', id, Boolean(body.enabled) ? 'enable' : 'disable', netOf(req))
-      json(res, 200, { ok: true, result, plugins: runtimePluginInventory() })
+      json(res, 200, { ok: true, result, plugins: runtimePluginInventory(home) })
     } catch (err) {
       json(res, 400, { error: err.message, code: 'RUNTIME_PLUGIN_TOGGLE_FAILED' })
     }
@@ -3211,7 +4212,17 @@ const api = {
     const secrecy = body.secrecy || (body.security === 'secret' ? '待认定' : '非涉密')
     const zoneIds = Array.isArray(body.zones) ? body.zones : (Array.isArray(body.nets) ? body.nets : [net])
     const zones = [...new Set(zoneIds.map((z) => ({ 内网: 'intranet', 政务外网: 'gov', 互联网: 'inet', intranet: 'intranet', gov: 'gov', inet: 'inet' }[z] || z)).filter((z) => ZONE_LABEL[z]))]
+    if (zones.includes('inet')) {
+      if (!zones.includes('gov')) zones.push('gov')
+      if (!zones.includes('intranet')) zones.push('intranet')
+    }
+    if (zones.includes('gov') && !zones.includes('intranet')) zones.push('intranet')
+    const orderedZones = ['intranet', 'gov', 'inet'].filter((z) => zones.includes(z))
+    zones.length = 0
+    zones.push(...orderedZones)
     const authorizationType = body.authorizationType === 'orgs' ? 'orgs' : 'group'
+    const accessScope = ['self', 'dept', 'group', 'orgs'].includes(body.accessScope) ? body.accessScope : 'dept'
+    const autoRegistered = regAutoApproved(kind, { ...body, internalLevel, secrecy, accessScope })
     const authorizedOrgs = authorizationType === 'orgs' && Array.isArray(body.authorizedOrgs) ? body.authorizedOrgs : []
     const rightsBasis = body.rightsBasis || ''
     const sourceOrg = body.sourceOrg || user.unit
@@ -3263,6 +4274,10 @@ const api = {
       type: body.serviceType || 'QGIS WMS',
       layers: body.layerCount || 0,
       auth: body.authMode || '统一网关票据',
+      provider: body.serviceProvider || sourceOrg,
+      networkZone: body.serviceZone || '',
+      rateLimit: body.rateLimit || '',
+      detectStatus: body.serviceDetectStatus || '',
       updateFreq: body.updateFreq || '',
       sla: body.sla || '',
     } : null
@@ -3276,6 +4291,8 @@ const api = {
       type: kind === 'service' ? 'service' : kind === 'deliverable' ? 'deliverable' : (body.type || 'document'),
       format: kind === 'service' ? (body.serviceType || 'OGC API') : kind === 'deliverable' ? '成果包（多格式）' : (body.format || formats[0] || 'PDF'),
       regKind: kind,
+      accessScope,
+      publishStatus: kind === 'service' ? 'pending-review' : 'unpublished',
       sourceType: body.sourceType === 'cloud' ? 'cloud' : 'local',
       source: body.source || (body.sourceType === 'cloud' ? '企业云空间' : '本地上传'),
       sourceRef: Array.isArray(body.sourceRef) ? body.sourceRef : [],
@@ -3292,22 +4309,23 @@ const api = {
       size: actualBytes
         ? (actualBytes >= 1024 ** 3 ? `${(actualBytes / 1024 ** 3).toFixed(1)} GB` : actualBytes >= 1024 ** 2 ? `${(actualBytes / 1024 ** 2).toFixed(1)} MB` : `${(actualBytes / 1024).toFixed(0)} KB`)
         : (body.size || (files.length ? `${files.length} 个文件` : '—')),
-      status: 'pending-dept',
+      status: autoRegistered ? 'authorized' : 'pending-dept',
       action: kind === 'service' ? '服务调用 · 图层查询' : kind === 'deliverable' ? '成果包预览 · 空间检索 · 批量下载' : '在线预览 · 全文检索',
       meta: { version: body.version || 'V1.0', crs: spatial.crs || body.crs || '', coverage: spatial.extent || body.coverage || '' },
       aiMeta,
       spatial,
-      securityMeta: { internalLevel, secrecy, requestedZones: zones, approvedZones: [], authorizationType, authorizedOrgs, rightsBasis },
+      securityMeta: { internalLevel, secrecy, requestedZones: zones, approvedZones: [], authorizationType, authorizedOrgs, rightsBasis, accessScope },
       project: { linked: projectLinked, projectId, projectName },
-      result: kind === 'deliverable' ? { projectId, resourceId: id, internalDataId: `PKG-${id}`, qcStatus: qualityRequired ? 'pending' : 'not-required', qcReportId: '' } : null,
+      result: kind === 'deliverable' ? { projectId, resourceId: id, internalDataId: `PKG-${id}`, category: body.resultCategory || '', stage: body.resultStage || '', version: body.version || 'V1.0', formal: body.formalResult === true, qcStatus: qualityRequired ? 'pending' : 'not-required', qcReportId: '' } : null,
       dataStandard: {
         schemaVersion: '1.0', dataId: id, dataType: REG_KIND_LABEL[kind], dataName: body.name || '未命名资源',
         businessCategory, uploader: user.name, dataOwner, sourceOrg, originalSource, dataDate,
         registeredAt: now, formats, sizeBytes: actualBytes || Number(body.sizeBytes || 0) || 0,
-        security: { internalLevel, secrecy, requestedZones: zones, approvedZones: [], authorizationType, authorizedOrgs, rightsBasis },
-        project: { linked: projectLinked, projectId, projectName },
-        confirmation: { status: 'PENDING', confirmedBy: null, confirmedAt: null },
-        registrationStatus: 'PENDING_DEPT',
+        security: { internalLevel, secrecy, requestedZones: zones, approvedZones: [], authorizationType, authorizedOrgs, rightsBasis, accessScope },
+        project: { linked: projectLinked, projectId, projectName, stage: body.resultStage || '', version: body.version || '' },
+        confirmation: { status: (kind === 'deliverable' && body.formalResult === true) ? 'PENDING' : 'NOT_REQUIRED', confirmedBy: null, confirmedAt: null },
+        registrationStatus: autoRegistered ? 'REGISTERED' : 'PENDING_DEPT',
+        publishStatus: kind === 'service' ? 'PENDING_REVIEW' : 'UNPUBLISHED',
       },
       service,
       quality,
@@ -3324,8 +4342,9 @@ const api = {
         scope: (item.scope || []).join(' / '),
         calls: 0,
         latency: '—',
-        status: 'pending-dept',
+        status: autoRegistered ? 'authorized' : 'pending-dept',
         published: false,
+        publishStatus: 'pending-review',
         resourceId: item.id,
       })
     }
@@ -3640,11 +4659,29 @@ const api = {
       .map((p) => ({ ...p, status: pluginEnabledFor(user.id, p) }))
     json(res, 200, { items: list, canManage: canManage(user) })
   },
+  'GET /api/agent-entries': (req, res) => {
+    const net = netOf(req)
+    const user = roleOf(req)
+    const inventory = runtimePluginInventory(ensureUserDshHome(user.id))
+    const on = (id) => Boolean(inventory.find((x) => x.id === id)?.enabled)
+    json(res, 200, {
+      items: [
+        { id: 'agent-team', label: 'Agent 团队', plugin: 'tool-agent-team', enabled: on('tool-agent-team'), desc: '把复杂任务拆给多个子 Agent，并行执行后汇总结果' },
+        { id: 'worktree', label: '工作树', plugin: 'tool-worktree', enabled: on('tool-worktree'), desc: '在隔离工作树中修改代码，避免污染当前项目目录' },
+        {
+          id: 'auto-review', label: '自动审查（权限层）', plugin: 'auto-review', enabled: false,
+          runtimeEnabled: on('auto-review'),
+          desc: '实验性逐工具调用审查层，不是代码审查报告；本产品未接入该权限预设',
+        },
+      ],
+      net,
+    })
+  },
   'GET /api/platform-capabilities': (req, res) => {
     const user = roleOf(req)
     const net = netOf(req)
     json(res, 200, {
-      items: platformCapabilities().filter((p) => p.layer !== 'kernel' && (p.nets || ['inet']).includes(net)),
+      items: platformCapabilities(accountRuntimeHome(user)).filter((p) => p.layer !== 'kernel' && (p.nets || ['inet']).includes(net)),
       canManage: canManage(user),
       layer: 'platform',
       installScope: '系统级模块 · 默认安装启用，不进入插件市场',
@@ -3654,7 +4691,7 @@ const api = {
     const user = roleOf(req)
     if (!canManage(user)) return json(res, 403, { error: '仅超级管理员可管理系统内核' })
     const bundles = officialBaselineBundles().map((b) => ({ ...b, type: 'plugin', usedBy: 0 }))
-    const infrastructure = platformCapabilities().filter((p) => p.layer === 'kernel')
+    const infrastructure = platformCapabilities(accountRuntimeHome(user)).filter((p) => p.layer === 'kernel')
     json(res, 200, { ok: true, skills: [], bundles, infrastructure, canManage: true })
   },
   'POST /api/admin/official-baseline': async (req, res) => {
@@ -3714,13 +4751,13 @@ const api = {
       })
       persistPersistentState()
       logAudit(user, 'platform-capability.toggle', cap.id, enabled ? 'enable' : 'disable', netOf(req))
-      return json(res, 200, { ok: true, item: platformCapabilities().find((x) => x.id === cap.id) })
+      return json(res, 200, { ok: true, item: platformCapabilities(accountRuntimeHome(user)).find((x) => x.id === cap.id) })
     }
     if (body.reset === true) {
       liveCapabilityPolicies.delete(cap.id)
       persistPersistentState()
       logAudit(user, 'platform-capability.reset', cap.id, 'allow', netOf(req))
-      return json(res, 200, { ok: true, item: platformCapabilities().find((x) => x.id === cap.id) })
+      return json(res, 200, { ok: true, item: platformCapabilities(accountRuntimeHome(user)).find((x) => x.id === cap.id) })
     }
     const rawPermissions = Array.isArray(body.permissions)
       ? body.permissions
@@ -3735,7 +4772,7 @@ const api = {
     liveCapabilityPolicies.set(cap.id, { permissions, limits: { ...cap.limits, ...limits }, updatedAt: Date.now(), updatedBy: user.name })
     persistPersistentState()
     logAudit(user, 'platform-capability.policy', cap.id, 'allow', netOf(req))
-    json(res, 200, { ok: true, item: platformCapabilities().find((x) => x.id === cap.id) })
+    json(res, 200, { ok: true, item: platformCapabilities(accountRuntimeHome(user)).find((x) => x.id === cap.id) })
   },
   'GET /api/plugin-review': (req, res) => {
     const user = roleOf(req)
@@ -3867,7 +4904,7 @@ const api = {
       },
     })
   },
-  'POST /api/admin/plugin-market': (req, res) => {
+  'POST /api/admin/plugin-market': async (req, res) => {
     const user = roleOf(req)
     if (!canManage(user)) return json(res, 403, { error: '仅管理员可管理插件市场' })
     const body = JSON.parse(req.__body || '{}')
@@ -3901,6 +4938,67 @@ const api = {
       persistPersistentState()
       logAudit(user, 'plugin-market.sort', item.id, `move-${body.direction === 'up' ? 'up' : 'down'}`, netOf(req))
       return json(res, 200, { ok: true, items: ordered.map((m) => marketItemState(m, { any: true })) })
+    }
+    if (action === 'upgrade') {
+      if (!item.subId) return json(res, 400, { error: '内置市场条目不接受升级包；请通过代码发布' })
+      if (!['bundle', 'skill'].includes(item.kind)) return json(res, 400, { error: '该条目不是可升级的 Bundle 或技能包' })
+      if (activeRuns.size) return json(res, 409, { error: '有会话正在执行，升级会在下一轮生效，请稍后再试', code: 'RUNTIME_BUSY' })
+      const fileId = String(body.fileId || '').trim()
+      const meta = fileId ? getFile(fileId) : null
+      if (!meta) return json(res, 400, { error: '请先上传新版本 ZIP 包', code: 'PLUGIN_FILE_REQUIRED' })
+      let buffer
+      try { buffer = readFileBuffer(fileId) } catch { return json(res, 400, { error: '升级包读取失败' }) }
+      const scan = inspectPluginZip(buffer)
+      if ((scan.kind || 'bundle') !== item.kind) return json(res, 400, { error: `包类型不匹配：当前是 ${item.kind}，上传包是 ${scan.kind || 'bundle'}` })
+      if ((scan.checks || []).some((c) => c[1] !== '通过')) {
+        return json(res, 400, { error: '升级包未通过平台检测：' + scan.checks.filter((c) => c[1] !== '通过').map((c) => c[0]).join('；') })
+      }
+      const backup = backupMarketPackage(item, `升级前 ${item.version || ''}`.trim())
+      const target = marketPackageDir(item)
+      try {
+        rmSync(target, { recursive: true, force: true })
+        mkdirSync(target, { recursive: true })
+        if (item.kind === 'skill') extractSkillPackage(buffer, target)
+        else {
+          extractBundlePackage(buffer, target)
+          const pkg = bundlePackageManifest(item.id)
+          if (!pkg || !pkg.name || !pkg.dsh || !pkg.dsh.bundle) throw new Error('Bundle 的 package.json 缺少 name 或 dsh.bundle')
+          item.packageName = pkg.name
+        }
+        const sub = pluginSubs.find((s) => s.id === item.subId)
+        const nextVersion = String(body.version || bundlePackageManifest(item.id)?.version || sub?.version || '').trim()
+        if (nextVersion) { item.version = nextVersion; if (sub) sub.version = nextVersion }
+        item.upgradedAt = new Date().toISOString()
+        item.upgradeFile = meta.name
+        if (sub) { sub.fileId = fileId; sub.file = meta.name; sub.sha256 = meta.sha256; sub.size = meta.size >= 1024 ** 2 ? `${(meta.size / 1024 ** 2).toFixed(1)} MB` : `${Math.max(1, Math.round(meta.size / 1024))} KB` }
+        if (item.kind === 'bundle') {
+          const users = bundleInstallUsers(item.id)
+          for (const entry of users) await closeHarnessForHome(userDshHome(entry.userId)).catch(() => {})
+        }
+      } catch (error) {
+        if (backup) {
+          try { restoreMarketPackage(item) } catch {}
+        }
+        return json(res, 409, { error: `升级失败，已尝试回滚：${error.message}` })
+      }
+      persistPersistentState()
+      logAudit(user, 'plugin-market.upgrade', item.id, `version=${item.version || '—'},backup=${backup?.id || 'none'}`, netOf(req))
+      return json(res, 200, { ok: true, item: marketItemState(item, { any: true }), backup: backup?.id || '', note: '已替换包目录；已安装账号的运行时已关闭，下一轮重新加载。' })
+    }
+    if (action === 'rollback') {
+      if (!item.subId) return json(res, 400, { error: '内置市场条目不支持回滚' })
+      if (activeRuns.size) return json(res, 409, { error: '有会话正在执行，回滚会在下一轮生效，请稍后再试', code: 'RUNTIME_BUSY' })
+      try {
+        const result = restoreMarketPackage(item)
+        if (item.kind === 'bundle') {
+          for (const entry of bundleInstallUsers(item.id)) await closeHarnessForHome(userDshHome(entry.userId)).catch(() => {})
+        }
+        persistPersistentState()
+        logAudit(user, 'plugin-market.rollback', item.id, `restored=${result.restoredVersion || '—'}`, netOf(req))
+        return json(res, 200, { ok: true, item: marketItemState(item, { any: true }), restoredVersion: result.restoredVersion, remaining: result.remaining })
+      } catch (error) {
+        return json(res, 409, { error: error.message || '回滚失败' })
+      }
     }
     if (action === 'delete') {
       if (!item.subId) return json(res, 400, { error: '内置市场条目不能删除，只能下架' })
@@ -3971,6 +5069,8 @@ const api = {
         try {
           const buffer = readFileBuffer(sub.fileId)
           const target = kind === 'skill' ? join(MARKET_PACKAGE_ROOT, marketId) : bundlePackageDir(marketId)
+          const existing = liveMarket.find((m) => m.id === marketId)
+          if (existing) backupMarketPackage(existing, `审核替换 ${sub.version || ''}`.trim())
           rmSync(target, { recursive: true, force: true })
           mkdirSync(target, { recursive: true })
           if (kind === 'skill') {
@@ -4052,6 +5152,7 @@ const api = {
     }
     if (body.desc !== undefined) item.desc = String(body.desc || '')
     if (body.instructions !== undefined) item.instructions = String(body.instructions || '').slice(0, 4000)
+    if (body.pinned !== undefined) item.pinned = Boolean(body.pinned)
     if (body.cwd !== undefined) {
       const rawCwd = String(body.cwd || '').trim()
       if (!rawCwd) {
@@ -4137,7 +5238,9 @@ const api = {
   },
   'GET /api/tasks': (req, res) => {
     taskTick()
-    json(res, 200, { items: liveTasks })
+    const user = roleOf(req)
+    const items = liveTasks.filter((t) => !t.userId || String(t.userId) === String(user.id || ''))
+    json(res, 200, { items })
   },
   'POST /api/tasks': (req, res) => {
     const user = roleOf(req)
@@ -4209,6 +5312,104 @@ const api = {
       'cache-control': 'no-store',
     })
     res.end(markdown)
+  },
+  'GET /api/conversation/trace': (req, res, url) => {
+    const user = roleOf(req)
+    const id = url.searchParams.get('id')
+    const c = conversations.find((x) => x.id === id)
+    if (!c) return json(res, 404, { error: '会话不存在' })
+    if (!conversationAllowed(user, c)) return json(res, 403, { error: '无权访问该会话轨迹', code: 'CONVERSATION_FORBIDDEN' })
+    const wanted = url.searchParams.get('trace')
+    const home = userAgentHome(user.id)
+    if (!wanted) return json(res, 200, { ok: true, items: listTraces(home, c.id) })
+    const trace = readTrace(home, c.id, wanted)
+    if (!trace) return json(res, 404, { error: '本轮运行轨迹不存在或已被清理', code: 'TRACE_NOT_FOUND' })
+    json(res, 200, { ok: true, trace })
+  },
+  'GET /api/conversation/session-log': (req, res, url) => {
+    const user = roleOf(req)
+    const id = url.searchParams.get('id')
+    const c = conversations.find((x) => x.id === id)
+    if (!c) return json(res, 404, { error: '会话不存在' })
+    if (!conversationAllowed(user, c)) return json(res, 403, { error: '无权导出该会话日志', code: 'CONVERSATION_FORBIDDEN' })
+    if (!c.dshSessionId) return json(res, 409, { error: '该会话还没有关联的 Harness 会话日志', code: 'SESSION_LOG_NOT_READY' })
+    const home = userDshHome(user.id)
+    const traceId = (c.messages || []).slice().reverse().find((m) => m.traceId)?.traceId
+    const trace = traceId ? readTrace(userAgentHome(user.id), c.id, traceId) : null
+    const archive = buildSessionLogArchive({
+      dshHome: home,
+      conversationId: c.id,
+      sessionId: c.dshSessionId,
+      trace,
+      meta: {
+        title: c.title, userId: c.userId || user.id, model: c.model, turns: c.turns || 0,
+        projectId: c.projectId || '', workspace: c.workspace || '',
+      },
+    })
+    if (!archive) return json(res, 404, { error: '没有找到该会话的 DSH 原始日志文件', code: 'SESSION_LOG_NOT_FOUND' })
+    const safeId = String(c.id || 'conversation').replace(/[^A-Za-z0-9_-]/g, '')
+    logAudit(user, 'conversation.session-log', c.id, `files=${archive.files},bytes=${archive.buffer.length}`, netOf(req))
+    res.writeHead(200, {
+      'content-type': 'application/zip',
+      'content-length': archive.buffer.length,
+      'content-disposition': `attachment; filename="jg-${safeId}.session-log.zip"`,
+      'cache-control': 'no-store',
+    })
+    res.end(archive.buffer)
+  },
+  'POST /api/conversation/fork': (req, res) => {
+    const user = roleOf(req)
+    const net = netOf(req)
+    const body = JSON.parse(req.__body || '{}')
+    const id = String(body.conversationId || body.id || '')
+    const source = conversations.find((x) => x.id === id)
+    if (!source) return json(res, 404, { error: '会话不存在' })
+    if (!conversationAllowed(user, source)) return json(res, 403, { error: '无权分叉该会话', code: 'CONVERSATION_FORBIDDEN' })
+    if (source.status === 'running') return json(res, 409, { error: '当前会话仍在执行，请结束后再分叉', code: 'CONVERSATION_RUNNING' })
+    const messages = Array.isArray(source.messages) ? source.messages : []
+    const requested = Number(body.index)
+    const upto = Number.isFinite(requested) ? Math.max(0, Math.min(messages.length - 1, requested)) : messages.length - 1
+    const copied = upto >= 0 ? messages.slice(0, upto + 1).map((m) => {
+      const next = { ...m, streaming: false, feedback: null, feedbackAt: null }
+      // 分叉会话不复用源会话的轨迹文件；下一轮会生成自己的轨迹。
+      delete next.traceId
+      delete next.runStats
+      return next
+    }) : []
+    const newId = `C-${Date.now()}`
+    const forkContext = copied
+      .slice(-16)
+      .map((m) => `${m.role === 'user' ? '用户' : '助手'}：${String(m.text || '').replace(/\s+/g, ' ').slice(0, 500)}`)
+      .join('\n')
+      .slice(0, 6000)
+    const conv = {
+      id: newId,
+      title: `分叉 · ${String(source.title || '未命名会话')}`.slice(0, 80),
+      time: '刚刚',
+      kind: source.kind || ((source.mode || source.resolvedMode) === 'work' ? 'work' : 'chat'),
+      model: source.model,
+      turns: Math.ceil(copied.length / 2),
+      status: 'done',
+      workspace: source.workspace || '默认工作区',
+      projectId: source.projectId || null,
+      mode: source.mode || source.resolvedMode || 'chat',
+      taskMode: source.taskMode || 'auto',
+      resolvedMode: source.resolvedMode || source.mode || 'chat',
+      modeReason: source.modeReason || '',
+      executionPolicy: source.executionPolicy === 'manual' ? 'manual' : 'auto',
+      agentPresetId: source.agentPresetId || '',
+      agentPresetName: source.agentPresetName || '',
+      reasoningEffort: source.reasoningEffort || '',
+      userId: String(source.userId || user.id),
+      forkedFrom: source.id,
+      forkedAt: new Date().toISOString(),
+      forkContext,
+      messages: copied,
+    }
+    conversations.unshift(conv)
+    persistPersistentState()
+    logAudit(user, 'conversation.fork', `${source.id}->${newId}`, `messages=${copied.length}`, net)
+    json(res, 200, { ok: true, conversation: conv, note: '已复制可见对话历史并新开 DSH 会话；不是 DSH 原生 fork。' })
   },
   'POST /api/conversation/policy': (req, res) => {
     const user = roleOf(req)
@@ -4305,6 +5506,184 @@ const api = {
     logAudit(user, 'conversation.delete', id, `turns=${conv.turns || 0}`, net)
     json(res, 200, { ok: true, id, note: '仅移除产品会话记录；Harness 历史文件按会话策略保留。' })
   },
+  'POST /api/terminal/exec': async (req, res) => {
+    const user = roleOf(req)
+    if (!canManage(user)) return json(res, 403, { error: '仅管理员可使用平台终端' })
+    const body = JSON.parse(req.__body || '{}')
+    const root = join(dataDirPath(), 'terminal', String(user.id || 'admin'))
+    mkdirSync(root, { recursive: true })
+    const result = await execTerminal(user.id, root, body.command, Math.max(5000, Math.min(120000, Number(body.timeoutMs) || 60000)))
+    logAudit(user, 'terminal.exec', String(body.command || '').slice(0, 160), result.ok ? `ok(${result.exitCode})` : `fail(${result.exitCode ?? 'timeout'})`, netOf(req))
+    json(res, 200, result)
+  },
+  'GET /api/terminal': (req, res) => {
+    const user = roleOf(req)
+    if (!canManage(user)) return json(res, 403, { error: '仅管理员可使用平台终端' })
+    const root = join(dataDirPath(), 'terminal', String(user.id || 'admin'))
+    mkdirSync(root, { recursive: true })
+    json(res, 200, { ok: true, ...terminalStatus(user.id, root) })
+  },
+  'POST /api/terminal/reset': (req, res) => {
+    const user = roleOf(req)
+    if (!canManage(user)) return json(res, 403, { error: '仅管理员可使用平台终端' })
+    resetTerminal(user.id)
+    logAudit(user, 'terminal.reset', user.id, 'allow', netOf(req))
+    json(res, 200, { ok: true })
+  },
+  'GET /api/worktrees': (req, res, url) => {
+    const user = roleOf(req)
+    const projectId = String(url.searchParams.get('projectId') || '').trim()
+    if (!projectId) return json(res, 400, { error: '缺少 projectId' })
+    const info = projectWorktreeInfo(user, projectId)
+    if (info.error) return json(res, info.status || 400, { error: info.error })
+    if (!info.repo) return json(res, 200, { ok: true, repo: false, projectId, cwd: info.cwd, items: [], note: info.note })
+    json(res, 200, {
+      ok: true, repo: true, projectId, projectName: info.project.name, cwd: info.cwd,
+      items: info.items, branches: info.branches, note: info.note,
+    })
+  },
+  'POST /api/worktrees/merge': (req, res) => {
+    const user = roleOf(req)
+    const body = JSON.parse(req.__body || '{}')
+    const info = projectWorktreeInfo(user, String(body.projectId || ''))
+    if (info.error) return json(res, info.status || 400, { error: info.error })
+    if (!info.repo) return json(res, 409, { error: '当前项目不是 Git 仓库', code: 'NOT_GIT_REPO' })
+    const targetPath = String(body.path || '').trim().replace(/[\\/]+$/, '')
+    const target = info.items.find((x) => x.path.toLowerCase() === targetPath.toLowerCase())
+    if (!target) return json(res, 404, { error: '工作树不存在或已移除' })
+    if (target.main) return json(res, 400, { error: '不能把主工作树合并到自身' })
+    if (!target.branch) return json(res, 409, { error: '该工作树处于分离 HEAD，无法确定要合并的分支' })
+    if (target.dirty) return json(res, 409, { error: `该工作树有 ${target.dirty} 个未提交改动，请先提交后再合并` })
+    const main = info.items[0]
+    const mainStatus = worktreeStatus(main.path)
+    if (mainStatus.dirty) return json(res, 409, { error: `主工作树有 ${mainStatus.dirty} 个未提交改动，请先提交后再合并` })
+    const merged = gitAt(main.path, ['merge', '--no-ff', '--no-edit', '--', target.branch], 30000)
+    if (!merged.ok) {
+      return json(res, 409, {
+        error: '合并未完成',
+        code: 'MERGE_FAILED',
+        branch: target.branch,
+        output: `${merged.stdout}\n${merged.stderr}`.trim(),
+        note: 'Git 已保留冲突现场，请在主工作树中解决冲突后继续。',
+      })
+    }
+    logAudit(user, 'worktree.merge', info.project.id, `${target.branch} -> ${main.branch || 'current'}`, netOf(req))
+    json(res, 200, { ok: true, branch: target.branch, output: `${merged.stdout}\n${merged.stderr}`.trim() })
+  },
+  'POST /api/worktrees/discard': (req, res) => {
+    const user = roleOf(req)
+    const body = JSON.parse(req.__body || '{}')
+    const info = projectWorktreeInfo(user, String(body.projectId || ''))
+    if (info.error) return json(res, info.status || 400, { error: info.error })
+    if (!info.repo) return json(res, 409, { error: '当前项目不是 Git 仓库', code: 'NOT_GIT_REPO' })
+    const targetPath = String(body.path || '').trim().replace(/[\\/]+$/, '')
+    const target = info.items.find((x) => x.path.toLowerCase() === targetPath.toLowerCase())
+    if (!target) return json(res, 404, { error: '工作树不存在或已移除' })
+    if (target.main) return json(res, 400, { error: '不能移除主工作树' })
+    const removed = gitAt(info.cwd, ['worktree', 'remove', '--force', target.path], 20000)
+    if (!removed.ok) {
+      return json(res, 502, {
+        error: '移除工作树失败', code: 'WORKTREE_REMOVE_FAILED',
+        output: `${removed.stdout}\n${removed.stderr}`.trim(),
+      })
+    }
+    logAudit(user, 'worktree.discard', info.project.id, target.path, netOf(req))
+    json(res, 200, { ok: true, path: target.path, note: '工作树目录及其未提交改动已移除，分支保留。' })
+  },
+  'POST /api/worktrees/delete-branch': (req, res) => {
+    const user = roleOf(req)
+    const body = JSON.parse(req.__body || '{}')
+    const info = projectWorktreeInfo(user, String(body.projectId || ''))
+    if (info.error) return json(res, info.status || 400, { error: info.error })
+    if (!info.repo) return json(res, 409, { error: '当前项目不是 Git 仓库', code: 'NOT_GIT_REPO' })
+    const branch = String(body.branch || '').trim()
+    if (!branch) return json(res, 400, { error: '缺少分支名' })
+    const target = info.branches.find((item) => item.name === branch)
+    if (!target) return json(res, 404, { error: '分支不存在或已删除' })
+    if (target.current) return json(res, 409, { error: '不能删除当前检出的分支，请先切换到其他分支' })
+    if (!target.orphan) return json(res, 409, { error: '该分支仍被工作树占用，请先移除工作树再删除分支' })
+    const deleted = gitAt(info.cwd, ['branch', '-D', branch], 10000)
+    if (!deleted.ok) {
+      return json(res, 502, {
+        error: '删除分支失败', code: 'BRANCH_DELETE_FAILED',
+        output: `${deleted.stdout}\n${deleted.stderr}`.trim(),
+      })
+    }
+    logAudit(user, 'worktree.delete-branch', info.project.id, branch, netOf(req))
+    json(res, 200, { ok: true, branch, note: '分支已被强制删除；提交对象仍可能被 Git 保留到清理前。' })
+  },
+  'GET /api/files/tree': (req, res, url) => {
+    const user = roleOf(req)
+    const rootInfo = resolveFileRoot(user, url)
+    if (rootInfo.error) return json(res, rootInfo.status || 400, { error: rootInfo.error })
+    const rel = String(url.searchParams.get('path') || '')
+    const depth = Math.max(1, Math.min(5, Number(url.searchParams.get('depth') || 1)))
+    const tree = projectFileTree(rootInfo.root, rel, depth)
+    if (tree.error) return json(res, tree.status || 400, { error: tree.error })
+    json(res, 200, { ok: true, root: rootInfo.root, label: rootInfo.label, kind: rootInfo.kind, ...tree })
+  },
+  'GET /api/files/content': (req, res, url) => {
+    const user = roleOf(req)
+    const rootInfo = resolveFileRoot(user, url)
+    if (rootInfo.error) return json(res, rootInfo.status || 400, { error: rootInfo.error })
+    const safe = safeFilePath(rootInfo.root, String(url.searchParams.get('path') || ''))
+    if (safe.error) return json(res, safe.status || 400, { error: safe.error })
+    const stat = statSync(safe.path)
+    if (stat.isDirectory()) return json(res, 400, { error: '不能预览目录' })
+    const ext = extname(safe.path).toLowerCase()
+    const base = { ok: true, path: safe.rel, name: basename(safe.path), size: stat.size, ext, mtime: stat.mtimeMs, image: FILE_IMAGE_EXT.has(ext) }
+    if (FILE_IMAGE_EXT.has(ext) || (stat.size > 0 && stat.size <= 20 * 1024 * 1024 && !FILE_TEXT_EXT.has(ext))) {
+      const head = readFileSync(safe.path).subarray(0, 512)
+      const binary = head.includes(0)
+      if (binary || FILE_IMAGE_EXT.has(ext) || !FILE_TEXT_EXT.has(ext)) {
+        return json(res, 200, { ...base, binary: true, rawUrl: `/api/files/raw?${new URLSearchParams({ projectId: url.searchParams.get('projectId') || '', conversationId: url.searchParams.get('conversationId') || '', path: safe.rel }).toString()}` })
+      }
+    }
+    if (stat.size > 1024 * 1024) return json(res, 200, { ...base, binary: false, tooLarge: true, text: '' })
+    const text = readFileSync(safe.path, 'utf8')
+    json(res, 200, { ...base, binary: false, text: text.slice(0, 400000), truncated: text.length > 400000 })
+  },
+  'GET /api/files/raw': (req, res, url) => {
+    const user = roleOf(req)
+    const rootInfo = resolveFileRoot(user, url)
+    if (rootInfo.error) return json(res, rootInfo.status || 400, { error: rootInfo.error })
+    const safe = safeFilePath(rootInfo.root, String(url.searchParams.get('path') || ''))
+    if (safe.error) return json(res, safe.status || 400, { error: safe.error })
+    const stat = statSync(safe.path)
+    if (stat.isDirectory() || stat.size > 20 * 1024 * 1024) return json(res, 400, { error: '文件不可预览或超过 20MB' })
+    const ext = extname(safe.path).toLowerCase()
+    res.writeHead(200, {
+      'content-type': FILE_RAW_TYPES[ext] || 'application/octet-stream',
+      'content-length': stat.size,
+      'cache-control': 'private, max-age=60',
+      'content-disposition': `inline; filename*=UTF-8''${encodeURIComponent(basename(safe.path))}`,
+    })
+    res.end(readFileSync(safe.path))
+  },
+  'GET /api/speech/catalog': async (req, res) => {
+    const status = modelStatus()
+    json(res, 200, { ok: true, provider: 'sensevoice-local', ...status })
+  },
+  'POST /api/speech/prepare': async (req, res) => {
+    try {
+      const status = await prepareSpeech()
+      json(res, 200, { ok: true, ...status })
+    } catch (error) {
+      json(res, 502, { error: error?.message || '本地模型准备失败' })
+    }
+  },
+  'POST /api/speech/transcribe': async (req, res) => {
+    const body = JSON.parse(req.__body || '{}')
+    const audioBase64 = String(body.audioBase64 || '')
+    if (!audioBase64 || audioBase64.length > 24 * 1024 * 1024) return json(res, 400, { error: '音频为空或超过 24MB' })
+    try {
+      const result = await transcribeSpeech(Buffer.from(audioBase64, 'base64'), body.language || 'zh')
+      json(res, 200, { ok: true, ...result })
+    } catch (error) {
+      if (error?.code === 'SPEECH_NOT_READY') return json(res, 409, { error: '本地语音模型尚未准备，请联系管理员在管理中心准备模型' })
+      json(res, 502, { error: error?.message || '本地语音识别失败' })
+    }
+  },
   'POST /api/chat': async (req, res) => {
     const user = roleOf(req)
     const net = netOf(req)
@@ -4314,6 +5693,17 @@ const api = {
     const projectId = String(body.projectId || '')
     const project = projectId ? liveProjects.find((p) => p.id === projectId && !p.removed) : null
     if (projectId && !project) return json(res, 404, { error: '项目不存在' })
+    const idempotencyKey = String(body.idempotencyKey || req.headers['idempotency-key'] || '').trim().slice(0, 160)
+    if (idempotencyKey) {
+      const prior = liveTasks.find((t) => t.kind === 'chat-run' && t.idempotencyKey === idempotencyKey && String(t.userId || '') === String(user.id || ''))
+      if (prior && ['queued', 'running', 'resuming'].includes(prior.state)) {
+        return json(res, 409, { error: '同一请求正在执行，请勿重复提交', code: 'DUPLICATE_REQUEST', task: prior })
+      }
+      if (prior && ['done', 'failed', 'cancelled', 'interrupted'].includes(prior.state)) {
+        const priorConv = conversations.find((c) => c.id === prior.conversationId)
+        return json(res, 200, { ok: true, duplicate: true, task: prior, conversation: priorConv || null, reply: prior.replyText || '', steps: prior.steps || [] })
+      }
+    }
     // 执行前再校验项目归属与设备绑定：前端列表过滤不能作为唯一防线。
     if (projectId) {
       const check = projectRunnableBy(user, project)
@@ -4325,6 +5715,12 @@ const api = {
       : 'auto'
     const route = resolveTaskMode(text, taskMode, projectId)
     const mode = route.mode
+    const webSearch = Boolean(body.webSearch)
+    if (webSearch) {
+      const webCap = platformCapabilities(accountRuntimeHome(user)).find((c) => c.id === 'CAP-WEB')
+      if (!webCap?.enabled) return json(res, 403, { error: 'Web 搜索能力当前已被平台停用', code: 'WEB_SEARCH_DISABLED' })
+      if (net === 'secret') return json(res, 403, { error: '涉密内网不开放互联网网页搜索', code: 'WEB_SEARCH_NETWORK_BLOCKED' })
+    }
     if (projectId && projectStatus(project) !== 'online') {
       return json(res, 409, {
         error: projectStatus(project) === 'other-device' ? '该项目绑定在另一台设备上，当前设备不可执行' : '项目本地文件夹当前不可用，请重新连接后再执行',
@@ -4338,8 +5734,10 @@ const api = {
     const effortLevel = ['low', 'medium', 'high'].includes(String(body.reasoningEffort || ''))
       ? String(body.reasoningEffort)
       : (requestedPreset?.defaultEffort || runtimeSettings.defaultEffort)
+    const deepThink = body.deepThink === true
     // DeepSeek provider supports off/low/high/max；产品三档映射为 低→off、中→low、高→high。
-    const reasoningEffort = effortLevel === 'low' ? 'off' : effortLevel === 'medium' ? 'low' : 'high'
+    // 深度思索使用独立推理模型，固定按高推理强度运行，不复用普通对话的档位。
+    const reasoningEffort = deepThink ? 'high' : effortLevel === 'low' ? 'off' : effortLevel === 'medium' ? 'low' : 'high'
     const requestKey = String(body.ownApiKey || '').trim()
     if (user.id === 'guest' && !requestKey) {
       return json(res, 403, {
@@ -4356,10 +5754,10 @@ const api = {
       executionPolicy = requestedPolicy
       conv = {
         id: requestedId || `C-${Date.now()}`, title: text.length > 26 ? `${text.slice(0, 26)}…` : text,
-        time: '刚刚', model: networks[net].models.find((m) => m.id === body.model)?.label || networks[net].models[0].label,
+        time: '刚刚', model: deepThink ? 'DeepSeek Reasoner' : (networks[net].models.find((m) => m.id === body.model)?.label || networks[net].models[0].label),
         turns: 0, status: 'running', workspace: '默认工作区', projectId: projectId || null, mode,
         taskMode, resolvedMode: mode, modeReason: route.reason,
-        executionPolicy, agentPresetId: requestedPreset?.id || '', agentPresetName: requestedPreset?.name || '', messages: [], reasoningEffort: effortLevel, userId: String(user.id),
+        executionPolicy, agentPresetId: requestedPreset?.id || '', agentPresetName: requestedPreset?.name || '', messages: [], reasoningEffort: deepThink ? 'high' : effortLevel, deepThink, userId: String(user.id),
       }
       conversations.unshift(conv)
     } else {
@@ -4395,7 +5793,7 @@ const api = {
     conv.messages.push({ role: 'user', text, time: new Date().toLocaleTimeString('zh-CN', { hour12: false }).slice(0, 5) })
     conv.status = 'running'
     activeRuns.add(conv.id)
-    const modelCfg = resolveModelConfig({
+    let modelCfg = resolveModelConfig({
       userConfig: liveModelConfig.get(user.id) || {},
       request: { ownApiKey: requestKey, modelName: body.modelName },
     })
@@ -4408,10 +5806,22 @@ const api = {
         model: { name: modelCfg.model, endpoint: modelCfg.baseUrl, keyConfigured: false },
       })
     }
+    if (deepThink) {
+      const deepSeekRoute = /deepseek\.com/i.test(modelCfg.baseUrl) || /deepseek/i.test(modelCfg.model)
+      if (!deepSeekRoute) {
+        conv.status = 'failed'
+        activeRuns.delete(conv.id)
+        return json(res, 409, {
+          error: '当前模型网关不支持深度思索。深度思索需要 DeepSeek 推理模型（deepseek-reasoner），请切换到 DeepSeek 官方端点后再使用。',
+          code: 'DEEP_THINK_UNSUPPORTED',
+        })
+      }
+      modelCfg = { ...modelCfg, model: 'deepseek-reasoner' }
+    }
     let chatTask = null
     let chatSlotHeld = false
     try {
-      chatTask = startChatRunTask({ conv, user, text, mode, taskMode, target: project?.name || '' })
+      chatTask = startChatRunTask({ conv, user, text, mode, taskMode, target: project?.name || '', idempotencyKey })
       await acquireChatRunSlot()
       chatSlotHeld = true
       if (conv.cancelRequested || chatTask.state === 'cancelled') {
@@ -4428,16 +5838,18 @@ const api = {
         ? `本次已启用的插件与技能（可选择使用）：\n${selectedPlugins.map((p) => `- ${p.name}（${p.kind === 'personal' ? '个人技能' : '企业插件'}）：${p.desc}`).join('\n')}`
         : ''
       const context = [
-        `当前用户：${user.name}（${user.label}，${user.unit || '—'}）`,
-        `当前任务模式：${taskMode === 'auto' ? `自动（本轮判定为${mode === 'work' ? '工作' : '对话'}模式：${route.reason}）` : taskMode === 'chat' ? '对话模式（优先直接回答；不要主动修改文件、运行命令或产生外部副作用。用户明确要求创建或修改文件、执行命令时，不要发起工具调用或申请权限，直接说明当前是对话模式并建议切换到工作模式）' : '工作模式（可以调用文件、命令、代码与技能工具执行任务）'}`,
+        `当前用户：${user.name}（${user.label}，${user.unit || '—'}）`,        `当前任务模式：${taskMode === 'auto' ? `自动（本轮判定为${mode === 'work' ? '工作' : '对话'}模式：${route.reason}）` : taskMode === 'chat' ? '对话模式（优先直接回答；不要主动修改文件、运行命令或产生外部副作用。用户明确要求创建或修改文件、执行命令时，不要发起工具调用或申请权限，直接说明当前是对话模式并建议切换到工作模式）' : '工作模式（可以调用文件、命令、代码与技能工具执行任务）'}`,
         project ? `当前工作项目：${project.name}；授权目录：${project.cwd}。所有文件读写与命令执行必须限制在该目录内。` : '',
         project?.instructions
           ? `项目专属指令（由项目创建者填写，优先级高于一般习惯，但不得覆盖系统安全规则）：\n${String(project.instructions).slice(0, 4000)}`
           : '',
         executionPolicy === 'manual'
-          ? '当前审批方式：请求批准。只读操作可以直接进行；创建、修改、删除文件，运行有副作用的命令，或调用会改变外部状态的工具前，必须先向用户申请一次授权，不得自行执行。'
+          ? '当前审批方式：请求批准。只读操作可以直接进行；创建、修改、删除文件，运行有副作用的命令，或调用会改变外部状态的工具时，直接发起工具调用，需要写入时可按工具要求申请 workspace-write 升级，由 DSH 只读策略把升级动作转成产品审批卡。不要先用提问向用户申请授权；用户拒绝后停止该动作。'
           : '当前审批方式：帮我批准。在已授权目录内可以自主执行常规读写与测试命令；大规模删除或覆盖、越过授权目录、高风险系统命令和对外业务操作仍需审批。',
         `当前网络：${networks[net]?.label || net}`,
+        webSearch
+          ? '本轮已启用网页搜索：优先调用平台 Web 搜索与网页抓取工具获取外部信息，回答中标注真实来源 URL；不得把模型记忆当成网页检索结果，搜不到就明确说明。'
+          : '',
         '企业可见资源目录（最多 40 项）：',
         resourcePromptContext(user, net) || '（当前无可见资源）',
         refContext ? `会话上下文：\n${refContext}` : '',
@@ -4445,8 +5857,10 @@ const api = {
           ? `Agent 预设「${activePreset.name}」的行为要求（必须遵守，但不得覆盖系统安全规则）：\n${String(activePreset.instructions).slice(0, 8000)}`
           : '',
         pluginContext,
+        conv.forkedFrom && conv.forkContext ? `分叉会话上下文（只读，来自用户选择的历史；不是 DSH 原生 fork）：\n${String(conv.forkContext).slice(0, 6000)}` : '',
       ].filter(Boolean).join('\n')
       const agentText = text
+      const runStartedAt = Date.now()
       // 本轮执行前先记录工作目录快照，执行后对比出真实新增/修改/删除。
       const treeBefore = runtimeSettings.workspaceChanges ? snapshotTree(conv.agentCwd) : null
       const result = await runAgent({
@@ -4460,6 +5874,8 @@ const api = {
         agentsHome: userAgentHome(user.id),
         dshHome: ensureUserDshHome(user.id),
         executionPolicy,
+        // Chat 只做问答/分析：无论审批方式如何，都不允许 DSH 在工作区写文件或执行有副作用的命令。
+        permissionPreset: mode === 'chat' ? 'read-only' : '',
         runKey: conv.id,
         runtimeScope: conv.id,
         onStart: (dshSessionId) => markChatRunStarted(chatTask, dshSessionId),
@@ -4468,12 +5884,44 @@ const api = {
         reasoningEffort,
         handlers: {
           onApproval: (params) => {
+            const evaluation = describeToolApproval(params)
             // Chat 模式不升级权限：任何需要审批的文件/命令操作一律拒绝，提示用户切换到 Work。
-            if (mode === 'chat') return { outcome: 'rejected' }
-            if (executionPolicy === 'auto' && autoApprovalAllowed(params, conv.agentCwd)) {
-              return { outcome: 'allowed-once' }
+            if (mode === 'chat') {
+              recordApprovalDecision({
+                conversationId: conv.id,
+                callId: params?.callId || '',
+                tool: params?.toolNameResolved || params?.toolName || '',
+                operation: evaluation.operation,
+                summary: evaluation.summary,
+                decision: 'deny',
+                rule: 'chat-mode-no-escalation',
+                risk: evaluation.risk,
+                actor: user.name,
+                approver: 'policy:chat-mode',
+                net,
+              })
+              return { outcome: 'rejected' }
             }
-            return createPendingInteraction('approval', conv.id, approvalDetails(params))
+            // 是否自动放行由 DSH 权限预设决定：
+            // Auto 使用 workspace-write，工作区内操作不会走到这里；能走到这里的都是沙箱升级请求。
+            // 手动使用 read-only，写入/执行本来就需要用户确认。因此这里一律人工审批。
+            const rule = executionPolicy === 'auto'
+              ? 'dsh-workspace-write-escalation'
+              : 'dsh-read-only-approval'
+            const decisionId = recordApprovalDecision({
+              conversationId: conv.id,
+              callId: params?.callId || '',
+              tool: params?.toolNameResolved || params?.toolName || '',
+              operation: evaluation.operation,
+              summary: evaluation.summary,
+              decision: 'pending',
+              rule,
+              risk: evaluation.risk,
+              actor: user.name,
+              approver: 'pending',
+              net,
+            })
+            return createPendingInteraction('approval', conv.id, approvalDetails(params, { ...evaluation, rule, decisionId }))
           },
           onQuestion: (params) => createPendingInteraction('question', conv.id, {
             questions: (Array.isArray(params?.questions) ? params.questions : []).map((q) => ({
@@ -4508,6 +5956,16 @@ const api = {
       })
       const steps = result.steps
       const workspaceChanges = treeBefore ? diffTree(treeBefore, snapshotTree(conv.agentCwd), conv.agentCwd) : []
+      const traceId = makeTraceId()
+      const runStats = buildRunStats({
+        startedAt: runStartedAt,
+        endedAt: Date.now(),
+        model: result.model,
+        contextText: context,
+        steps,
+        usage: result.usage,
+        events: result.events,
+      })
       const assistantMsg = {
         role: 'assistant', text: reply,
         time: new Date().toLocaleTimeString('zh-CN', { hour12: false }).slice(0, 5),
@@ -4521,6 +5979,33 @@ const api = {
         citations: citations.map((c) => c.id),
         model: result.model,
         usage: result.usage || null,
+        usageAt: Date.now(),
+        traceId,
+        runStats,
+      }
+      // 原始事件流单独落盘：既不放大会话快照，也让「轨迹 / 回放 / 统计」可回溯。
+      try {
+        writeTrace(userAgentHome(user.id), {
+          traceId,
+          conversationId: conv.id,
+          dshSessionId: result.sessionId || conv.dshSessionId || '',
+          userId: user.id,
+          startedAt: runStartedAt,
+          endedAt: Date.now(),
+          model: result.model,
+          input: text,
+          context,
+          stats: runStats,
+          steps: Array.isArray(steps) ? steps : [],
+          usage: result.usage || null,
+          toolAudit: Array.isArray(result.toolAudit) ? result.toolAudit : [],
+          subagents: Array.isArray(result.subagents) ? result.subagents : [],
+          workflows: Array.isArray(result.workflows) ? result.workflows : [],
+          events: Array.isArray(result.events) ? result.events : [],
+          notifications: Array.isArray(result.notifications) ? result.notifications : [],
+        })
+      } catch (traceError) {
+        console.error('[jg-server] trace persist failed:', traceError?.message || traceError)
       }
       const aiTitle = String(result.title || '').trim()
       const titleLooksUsable = aiTitle
@@ -4529,15 +6014,18 @@ const api = {
         && !/^(用户|系统|项目|助手|Context|Session|System)/i.test(aiTitle)
       if (titleLooksUsable) conv.title = aiTitle.slice(0, 80)
       conv.messages.push(assistantMsg)
+      persistPersistentState()
       conv.turns = Math.ceil(conv.messages.length / 2)
       conv.status = 'done'
       activeRuns.delete(conv.id)
       conv.model = result.model
-      if (reasoningEffort) conv.reasoningEffort = effortLevel
+      conv.deepThink = deepThink
+      if (reasoningEffort) conv.reasoningEffort = deepThink ? 'high' : effortLevel
       conv.dshSessionId = result.sessionId
       finishChatRunTask(chatTask, {
         steps: Array.isArray(steps) ? steps.length : 0,
         artifacts: workspaceChanges.length + (Array.isArray(result.deliverables) ? result.deliverables.length : 0),
+        reply,
       })
       logAudit(user, 'chat.message', conv.id, `allow(harness=${result.model})`, net)
       for (const tool of (result.toolAudit || [])) {
@@ -4592,7 +6080,7 @@ const api = {
     const conv = conversations.find((c) => c.id === pending.conversationId)
     if (conv && !conversationAllowed(user, conv)) return json(res, 403, { error: '无权处理该会话的审批', code: 'CONVERSATION_FORBIDDEN' })
     const outcome = ['allowed-once', 'rejected', 'cancelled'].includes(body.outcome) ? body.outcome : 'cancelled'
-    const item = settlePendingInteraction(requestedId, { outcome })
+    const item = settlePendingInteraction(requestedId, { outcome }, { approver: user.name })
     if (!item) return json(res, 404, { error: '审批请求已结束或不存在' })
     const detail = `${item.payload?.toolName || '工具'} ${item.payload?.summary || item.payload?.reason || ''}`.trim()
     logAudit(user, 'chat.approval', item.conversationId, `${outcome} ${detail}`.slice(0, 900), net)
@@ -4682,12 +6170,35 @@ const api = {
     logAudit(user, 'file.write', '规划一所周报_2026-11-07.md', 'allow(confirmed)', net)
     json(res, 200, { ok: true, message: msg, task })
   },
-  'GET /api/automations': (req, res) => json(res, 200, { items: [...automations, ...harnessSchedules()] }),
+  'GET /api/automations': (req, res) => {
+    const user = roleOf(req)
+    const items = liveAutomations.filter((a) => String(a.userId || '') === String(user.id || ''))
+    json(res, 200, { items: [...items, ...harnessSchedules()] })
+  },
   'POST /api/automations': (req, res) => {
     const user = roleOf(req)
     const body = JSON.parse(req.__body || '{}')
-    const item = { id: `AU-${Date.now().toString().slice(-4)}`, name: body.name || '未命名定时任务', schedule: body.schedule || '每天 08:30', status: 'active', last: '—', next: '待首次执行', owner: user.name, prompt: body.prompt || '', deliver: body.deliver || '工作台 · 定时任务结果', model: '系统默认模型' }
-    automations.unshift(item)
+    const prompt = String(body.prompt || '').trim()
+    if (!prompt) return json(res, 400, { error: '执行内容不能为空' })
+    const schedule = String(body.schedule || '每天 08:30').trim()
+    const item = {
+      id: `AU-${Date.now().toString().slice(-6)}${Math.floor(Math.random() * 90 + 10)}`,
+      name: String(body.name || '未命名定时任务').trim() || '未命名定时任务',
+      schedule,
+      scheduleRule: parseAutomationSchedule(schedule),
+      status: 'active',
+      last: '—',
+      next: '待首次执行',
+      owner: user.name,
+      userId: String(user.id || ''),
+      prompt,
+      deliver: String(body.deliver || '工作台 · 定时任务结果'),
+      model: '系统默认模型',
+      createdAt: Date.now(),
+    }
+    scheduleAutomationNext(item, Date.now())
+    liveAutomations.unshift(item)
+    persistPersistentState()
     logAudit(user, 'automation.create', item.id, 'allow', netOf(req))
     json(res, 200, { ok: true, item })
   },
@@ -4700,9 +6211,12 @@ const api = {
       logAudit(user, 'automation.pause', id, entry.status === 'active' ? 'enable' : 'pause', netOf(req))
       return json(res, 200, { ok: true, item: { id, status: entry.status === 'active' ? 'active' : 'paused' } })
     }
-    const a = automations.find((x) => x.id === id)
+    const a = liveAutomations.find((x) => x.id === id && String(x.userId || '') === String(user.id || ''))
     if (!a) return json(res, 404, { error: '不存在该定时任务' })
     a.status = a.status === 'active' ? 'paused' : 'active'
+    if (a.status === 'active') scheduleAutomationNext(a, Date.now())
+    else a.next = '—'
+    persistPersistentState()
     logAudit(user, 'automation.pause', id, a.status === 'active' ? 'enable' : 'pause', netOf(req))
     json(res, 200, { ok: true, item: a })
   },
@@ -4715,39 +6229,138 @@ const api = {
       logAudit(user, 'automation.delete', id, 'allow', netOf(req))
       return json(res, 200, { ok: true })
     }
-    const index = automations.findIndex((x) => x.id === id)
+    const index = liveAutomations.findIndex((x) => x.id === id && String(x.userId || '') === String(user.id || ''))
     if (index < 0) return json(res, 404, { error: '不存在该定时任务' })
-    automations.splice(index, 1)
+    liveAutomations.splice(index, 1)
+    persistPersistentState()
     logAudit(user, 'automation.delete', id, 'allow', netOf(req))
     json(res, 200, { ok: true })
   },
-  'POST /api/automations/run': (req, res) => {
+  'POST /api/automations/run': async (req, res) => {
     const user = roleOf(req)
     const body = JSON.parse(req.__body || '{}')
-    const a = automations.find((x) => x.id === body.id)
+    const a = liveAutomations.find((x) => x.id === String(body.id || '') && String(x.userId || '') === String(user.id || ''))
     if (!a) return json(res, 404, { error: '不存在' })
-    a.last = `${new Date().toLocaleTimeString('zh-CN', { hour12: false }).slice(0, 5)} 手动触发成功`
-    const task = { id: `T-${Date.now()}`, title: `手动执行 · ${a.name}`, state: 'queued', progress: 0, target: `定时任务 · ${a.deliver || '工作台'}`, started: '—', createdAt: Date.now() }
-    liveTasks.unshift(task)
+    const result = await runAutomation(a, 'manual')
+    if (!result.ok) return json(res, result.code === 'RUNNING' ? 409 : 500, { error: result.error, task: result.task })
     logAudit(user, 'automation.run', a.id, 'allow', netOf(req))
-    json(res, 200, { ok: true, item: a, task })
+    json(res, 200, { ok: true, item: a, task: result.task })
   },
   'GET /api/console': (req, res) => {
+    const user = roleOf(req)
     const installed = installedSkillPlugins()
-    const capabilityCount = platformCapabilities().filter((p) => p.enabled).length
+    const home = accountRuntimeHome(user)
+    const runtime = runtimeOverview(home)
+    const currentNetwork = networks[netOf(req)] || networks.inet
+    const modelConf = liveModelConfig.get(user.id) || {}
+    const gatewayEndpoint = maskGatewayEndpoint(modelConf.endpoint || 'https://ai.jg.local/v1')
+    const gatewayProvider = modelConf.provider || '统一模型网关'
+    const gatewayModel = modelConf.defaultModel || (currentNetwork.models[0] || {}).label || '—'
+    const gatewayKeySaved = Boolean(modelConf.apiKey || modelConf.key)
+    const capabilityCount = platformCapabilities(home).filter((p) => p.enabled).length
     const skillCount = installed.filter((p) => p.kind === 'personal').length
     const listedMarket = liveMarket.filter((m) => m.listed !== false && !(m.kind === 'skill' && marketSkillGlobalBaseline(m.id)))
     const listedCount = listedMarket.length
     const pluginMarketCount = listedMarket.filter((m) => m.kind === 'bundle' || m.kind === 'plugin').length
     const skillMarketCount = listedCount - pluginMarketCount
     const pendingCount = pluginSubs.filter((s) => s.status === 'pending').length
+    const totalCaps = platformCapabilities(home).length
     const sections = {
       ...consoleSections,
+      overview: {
+        ...consoleSections.overview,
+        meta: '运行概况只展示当前运行时实际计数；未接入监控的指标不展示',
+        kpis: [
+          { k: '平台服务', v: `${capabilityCount} / ${totalCaps}`, note: '运行时实际启用的公共能力', tone: 'ok' },
+          { k: '已安装技能', v: `${skillCount}`, note: '当前账号实际安装的个人技能', tone: '' },
+          { k: '插件市场', v: `${pluginMarketCount} / ${skillMarketCount}`, note: '公开插件 / 技能实际数量', tone: '' },
+          { k: '数据资源', v: `${liveResources.length}`, note: '数据中心实际 Resource 数量', tone: '' },
+          { k: '业务应用', v: `${liveApps.length}`, note: '应用注册接口实际数量', tone: '' },
+          { k: '待审核', v: `${pendingCount}`, note: pendingCount ? '插件市场待审核提交' : '暂无待审核提交', tone: pendingCount ? 'warn' : 'ok' },
+        ],
+        blocks: pendingCount ? [{
+          type: 'rows',
+          title: '待处理事项',
+          items: [[`插件审核 ${pendingCount} 项`, '员工提交的插件 / 技能', '插件市场', '待审核']],
+        }] : [],
+      },
       ai: {
         ...consoleSections.ai,
         kpis: consoleSections.ai.kpis.map((k) => (k.k === '公共能力 / 技能'
           ? { ...k, v: `${capabilityCount} / ${skillCount}`, note: `${capabilityCount} 项公共能力 · 市场 ${pluginMarketCount} 个插件 / ${skillMarketCount} 个技能 · 待审核 ${pendingCount}`, tone: pendingCount ? 'warn' : 'ok' }
           : k)),
+      },
+      data: {
+        ...consoleSections.data,
+        kpis: [
+          { k: '数据资源', v: `${liveResources.length}`, note: '数据中心实际 Resource 数量', tone: '' },
+        ],
+        blocks: [],
+      },
+      apps: {
+        ...consoleSections.apps,
+        kpis: [
+          { k: '业务应用', v: `${liveApps.length}`, note: '应用注册接口实际数量', tone: '' },
+        ],
+        blocks: [],
+      },
+      org: { ...consoleSections.org, kpis: [], blocks: [] },
+      ops: { ...consoleSections.ops, kpis: [], blocks: [] },
+      security: (() => {
+        const decisions = latestApprovalDecisions(50)
+        const pending = decisions.filter((d) => d.decision === 'pending').length
+        const highRisk = decisions.filter((d) => d.risk === 'high').length
+        const rejected = decisions.filter((d) => /reject|deny/i.test(d.decision || '')).length
+        const passed = decisions.filter((d) => /allowed/i.test(d.decision || '')).length
+        const expired = decisions.filter((d) => /expire/i.test(d.decision || '')).length
+        return {
+          ...consoleSections.security,
+          meta: '审批决策来自 SQLite approval_decisions；PTC 嵌套调用只回传工具名与升级原因，摘要会明确标注',
+          kpis: [
+            { k: '审批决策', v: `${decisions.length}`, note: '最近 50 条真实记录', tone: decisions.length ? 'ok' : '' },
+            { k: '待处理', v: `${pending}`, note: pending ? '等待人工决定' : '当前无待处理', tone: pending ? 'warn' : 'ok' },
+            { k: '高风险', v: `${highRisk}`, note: '按升级原因判定', tone: highRisk ? 'warn' : 'ok' },
+            { k: '已拒绝', v: `${rejected}`, note: '拒绝或策略拦截', tone: rejected ? 'bad' : 'ok' },
+            { k: '已通过', v: `${passed}`, note: '人工或策略放行', tone: passed ? 'ok' : '' },
+            { k: '已过期', v: `${expired}`, note: '重启或超时未决定', tone: expired ? 'warn' : 'ok' },
+          ],
+          blocks: [],
+        }
+      })(),
+      service: { ...consoleSections.service, kpis: [], blocks: [] },
+      settings: {
+        ...consoleSections.settings,
+        meta: '基础配置写入全局运行时设置；客户端版本与环境配置只读展示。保存后对新会话生效，已有对话不回溯。',
+        writable: canManage(user),
+        basic: { ...runtimeSettings },
+        version: [
+          { label: '产品版本', value: `v${productVersion}`, note: '客户端 package.json' },
+          { label: '前端版本', value: `v${frontendVersion}`, note: 'public/index.html 实际加载版本' },
+          { label: 'Electron', value: electronVersion, note: '桌面客户端外壳' },
+          { label: 'Node.js', value: process.version, note: '本地服务运行时' },
+          { label: 'DSH 运行时', value: runtime.dshVersion, note: 'dsh-runtime 实际版本' },
+          { label: '服务端口', value: String(port), note: '当前监听端口' },
+        ],
+        environment: [
+          { label: '当前网络', value: currentNetwork.label, note: currentNetwork.note || currentNetwork.desc },
+          { label: '可用网络', value: networkOrder.map((id) => networks[id]?.label || id).join(' / '), note: '网络之间独立认证、独立审计' },
+          { label: '模型网关', value: gatewayProvider, note: `${gatewayEndpoint} · ${gatewayModel}` },
+          { label: 'API Key', value: gatewayKeySaved ? '已保存（服务端托管）' : '未保存', note: '页面不回显密钥' },
+          { label: '数据库', value: join(dataDirPath(), 'jg.sqlite'), note: 'SQLite 持久化文件' },
+          { label: '运行时快照', value: runtime.dumpPath || runtime.configPath || '—', note: 'DSH 配置快照路径' },
+        ],
+        networks: networkOrder.map((id) => ({
+          id,
+          label: networks[id]?.label || id,
+          current: id === currentNetwork.id,
+          note: networks[id]?.desc || '',
+        })),
+        kpis: [
+          { k: '基础配置', v: canManage(user) ? '3 项可写' : '只读', note: '运行时设置' },
+          { k: '产品版本', v: `v${productVersion}`, note: '客户端与前端' },
+          { k: '当前环境', v: currentNetwork.label, note: '端口与运行时' },
+        ],
+        blocks: [],
       },
     }
       json(res, 200, {
@@ -5280,6 +6893,201 @@ const api = {
     })
     res.end(buffer)
   },
+  'GET /api/formats/capabilities': (req, res) => {
+    json(res, 200, {
+      items: FORMAT_REGISTRY,
+      note: '平台级数据格式基座：数据中心、智能笔记本、Agent 与 MCP 共用；不隶属于某个业务模块。',
+    })
+  },
+  'POST /api/formats/inspect': async (req, res) => {
+    const user = roleOf(req)
+    const body = JSON.parse(req.__body || '{}')
+    const inputFiles = Array.isArray(body.files) ? body.files.filter((item) => item?.id) : []
+    const fileId = String(body.fileId || '')
+    if (!fileId && !inputFiles.length) return json(res, 400, { error: '缺少数据文件' })
+    try {
+      if (inputFiles.length) {
+        const packed = []
+        for (const item of inputFiles) {
+          packed.push({ path: String(item.path || item.name || 'data.bin'), buffer: readFileBuffer(String(item.id)) })
+        }
+        const result = await inspectGeoFiles(packed, String(body.name || '空间数据'))
+        logAudit(user, 'format.inspect', `folder:${inputFiles.length}`, `${result.kind}:${result.features}`, netOf(req))
+        return json(res, 200, { ok: true, format: 'gis', ...result })
+      }
+      const buffer = readFileBuffer(fileId)
+      const format = detectDataFormat(String(body.name || ''), String(body.mime || ''), buffer)
+      const result = await inspectDataFormat(buffer, String(body.name || '数据文件'), String(body.mime || ''))
+      logAudit(user, 'format.inspect', `${fileId}:${format}`, `${result.kind || format}:${result.pageCount || result.features || 0}`, netOf(req))
+      return json(res, 200, { ok: true, format, formatLabel: result.formatLabel, ...result })
+    } catch (error) {
+      return json(res, Number(error?.status) || 422, { error: '数据格式解析失败', detail: String(error?.message || error) })
+    }
+  },
+  'POST /api/formats/extract': async (req, res) => {
+    const user = roleOf(req)
+    const body = JSON.parse(req.__body || '{}')
+    const fileId = String(body.fileId || '')
+    if (!fileId) return json(res, 400, { error: '缺少数据文件' })
+    let buffer
+    try { buffer = readFileBuffer(fileId) } catch { return json(res, 404, { error: '文件不存在或已过期' }) }
+    try {
+      const result = await extractDataFormat(buffer, String(body.name || ''), String(body.mime || ''))
+      logAudit(user, 'format.extract', `${fileId}:${result.format}`, result.text ? `chars:${result.text.length}` : `features:${result.features || 0}`, netOf(req))
+      return json(res, 200, { ok: true, ...result })
+    } catch (error) {
+      return json(res, Number(error?.status) || 422, { error: '数据内容提取失败', detail: String(error?.message || error) })
+    }
+  },
+  'POST /api/formats/export': async (req, res) => {
+    const user = roleOf(req)
+    const net = netOf(req)
+    const body = JSON.parse(req.__body || '{}')
+    const format = String(body.format || '')
+    const op = String(body.op || '')
+    const name = String(body.name || '数据')
+    const fileIds = Array.isArray(body.fileIds) ? body.fileIds.map(String).filter(Boolean) : []
+    const fileId = String(body.fileId || '')
+    const inputFiles = Array.isArray(body.files) ? body.files.filter((item) => item?.id) : []
+    const target = String(body.target || '')
+    if (!format || !op) return json(res, 400, { error: '缺少输出格式或操作' })
+    let buffer = null
+    let buffers = []
+    let files = []
+    try {
+      if (inputFiles.length) {
+        files = inputFiles.map((item) => ({ path: String(item.path || item.name || 'data.bin'), buffer: readFileBuffer(String(item.id)) }))
+      } else if (format === 'pdf' && op === 'merge') {
+        if (fileIds.length < 2) return json(res, 400, { error: '合并至少需要两个 PDF 文件' })
+        for (const id of fileIds) buffers.push(readFileBuffer(id))
+      } else {
+        if (!fileId) return json(res, 400, { error: '缺少数据文件' })
+        buffer = readFileBuffer(fileId)
+      }
+    } catch {
+      return json(res, 400, { error: '文件不存在或已过期' })
+    }
+    try {
+      const { outputs } = await exportDataFormat({ format, op, buffer, buffers, files, ranges: body.ranges, name, target })
+      const filesOut = []
+      for (const [index, output] of outputs.entries()) {
+        const id = `FMT-${Date.now().toString().slice(-8)}-${index + 1}`
+        const mime = output.mime || (output.format === 'pdf' ? 'application/pdf' : output.format === 'gis' ? 'application/geo+json' : 'application/dxf')
+        const stored = putFile({ id, name: output.name, mime, buffer: output.buffer, owner: user.name, net, note: `format.export:${format}/${op}` })
+        filesOut.push({ id: stored.id, name: output.name, size: stored.size, mime, label: output.label || '', url: `/api/files/download?id=${stored.id}` })
+      }
+      logAudit(user, 'format.export', `${format}/${op}`, `${fileIds.length || inputFiles.length || 1} in -> ${filesOut.length} out`, net)
+      return json(res, 200, { ok: true, format, op, target, files: filesOut })
+    } catch (error) {
+      return json(res, Number(error?.status) || 422, { error: '数据格式输出失败', detail: String(error?.message || error) })
+    }
+  },
+  'POST /api/geo/inspect': (req, res) => {
+    const user = roleOf(req)
+    const body = JSON.parse(req.__body || '{}')
+    const fileId = String(body.fileId || '')
+    if (!fileId) return json(res, 400, { error: '缺少 GIS/CAD 文件' })
+    let buffer
+    try { buffer = readFileBuffer(fileId) } catch { return json(res, 400, { error: '文件不存在或已过期' }) }
+    try {
+      const result = inspectSpatial(buffer, String(body.name || 'spatial.json'))
+      logAudit(user, 'geo.inspect', fileId, `${result.kind}:${result.features}`, netOf(req))
+      return json(res, 200, { ok: true, ...result })
+    } catch (error) {
+      return json(res, 422, { error: 'GIS/CAD 解析失败', detail: String(error?.message || error) })
+    }
+  },
+  'GET /api/pdf/view': (req, res, url) => {
+    const fileId = String(url.searchParams.get('fileId') || '')
+    if (!fileId) return json(res, 400, { error: '缺少 PDF 文件' })
+    let buffer
+    try { buffer = readFileBuffer(fileId) } catch { return json(res, 404, { error: 'PDF 文件不存在或已过期' }) }
+    if (!buffer || buffer.subarray(0, 5).toString() !== '%PDF-') return json(res, 400, { error: '不是有效的 PDF 文件' })
+    res.writeHead(200, {
+      'content-type': 'application/pdf',
+      'content-length': buffer.length,
+      'content-disposition': 'inline; filename="preview.pdf"',
+      'cache-control': 'no-store',
+    })
+    res.end(buffer)
+  },
+  'POST /api/pdf/inspect': async (req, res) => {
+    const user = roleOf(req)
+    const body = JSON.parse(req.__body || '{}')
+    const fileId = String(body.fileId || '')
+    if (!fileId) return json(res, 400, { error: '缺少 PDF 文件' })
+    let buffer
+    try { buffer = readFileBuffer(fileId) } catch { return json(res, 400, { error: 'PDF 文件不存在或已过期' }) }
+    if (!buffer || buffer.subarray(0, 5).toString() !== '%PDF-') return json(res, 400, { error: '不是有效的 PDF 文件（缺少 %PDF- 文件头）' })
+    try {
+      const info = await inspectPdf(buffer)
+      logAudit(user, 'pdf.inspect', fileId, 'allow', netOf(req))
+      return json(res, 200, { ok: true, ...info })
+    } catch (error) {
+      return json(res, 422, { error: 'PDF 解析失败', detail: String(error?.message || error) })
+    }
+  },
+  'POST /api/pdf/extract': (req, res) => {
+    const user = roleOf(req)
+    const body = JSON.parse(req.__body || '{}')
+    const fileId = String(body.fileId || '')
+    if (!fileId) return json(res, 400, { error: '缺少 PDF 文件' })
+    let buffer
+    try { buffer = readFileBuffer(fileId) } catch { return json(res, 400, { error: 'PDF 文件不存在或已过期' }) }
+    if (!buffer || buffer.subarray(0, 5).toString() !== '%PDF-') return json(res, 400, { error: '不是有效的 PDF 文件' })
+    try {
+      const result = extractPdfText(buffer)
+      logAudit(user, 'pdf.extract', fileId, `chars:${result.text.length}`, netOf(req))
+      return json(res, 200, { ok: true, ...result })
+    } catch (error) {
+      return json(res, 422, { error: 'PDF 文本提取失败', detail: String(error?.message || error) })
+    }
+  },
+  'POST /api/pdf/merge': async (req, res) => {
+    const user = roleOf(req)
+    const net = netOf(req)
+    const body = JSON.parse(req.__body || '{}')
+    const fileIds = Array.isArray(body.fileIds) ? body.fileIds.map(String).filter(Boolean) : []
+    if (fileIds.length < 2) return json(res, 400, { error: '合并至少需要两个 PDF 文件' })
+    const buffers = []
+    for (const id of fileIds) {
+      try { buffers.push(readFileBuffer(id)) } catch { return json(res, 400, { error: `PDF 文件不存在或已过期：${id}` }) }
+    }
+    try {
+      const output = await mergePdfs(buffers)
+      const filename = `${String(body.name || '合并文档').replace(/[\\/:*?"<>|]/g, '_').replace(/\.pdf$/i, '')}-合并.pdf`
+      const id = `PDF-${Date.now().toString().slice(-8)}`
+      const stored = putFile({ id, name: filename, mime: 'application/pdf', buffer: output, owner: user.name, net, note: 'PDF 合并' })
+      logAudit(user, 'pdf.merge', `${fileIds.length} files -> ${filename}`, `allow(${output.length})`, net)
+      return json(res, 200, { ok: true, file: { id: stored.id, name: filename, size: stored.size, url: `/api/files/download?id=${stored.id}` }, pages: (await inspectPdf(output)).pageCount })
+    } catch (error) {
+      return json(res, 422, { error: 'PDF 合并失败', detail: String(error?.message || error) })
+    }
+  },
+  'POST /api/pdf/split': async (req, res) => {
+    const user = roleOf(req)
+    const net = netOf(req)
+    const body = JSON.parse(req.__body || '{}')
+    const fileId = String(body.fileId || '')
+    if (!fileId) return json(res, 400, { error: '缺少 PDF 文件' })
+    let buffer
+    try { buffer = readFileBuffer(fileId) } catch { return json(res, 400, { error: 'PDF 文件不存在或已过期' }) }
+    try {
+      const outputs = await splitPdf(buffer, body.ranges)
+      const base = String(body.name || '拆分文档').replace(/[\\/:*?"<>|]/g, '_').replace(/\.pdf$/i, '')
+      const files = []
+      for (const item of outputs) {
+        const filename = `${base}-${item.label}.pdf`
+        const id = `PDF-${Date.now().toString().slice(-8)}-${files.length + 1}`
+        const stored = putFile({ id, name: filename, mime: 'application/pdf', buffer: item.buffer, owner: user.name, net, note: 'PDF 拆分' })
+        files.push({ id: stored.id, name: filename, size: stored.size, pages: item.label, url: `/api/files/download?id=${stored.id}` })
+      }
+      logAudit(user, 'pdf.split', `${fileId} -> ${files.length} files`, 'allow', net)
+      return json(res, 200, { ok: true, files })
+    } catch (error) {
+      return json(res, 422, { error: 'PDF 拆分失败', detail: String(error?.message || error) })
+    }
+  },
   'POST /api/files/upload': (req, res, url) => {
     const user = roleOf(req)
     const net = netOf(req)
@@ -5740,7 +7548,7 @@ const api = {
     const user = roleOf(req)
     json(res, 200, {
       items: liveAcademy,
-      categories: [{ key: 'all', label: '全部' }, { key: 'classic', label: '经典项目' }, { key: 'video', label: '学习视频' }, { key: 'doc', label: '学习课件' }, { key: 'spec', label: '规范文件' }],
+      categories: [{ key: 'all', label: '全部' }, { key: 'classic', label: '经典项目' }, { key: 'video', label: '学习视频' }, { key: 'doc', label: '学习课件' }, { key: 'spec', label: '规范文件' }, { key: 'report', label: '调研报告' }],
       stats: { ...academyStats, user: user.name, dept: user.unit },
     })
   },
@@ -5771,6 +7579,17 @@ const api = {
     const tool = String(body.tool || '')
     const args = body.args && typeof body.args === 'object' ? body.args : {}
     if (!isExternalSideEffectTool(tool) && !isExternalSideEffectTool(`mcp__jg__${tool}`)) {
+      recordApprovalDecision({
+        tool: `mcp__jg__${tool}`,
+        operation: 'read',
+        summary: summarizeToolCall(`mcp__jg__${tool}`, args),
+        decision: 'auto-allow',
+        rule: 'mcp-non-side-effect',
+        risk: 'low',
+        actor: user.name,
+        approver: 'policy:mcp',
+        net: netOf(req),
+      })
       return json(res, 200, { ok: true, outcome: 'allowed-once', note: '非外部副作用工具，无需审批' })
     }
     const active = [...activeRuns]
@@ -5783,18 +7602,34 @@ const api = {
       return json(res, 409, { error: '当前有多个会话正在执行，无法确定审批归属，MCP 写操作已拒绝。', code: 'AMBIGUOUS_ACTIVE_RUN' })
     }
     const conv = active[0]
+    const evaluation = describeToolApproval({
+      toolNameResolved: `mcp__jg__${tool}`,
+      toolArgs: JSON.stringify(args),
+    })
+    const decisionId = recordApprovalDecision({
+      conversationId: conv.id,
+      tool: `mcp__jg__${tool}`,
+      operation: evaluation.operation,
+      summary: evaluation.summary,
+      decision: 'pending',
+      rule: 'external-side-effect',
+      risk: 'high',
+      actor: user.name,
+      approver: 'pending',
+      net: netOf(req),
+    })
     const details = approvalDetails({
       toolNameResolved: `mcp__jg__${tool}`,
       toolArgs: JSON.stringify(args),
       reason: 'MCP 外部副作用工具需要人工确认',
-    })
-    const result = await createPendingInteraction('approval', conv.id, details)
+    }, { ...evaluation, decisionId })
+    const result = await createPendingInteraction('approval', conv.id, { ...details, decisionId })
     const allowed = result?.outcome === 'allowed-once'
     logAudit(user, 'mcp.approval', conv.id, `${allowed ? 'allow' : String(result?.outcome || 'cancelled')} ${details.toolName} ${details.summary}`.slice(0, 900), netOf(req))
     if (!allowed) return json(res, 403, { error: '用户未批准该 MCP 外部副作用操作', outcome: result?.outcome || 'cancelled' })
     return json(res, 200, { ok: true, outcome: 'allowed-once' })
   },
-  'POST /api/ai/invoke': (req, res) => {
+  'POST /api/ai/invoke': async (req, res) => {
     const mcpToken = process.env.JG_MCP_TOKEN || ''
     const viaMcp = Boolean(mcpToken) && String(req.headers['x-jg-mcp-token'] || '') === mcpToken
     let user
@@ -5810,7 +7645,9 @@ const api = {
     const tool = aiTools.find((t) => t.name === name)
     if (!tool) return json(res, 404, { error: '工具不存在', hint: '先调用 GET /api/ai/tools 获取可用工具' })
     const TOOL_MODULE = { 云空间: 'drive', 通知公告: 'notice', 教学园地: 'academy', 通讯录: 'contacts', 即时通讯: 'im', 任务: 'tasks', 智能笔记本: 'knowledge', 数据中心: 'datacenter' }
-    if (!user.visibleModules.includes(TOOL_MODULE[tool.target] || 'tasks')) {
+    // 平台基础服务不属于任何业务模块：只要当前账号已登录，就按服务自身的资源边界校验。
+    const PLATFORM_BASE_TOOLS = new Set(['format_capabilities', 'format_inspect', 'format_extract', 'format_export', 'code_review'])
+    if (!PLATFORM_BASE_TOOLS.has(name) && !user.visibleModules.includes(TOOL_MODULE[tool.target] || 'tasks')) {
       logAudit(user, 'ai.invoke', name, 'deny(403)', netOf(req))
       return json(res, 403, { error: `当前角色无权调用「${tool.label}」` })
     }
@@ -5873,6 +7710,61 @@ const api = {
       const q = String(args.q || '').trim().toLowerCase()
       const list = liveResources.filter((r) => (q ? `${r.name}${(r.tags || []).join('')}`.toLowerCase().includes(q) : true))
       result = { count: list.length, items: list.slice(0, 5).map((r) => ({ id: r.id, name: r.name, security: r.security, scope: r.scope, extent: r.extent, updated: r.updated })) }
+    } else if (name === 'format_capabilities') {
+      result = { items: FORMAT_REGISTRY, note: 'PDF / GIS / CAD 是平台级格式基座，不是数据中心模块。' }
+    } else if (name === 'format_inspect') {
+      const fileId = String(args.fileId || '')
+      if (!fileId) return json(res, 400, { error: '缺少数据文件 ID' })
+      let buffer
+      try { buffer = readFileBuffer(fileId) } catch { return json(res, 404, { error: '文件不存在或已过期' }) }
+      try {
+        const data = await inspectDataFormat(buffer, String(args.name || '数据文件'), String(args.mime || ''))
+        result = { fileId, format: data.format, formatLabel: data.formatLabel, kind: data.kind, pageCount: data.pageCount, features: data.features, layers: data.layers, bbox: data.bbox, crs: data.crs, note: data.note || '' }
+      } catch (error) {
+        return json(res, Number(error?.status) || 422, { error: '数据格式解析失败', detail: String(error?.message || error) })
+      }
+    } else if (name === 'format_extract') {
+      const fileId = String(args.fileId || '')
+      if (!fileId) return json(res, 400, { error: '缺少数据文件 ID' })
+      let buffer
+      try { buffer = readFileBuffer(fileId) } catch { return json(res, 404, { error: '文件不存在或已过期' }) }
+      try { result = await extractDataFormat(buffer, String(args.name || ''), String(args.mime || '')) } catch (error) { return json(res, Number(error?.status) || 422, { error: '数据内容提取失败', detail: String(error?.message || error) }) }
+    } else if (name === 'format_export') {
+      const format = String(args.format || '')
+      const op = String(args.op || '')
+      if (!format || !op) return json(res, 400, { error: '缺少输出格式或操作' })
+      const fileIds = Array.isArray(args.fileIds) ? args.fileIds.map(String).filter(Boolean) : []
+      let buffer = null
+      let buffers = []
+      try {
+        if (format === 'pdf' && op === 'merge') {
+          if (fileIds.length < 2) return json(res, 400, { error: '合并至少需要两个 PDF 文件' })
+          for (const id of fileIds) buffers.push(readFileBuffer(id))
+        } else {
+          const fileId = String(args.fileId || '')
+          if (!fileId) return json(res, 400, { error: '缺少数据文件 ID' })
+          buffer = readFileBuffer(fileId)
+        }
+      } catch {
+        return json(res, 400, { error: '文件不存在或已过期' })
+      }
+      const { outputs } = await exportDataFormat({ format, op, buffer, buffers, ranges: args.ranges, name: String(args.name || '数据') })
+      const files = []
+      for (const [index, output] of outputs.entries()) {
+        const id = `FMT-${Date.now().toString().slice(-8)}-${index + 1}`
+        const mime = output.format === 'pdf' ? 'application/pdf' : output.format === 'gis' ? 'application/geo+json' : 'application/dxf'
+        const stored = putFile({ id, name: output.name, mime, buffer: output.buffer, owner: user.name, net: netOf(req), note: `format.export:${format}/${op}` })
+        files.push({ id: stored.id, name: output.name, size: stored.size, mime, label: output.label || '', url: `/api/files/download?id=${stored.id}` })
+      }
+      result = { format, op, files }
+    } else if (name === 'code_review') {
+      const projectId = String(args.projectId || '')
+      if (!projectId) return json(res, 400, { error: '缺少项目 ID' })
+      const project = liveProjects.find((p) => p.id === projectId && !p.removed)
+      if (!project || !projectVisibleTo(user, project)) return json(res, 403, { error: '当前身份无权审查该项目' })
+      if (!project.cwd) return json(res, 400, { error: '该项目尚未绑定本地文件夹' })
+      const run = await runHarnessService('code-review', { cwd: project.cwd, scope: args.scope, maxFiles: args.maxFiles })
+      result = { project: { id: project.id, name: project.name, cwd: project.cwd }, ...run }
     } else if (name === 'task_create') {
       const title = String(args.title || '').trim() || 'AI 创建的待办'
       result = { ok: true, id: `T-AI${String(Date.now()).slice(-5)}`, title, state: '待分配' }
@@ -6083,6 +7975,12 @@ const api = {
       : audit.filter((item) => item.actor === user.name && item.net === netLabel)
     return json(res, 200, { items: items.slice(0, 12) })
   },
+  'GET /api/approval-decisions': (req, res, url) => {
+    const user = roleOf(req)
+    if (!canManage(user)) return json(res, 403, { error: '仅管理角色可查看审批决策' })
+    const limit = Math.max(1, Math.min(Number(url?.searchParams?.get('limit') || 50) || 50, 200))
+    return json(res, 200, { items: latestApprovalDecisions(limit) })
+  },
   'POST /api/attempt': (req, res) => {
     const user = roleOf(req)
     const net = netOf(req)
@@ -6119,11 +8017,17 @@ const server = createServer(async (req, res) => {
     if (!handler) return json(res, 404, { error: `no route ${key}` })
 
     // 保留登录前的三个入口：读取引导、选网络、选角色；其余 API 必须先有服务端会话。
-    const publicApi = new Set(['GET /api/bootstrap', 'POST /api/login', 'POST /api/network', 'POST /api/logout'])
+    const publicApi = new Set(['GET /api/captcha', 'GET /api/bootstrap', 'POST /api/login', 'POST /api/network', 'POST /api/logout'])
     const mcpToken = process.env.JG_MCP_TOKEN || ''
     const viaMcp = Boolean(mcpToken) && String(req.headers['x-jg-mcp-token'] || '') === mcpToken
     if (!publicApi.has(key) && !viaMcp && !sessionOf(req)) {
       return json(res, 401, { error: '未登录或会话已过期，请重新选择身份', code: 'AUTH_REQUIRED' })
+    }
+    if (!publicApi.has(key) && !viaMcp && key !== 'POST /api/account/password') {
+      const account = sessionOf(req)?.accountId ? getAccount(sessionOf(req).accountId) : null
+      if (account?.mustChangePassword) {
+        return json(res, 403, { error: '首次登录需先修改初始密码', code: 'PASSWORD_CHANGE_REQUIRED' })
+      }
     }
 
     const blockedModule = viaMcp ? null : guestBlock(roleOf(req), key)

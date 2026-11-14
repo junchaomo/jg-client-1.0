@@ -1,0 +1,282 @@
+/* 九规智能中枢 Unified Layout System
+ * 仅通过高优先级选择器覆盖历史页面样式，不修改 styles.css。
+ */
+:root {
+  --layout-rail-w: 58px;
+  --layout-sidebar-w: 272px;
+  --layout-gutter: 24px;
+  --layout-menubar-h: 38px;
+  --layout-border: #e5e5e5;
+  --layout-surface: #ffffff;
+  --layout-motion: 180ms cubic-bezier(.22,.61,.36,1);
+  --layout-shadow: 0 18px 48px rgba(17, 24, 39, .12);
+  --layout-radius: 12px;
+}
+
+#app.app.layout-shell:not(.has-cloud):not(.has-admin),
+#app.layout-shell {
+  --layout-active-sidebar-w: 0px;
+  position: relative;
+  display: grid !important;
+  grid-template-columns: var(--layout-rail-w) var(--layout-active-sidebar-w) minmax(0, 1fr) !important;
+  grid-template-rows: minmax(0, 1fr) !important;
+  height: calc(100vh - var(--layout-menubar-h)) !important;
+  min-height: 0;
+  background: var(--layout-surface);
+  overflow: hidden;
+}
+
+#app.app.layout-shell.sidebar-open:not(.has-cloud):not(.has-admin),
+#app.layout-shell.sidebar-open {
+  --layout-active-sidebar-w: var(--layout-sidebar-w);
+}
+
+#app.layout-shell > .railbar {
+  grid-column: 1 !important;
+  grid-row: 1 !important;
+  position: relative;
+  z-index: 20;
+  height: 100%;
+}
+
+#app.layout-shell > .main {
+  grid-column: 3 !important;
+  grid-row: 1 !important;
+  width: 100% !important;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--layout-surface);
+  overflow: hidden;
+}
+
+/* 全局不再保留“企业空间 / 模块”面包屑层；导航与侧栏直接位于菜单栏下方。 */
+#app.layout-shell > .main > .topbar {
+  display: none !important;
+}
+
+#app.layout-shell .topbar .top-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+#app.layout-shell .topbar .crumb {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#app.layout-shell .topbar .top-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+}
+
+.layout-toggle {
+  width: 30px;
+  height: 30px;
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: #4b5563;
+  cursor: pointer;
+}
+.layout-toggle:hover { background: #f2f4f7; color: #111827; }
+.layout-toggle:focus-visible { outline: 2px solid #111827; outline-offset: 2px; }
+.layout-toggle[aria-pressed="true"] { background: #f2f4f7; }
+.layout-toggle svg { width: 17px; height: 17px; display: block; }
+
+#app.layout-shell .main-body {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  overflow: hidden;
+  position: relative;
+}
+
+#app.layout-shell .main-body > .view {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  padding: var(--layout-gutter) var(--layout-gutter) 32px !important;
+  overflow-y: auto;
+  overflow-x: hidden;
+  box-sizing: border-box;
+}
+
+/* 固定推挤式侧栏：与左侧图标栏并排，主内容从侧栏右侧开始。 */
+#app.layout-shell > .sidebar {
+  position: relative !important;
+  z-index: 30 !important;
+  grid-column: 2 !important;
+  grid-row: 1 !important;
+  top: auto !important;
+  left: auto !important;
+  right: auto !important;
+  bottom: auto !important;
+  width: var(--layout-active-sidebar-w) !important;
+  min-width: 0 !important;
+  max-width: var(--layout-active-sidebar-w) !important;
+  height: 100% !important;
+  display: flex !important;
+  flex-direction: column !important;
+  overflow: hidden !important;
+  background: var(--layout-surface) !important;
+  border-right: 1px solid var(--layout-border) !important;
+  box-shadow: none !important;
+  border-radius: 0 !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  transform: none !important;
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+}
+
+#app.layout-shell:not(.sidebar-open) > .sidebar {
+  display: none !important;
+}
+
+#app.layout-shell > .sidebar > .sidebar-scroll,
+#app.layout-shell > .sidebar > .layout-sidebar-content {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+#app.layout-shell > .sidebar > .layout-sidebar-content {
+  width: 100% !important;
+  max-width: none !important;
+  height: auto !important;
+  min-height: 100%;
+  box-sizing: border-box;
+  border: 0 !important;
+  border-radius: 0 !important;
+  background: var(--layout-surface) !important;
+}
+
+#app.layout-shell > .sidebar .tk-left,
+#app.layout-shell > .sidebar .settings-side,
+#app.layout-shell > .sidebar .sk-left,
+#app.layout-shell > .sidebar .mc-nav {
+  width: 100% !important;
+  max-width: none !important;
+  height: 100% !important;
+  min-height: 0 !important;
+  border-right: 0 !important;
+  box-shadow: none !important;
+  background: var(--layout-surface) !important;
+  box-sizing: border-box;
+}
+
+#app.layout-shell > .sidebar .tk-left,
+#app.layout-shell > .sidebar .mc-nav {
+  overflow-y: auto;
+}
+
+#app.layout-shell .pane-grip {
+  top: 0 !important;
+  right: -3px !important;
+  bottom: 0 !important;
+  height: auto !important;
+  z-index: 6;
+}
+
+/* 抽出业务侧栏后，主内容不再保留第二套左右分栏 */
+#app.layout-shell .settings-shell,
+#app.layout-shell .sk-wrap,
+#app.layout-shell .mc-shell,
+#app.layout-shell .im-wrap {
+  display: block !important;
+  height: 100% !important;
+  min-height: 0 !important;
+}
+
+#app.layout-shell .settings-main,
+#app.layout-shell .pl-main,
+#app.layout-shell .mc-main,
+#app.layout-shell .im-right {
+  width: 100% !important;
+  max-width: none !important;
+  min-width: 0;
+}
+
+#app.layout-shell .im-right {
+  height: 100% !important;
+  min-height: 0 !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+}
+
+#app.layout-shell .sk-main,
+#app.layout-shell .settings-main {
+  padding-left: 0 !important;
+}
+
+#app.layout-shell .view:has(.tk-main-page) {
+  padding: 0 !important;
+  overflow: hidden !important;
+}
+
+#app.layout-shell .sk-wrap .pane-splitter,
+#app.layout-shell .mc-shell .pane-splitter {
+  display: none !important;
+}
+
+/* 云浏览器展开时：图标栏 + 侧栏 + 主内容 + 云浏览器 */
+#app.layout-shell.has-cloud {
+  grid-template-columns: var(--layout-rail-w) var(--layout-active-sidebar-w) minmax(0, 1fr) var(--cb-w) !important;
+}
+#app.layout-shell.has-cloud > .main { grid-column: 3 !important; }
+#app.layout-shell.has-cloud > #cbPanel { grid-column: 4 !important; grid-row: 1 !important; }
+
+/* 单栏页面统一内容基线 */
+#app.layout-shell .view[data-layout="single"] > .view-head,
+#app.layout-shell .view[data-layout="single"] > .mc-block,
+#app.layout-shell .view[data-layout="single"] > .form-note {
+  max-width: 1180px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.layout-sidebar-placeholder {
+  padding: 18px 16px;
+  color: #8b929c;
+  font-size: 12px;
+  line-height: 1.7;
+}
+.layout-sidebar-placeholder-title {
+  color: #2f343a;
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+.layout-sidebar-placeholder-note { color: #8b929c; }
+
+@media (max-width: 1100px) {
+  #app.app.layout-shell.sidebar-open:not(.has-cloud):not(.has-admin),
+  #app.layout-shell.sidebar-open { --layout-active-sidebar-w: var(--layout-sidebar-w); }
+  #app.layout-shell .mc-kpis { grid-template-columns: repeat(auto-fit, minmax(104px, 1fr)) !important; }
+  #app.layout-shell .pl-head > div { flex-wrap: wrap !important; }
+  #app.layout-shell .pl-head-main { flex: 1 1 190px !important; min-width: 0 !important; }
+  #app.layout-shell .pl-acts { flex-wrap: wrap !important; }
+}
+
+@media (max-width: 760px) {
+  :root { --layout-gutter: 14px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #app.layout-shell > .sidebar { transition: none !important; }
+}

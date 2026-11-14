@@ -425,7 +425,7 @@ function workflowsOf(events) {
 }
 
 /** 子代理运行摘要 + 子代理最终正文，独立于执行步骤，供消息块展示。 */
-function subagentsOf(notifications) {
+function subagentsOf(notifications, tasks = []) {
   const rows = new Map()
   for (const n of (notifications || [])) {
     if (n?.method === 'subagent.started') {
@@ -437,11 +437,13 @@ function subagentsOf(notifications) {
         status: 'running',
         stopReason: '',
         output: '',
+        name: '',
+        task: '',
       })
     } else if (n?.method === 'subagent.finished') {
       const childSessionId = String(n.params?.childSessionId || '')
       if (!childSessionId) continue
-      const row = rows.get(childSessionId) || { childSessionId, provider: '子代理', status: 'ok', stopReason: '', output: '' }
+      const row = rows.get(childSessionId) || { childSessionId, provider: '子代理', status: 'ok', stopReason: '', output: '', name: '', task: '' }
       row.provider = n.params?.provider || row.provider
       row.status = n.params?.status || row.status
       row.stopReason = n.params?.stopReason || ''
@@ -449,7 +451,32 @@ function subagentsOf(notifications) {
       rows.set(childSessionId, row)
     }
   }
-  return [...rows.values()]
+  const list = [...rows.values()]
+  list.forEach((row, index) => {
+    const task = tasks[index]
+    if (!task) return
+    if (task.name) row.name = task.name
+    if (task.task) row.task = task.task
+  })
+  return list
+}
+
+/** 从 run_code 审计中提取 spawn_teammate 的名称与任务说明，按启动顺序映射到子代理。 */
+function subagentTasksOf(audit = []) {
+  const rows = []
+  for (const item of (audit || [])) {
+    const detail = String(item?.detail || '')
+    if (!/spawn_teammate|spawn_subagent|spawn_agent/i.test(detail)) continue
+    let parsed = {}
+    try { parsed = JSON.parse(detail) || {} } catch {}
+    // audit detail 会在 800 字符处截断，截断后的 JSON 无法解析；
+    // 因此对原始文本先还原转义引号，再按字段正则提取，避免任务板永远显示 spawn。
+    const text = String(parsed.code || detail).replace(/\\n/g, '\n').replace(/\\"/g, '"')
+    const name = text.match(/name\s*:\s*["'`]([^"'`]+)/)?.[1] || ''
+    const task = text.match(/description\s*:\s*["'`]([^"'`]+)/)?.[1] || String(parsed.description || '')
+    if (name || task) rows.push({ name, task })
+  }
+  return rows
 }
 
 function auditOf(events) {
@@ -506,7 +533,7 @@ export async function runtimeRequest(method, params = {}, cfg = {}) {
  * 在 DSH 会话中运行一轮 agent。已存在 dshSessionId 时续用同一会话，
  * 不存在时自动创建新会话并返回 id。
  */
-export async function runAgent({ apiKey, baseUrl, model, text, sessionId, context, images, handlers, reasoningEffort, cwd, agentsHome = '', dshHome = '', executionPolicy = 'auto', runKey = '', runtimeScope = '', onStart = null, shouldCancel = null }) {
+export async function runAgent({ apiKey, baseUrl, model, text, sessionId, context, images, handlers, reasoningEffort, cwd, agentsHome = '', dshHome = '', executionPolicy = 'auto', permissionPreset = '', runKey = '', runtimeScope = '', onStart = null, shouldCancel = null }) {
   if (!apiKey) throw new HarnessError('没有可用的模型密钥', { code: 'MODEL_KEY_MISSING', status: 503 })
   const effort = ['off', 'low', 'medium', 'high', 'max'].includes(String(reasoningEffort || '')) ? String(reasoningEffort) : ''
   const cfg = { apiKey, baseUrl, model, reasoningEffort: effort, agentsHome, dshHome }
@@ -558,6 +585,7 @@ export async function runAgent({ apiKey, baseUrl, model, text, sessionId, contex
       await new Promise((resolve) => setTimeout(resolve, 300))
     }
   }
+  const resolvedPermissionPreset = permissionPreset || (executionPolicy === 'auto' ? 'workspace-write' : 'read-only')
   try {
     let session
     if (sessionId) {
@@ -573,8 +601,9 @@ export async function runAgent({ apiKey, baseUrl, model, text, sessionId, contex
     }
     // 通过 DSH 原生 Session Working Directory 绑定真实执行目录。
     if (cwd) await session.setWorkingDirectory(cwd)
-    // 统一用 read-only 入口；Auto 由服务端对每次审批做低风险自动放行，高风险仍落人工审批。
-    await session.run('/permission read-only')
+    // DSH 原生权限预设：Auto 使用 workspace-write 沙箱，工作区内读写/测试/构建由沙箱直接放行；
+    // 越界、外部写入和权限升级仍由 DSH 的 approval/request 升级到产品审批。手动模式保持 read-only。
+    await session.run(`/permission ${resolvedPermissionPreset}`)
     if (planActivate) await session.run('/plan')
     // 记录本轮正在执行的 SDK 会话，供产品按会话调用原生 session/cancel。
     if (entry && runKey) entry.runs.set(String(runKey), { sessionId: String(session.id), startedAt: Date.now() })
@@ -596,7 +625,7 @@ export async function runAgent({ apiKey, baseUrl, model, text, sessionId, contex
       try {
         const session = harness.session()
         if (cwd) await session.setWorkingDirectory(cwd)
-        await session.run('/permission read-only')
+        await session.run(`/permission ${resolvedPermissionPreset}`)
         if (planActivate) await session.run('/plan')
         if (entry && runKey) entry.runs.set(String(runKey), { sessionId: String(session.id), startedAt: Date.now() })
         if (typeof onStart === 'function') onStart(String(session.id))
@@ -618,20 +647,21 @@ export async function runAgent({ apiKey, baseUrl, model, text, sessionId, contex
   const actualModel = modelOf(result.events || [], model)
   const reply = (result.finalResponse || '').trim() || '任务已完成。'
   const subagentNotifs = relevantSubagentNotifications(String(result.sessionId || ''), [...backgroundNotifications, ...(result.notifications || [])])
+  const audit = auditOf(result.events || [])
   return {
     reply,
     sessionId: result.sessionId,
     model: actualModel,
     latencyMs,
     steps: stepsOf(result.events || [], result.notifications || [], actualModel, latencyMs),
-    subagents: subagentsOf(subagentNotifs),
+    subagents: subagentsOf(subagentNotifs, subagentTasksOf(audit)),
     workflows: workflowsOf(result.events || []),
     todos: todosOf(result.events || []),
     usage: usageOf(result.events || []),
     title: titleOf(result.events || []),
     jobs: jobsOf(result.events || []),
     deliverables: deliverablesOf(result.events || []),
-    toolAudit: auditOf(result.events || []),
+    toolAudit: audit,
     finishReason: result.finishReason,
     events: result.events || [],
     notifications: result.notifications || [],

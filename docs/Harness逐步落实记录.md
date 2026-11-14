@@ -998,3 +998,533 @@
 - 新增 `public/ui-close.css` 统一关闭按钮的尺寸、边框、背景与 hover 状态。
 
 **验证**：DSH 运行时插件弹窗、平台能力详情、插件/技能详情均只有一个右上角关闭入口；页面无重复关闭按钮。
+
+## 40. P0 全链路轨迹、轮次统计、会话分叉与完整日志（2026-11-13）
+
+新增 `trace.mjs`，产品层直接消费 DSH `runAgent()` 返回的真实事件流，不改 DSH 内核：
+
+- 每轮落盘 `data/agents/<userId>/traces/<conversationId>/<traceId>.json`，包含 `events`、`notifications`、`steps`、`usage`、`toolAudit`、`subagents`、`workflows` 与模型输入上下文。
+- 助手消息新增 `traceId`、`runStats`；统计真实耗时、模型调用次数、输入/输出/缓存读/缓存写/推理 tokens、缓存命中率、上下文字符与估算 tokens、工具调用/失败、事件数。
+- 会话“更多”菜单新增“分叉会话”和“导出完整会话日志（ZIP）”。
+- 分叉会复制当前可见消息到新会话，新建空 DSH session，保留项目、模式、审批策略与模型预设；`forkContext` 明确标注为只读历史，不是 DSH 原生 fork；复制消息会清除源会话 `traceId`，避免查询错轨迹。
+- 完整日志递归定位 `dshHome/sessions/**/session-<id>/session.v4.jsonl.zstd`，用纯 JS store ZIP 打包 `dsh-session/` 原始日志、`trace.json`、`manifest.json`、`README.txt`。
+
+新增 API：`GET /api/conversation/trace`、`GET /api/conversation/session-log`、`POST /api/conversation/fork`。
+
+**实测**：会话 `C-991122` 真实返回 `traceId=TR-mwee6lrm-03e47f` 与 `dshSessionId=session-1d14a7bbdcd440a599d07a4e8759feb5`；轨迹 117,526 字节、19 个事件；ZIP 138,282 字节，解压包含 `session.v4.jsonl.zstd`、`trace.json`、`manifest.json`、`README.txt`；分叉会话 `kind` 回落为 `chat`，不携带源轨迹 ID。
+
+
+## 41. 插件包版本备份、升级与回滚（2026-11-13）
+
+- 新增 `marketVersions` 持久字段与 `data/market-backups/<marketItemId>/<timestamp>/` 备份目录，每个条目保留最近 5 个版本。
+- 审核替换已有目标目录前先备份；审核替换失败不会留下半包。
+- `POST /api/admin/plugin-market` 新增 `action=upgrade`：校验 ZIP 类型与扫描结果、备份当前包、替换、更新版本号与文件信息、关闭已安装 Bundle 的账号运行时；失败自动尝试回滚。
+- 新增 `action=rollback`：恢复上一备份版本、更新版本号、关闭相关运行时；无备份返回 409。
+- 管理页社区条目新增“升级”“回滚”入口；`marketItemState` 返回 `versions`、`canRollback`。
+
+
+## 42. 管理员持久终端（平台侧 + DSH 运行时侧）（2026-11-13）
+
+- 新增 `terminal.mjs`：每个管理员账号一个常驻 PowerShell 进程，唯一 marker 判断命令结束，支持超时重启、`cd` 后工作目录保持、输出清理。
+- 新增 `POST /api/terminal/exec`、`GET /api/terminal`、`POST /api/terminal/reset`，仅 `admin` 权限。
+- “Agent 与 MCP → DSH 运行时诊断”新增“开发终端”入口，复用现有 `openModal`、`.mc-block`、`.mc-table`、`.btn`、`.text-input` 样式。
+- 同时把 DSH 官方可选 Bundle 注入 sdk profile：`dsh-experimental-terminal-bundle`、`dsh-experimental-agent-team-profile`、`dsh-experimental-tool-worktree`、`dsh-experimental-auto-review`；运行时由 115 项增至 126 项，120 启用 / 6 停用，新增 `optional-tool-terminal`、`tool-agent-team`、`tool-worktree`、`auto-review`。
+- 修改前已备份 profile 到 `data/backups/profile-before-optional-*`。
+
+**实测**：管理员终端 `Get-Location; Write-Output hello` 返回真实 cwd 与 `hello`，UI 回车执行同样返回真实结果；可选 Bundle 加载后真实 Chat 仍返回“可选能力已加载”。
+
+
+## 43. 当前仍未纳入的能力（如实记录）
+
+以下能力尚未完成产品级接入，不以占位或假数据冒充：
+
+- 自定义外部插件索引源（当前市场仍是平台内置数据库 + 官方条目）。
+- Codex / Claude Code 按需子智能体：npm 上的 `dsh-subagent-codex`、`dsh-subagent-claude-code` 为 `0.0.1-rc.1`，与当前 `0.2.2-rc.1` 运行时 peer 依赖不匹配，未强行安装。
+- CUA：`dsh-cua-bundle` 与当前 cordis 4.1.0 版本不匹配（该包 peer 上限为 `<4.1.0`），未强行安装。
+- 会话“恢复”仍复用 DSH 既有 `resumeSession()` 与重新打开会话，没有新增显式“恢复并继续”按钮。
+
+> 文件预览目录树与本地离线语音转写已在第 44 节完成，不再是未完成项。
+
+
+## 44. 文件预览目录树与本地离线语音转写（2026-11-13）
+
+### 文件预览目录树
+
+- 新增 `GET /api/files/tree`：按项目 `cwd` 或会话工作目录懒加载目录，目录优先排序，跳过 `.git`、`node_modules`、`.jg`、`.dsh` 等运行目录。
+- 新增 `GET /api/files/content`：读取文本预览；超过 1MB 不渲染全文；图片与二进制文件返回 `rawUrl`，不把二进制当文本。
+- 新增 `GET /api/files/raw`：仅限图片/PDF 等可预览类型，单文件上限 20MB。
+- 三条接口都先校验项目可见性或会话归属，再做 `realpath` 越界校验；`../`、绝对路径、符号链接逃逸均被拒绝。
+- 项目详情新增“浏览文件”按钮，弹窗左侧懒加载目录树、右侧预览文本/图片；项目会话“更多”菜单新增“浏览项目文件”。
+- 全部复用现有 `openModal`、`.mc-*`、`.btn` 与内联变量样式，没有新增视觉体系。
+
+**实测**：项目 `PRJ-D1F5D4` 根目录 `D:\project-test3\workspaces\traffic-counter` 返回 8 个真实文件；预览 `change-summary-test.md` 得到真实内容“变更摘要验证”；`../../`、`/etc/passwd`、绝对路径请求均被拒绝。
+
+### 本地离线语音转写
+
+- 新增 `speech.mjs` 与 `speech-worker.mjs`：直接使用 DSH 自带的 `sherpa-onnx-node` 原生运行时和 SenseVoiceSmall ONNX 模型，CPU 本地推理；识别在独立子进程中完成，不阻塞 HTTP 服务。
+- 模型固定 revision、大小与 SHA-256 与 DSH `runtime/assets.json` 一致：INT8 约 239MB，另加 tokens 与 Silero VAD；默认优先 `hf-mirror.com`，失败回退 Hugging Face。
+- 新增 `GET /api/speech/catalog`、`POST /api/speech/prepare`（仅管理员）、`POST /api/speech/transcribe`。音频以 16kHz 单声道 PCM16 WAV 传入，识别结果只返回文本，不落会话事件。
+- 输入框语音按钮由 Web Speech 改为本地录音：浏览器侧重采样为 16kHz WAV，调用本机模型；模型未准备时提示管理员先在“管理中心 → AI 能力管理 → DSH 运行时诊断 → 本地语音”准备模型。
+- 本地语音弹窗只复用现有 `jg-modal`、`.mc-block`、`.field-value`、`.btn` 样式。
+
+**实测**：本机生成 16kHz 测试 WAV 后，`speech/transcribe` 返回“你好，这是本地离线语音识别测试。”，`offline=true`，`auto` 语言同样通过；模型文件已校验为 `ready`，共 241,357,257 字节。
+
+
+## 45. 未实现入口灰调与能力归类修正（2026-11-13）
+
+- 平台公共能力 `CAP-AGENT` 的 `sourceIds` 从已停用的 `tool-subagent` 改为真实启用的 `subagent`、`agent-team`、`tool-agent-team`、`ptc-runtime`、`workflow-ptc`、`tool-workflow`；`/api/platform-capabilities` 由 6/7 恢复为 7/7。
+- 项目卡片置顶改为真实调用 `POST /api/projects/update` 的 `pinned` 字段，服务端持久化后重新渲染侧边栏；不再显示“演示”提示。
+- 会话菜单的“分区 / 锁定聊天 / 分享 / 归档”、项目显示菜单的“整理侧边栏 / 聊天排序方式”、顶部“文件 / 帮助”菜单的临时聊天、打开文件夹、关闭、文档、任务管理器、检查更新，统一加 `off` / `disabled` 灰态；点击不执行旧演示逻辑。
+- 设置中心的工作区、二次认证、设备、诊断、授权申请、导出、归档、清缓存、MCP 测试、更新、帮助等入口统一灰调，`title` 标注“功能尚未接入”。
+- 图像生成当前只有本地 canvas 占位，没有真实生成接口，因此侧栏“图像”与输入框“创建图像”灰调并禁用；不隐藏入口，也不再用占位画面冒充真实结果。
+- 云浏览器中下载、AI 转交、文件工具、更多工具、门户凭据注入等未接后端的控件灰调，输入框禁用；已登记的云会话打开/结束仍保留真实行为。
+- 本轮不改变现有 UI 样式体系，灰态只使用内联 `opacity`、`cursor` 与原生 `disabled`，没有改动 `public/styles.css`。
+
+**实测**：重启后 `http://127.0.0.1:57206/` 中侧栏“图像”为 `disabled + opacity .45`，文件菜单“新建临时聊天 / 打开文件夹 / 关闭”为灰态；`/api/platform-capabilities` 返回 7 项全部 `enabled`；项目 `PRJ-D1F5D4` 置顶写入后 `pinned=true`，取消后恢复 `false`。
+
+
+## 46. 定时任务中心与云浏览器残留入口收口（2026-11-13）
+
+- 定时任务中心：筛选、搜索、分享、追加要求输入框与发送按钮统一灰调；补丁输入框 `tkAsk` 禁用，点击不产生“已记入任务”的假成功。
+- 任务中心“更多”菜单：在网页端打开、移至项目灰调；“查看任务中的文件”改为空态说明，不再列出虚构的 `执行记录.txt`、`来源台账` 等假文件。
+- 任务详情中的执行记录仍使用真实 `/api/tasks` 数据；中断任务仍可点击回到原会话并填入原指令，但不自动重放。
+- 云浏览器：扩展程序、下载、更多工具、AI 转交输入框、文件工具、更多工具、门户凭据注入全部灰调；已登记的云会话打开/结束保留真实行为。
+- 数据中心的数据服务条目点击只提示真实调用规则，不再标注“演示”。
+
+**实测**：新版 `app.js?v=443` 在 `http://127.0.0.1:57206/` 加载成功，任务中心筛选/搜索按钮读取为 `disabled`；页面无新增脚本错误。
+
+补充：通讯录“呼叫”、即时通讯“截图”发送、云空间文件下载/移动、公告“转发到即时通讯”、档案“查看项目档案”等未接后端的入口一并灰调，点击不再显示假成功；云空间真实存在的文件下载链接仍可直接打开。版本推进到 `app.js?v=444`。
+
+
+## 47. 持久队列幂等键与断点快照（2026-11-13，进行中）
+
+- 每次 Chat 请求由前端生成 `idempotencyKey`，随 `/api/chat` 提交；服务端按 `userId + idempotencyKey` 查找 `chat-run` 任务。
+- 相同 Key 正在排队/执行时返回 `409 DUPLICATE_REQUEST`，不重复写入用户消息、不重复执行。
+- 相同 Key 已完成/失败/取消/中断时返回原任务与原会话，并带 `duplicate:true` 与已保存的 `replyText`；前端直接恢复原会话，不再重跑。
+- `chat-run` 任务新增 `checkpoint`：记录会话、原指令、模式、DSH sessionId、阶段与更新时间；启动、完成、失败、取消、重启中断都会更新阶段。
+- 任务完成时保存 `replyText`，供幂等重放返回，不重新调用模型。
+
+**实测**：同一 Key 第一次请求耗时 54 秒返回 `reply=OK`；第二次请求 0 秒返回 `duplicate=True`，任务 `TR-1794546114838-653`，没有再次执行。跨重启自动续跑仍未开启，因为运行中断可能已产生未确认副作用。
+
+
+## 48. 可确认的恢复执行（2026-11-13）
+
+- 任务执行记录中，`interrupted` / `failed` 的 `chat-run` 仍可点击。
+- 点击后不再直接回填原指令，而是弹出“恢复执行”确认：展示任务、中断阶段、原会话，并明确说明中断前工具动作可能已产生副作用，系统不会自动重放。
+- 只有点击“继续执行”才回到原会话并发送恢复指令；恢复指令要求先检查工作区与已有产出，只继续未完成部分，不重复已完成的写入、命令或外部操作。
+- 取消则只关闭确认框，不产生任何执行。
+- 恢复执行使用新的 `idempotencyKey`，不复用旧 Key，避免把人工恢复误判为重复请求。
+
+**实测**：新版 `app.js?v=445` 加载成功；中断任务接口返回的 `checkpoint` 包含会话、原指令、阶段与 DSH sessionId。当前没有处于 `interrupted` 的测试任务，因此恢复按钮的真实执行路径尚未完整跑通，已保留为可验证入口。
+
+
+## 49. 定时任务真实调度与执行（2026-11-13）
+
+- 定时任务不再使用 `data.mjs` 的种子条目和 `taskTick()` 时间推进假进度。
+- 新增 `liveAutomations` 持久存储，随 `runtime` 快照落盘；`GET /api/automations` 只返回当前账号自己的任务。
+- 创建任务时解析 `每天 / 每周X / 每月 / 每季度首月` 四类规则，计算真实 `nextRunAt` 与展示用 `next`。
+- 服务启动后每 30 秒执行一次 `automationTick()`；到点且未在运行的任务会真实调用 `runAgent()`。
+- 每次执行创建真实的 `automation-run` 任务与独立会话 `C-AU-*`，记录 queued → running → done/failed、步骤数、回复、会话与 DSH sessionId。
+- 执行完成回写 `last`、`lastResult`、`lastTaskId`、`lastRunAt` 并重新计算下一次时间；暂停不再计算下一次，显示 `—`。
+- 高风险删除/覆盖指令、空指令、缺少模型密钥都会直接失败并写明原因，不会伪造成功。
+- 任务中心不再显示种子任务；任务列表按 `userId` 过滤，避免跨账号看到他人的执行记录。
+- 新建/编辑表单补齐已有自定义频率的回显；任务详情展示最近一次真实执行结果，暂停任务单独归组。
+
+**实测**：
+- 创建 `每天 09:00` 任务，`next=11-14 09:00`；手动触发后任务 `T-1794546877900-376` 从 `running` 到 `done`，`replyText=定时任务已真实执行`，模型 `deepseek-chat`。
+- 重启服务后任务、自动化条目、执行记录都在；暂停状态保持。
+- 创建 `每天 13:20` 任务后不手动触发，13:20 调度器自动创建并完成 `T-1794547220008-517`，`lastResult=自动调度成功`，下一次自动变为 `11-14 13:20`。
+- 测试用自动化条目与对应执行记录已删除，避免把验证数据留在真实任务中心。
+
+
+## 50. `CAP-WEB` 网页搜索真实入口（2026-11-13）
+
+- 输入框「＋ → 网页搜索」不再是 `off:true` 的静态占位；点击后切换 `state.webSearch`，菜单显示“已启用 · 本轮会检索网页”。
+- 发送会话时携带 `webSearch` 标志；服务端在创建 run 前校验 `CAP-WEB` 是否真实启用、当前网络是否为涉密内网，未通过直接返回 `WEB_SEARCH_DISABLED` / `WEB_SEARCH_NETWORK_BLOCKED`。
+- 通过校验后，本轮上下文明确要求优先调用平台 Web 搜索、网页抓取，并在回答中给出真实来源 URL；搜不到必须说明，不能拿模型记忆冒充网页结果。
+- 运行轨迹继续记录真实工具调用和步骤，执行过程与引用链接都在会话里可复核。
+
+**实测**：从输入框打开网页搜索，发送“请搜索 DeepSeek Harness 的 GitHub 仓库”，任务 `TR-1794547545749-680` 完成；6 次模型调用，轨迹 `TR-mwejadcj-3c090d` 中出现 26 次 `web_search`，回答返回 [GitHub - deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness)。
+
+
+## 51. Agent Team / Worktree / Auto Review 产品入口（2026-11-13）
+
+- 新增 `GET /api/agent-entries`，从真实运行时插件清单读取三项能力是否启用，前端不再自行写死“可用”。
+- 输入框「＋」新增三个入口：
+  - **Agent 团队**：填入团队拆解任务，明确要求使用 `tool-agent-team`，先拆并行子任务再汇总。
+  - **工作树**：要求使用 `worktree` 工具在隔离工作树内执行，不直接改当前项目目录；没有在线项目时先打开项目选择器。
+  - **自动审查**：要求使用 `auto-review` 审查当前项目未提交变更，只出问题、证据与修复建议，不直接改文件。
+- 三项入口点击后都会回到新会话输入框并聚焦到可续写位置；用户补充目标后发送，走真实 DSH 运行时，不是假按钮。
+- 运行时未启用时入口灰调并显示“运行时未启用”，点击不发送。
+
+**实测**：`GET /api/agent-entries` 返回三项 `enabled:true`（`tool-agent-team`、`tool-worktree`、`auto-review`）；输入框菜单显示三项非灰入口，点击“Agent 团队”后输入框已填入团队任务模板并聚焦。
+## 52. 网页搜索来源可点击 + 右侧自带浏览器（2026-11-13）
+
+- `richTextHTML()` 把回答与引用里的 Markdown 链接、裸 `http/https` URL 渲染成 `[data-weblink]` 超链接；链接沿用正文颜色变量并加下划线，不新增页面级样式。
+- 点击链接统一交给 `openCloudWebTab()`：展开既有右侧云浏览器面板，创建 `kind:'web'` 标签，标签显示来源域名，面板头部保留“刷新 / 外部打开”。
+- 不再依赖 Electron `<webview>`：上一版实测该标签在 Electron 45 下仍是普通 `HTMLElement`，没有 `reload/getURL`，页面空白。改为 Electron 原生 `WebContentsView`，由 `electron/main.cjs` 托管独立网页进程，`preload.cjs` 暴露 `browser.open/bounds/reload/close/openExternal`，渲染层只负责给出面板内 `#cbWebSlot` 的实时位置。
+- `WebContentsView` 使用 `contextIsolation:true`、`nodeIntegration:false`、`sandbox:true`；只允许 `http/https` 顶层导航，新窗口请求交给系统浏览器，不加载本地协议。
+- 侧栏拖动宽度、窗口缩放、切换标签时都会重新同步原生视图边界；关闭标签或折叠侧栏时移除原生视图，不留下覆盖层。
+
+**实测**：
+- 真实会话“搜索 DeepSeek Harness GitHub 仓库”里的回答来源已渲染为 `GitHub - deepseek-ai/deepseek-harness` 超链接，`href=https://github.com/deepseek-ai/deepseek-harness`。
+- 点击后 `#cbPanel` 展开，`kind:'web'` 标签创建；主进程返回 `WebContentsView` `attached:true`、`visible:true`、边界 `x=1108,y=135,w=318,h=750`，与 `#cbWebSlot` 的 `getBoundingClientRect()` 完全一致。
+- 该视图真实加载 `https://github.com/deepseek-ai/deepseek-harness`，页面标题为 `GitHub - deepseek-ai/deepseek-harness: DeepSeek Harness: Everything is a Plugin. · GitHub`，正文可读；不是空白占位。
+- 链接锚点、右侧面板和原生网页视图在 Electron 窗口内同时存在；未改 `public/styles.css`，未改动现有导航、聊天、任务中心等页面样式。
+## 53. 工作树管理面板与自动审查语义修正（2026-11-13）
+
+- 新增 `GET /api/worktrees?projectId=...`：只读取项目真实 `git worktree list --porcelain`，返回每个工作树的路径、分支、HEAD、是否主工作树、未提交改动数，以及项目是否为 Git 仓库。
+- 新增 `POST /api/worktrees/merge`：只允许把已列出的非主工作树合并到主工作树；合并前校验两侧均无未提交改动，使用 `git merge --no-ff --no-edit -- <branch>`，冲突现场保留并原样返回 Git 输出。
+- 新增 `POST /api/worktrees/discard`：只允许移除已列出的非主工作树；使用 `git worktree remove --force`，删除前在主工作树中再次确认路径属于当前仓库，分支保留。
+- 输入框“工作树”入口改为打开真实工作树面板：显示项目目录、全部工作树、分支、HEAD 与未提交数；提供复制路径、在此执行、合并、丢弃和“让 Agent 新建工作树”。合并/丢弃均需在行内二次确认，危险操作不会单击直接执行。
+- 修正“自动审查”假语义：DSH 的 `auto-review` 是每次工具调用前的实验性权限审查层，不是代码审查报告生成器。入口改名为“自动审查（权限层）”，在本产品中灰调禁用，说明“实验权限层尚未接入”；不再把它当成一个可发送的审查任务。
+
+**实测**：
+- 在隔离 Git 仓库中创建主工作树 + `wt-check` 工作树，工作树面板读到 2 条真实记录，主工作树只显示“复制路径”，隔离工作树显示“复制路径 / 在此执行 / 合并 / 丢弃”。
+- 在 `wt-check` 提交一次真实改动后，通过面板“合并 → 确认”执行，主工作树生成 `Merge branch 'wt-check'` 合并提交；`git worktree list` 仍保留该隔离工作树。
+- 通过面板“丢弃 → 确认”移除该工作树，工作树列表降为只剩主工作树，分支 `wt-check` 保留。
+- 非 Git 项目 `PRJ-D1F5D4` 返回 `repo:false` 与明确空态，不伪造工作树。
+- 输入框菜单中“自动审查（权限层）”为 `disabled + off`，点击不产生任务；服务端 `GET /api/agent-entries` 同时返回 `enabled:false`、`runtimeEnabled:true`。
+- 未修改 `public/styles.css`；工作树面板复用既有 `openModal`、`.mc-block`、`.btn`、`.tag` 与内联样式。
+## 54. 审批路径校验与终端进程限额（2026-11-13）
+
+- `autoApprovalAllowed()` 的路径校验从字符串前缀升级为“字符串前缀 + 真实路径”双重判断：先把目标路径和授权目录解析到最近存在的父目录，再比较真实路径。这样在授权目录内创建指向目录外的符号链接时，写入/读取会被转人工审批，而不是仅凭字符串前缀放行。
+- 审批矩阵补充外部副作用与破坏性命令：`git push`、`npm/pnpm/yarn publish`、包安装、`curl/wget/Invoke-WebRequest`、`docker rm/rmi/push`、`kubectl delete`、`sc delete`、`reg add/delete`、`takeown`、`icacls` 等不再在“帮我批准”下自动放行。
+- 平台开发终端新增进程级限制：
+  - 命令超时后使用 `taskkill /T /F` 终止整棵进程树，不再只杀外层 PowerShell；
+  - 运行期间每 3 秒采样一次进程树，内存超过 `JG_TERM_MEMORY_MB`（默认 1024 MB）或进程数超过 `JG_TERM_MAX_PROCESSES`（默认 8）时终止并返回“资源限额”原因；
+  - 优先尝试 Windows Job Object（`sandbox/job-limit.ps1`）设置内存、活动进程数和 `KILL_ON_JOB_CLOSE`；当前环境因父进程已在 Job 中导致 `AssignProcessToJobObject` 返回失败，自动降级为进程树采样监控。Job Object 可用时状态显示 `job-object`，否则显示 `process-watch`。
+- 终端标题栏显示当前限额，但不改 `styles.css`。
+
+**验证**：
+- 普通命令真实返回 `hello-limit` 与工作目录。
+- 3 秒超时命令被终止，状态为 `open:false`、`timeout:true`。
+- 将 `JG_TERM_MAX_PROCESSES` 设为 2，执行会拉起多个子进程的命令，得到真实结果 `终端进程树超过 2 个进程，已终止`、`resourceLimit:true`。
+- 未验证：Job Object 在当前嵌套 Job 环境下无法分配成功；DSH 内部工具进程尚未纳入同一套限额，仍只有审批规则和路径校验。## 55. PDF / GIS 独立运行时、云浏览器文件、工作树分支、代码审查与 token 用量（2026-11-13）
+
+- 新增 `pdf.mjs` 与 `vendor/pdf-lib.min.js`（1.17.1），提供真实 PDF 解析、页尺寸、合并、按页范围拆分与文本提取；后端路由 `GET /api/pdf/view`、`POST /api/pdf/inspect|extract|merge|split`。
+- 修复 PDF 文本提取的编码判断：纯可打印 ASCII/PDFDocEncoding 文本按单字节解码，UTF-16BE 中文继续按大端转小端；用 pdf-lib 生成的英文样本实测提取为 `JG PDF sample page 1...`，不再输出乱码。
+- 新增 `geo.mjs` 与 `POST /api/geo/inspect`，本机解析 GeoJSON 与 ASCII DXF（LINE、LWPOLYLINE、POLYLINE、CIRCLE、TEXT），返回要素数、图层、类型、bbox 与真实 SVG 预览；DWG 明确要求先转 DXF，不伪造原生支持。
+- 数据中心标题栏新增“PDF 工具”和“GIS / CAD 工具”。客户端实际选择本地 `.tmp-sample.pdf`（2 页，595×842）后，解析结果显示 2 页并内嵌 `/api/pdf/view` 真实预览；提取文本返回两页英文正文。
+- 客户端实际选择 `.tmp-sample.geojson` 后，工具返回 2 个要素、26 个坐标点、范围 `115.9,29.1,116.1,29.3`、WGS84、图层“规划/交通”，并绘制真实 SVG 几何。
+- 云浏览器下载记录改为“运行中的下载 + 下载目录真实文件”合并读取：`browser:downloads` 在进程重启后仍能列出 `C:\Users\46198\Downloads\九规智能中枢\cloud-browser-test.txt`，弹窗显示“已完成”以及打开/定位按钮；打开和定位也会解析磁盘记录，不再只查内存。
+- 云浏览器下载弹窗、真实文件列表已在客户端 UI 实际打开验收；`转交 AI` 与 `page-info`/`page-text` 桥接仍待真实企业页面端到端点击验收。
+- 工作树新增孤立分支识别与删除：`GET /api/worktrees` 的 `branches` 标记当前分支及是否被工作树占用；`POST /api/worktrees/delete-branch` 拒绝当前分支和占用分支，执行真实 `git branch -D`。
+- 客户端真实 UI 验收：打开“分支清理验证”项目的工作树面板，看到主工作树与 `wt-branch` 隔离工作树；点击丢弃并确认后出现“孤立分支 · wt-branch / 删除分支”；点击删除并确认后提示“已删除分支 wt-branch”，列表只剩 `master`。
+- 新增 `review.mjs` 与 `POST /api/code-review/run`，执行 Node 语法检查、JSON 可解析性检查、硬编码密钥/eval/命令执行/TODO/调试输出规则扫描，并返回文件、行号、证据与 Git 工作区信息。
+- 代码审查页改为每次进入都刷新 `/api/projects`，真实 UI 选择项目并运行后显示 160 个文件、语法失败 0、JSON 失败 0、高风险 0、低风险 34（其中包含本轮 `.tmp-*` 测试脚本的调试输出）；清理临时脚本后复跑为 160 个文件、0 命中，并可导出 Markdown。
+- `GET /api/usage/summary` 按当前用户真实聚合助手消息 `usage`；账户菜单与设置页“Token 用量”展示真实累计 166,031 tokens、12 次调用、输入 56,243 / 输出 860、缓存读 108,928，按模型 `deepseek-chat` 与最近计量；没有 usage 的轮次明确不计入、不估算。
+- 未修改 `public/styles.css`；新增前端版本 `app.js?v=458`。
+## 56. 数据格式基座与 Harness 通用代码审查服务（2026-11-13）
+
+本轮按架构归属重做，不把 PDF / GIS / CAD 当作数据中心功能模块，也不把代码审查当作普通页面能力。
+
+**平台格式基座**
+- 新增 `formats.mjs`：`FORMAT_REGISTRY` 注册 PDF、GIS/GeoJSON、CAD/DXF 的统一读取与输出能力；`detectDataFormat()` 按扩展名、MIME 与 `%PDF-` 文件头识别格式；`inspectDataFormat()`、`extractDataFormat()`、`exportDataFormat()` 提供解析、内容读取和输出。
+- 新增平台接口 `GET /api/formats/capabilities`、`POST /api/formats/inspect`、`POST /api/formats/extract`、`POST /api/formats/export`；旧的 `/api/pdf/*` 与 `/api/geo/inspect` 保留为兼容入口，但新页面不再依赖数据中心路径。
+- PDF 输出支持合并与按页范围拆分；GIS 输出规范化 FeatureCollection；CAD 输出 ASCII DXF。PDF 合并、拆分、文本提取均返回真实文件或真实文本；GeoJSON 不做投影转换，DWG 仍需先转 DXF。
+- `geo.mjs` 的 `inspectDXF()` 额外返回解析出的 `entities`，供格式基座在 DXF 同格式回写时复用，不改变原有 SVG 预览。
+- 数据中心页移除“PDF 工具 / GIS / CAD 工具”按钮；新增“数据格式基座”页（`state.view = 'formats'`，更多菜单入口），明确标注“平台级能力，由数据中心、智能笔记本、Harness Agent 与 MCP 共用”。
+- PDF 运行器与 GIS/CAD 运行器标题改为“平台格式基座”；PDF 解析、拆分、文本提取和 GIS/CAD 解析统一调用 `/api/formats/*`。GIS/CAD 运行器新增真实输出按钮：GeoJSON 规范化、DXF 回写，并显示下载链接。
+- `data.mjs` 中新增 `formats` 模块并加入所有角色的 `visibleModules`；`codereview` 显示名改为“代码审查服务”，并对员工、访客也开放入口。
+
+**Harness 通用服务**
+- 新增 `harness-services.mjs`：`HARNESS_BASE_SERVICES` 注册 `code-review`，`runHarnessService()` 统一执行。服务输入为 `projectId`、`scope`、`maxFiles`，输出真实 `findings`、严重级别、语法检查、JSON 检查与 Git 工作区信息；它是只读分析服务，不是 DSH 的 `auto-review` 权限层。
+- 新增 `GET /api/harness/services` 与 `POST /api/harness/services/code-review`；旧 `POST /api/code-review/run` 保留为兼容别名，内部统一调用 `runHarnessService('code-review', ...)`，不再保留第二套审查实现。
+- 代码审查页改为调用 `/api/harness/services/code-review`，标题改为“代码审查服务”，说明任意项目、Chat/Work Agent 与 MCP 工具均可调用。
+
+**Agent / MCP 接入**
+- `data.mjs` 的 AI 工具清单新增 `format_capabilities`、`format_inspect`、`format_extract`、`format_export`、`code_review`；`mcp-jg.mjs` 同步新增同名 MCP 工具。
+- `/api/ai/invoke` 新增平台基础服务白名单：格式操作按真实文件 ID 校验，代码审查按项目可见性校验；不再按数据中心或代码审查模块的 `visibleModules` 拦截。该路由已改为异步处理。
+- 平台工具与业务模块解耦：`format_*` 和 `code_review` 不属于数据中心、代码审查页的模块权限；MCP 子进程可通过 `mcp__jg__*` 调用同一基座。
+
+**运行时验证**
+- 语法检查：`server.mjs`、`formats.mjs`、`harness-services.mjs`、`mcp-jg.mjs`、`geo.mjs`、`data.mjs`、`public/app.js` 全部通过 `node --check`；期间修复了 `mcp-jg.mjs` 插入工具时遗漏 `task_create` 的 `name` 字段。
+- 格式能力：`GET /api/formats/capabilities` 返回 3 项（pdf、gis、cad）。
+- PDF：真实 1 页样本解析为 1 页、595×842；`extract` 返回 `Format base PDF A`；`split 1` 输出 898 B `拆分文档-1.pdf`；两个真实 PDF 合并输出 1,051 B `合并文档-合并.pdf`，均由 `putFile()` 写入文件库并返回 `/api/files/download?id=...`。
+- GIS：真实 GeoJSON 解析为 2 个要素、图层“规划/交通”、bbox `[115.9,29.1,116.1,29.3]`；`normalize` 输出 929 B 规范化 `.geojson`。
+- CAD：真实 ASCII DXF 解析为 4 个实体、图层“道路/交叉口/标注”、类型 LINE/CIRCLE/TEXT、bbox `[0,0,100,60]`；`normalize` 输出 245 B 63 行 ASCII DXF。
+- 代码审查：以临时项目绑定本工程根目录执行 `/api/harness/services/code-review`，真实扫描 175 个源码文件，语法失败 0、JSON 失败 0，命中 5 条低风险（均为 `todo-marker` / `debug-console` 类静态提示）；验证项目已清理，数据库不留测试项目。
+- 前端：`app.js?v=460`；数据格式基座页已打开并截图 `D:\project-test3\shots\format-base-page.png`；PDF 真实解析预览截图 `D:\project-test3\shots\format-pdf-current.png`。旧版数据中心页已无 PDF/GIS 入口。
+- 未修改 `public/styles.css`。
+
+**边界**
+- 格式基座当前不提供“从文字生成 PDF”“从要素集直接生成 GIS 图层”“投影转换”等未实现能力；只做同格式合并/拆分、规范化与 DXF 同格式回写。
+- 代码审查是服务，不是 `auto-review` 权限层；`auto-review` 仍保持未开启。
+- 代码审查服务控制台截图 `D:\project-test3\shots\code-review-service.png`；标题与说明已切换为 Harness 通用基础服务。
+
+## 57. 管理中心 AI 能力归类（2026-11-13）
+
+本轮把平台能力清单按“数据格式基座属于平台公共能力、代码审查属于系统内核”重新归类，界面只呈现真实存在的模块。
+
+**平台公共能力**
+- 原来的单项 `CAP-OFFICE`「Office / PDF 文档处理」拆成四项：`CAP-OFFICE`「Office 文档处理」、`CAP-PDF`「PDF 文档处理」、`CAP-GIS`「GIS 空间数据」、`CAP-CAD`「CAD 图纸数据」。
+- Office 保留 `module: dsh-skill-office` 与 `sourceIds: ['skill-office']`，运行时状态沿用 DSH 实际加载结果。
+- PDF / GIS / CAD 使用 `module: formats.mjs#pdf|gis|cad`，分别展示真实权限：PDF 解析、文本提取、按页拆分、合并与导出；GIS 的 GeoJSON 读取、要素/图层/bbox 与规范化输出；CAD 的 ASCII DXF 实体/图层/bbox 与 DXF 回写。
+- 这三项新增 `runtime: 'product'`：`formats.mjs` 由 `server.mjs` 直接导入并注册，属于产品级真实模块，不是 DSH 运行时清单里的条目；据此不伪造 `sourceIds`，也不把界面写成“未加载”。
+- 平台公共能力从 7 项变为 10 项：Office、PDF、GIS、CAD、业务系统接入、Python、会话检索、Web 搜索、后台作业、Agent 编排。
+
+**系统内核**
+- 新增 `CAP-CODEREVIEW`「代码审查服务」，`module: harness-services.mjs#code-review`，`runtime: 'product'`，`layer: 'kernel'`、`stoppable: false`。
+- 权限为只读源码扫描、语法检查、JSON 校验、静态规则提示；资源上限 1 核 / 512MB / 300s / 并发 1。
+- 代码审查进入 `/api/admin/official-baseline` 的 `infrastructure`，不出现在 `/api/platform-capabilities`；与 `CAP-FILES` 一样不可停用或卸载。
+- 系统内核从 3 项变为 4 项：文件附件与交付物、代码审查服务、Harness 基础运行时、Harness SDK 应用层。
+
+**验证**
+- `server.mjs` 通过 `runtime\node.exe --check`。
+- 重启客户端后以云端浏览器打开管理中心「AI 能力管理」：系统内核显示 `4 / 4`，平台公共能力显示 `10 / 10`。
+- 系统内核明细可见「代码审查服务 · 基础能力 · harness-services.mjs#code-review · 已启用」；平台公共能力明细可见 Office、PDF、GIS、CAD 四行，对应运行时模块分别为 `dsh-skill-office`、`formats.mjs#pdf`、`formats.mjs#gis`、`formats.mjs#cad`。
+- 截图 `D:\project-test3\shots\capability-classification.png`（系统内核）、`D:\project-test3\shots\platform-formats.png`（四类数据格式）。
+- 未修改 `public/styles.css`；本次未触碰 Office、PDF、GIS、CAD 的实际读写实现，只调整能力清单与归类。
+
+## 58. 恢复云浏览器入口（2026-11-13）
+
+`render()` 曾把整个 `#topbar` 无条件设为 `hidden`，导致放在顶栏右侧的 `#cbToggle`「展开云浏览器」按钮随之消失；按钮本身和云浏览器侧栏都还在。
+
+- 改为 `topbar.hidden = !cloudAllowed()`：首页、对话、任务、知识库、学习中心显示顶栏和云浏览器开关，其他不适用云浏览器的视图继续收起顶栏。
+- 开关仍调用原有 `toggleCloudPanel()`，点击后右侧 `#cbPanel` 正常展开，按钮标题切换为“折叠云浏览器”。
+- `public/app.js?v=463`；语法检查通过。
+- 云端浏览器打开首页验证：按钮尺寸 30×30、位于右上角；点击后 `#cbPanel` 宽度 165px，侧栏正常显示。
+- 截图 `D:\project-test3\shots\cloud-browser-toggle-restored.png`、`D:\project-test3\shots\cloud-browser-panel-restored.png`。
+
+
+
+## 59. 首页侧边栏悬浮卡片与 SHP / GDB 真实解析（2026-11-13）
+
+**侧边栏**
+- `public/app.js` 的 `renderSidebar()` 增加品牌标题下拉箭头、搜索按钮、通知按钮；在“新聊天”后增加分隔线，置顶区标题使用 `sb-section-head`；保留项目、分区与最近结构。
+- 新增 `public/sidebar-chatgpt.css`，按参考图实现悬浮卡片：`.sidebar:not(.tk-sidebar)` 外边距 `10px 6px 10px 8px`、高度 `calc(100% - 20px)`、白底、16px 圆角、细边框与阴影；`#sbGrip` 绝对定位在卡片右边缘，悬停/拖动时加深。
+- 卡片宽度较窄时用容器查询隐藏品牌图标，避免“九规智能中枢”折成三行；`app.js?v=465`，`sidebar-chatgpt.css?v=1`。
+- 云端浏览器验证：右侧缩放边可从约 150px 拖到 218px，标题保持单行，卡片圆角、留白、阴影和顶部分区线均生效；截图 `D:\project-test3\shots\sidebar-chatgpt-card.png`。
+
+**GIS 数据格式**
+- 新增 `gis-bridge.py`：通过 `pyogrio.list_layers`、`read_info`、`pyogrio.raw.read` 读取 Shapefile / File Geodatabase；用 `shapely.wkb.loads` 转 GeoJSON，保留每要素的图层名、FID 与全部属性字段，最多每层读取 2000 个要素。
+- 新增 `gis-datasets.mjs`：接收 `.zip`，用 Windows `tar`（失败回退 `python -m zipfile`）解压，递归查找 `.shp` 或 `.gdb`，调用桥接后用既有 `inspectGeoJSON` 生成 bbox、要素数、字段和 SVG 预览；`export` 输出规范化 GeoJSON。
+- `formats.mjs` 的 GIS 注册项改为 `GIS / GeoJSON / SHP / GDB`，扩展名增加 `.shp/.gdb/.zip`；`detectDataFormat`、`inspectDataFormat`、`extractDataFormat`、`exportDataFormat` 增加 ZIP 分支；`server.mjs` 的 `/api/formats/extract` 改为 async，AI `format_extract` 同步 await。
+- `public/app.js` 的 `openSpatialTool()` 文件选择器支持 `.zip`，界面写明 Shapefile 需把 `.shp/.dbf/.shx/.prj` 打成一个 ZIP、GDB 需把整个 `.gdb` 文件夹打成一个 ZIP；结果区显示属性字段、图层明细、只读说明和预览条数。
+- 运行依赖位于 `vendor\gis`：`pyogrio 0.13.0`（GDAL 3.12.4）、`shapely 2.2.0`、`numpy 2.5.4`、`certifi`、`packaging`；运行时设置 `PYTHONPATH=D:\project-test3\jg-client-1.0\vendor\gis`，可用 `JG_GIS_PYTHON` 指定 Python。
+
+**真实验证**
+- SHP：`test-shp.zip`（651 B）经页面选择后解析为 Shapefile (SHP)，2 个点要素、字段 `name`、`EPSG:4326`、bbox `[115.9,29.1,116.1,29.3]`，SVG 预览正常；输出 `test-shp-规范化.geojson`，下载 265 B，内容含 `name=A/B`。
+- GDB：`test-gdb.zip`（46,508 B）经页面选择后解析为 File Geodatabase (GDB)，7 个 MultiPolygon、图层 `TEST_PL_FGDB`、字段 `FIELD/GLOBALID/CREATED_USER/.../Shape_Area`、`EPSG:31254`，SVG 预览正常；输出下载 37,550 B，首要素属性包含全部源字段，不再是空属性。
+- 页面 `inspect` 走真实会话与上传接口；导出结果通过 `bu.download` 下载并回读 JSON 校验。SHP/GDB 只读，输出仅支持规范化 GeoJSON；直接上传 `.shp` 单文件或 `.gdb` 文件夹仍不支持，必须打 ZIP。
+- `gis-datasets.mjs`、`formats.mjs`、`server.mjs`、`public/app.js` 均通过 `runtime\node.exe --check`。
+- 修复导出结果文件大小显示为 `0 KB` 的格式化问题；小于 1 KB 显示为字节。
+
+## 60. 更多菜单清理（2026-11-13）
+
+- 从 `MORE_ITEMS` 移除「数据格式基座」和「代码审查服务」；这两个模块不再作为「更多」菜单入口出现。
+- 「综合管理」图标由重复使用的 `shield` 改为独立的 `briefcase` 图标。
+- 对历史 localStorage 中的 `morePinned` 增加存在性过滤，避免已移除模块留下空置顶项。
+- `public/app.js?v=466`，`runtime\node.exe --check` 通过；云端浏览器打开客户端确认菜单仅保留：智能笔记本、教学园地、智能投标、综合监测、城市体检和更新、人事组织、审图平台、财务管理、综合管理。
+- 截图 `D:\project-test3\shots\more-menu-clean.png`。
+
+## 61. 侧边栏滚动区域下移到横线（2026-11-13）
+
+- 将「新聊天」按钮和分隔线从 `.sidebar-scroll` 移到独立的 `.sb-top-actions`，品牌行、新聊天、分隔线保持固定，不随会话列表滚动。
+- `.sidebar-scroll` 改为从分隔线下方开始，滚动条轨道只覆盖置顶、项目和最近区域；顶部没有滚动轨道。
+- 云端浏览器实测：分隔线底边 `y=138`，滚动区顶边 `y=138`；新聊天 `y=91–125` 位于滚动区外；滚动内容高度 1340px、可视高度 618px，滚动正常。
+- `public/app.js?v=467`、`sidebar-chatgpt.css?v=2`；`runtime\node.exe --check public\app.js` 通过。
+- 截图 `D:\project-test3\shots\sidebar-fixed-newchat.png`。
+
+## 62. 侧边栏改为参考图的平铺白底样式（2026-11-13）
+
+- 按新参考图去掉悬浮圆角卡片：侧栏改为全高平铺白底，外边距 0、圆角 0、阴影改为右侧 1px 分隔线。
+- 品牌标题加大到 19px / 600，新聊天改为透明底、无药丸圆角，仅在悬停时显示浅灰反馈。
+- 新聊天与分隔线仍固定在顶部；滚动区域仅从分隔线下方开始。
+- 会话区滚动条改为参考图样式：12px 宽、白色轨道、灰色圆头滑块、上下箭头按钮，轨道只在会话列表区域出现。
+- 实测新聊天常态背景为 `rgba(0,0,0,0)`，侧栏圆角 0、外边距 0，右侧分隔线生效；`app.js?v=467`、`sidebar-chatgpt.css?v=4`。
+- 截图 `D:\project-test3\shots\sidebar-chatgpt-flat.png`。
+
+## 63. 审批策略改为 DSH 原生权限预设（2026-11-13）
+
+- 不再由 `approval-rules.mjs` 自定义 allow/deny 矩阵。Auto 直接使用 DSH `workspace-write`：工作区内读写、测试、构建由 DSH 沙箱直接执行；越界、外部写入和权限升级才发 `approval/request`。手动模式保持 DSH `read-only`。
+- Chat 模式强制 `read-only`，即使审批方式为 Auto 也不允许写文件或执行有副作用的命令；需要审批时由服务端拒绝并提示切换到 Work。
+- `approval-rules.mjs` 只保留操作类型、风险级别和参数摘要，用于审批卡展示与 `approval_decisions` 审计。
+- 实测：Chat 模式创建文件被拒绝；Work 模式在 workspace 内创建文件无审批直接完成；`D:\project-test3\outside\dsh-outside.txt` 触发审批，拒绝后文件未创建；`approval_decisions` 记录 `dsh-workspace-write-escalation` 和 `chat-mode-no-escalation`。
+- `node --check harness.mjs/server.mjs/approval-rules.mjs` 通过；14 条审批元数据用例通过；服务 PID `64596`，`/api/health` 200。
+
+## 64. 手动审批闭环与审批胶囊文案（2026-11-13）
+
+- 手动工作模式的端到端验证：DSH 只读策略对写入发起 `dsh-read-only-approval`，审批记录 `APD-0c221f579510`，允许后写入成功，`decision=allowed`、`approver=米乐`。
+- 手动模式不再让模型先发 `ask_user_question` 申请授权，改为直接发起工具调用，由 DSH 生成审批请求；避免一次写入出现两次确认。
+- 输入框内的待审批胶囊文案由「请求批准」改为「待批准」，与审批方式按钮「请求批准」区分。
+- 重启时会将该进程遗留的 `pending` 审批记录收口为 `expired`、`approver=system-restart`，避免审计列表长期显示待审批。
+- `public/app.js?v=531`；`node --check public/app.js` 通过；服务 PID `49484`，`/api/health` 200。
+
+## 65. 前端审批语义对齐（2026-11-14）
+
+- 输入框左侧策略胶囊：工作模式下显示「帮我批准」或「请求批准」；对话模式下固定显示「只读」并禁用，提示“对话模式固定只读，切换到工作模式后可选择审批方式”。
+- 策略菜单说明改为 DSH 真实边界：请求批准=工作区内写入与执行也逐次确认；帮我批准=工作区内直接执行，越界或升级才确认。
+- 待审批胶囊文案为「待批准」，弹出层展示工具、参数摘要、风险级别与审批规则，再提供“允许本次执行/拒绝本次执行”。
+- 审批决策落库仍通过 `GET /api/approval-decisions` 查询，管理端审批决策列表 UI 尚未实现。
+- `public/app.js?v=532`；`node --check public/app.js` 通过；对话模式已实测显示禁用的「只读」胶囊。
+
+## 66. 三项模型侧能力真实部署与验证（2026-11-14）
+
+- 关键修正：产品实际按账号使用独立 DSH Home（`data\agents\<userId>\dsh-home`），不再是全局 `data\dsh-home`。账号首次创建时只复制一次 profile；之后全局模板改动不会同步到已有账号。此前管理页显示 enabled 但模型仍盲写，根因是管理页/探针读全局 Home，实际会话读账号 Home。
+- 已在真实账号 profile `data\agents\A-7788-01\dsh-home\profiles\sdk\cordis.patch.yml` 和全局模板 `data\dsh-home\profiles\sdk\cordis.patch.yml` 同时加入：
+  - `fs-observation-policy` 基础项 `disabled: true`，插入 `fs-observation-policy-guard`；`write/edit/delete` 对已存在但未读文件返回 `FS_NOT_OBSERVED`，新建允许。
+  - `tool-executor-native` `disabled: true`，插入 `tool-executor-ptc-enabled`（`@deepseek-ai/dsh-tool-executor-ptc`，`maxParallelSubCalls: 10`）；PTC 激活后模型只直接看到 `run_code`。
+- 实际验证（真实账号，非隔离探针）：
+  - fs guard：会话 `C-1794587125458454` 中 `fs-guard-real.txt` 初始 `real-original`，模型只允许 `write` 盲覆盖；返回 `cannot modify ... file has not been read — read the file, then retry`，文件保持 `real-original`，未改用 pwsh/apply_patch/edit。随后已清理测试文件。
+  - Agent Team：会话 `C-1794588396296389`，`spawn_teammate` 创建 `probe`，`send_message` 收到 `OK`；子会话 `eb5b2fbe-5eed-4310-8546-dc885820561f`，`provider=spawn`、`status=ok`、`stopReason=completed`。
+  - PTC 只读：会话 `C-1794588709451926`，`run_code` 执行 `console.log(1 + 1)` 返回 `2`，无审批，步骤中只有 `run_code`。
+  - PTC 工作区写：会话 `C-1794588922981153`，`run_code` 内嵌 `tools.write` 创建 `ptc-nested.txt`，无审批，`workspaceChanges` 记录新增；验证后已清理该文件。
+  - PTC 越界写：同一会话第二回合，`run_code` 内嵌 `tools.write` 写 `D:\project-test3\ptc-guard.txt` 被 `workspace-write` 拒绝（`file access denied under workspace-write mode`），未改文件、未弹审批、未请求 danger-full-access。
+  - PTC 下 fs guard：同一会话第三回合，`run_code` 内嵌 `tools.edit` 修改未读的 `fs-edit-guard.txt` 被拒绝（`file has not been read — read the file, then retry`），文件保持 `edit-original`；验证后已清理。
+  - PTC 下 Agent Team：同一会话第四回合，模型经 `run_code` 调用 `tools.spawn_teammate` 创建 `probe2`，`tools.send_message` 发送，`tools.wait_agent` 等待，返回 `OK`；子会话 `102b3af9-7299-4fc6-acbf-7a514869495a`，`provider=spawn`、`status=ok`、`stopReason=completed`。说明 PTC 与 Agent Team 可共存。
+- 修复 Windows 工作区 ACL：DSH `workspace-write` 启动时需要给工作区目录追加 capability ACE，要求目录具备 `WRITE_DAC`；默认继承的 `Modify` 不含该权限，会让 `run_code`/`pwsh` 以 Win32 5 启动失败并申请 `danger-full-access`。`server.mjs` 的 `chatWorkspaceDir()` 现在在创建会话目录后调用 `ensureWorkspaceAcl()`，只给当前登录用户本人补 `(OI)(CI)F` 显式完全控制，不向其他账号开放。修复后 PTC 只读/工作区写均无审批直接成功。
+- 边界与未验证项：
+  - `fs-observation-policy` 只覆盖 `write/edit/delete` 等 fs 工具，不覆盖 `pwsh` 等 shell 写入；shell 绕过仍是明确边界。
+  - PTC 嵌套工具在 `workspace-write` 下按自身策略拒绝越界；申请 `danger-full-access` 时审批卡定位到嵌套的 `write`，而不是外层 `run_code`，说明并非“外层一次批准就放行整个程序”。首次批准后 fs guard 仍要求先读，文件未被盲写；第二次批准被拒绝后文件保持原样。
+  - 嵌套工具审批只带 `toolName/reason`，不带嵌套参数；已把 `reason` 回填为参数摘要，并在放宽沙箱时把展示风险标为 high。审批卡仍无法显示嵌套工具的精确路径/内容。
+  - 管理端审批决策列表 UI、Agent Team roster/任务板、手动审批真实 pending 视觉复验仍未完成。
+- 服务重启后 PID `62472`，`/api/health` 200；`server.mjs`、`harness.mjs`、`dsh-fs-observation-policy/lib/index.js` 均通过 `node --check`。已清理 `fs-guard-*`、`ptc-*` 测试文件、`fs-policy-debug.log` 和临时 `probe-*.mjs`。
+
+## 67. 账号级运行时管理与基线同步（2026-11-14）
+
+- `/api/runtime/plugins` 的 GET/POST 改为使用当前管理员账号的 `ensureUserDshHome(user.id)`：dump 与 profile patch 都从同一个账号 Home 生成/写入，不再读全局 `data\dsh-home`。接口返回的 `source` 已改为“按当前账号 DSH_HOME 生成”。
+- `/api/bootstrap` 与 `/api/settings` 的 `runtimeOverview()` 也接收账号 Home；`configPath`、`credentialsPath`、`skillsDir`、插件清单反映真实账号运行时。
+- `ensureUserDshHome()` 新增 `ensureManagedModelPlugins(home)`：对已有账号按“缺什么补什么”幂等补齐 fs guard 与 PTC 执行器；账号已显式停用的条目保留原配置，不整文件覆盖。
+- 服务启动时遍历 `listAccounts()` 调用 `ensureUserDshHome(account.id)`，让已有账号在重启后获得平台级模型能力基线，而不是等首次建号才复制。
+- `runtimeDumpPath(home)` 把配置快照按 Home 隔离：账号 Home 写 `dsh-dump-config.txt`，全局 `data\dsh-home` 保留历史 `data\dsh-dump-config.txt`。`refreshRuntimeConfigDump`、`runtimePluginInventory`、`runtimeOverview` 共用同一路径函数，避免两个账号并发刷新互相覆盖。
+- `platformCapabilities(home)` 改为可接收账号 Home；`/api/bootstrap`、`/api/platform-capabilities`、`/api/admin/official-baseline`、平台能力启停、Web 搜索校验和 `/api/console` 都改为使用 `accountRuntimeHome(user)`，不再按全局清单判断当前账号。
+- 实测：重启后 `/api/runtime/plugins` 返回 `fs-observation-policy-guard=true`、`tool-executor-ptc-enabled=true`，`fs-observation-policy/tool-executor-native/tool-executor-ptc` 均 `false`；A-7788-01 的 patch 仍只有一份 guard/PTC 条目，未重复追加。
+- 实测账号 dump 文件位于 `data\agents\A-7788-01\dsh-home\dsh-dump-config.txt`（16994 字节），全局 `data\dsh-dump-config.txt` 保持独立（16909 字节）；`/api/bootstrap`、`/api/console`、`/api/admin/official-baseline` 均 200。
+- 未完成：`ops` 目录不是有效账号，启动同步不会覆盖它；若以后恢复该账号，需要正常走账号创建/登录路径。
+- 服务重启后 PID `68416`，`/api/health` 200；`server.mjs` 通过 `node --check`。
+
+## 68. 普通设计师账号“米乐乐”（2026-11-14）
+
+- `data.mjs` 新增 `roles.designer`：`label=普通设计师`，`duty=规划设计师`，`unit=规划一所`，模块与普通员工一致，`scopes=['public','internal','unit:规划一所']`，不含 `admin`。
+- 新增真实账号 `A-7788-02`：`name=米乐乐`、`role=designer`、`unit=规划一所`、`duty=规划设计师`，写入 SQLite `accounts` 表，不走演示角色冒充。
+- `/api/bootstrap` 的 `allRoles` 改为真实账号列表（`listAccounts()` + `userOfAccount`），账号切换菜单从“角色”改为“账号”，显示“2 个账号可选”。
+- `/api/login` 支持用账号 id 登录：`getAccount(body.accountId)` 优先，`getAccount(body.role) || getAccountByRole(body.role)` 兼容旧的角色名登录。
+- 实测：
+  - 用 `{role:'A-7788-02'}` 登录返回 200，用户 `id=A-7788-02`、`name=米乐乐`、`label=普通设计师`、`unit=规划一所`、`visibleModules=26`、`scopes` 正确。
+  - 新账号自动创建 `data\agents\A-7788-02\dsh-home`，`cordis.patch.yml` 55 行，包含 fs guard 与 PTC 基线。
+  - 新账号 `/api/model/config` 返回 200，使用统一模型网关；`/api/runtime/plugins` 返回 403（非管理员，符合权限边界）。
+  - 浏览器账号菜单显示“米乐乐 普通设计师 · 规划一所 当前”。
+- 前端 `app.js?v=533`；`node --check public/app.js` 通过。服务 PID `65408`，`/api/health` 200。（该 PID 为第 68 节记录时的历史值，当前服务 PID 见第 69 节。）
+
+## 69. 产品可见性三项与视觉回归收口（2026-11-14）
+
+- 审批决策列表：管理中心「安全与审计」页改为真实 `approval_decisions` 数据。`/api/console` 的 `security` 段提供 6 个 KPI（审批决策、待处理、高风险、已拒绝、已通过、已过期），不再返回占位表格；前端 `renderAdmin` 在 `tab==='security'` 时读取 `GET /api/approval-decisions?limit=50`，按卡片行展示时间、工具、操作、决定、操作人、命中规则、风险与完整摘要，避免长 PTC 原因在窄列逐字换行。
+- 决定值映射：`allowed/allowed-once→已通过`，`pending→待审批`，`reject/deny→已拒绝`，`cancel→已取消`，`expire→已过期`；前端 `STATUS/WARN/BAD` 正则同步加入新中文状态。
+- Agent Team 任务板：`harness.mjs` 新增 `subagentTasksOf(audit)`，从 `run_code` 审计的 `spawn_teammate` 代码中提取 `name/description`，按启动顺序映射到 `subagentsOf`；同时修复审计 `detail` 在 800 字符处截断后 `JSON.parse` 失败的问题，改为先还原转义再正则提取。前端 `subagentBlock` 改为默认展开的「Agent Team · 任务板」，卡片显示状态、代理名、childSessionId 前 8 位、任务说明、输出摘要和结束原因。
+- PTC 审批摘要：`openApprovalMenu` 改为结构化「审批摘要」卡片，展示工具、操作、目标、风险/规则、摘要和「仅本次」；无参数时不再一概标为“PTC 嵌套”，只有 `callId` 以 `:ptc:<n>` 结尾时认定 PTC 嵌套并加标签；所有仅含升级原因的无参数审批都显示“工具未回传精确参数，以上摘要来自运行时升级原因，不冒充完整参数”。
+- 实测：
+  - `/api/console` 的 security 段返回 6 个 KPI；截图时 `approval_decisions` 12 条，已拒绝 5、已通过 3、已过期 2、高风险 2；PTC 复验新增 2 条后为 15 条（reject/deny 7、allowed 4、cancel 2、expire 2，高风险 4）。管理中心列表按卡片式渲染，摘要列占满整行。
+  - 真实工作区外写入审批：弹层显示 `write / write / 高风险 · DSH 工作区越界升级`，摘要说明升级原因，无“PTC 嵌套”误标；拒绝后未产生文件，审批记录落库为已拒绝。
+  - PTC 嵌套审批：工作模式下外层 `run_code` 先批准执行，随后嵌套 `write` 弹出「审批摘要」，顶部显示 `PTC 嵌套`、`仅本次`，明细为 `write / write / 高 · DSH 工作区越界升级`，摘要为完整升级原因并附“未回传精确参数”说明；拒绝后 `ptc-approval-ui2.txt` 不存在，记录落库为已拒绝，`callId` 以 `:ptc:1` 结尾。
+  - 新 Agent Team 会话：`spawn_teammate` 创建 `probe474`，子会话 `37cd5709-...`，任务板显示“完成 / probe474 / 37cd5709 / Minimal probe teammate that replies only OK / OK / 结束原因 completed”，1/1 已结束。
+  - 718×763 视口下 6 个 KPI 排成 3+3，不再出现 3+1；默认蓝色与绿色强调色均已截图复核，选中态、卡片和状态标签不变形。
+- 入口与边界：审批决策列表仍在管理中心「安全与审计」，不是独立一级导航；列表当前只读，未做按工具/决定/风险筛选、完整参数展开和导出；`GET /api/approval-decisions` 仍仅管理员可读，非管理员 403。
+- 前端入口 `app.js?v=539`；`server.mjs`、`harness.mjs`、`public/app.js` 均通过 `node --check`。服务 PID `47492`，`/api/health` 200。
+
+
+## 70. 正式账号密码登录、首次强制改密与记住账号密码（2026-11-14）
+
+- 账号密码存储：`accounts` 表新增 `password_hash`、`must_change_password`、`password_updated_at`；旧库用 `ALTER TABLE` 幂等补列。密码只存 `scrypt$salt$hex` 哈希，不落明文；`mapAccount` 对外只暴露字段，登录用户对象不带哈希。
+- 默认密码规则：新增 `pinyin-pro` 依赖，`defaultPasswordForName()` 用 `pinyin(name,{toneType:'none',type:'array'})` 取姓名全拼、首字母大写后拼 `@123`。当前实测：米乐和米乐乐均按该规则生成初始密码（此处不记录明文）；以后新增中文姓名也按全拼生成，不再回退账号编码。
+- 启动迁移：`ensureAccountPasswords()` 在 `seedLocalAccounts()` 后执行，只给 `password_hash` 为空的账号写初始密码并置 `must_change_password=1`，不覆盖已改过的密码。
+- 登录接口：`POST /api/login` 必须同时提供账号与密码；按 `accountId` 或兼容 `role` 找到真实账号，缺密码返回 `PASSWORD_REQUIRED`，校验失败返回 401 `BAD_CREDENTIALS` 并写 deny 审计；成功返回 `{ok,user,accountId,mustChangePassword}`。不再回退演示角色。
+- 首次强制改密：`GET /api/bootstrap` 新增 `mustChangePassword`；非公开 API 在会话账号 `must_change_password=1` 时返回 403 `PASSWORD_CHANGE_REQUIRED`，仅放行 `POST /api/account/password`。前端 `renderViewInner()` 在 `authed && mustChangePassword` 时直接渲染「首次登录 · 设置密码」，无法先进入业务页面。
+- 改密接口：`POST /api/account/password` 接收 `{currentPassword,nextPassword}`，从 `jg_sid` 会话取账号，校验当前密码，要求新密码 8–64 位且至少含字母和数字，禁止与原密码相同；成功后更新哈希、置 `must_change_password=0`，写 `auth.password.change` 审计。
+- 设置页入口：个人资料 → 安全新增「登录密码 / 已设置 / 修改密码」，复用同一改密接口；设置搜索项同步加入“登录密码”。
+- 记住账号密码：登录页新增密码输入、`记住账号和密码` 复选框、行内错误提示；`localStorage` 键为 `jg.login.account`、`jg.login.password`、`jg.login.remember`。勾选后登录成功保存账号与密码，重新打开登录页回填并选中账号；不勾选则清除已保存值。密码以明文存于本机浏览器，是用户明确要求的功能取舍。
+- 账号切换：账号菜单「切换账号」改为「登录其他账号」，点击后先退出当前会话再回登录页；删除前端 `switchRole()` 免密登录路径，避免密码校验被绕过。
+- 首次登录与设置页共用同一套页面样式：`setLoginChrome()` 隐藏侧栏/菜单/顶栏并让登录卡片全屏居中，未修改 `public/styles.css`，黑白灰与强调色风格保持一致。
+- 实测：
+  - `A-7788-02` 用初始密码登录 200，`bootstrap.mustChangePassword=true`；随后 `GET /api/conversations` 返回 403 `PASSWORD_CHANGE_REQUIRED`，证明服务端强制改密生效。
+  - 管理员米乐首次登录强制页用初始密码完成改密并进入首页；设置页再改一次密码成功，审计新增两条 `auth.password.change` allow。
+  - 错误密码在登录页显示「账号或密码不正确」，不建立会话；`auth.login` deny 落库。
+  - 勾选记住密码后，退出重进登录页自动选中账号并回填密码；切到米乐乐时密码清空；米乐乐登录后进入强制改密页。
+  - 退出后账号菜单的「登录其他账号」回到登录页，不再出现免密切换账号。
+  - SQLite 核对：`A-7788-01` 哈希长度 168、`must_change_password=0`；`A-7788-02` 哈希长度 168、`must_change_password=1`（未替用户改密）。
+- 当前测试态：管理员米乐密码已在验收中改为测试密码（此处不记录明文），米乐乐仍为初始密码状态且首次登录必须改密。需要恢复管理员初始密码时，把 `A-7788-01` 的 `password_hash` 清空并重启服务即可重新生成初始密码。
+- 前端 `app.js?v=543`；`server.mjs`、`db.mjs`、`public/app.js` 均通过 `node --check`。服务 PID `38960`，`/api/health` 200。
+- 截图：`C:\Users\46198\AppData\Local\Temp\jg-login-page.png`（登录页）、`jg-login-3.png`（首次强制改密）、`jg-milele-first.png`（米乐乐强制改密）、`jg-pwd-changed.png`（设置页改密成功）。
+- 未单独验证：取消勾选后清除已保存值的 UI 操作；接口侧已实测当前密码错误 401、弱密码 400。
+
+
+## 71. 登录页姓名全拼用户名、输入框满宽与算术验证码（2026-11-14）
+
+- 本节取代第 70 节中“账号卡片 + accountId”的登录入口；密码哈希、首次强制改密、设置页改密、服务端强制改密拦截与记住密码策略保留。
+- 输入框满宽：根因是 `.mini-input` 自身带有 `max-width:210px`，此前只写 `width:100%` 仍被压缩。登录页三处输入均加 `width:100%!important;max-width:100%!important;box-sizing:border-box`；登录卡片改为 440px，718px 视口下实测卡片 x=139、输入框宽 386px，卡片与输入框均居中满宽。首次登录改密页同步修正为 440px 卡片与满宽输入。
+- 登录用户名：`accounts` 表新增 `username`、`phone` 两列，旧库按现有 `duplicate column name` 模式幂等补列；`ensureAccountUsernames()` 在启动时按姓名全拼生成小写用户名（`pinyin-pro`），已实测 `A-7788-01= mile`、`A-7788-02= milele`。
+- 登录查询：`getAccountByUsername()` 先按 `lower(username)=lower(?)` 查，再按非空 `phone` 查，为后续“姓名全拼/绑定手机号”共用入口；`POST /api/login` 优先接收 `{username,password,captchaId,captchaAnswer}`，保留 `accountId` 兼容旧调用。用户名大小写不敏感，实测 `Mile` 可登录米乐。
+- 验证码：新增公开 `GET /api/captcha`，服务端内存 Map 生成 5 分钟有效的一次性算式；随机 `+ - × ÷`，减法保证非负、除法保证整除，返回 `{captchaId,question}`。登录必须携带验证码，缺失返回 400 `CAPTCHA_REQUIRED`，错误/过期/重复使用返回 400 `BAD_CAPTCHA`。前端显示算式、输入框与“换一个”按钮；登录失败自动换题并清空答案。
+- 记住账号密码：storage 增加 `jg.login.username`，继续使用 `jg.login.account`、`jg.login.password`、`jg.login.remember`；旧版只存 accountId 的记录会用 `/api/bootstrap.allRoles` 中的 username 迁移回填。切换用户名时自动清空旧密码；勾选并在登录成功后保存，不勾选登录成功时清除。
+- 实测：
+  - 718×763：登录页卡片 440px、x=139，用户名/密码/验证码输入框 386px；首次改密页同样 440px、输入 386px。
+  - `Mile`（大写）登录米乐 200，返回 `username:"mile"`；`/api/bootstrap.allRoles` 为 `mile/米乐`、`milele/米乐乐`。
+  - 米乐乐用 `milele` 登录 200，`mustChangePassword=true`，随后 `/api/conversations` 403 `PASSWORD_CHANGE_REQUIRED`，首次改密页正常渲染。
+  - 错误密码返回“用户名或密码不正确”；错误验证码返回 400 `BAD_CAPTCHA`，前端自动换题并显示“验证码不正确，已换一个，请重新填写”。
+  - 同一验证码成功后再次使用返回 400 `BAD_CAPTCHA`；除法题 `30 ÷ 5 = 6` 登录成功；一次错误密码后题目由 `7 - 2` 换为 `17 - 11`。\n  - 取消勾选“记住账号和密码”后，`jg.login.username/account/password/remember` 四个键立即清空；重新勾选并登录后再次保存。
+  - SQLite：`username`/`phone` 已迁移，米乐 `mile`、米乐乐 `milele`；密码哈希长度仍为 168，`must_change_password` 状态未被本次改动改写。
+- 当前状态：服务 PID `66992`，`/api/health` 200；前端 `app.js?v=548`；管理员米乐已登录首页；米乐乐仍为初始密码状态且 `must_change_password=1`，首次登录会进入改密页。
+- 未实现/未验证：手机号绑定 UI 与手机号数据尚未提供，当前只完成 `phone` 字段和登录查询入口；验证码 5 分钟过期仅由代码路径保证，未做等待 5 分钟的时钟验证。
+- 截图：`C:\Users\46198\AppData\Local\Temp\jg-login-new2.png`（满宽登录页）、`jg-milele-firstnew2.png`（满宽首次改密页）、`jg-captcha-bad.png`（验证码错误与自动换题）。
+
+
+
+## 72. 管理中心“系统设置”：基础配置可写、版本/环境只读（2026-11-14）
+
+- 目标：落实管理中心“系统设置”子模块，不做通知规则引擎和未定义的细粒度功能开关；只接入真实运行时数据。
+- 服务端：`GET /api/console` 的 `settings` 段返回 `writable`、`basic`（`defaultPolicy`、`defaultEffort`、`workspaceChanges`）、`version`（产品/前端/Electron/Node/DSH/端口）、`environment`（当前网络/可用网络/模型网关/API Key 状态/数据库/运行时快照）和网络列表；版本取自 `package.json`、`node_modules/electron/package.json`、`public/index.html`、`process.version` 与 `runtimeOverview()`，不是手写演示值。
+- 基础配置写入复用 `POST /api/settings`（仅 `canManage` 管理员），服务端继续用 `sanitizeRuntimeSettings()` 收敛字段并写 `runtimeSettings` 持久状态；保存后记录 `settings.runtime.update` 审计。
+- 前端：`renderAdminSettings()` 按两行式配置行展示，避免窄屏三列表格挤压；版本与环境为只读信息行，基础配置三个下拉框可编辑；保存按钮在请求期间禁用，失败回到可操作态并提示，成功后刷新管理中心。
+- 模型网关只展示供应商、脱敏后的端点、默认模型与 Key 是否已保存，不回显密钥；路径类值按真实本机路径展示。
+- 实测：718×763 下系统设置页三层内容正常渲染；将默认执行策略改为“人工确认”保存后，页面重载显示新值，验证后恢复“自动化执行”；将默认推理强度改为“高”保存后显示“高”，随后恢复“中”；版本显示前端 `v550`、Electron `45.2.1`、Node `v24.15.0`、DSH `0.2.2-rc.1`、端口 `54649`。
+- 当前状态：服务 PID `20676`，`/api/health` 200；前端 `app.js?v=550`；管理员米乐已登录。截图：`C:\Users\46198\AppData\Local\Temp\jg-settings-2.png`（基础配置）、`jg-settings-3.png`（版本/环境）、`jg-settings-4.png`（环境底部）。
+- 未实现：通知规则需要先定义事件与通知渠道；更细的功能开关需绑定真实运行时行为后再开放，当前未摆假开关。
+
+## 73. 登录页关闭入口与快捷方式图标收紧（2026-11-14）
+
+- 登录页：`renderLogin()` 与首次改密页卡片去掉外框、阴影和白底，表单直接落在页面底色上；右上角新增关闭按钮，Electron 下调用 `window.jgClient.close()`，浏览器环境回退到 `window.close()`。
+- 安全域选中态改为白底 + 强调色描边 + 左侧强调色内阴影，不再使用浅色块背景，选择状态仍清晰可辨。
+- 图标：从现有透明源图按蓝绿形状重新裁边，只保留约 4% 外留白，生成 `electron/jg-app-icon.png` 与多尺寸透明 `electron/jg-app-icon.ico`；透明像素在 16/32/48/256 尺寸四角均校验为 `(0,0,0,0)`。
+- 快捷方式：`C:\Users\46198\Desktop\九规智能中枢.lnk` 的 IconLocation 改为 `D:\project-test3\jg-client-1.0\electron\jg-app-icon.ico,0`，并保持 Target/Arguments/WorkingDirectory 不变；随后调用 `SHChangeNotify` 与 `ie4uinit -show` 刷新。
+- Electron 主窗口与弹窗 `icon` 同步改为 `jg-app-icon.ico`，避免窗口仍读取旧图标。
+- 验证：登录页在 718×763 下无卡片外框，关闭按钮可见；退出登录再登录成功；`app.js?v=551` 已生效；快捷方式实际提取的 32×32 图标四角 alpha 为 0，蓝绿图形已贴近图标边界。
+- 截图：`C:\Users\46198\AppData\Local\Temp\jg-login-clean.png`（新版登录页）、`jg-icon-tight-preview.png`（紧凑透明图标预览）、`jg-shortcut-extracted.png`（快捷方式提取图标）。
+
+## 74. 登录页改为竖向分区（2026-11-14）
+
+- 宽屏不再使用居中的窄卡片：改为左右分区，左侧竖向品牌区（标识、产品名、安全域选项和说明），右侧竖向登录表单；`100vh` 高度填满，减少左右空白。
+- 安全域由横向三卡改为竖排列表；选中态为白底 + 强调色边框 + 左侧强调色内阴影，不使用浅色块背景。
+- 右侧表单最大宽度 `520px`，输入框满宽；关闭按钮保留在表单右上角；窄屏 `max-width:900px` 自动收为单列（品牌区在上、表单在下）。
+- 登录页样式写在本页 scoped `<style>` 中，未修改 `public/styles.css`。
+- 验证：`app.js?v=552`；718×763 下单列布局无横向溢出；退出登录后重新登录成功；服务 PID `20676`，`/api/health` 200。
+- 截图：`C:\Users\46198\AppData\Local\Temp\jg-login-vertical-718.png`（窄屏）、`jg-login-wide-1680.png`（1680×1050 宽屏布局）。
+
+## 75. 登录密码可见与关闭按钮位置修正（2026-11-14）
+
+- 登录密码框右侧新增眼睛图标按钮：默认隐藏密码，点击后切换为明文，图标同步变为“闭眼”，`aria-label` 与 `aria-pressed` 跟随状态更新；再次点击恢复隐藏。按钮保留键盘可达性，输入框继续满宽。
+- 关闭按钮从表单标题行移到页面右上角固定位置（`position:fixed; top:14px; right:18px; z-index:10`），不再悬在表单中段。
+- 登录页样式仍使用页面内 scoped `<style>`，未修改 `public/styles.css`。
+- 验证：`app.js?v=553`；718×763 与 1680×1050 均可见右上角关闭按钮；密码切换后 `input.type` 由 `password` 变为 `text`，按钮 aria-label 变为“隐藏密码”；退出登录再登录成功；`/api/health` 200。
+- 截图：`C:\Users\46198\AppData\Local\Temp\jg-login-wide-553.png`（宽屏）、`jg-login-pw-visible-718.png`（密码明文状态）。
+
+## 76. 登录关闭按钮强化与两账号正式密码（2026-11-14）
+
+- 登录页关闭按钮改为右上角描边胶囊按钮：X 图标 + “关闭”文字，透明底、细边框、无填充，固定在 `top:14px; right:18px`，在宽屏与窄屏都保持可辨。
+- 米乐（`mile`，`A-7788-01`）和米乐乐（`milele`，`A-7788-02`）正式密码均通过真实 `POST /api/account/password` 更新为约定的正式密码，`mustChangePassword` 随之置为 `0`；未直接改库。
+- 独立新会话重新登录验证：米乐、米乐乐均返回 `ok:true`、`mustChangePassword:false`，用户名分别为 `mile`/`milele`。
+- 本机浏览器 `jg.login.password` 已同步为新密码，保持“记住账号和密码”后退出再登录会自动回填新密码。
+- 当前前端 `v557`，服务 PID `20676`，`/api/health` 200；登录页密码说明已改为“新账号初始密码……已有正式密码的账号直接使用正式密码”；截图：`C:\Users\46198\AppData\Local\Temp\jg-login-wide-557.png`（描边关闭按钮 + 密码可见按钮）。
+- 注意：不在代码、界面文案或仓库文档中写入明文密码；账号库只保存 scrypt 哈希，后续改密继续走账号改密接口。
+## 77. 深度思索接入推理模型（2026-11-14）
+
+- 问题定位：原有界面只有“推理强度 低/中/高”，映射为 `off/low/high`；当前账号默认模型仍是 `deepseek-chat`，所以“高”只是普通模型的推理档位，并没有独立推理模型入口，也没有把推理模型接入会话。
+- 前端入口：不新增顶部按钮；在聊天输入框“＋”菜单中加入“深度思索”并放在第二项，原“深度研究 / 暂未开放”占位不再保留。开启后该行显示“✓ 深度思索”，并提示“已开启 · 当前会话使用推理模型”；再次点击关闭。
+- 交互状态：`state.deepThink` 与会话的 `deepThink` 字段同步；开启时推理强度固定为高，发送 `/api/chat` 时携带 `deepThink: true`；新建会话重置为关闭，重新打开会话从服务端记录恢复。
+- 服务端：`/api/chat` 读取 `deepThink`，在 DeepSeek 官方端点下把 `modelCfg.model` 切换为 `deepseek-reasoner`，`reasoningEffort` 固定为 `high`；会话记录 `deepThink` 和 `reasoningEffort=high` 并持久化。
+- 失败边界：非 DeepSeek 端点开启深度思索时返回 `409 DEEP_THINK_UNSUPPORTED`，明确提示需要 DeepSeek 推理模型，不静默回退到普通模型。
+- 等待反馈：深度思索请求进行中且尚无执行步骤时，聊天区显示“深度思索中”，并提示正在调用 DeepSeek 推理模型；不把模型内部 `reasoning_content` 原文暴露到界面，只展示状态和最终回答。
+- 实测：`app.js?v=561`，服务 `http://127.0.0.1:54649/`，PID `68252`，`/api/health` 200；用“9.11 和 9.9 哪个大？先简要推理再给结论。”验证，最新会话返回 `model=deepseek-reasoner`、`deepThink=true`、`reasoningEffort=high`，回答包含推理过程和结论；刷新后重新打开该会话，“＋”菜单仍显示“✓ 深度思索”。
+- 正式验收（2026-11-14）：新建空会话默认关闭；从“＋”第二项开启后显示“✓ 深度思索 已开启 · 当前会话使用推理模型”；发送后立即观察到“深度思索中 / 正在调用 DeepSeek 推理模型…”；验收会话 `C-1794625048826270` 返回 `deepThink=true`、`model=deepseek-reasoner`、`reasoningEffort=high`，回答同时给出推理要点和结论；刷新并重新打开该会话后入口仍为开启。关闭后同一会话继续发送普通问题，返回 `deepThink=false`、`model=deepseek-chat`，并提示“已关闭深度思索：恢复普通对话模型”；“推理强度”低/中/高三档仍可用。
+- 截图：`C:\Users\46198\AppData\Local\Temp\jg-deepthink-plus-561.png`（718×763 下 + 菜单中的深度思索入口）。
+- 未验证：非 DeepSeek 端点的 409 分支未切换账号实测；`reasoning_content` 不展示为逐字思考过程；本轮会话统计的 `reasoningTokens` 为 0，未把 token 数作为深度思索的验收依据。

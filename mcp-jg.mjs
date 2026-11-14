@@ -61,6 +61,42 @@ const tools = [
     inputSchema: { type: 'object', properties: { q: { type: 'string' } } },
   },
   {
+    name: 'format_capabilities',
+    description: '列出平台格式基座支持的 PDF、GIS/GeoJSON、CAD/DXF 读写能力与边界。',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'format_inspect',
+    description: '解析平台文件中的 PDF、GeoJSON 或 ASCII DXF，返回页数、要素、图层、范围等元数据。',
+    inputSchema: { type: 'object', properties: { fileId: { type: 'string', description: '平台文件 ID' }, name: { type: 'string', description: '原始文件名，用于识别格式' }, mime: { type: 'string' } }, required: ['fileId'] },
+  },
+  {
+    name: 'format_extract',
+    description: '读取 PDF 文本，或返回 GIS/CAD 的要素、图层与范围摘要。',
+    inputSchema: { type: 'object', properties: { fileId: { type: 'string', description: '平台文件 ID' }, name: { type: 'string' }, mime: { type: 'string' } }, required: ['fileId'] },
+  },
+  {
+    name: 'format_export',
+    description: '输出平台数据格式：PDF 合并/拆分、GeoJSON 规范化、ASCII DXF 回写。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        format: { type: 'string', enum: ['pdf', 'gis', 'cad'] },
+        op: { type: 'string', enum: ['merge', 'split', 'normalize'] },
+        fileId: { type: 'string' },
+        fileIds: { type: 'array', items: { type: 'string' } },
+        ranges: { type: 'string' },
+        name: { type: 'string' },
+      },
+      required: ['format', 'op'],
+    },
+  },
+  {
+    name: 'code_review',
+    description: 'Harness 通用基础服务：审查一个项目的源码目录，返回语法、JSON 与静态规则命中。',
+    inputSchema: { type: 'object', properties: { projectId: { type: 'string' }, scope: { type: 'string', enum: ['all', 'changed'] }, maxFiles: { type: 'number' } }, required: ['projectId'] },
+  },
+  {
     name: 'task_create',
     description: '创建一个待办任务（当前为产品任务接口登记）。',
     inputSchema: { type: 'object', properties: { title: { type: 'string' } } },

@@ -1,3 +1,5 @@
+import { AppLayout, LAYOUT_TOKENS } from './layout-system.js'
+
 const state = {
   boot: null,
   view: 'home',
@@ -36,6 +38,7 @@ const state = {
   composerTools: ['T-DATA'],
   composerRefs: [],
   reasoningEffort: 'medium',
+  deepThink: false,
   personalFiles: [
     { id: 'PF-01', name: '个人项目笔记摘要.docx', type: 'docx', size: '12.4 MB', owner: '钱工', dept: '集团总部', updated: '2026-11-07 16:20', shared: ['本人'], scope: '仅本人', tags: ['个人云盘', '笔记'] },
     { id: 'PF-02', name: '城市体检指标测算底表.xlsx', type: 'xlsx', size: '8.6 MB', owner: '钱工', dept: '集团总部', updated: '2026-11-06 10:35', shared: ['本人'], scope: '仅本人', tags: ['个人云盘', '测算'] },
@@ -57,11 +60,14 @@ const state = {
   // 会话
   conversations: [],
   pinnedConvs: (() => { try { return JSON.parse(localStorage.getItem('jg.pinnedConvs') || '[]') } catch (e) { return [] } })(),
+  archivedConvs: (() => { try { return JSON.parse(localStorage.getItem('jg.archivedConvs') || '[]') } catch (e) { return [] } })(),
   recentFilter: 'all',
   recentSort: 'recent',
   showProjects: true,
   projFolds: {},
   sidebarSections: [],
+  projectSections: (() => { try { return JSON.parse(localStorage.getItem('jg.projectSections') || '[]') } catch (e) { return [] } })(),
+  projectSectionMap: (() => { try { return JSON.parse(localStorage.getItem('jg.projectSectionMap') || '{}') } catch (e) { return {} } })(),
   conversation: null,
   chatBusy: false,
   chatAbort: false,
@@ -81,13 +87,16 @@ const state = {
   feedback: [],
   monitor: null,
   automations: [],
-  taskPins: ['AU-1'],
+  taskPins: [],
+  agentEntries: [],
+  webSearch: false,
   knowledge: [],
   knowledgeQuery: '',
   notebooks: [],
   notebookId: null,
   nbOpen: false,
   nbStart: false,
+  nbSortMode: 'recent',
   noteId: null,
   cloud: null,
   cloudOpen: false,
@@ -103,6 +112,8 @@ const state = {
   cbUserW: 0,
   imagegen: { prompt: '', ratio: '1:1', count: 1, style: '写实', shots: [], busy: false, tab: 'hot' },
 }
+
+const layout = new AppLayout(document.getElementById('app'))
 
 const paths = {
   chat: '<path d="M4 5.5h16v10H9l-5 3.5z"/>',
@@ -121,6 +132,8 @@ const paths = {
   tool: '<path d="M14 5l5 5-8 8H6v-3z"/><path d="M4 20l3-3"/>',
   send: '<path d="M12 19V5M6 11l6-6 6 6"/>',
   search: '<circle cx="11" cy="11" r="6"/><path d="M16 16l4 4"/>',
+  bell: '<path d="M6 16h12l-1.5-2V10a4.5 4.5 0 0 0-9 0v4L6 16z"/><path d="M10 19h4"/>',
+  briefcase: '<rect x="4" y="8" width="16" height="11" rx="2"/><path d="M9 8V6h6v2"/><path d="M4 12h16"/>',
   doc: '<path d="M7 4h7l4 4v12H7z"/><path d="M14 4v4h4"/>',
   filter: '<path d="M4 6h16M7 12h10M10 18h4"/>',
   upload: '<path d="M12 16V4"/><path d="M7 9l5-5 5 5"/><path d="M4 16v3h16v-3"/>',
@@ -133,6 +146,7 @@ const paths = {
   shield: '<path d="M12 3l7 3v6c0 4-3 7-7 9-4-2-7-5-7-9V6z"/>',
   bell: '<path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h12s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/>',
   check: '<path d="M5 12l4 4 6-8"/>',
+  alarm: '<circle cx="12" cy="13" r="6"/><path d="M12 10v3h2"/><path d="M5 5l-2 2M19 5l2 2"/><path d="M7 19l-2 2M17 19l2 2"/>',
   close: '<path d="M6 6l12 12M18 6L6 18"/>',
   trash: '<path d="M4 7h16M9 7V5h6v2M7 7l1 13h8l1-13"/>',
   refresh: '<path d="M5 12a7 7 0 0 1 12-4M19 12a7 7 0 0 1-12 4"/><path d="M17 4v4h-4M7 20v-4h4"/>',
@@ -149,6 +163,7 @@ const paths = {
   pinOff: '<path d="M9 4h6l-1 5 3 3v2H7v-2l3-3z"/><path d="M12 14v6"/><path d="M3 3l18 18"/>',
   external: '<rect x="4" y="7" width="9" height="13" rx="2"/><path d="M14 4h6v6"/><path d="M20 4l-8 8"/>',
   pen: '<path d="M4 20l4.5-1 10-10-3.5-3.5-10 10z"/><path d="M13.5 5.5l3.5 3.5"/>',
+  compose: '<rect x="4" y="6" width="13" height="13" rx="2"/><path d="M14.5 4.5l3 3L10 15l-3.5 1 1-3.5z"/>',
   dots: '<circle cx="6" cy="12" r="1.2" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.2" fill="currentColor" stroke="none"/><circle cx="18" cy="12" r="1.2" fill="currentColor" stroke="none"/>',
   home: '<path d="M4 11l8-6 8 6v8a1 1 0 0 1-1 1h-5v-6H10v6H5a1 1 0 0 1-1-1z"/>',
   mic: '<rect x="9" y="3.5" width="6" height="10" rx="3"/><path d="M6 11a6 6 0 0 0 12 0M12 17v3"/>',
@@ -234,8 +249,65 @@ function toast(message, bad = false) {
   toast._t = setTimeout(() => { el.className = 'toast' }, 3200)
 }
 
+function closeRowMenu() {
+  document.querySelectorAll('.jg-row-menu').forEach((m) => m.remove())
+}
+
+function openRowMenu(anchor, marketId, name = '') {
+  closeRowMenu()
+  const menu = document.createElement('div')
+  menu.className = 'jg-row-menu'
+  menu.innerHTML = `<button type="button" data-row-uninstall="${esc(marketId)}">${icon('close')}<span>卸载${name ? `「${esc(name)}」` : ''}</span></button>`
+  document.body.appendChild(menu)
+  const r = anchor.getBoundingClientRect()
+  const w = menu.offsetWidth || 148
+  const h = menu.offsetHeight || 40
+  menu.style.left = `${Math.max(8, Math.min(window.innerWidth - w - 8, r.right - w))}px`
+  menu.style.top = `${Math.max(8, Math.min(window.innerHeight - h - 8, r.bottom + 4))}px`
+  menu.querySelector('[data-row-uninstall]').addEventListener('click', async (e) => {
+    e.stopPropagation()
+    menu.remove()
+    const { ok, body } = await api('/api/plugin-market/install', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id: marketId }),
+    })
+    if (!ok) return toast(body.error || '卸载失败', true)
+    toast(body.message || `已卸载${name ? `「${name}」` : ''}，下一轮对话生效`)
+    renderView()
+  })
+  setTimeout(() => {
+    document.addEventListener('pointerdown', function onDown(e) {
+      if (!menu.contains(e.target)) {
+        menu.remove()
+        document.removeEventListener('pointerdown', onDown, true)
+      }
+    }, true)
+    window.addEventListener('resize', closeRowMenu, { once: true })
+    window.addEventListener('scroll', closeRowMenu, { once: true, capture: true })
+  }, 0)
+}
+
 function esc(value = '') {
   return String(value).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
+}
+
+function richTextHTML(value = '') {
+  const raw = String(value)
+  let last = 0
+  let out = ''
+  raw.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)|(https?:\/\/[^\s<>"']+)/g, (full, label, mdUrl, bareUrl, offset) => {
+    out += esc(raw.slice(last, offset))
+    let url = mdUrl || bareUrl
+    let tail = ''
+    const t = url.match(/(?:[，。；！？、]|[.,;!])$/)
+    if (t) { tail = t[0]; url = url.slice(0, -1) }
+    out += `<a href="${esc(url)}" data-weblink="${esc(url)}" title="在右侧自带浏览器打开" style="color:var(--accent);text-decoration:underline;text-underline-offset:2px;word-break:break-all">${esc(label || url)}</a>${esc(tail)}`
+    last = offset + full.length
+    return full
+  })
+  out += esc(raw.slice(last))
+  return out
 }
 
 /* ------------------------------- boot ------------------------------- */
@@ -244,6 +316,7 @@ async function loadBoot() {
   const { body } = await api('/api/bootstrap')
   state.boot = body
   state.runtimeSettings = body.settings || state.runtimeSettings
+  loadUsageSummary().catch(() => {})
   if (!state.conversation?.id) state.executionPolicy = state.runtimeSettings.defaultPolicy === 'manual' ? 'manual' : 'auto'
   state.agentPresets = body.agentPresets || []
   if (!state.agentPresets.some((p) => p.id === state.agentPresetId)) state.agentPresetId = ''
@@ -259,6 +332,8 @@ async function loadBoot() {
   if (!state.composerTools.length && enabledTools.includes('T-DATA')) state.composerTools = ['T-DATA']
   const plugins = await api('/api/plugins')
   if (plugins.ok) state.plugins = plugins.body.items || []
+  const entries = await api('/api/agent-entries')
+  if (entries.ok) state.agentEntries = entries.body.items || []
   const prj = await api('/api/projects')
   if (prj.ok) state.sidebarProjects = (prj.body.items || []).slice(0, 3)
   const mcp = await api('/api/mcp/resources')
@@ -297,7 +372,8 @@ function renderRail() {
   const btn = (id) => {
     if (!visible(id)) return ''
     const meta = modules[id] || { label: id }
-    return `<button class="rail-btn${state.view === id ? ' on' : ''}" data-nav="${id}" title="${esc(meta.label)}${badge(id) ? ` · ${state.notifications.filter((x) => x.unread && notifModule(x) === id).length} 条未读` : ''}"><span class="ico">${icon(navIcon(id))}</span>${badge(id)}</button>`
+    const off = id === 'imagegen'
+    return `<button class="rail-btn${state.view === id ? ' on' : ''}" data-nav="${id}"${off ? ' disabled style="opacity:.45;cursor:not-allowed"' : ''} title="${esc(off ? '图像生成尚未接入' : meta.label)}${badge(id) ? ` · ${state.notifications.filter((x) => x.unread && notifModule(x) === id).length} 条未读` : ''}"><span class="ico">${icon(navIcon(id))}</span>${badge(id)}</button>`
   }
   const railbar = document.getElementById('railbar')
   railbar.innerHTML = `
@@ -333,37 +409,6 @@ function renderRail() {
     if (window.__accountPop) { const old = window.__accountPop; window.__accountPop = null; old.remove(); return }
     openAccountMenu(ev.currentTarget)
   })
-  const homeBtn = railbar.querySelector('.rail-home')
-  homeBtn?.addEventListener('mouseenter', () => {
-    if (sbFixed()) return
-    const sb = document.getElementById('sidebar')
-    clearTimeout(window.__sbHide)
-    sb.classList.remove('hidden')
-    sb.classList.add('fly')
-  })
-  homeBtn?.addEventListener('mouseleave', () => {
-    window.__sbHide = setTimeout(() => {
-      if (sbFixed()) return
-      const sb = document.getElementById('sidebar')
-      if (!sb.matches(':hover')) { sb.classList.remove('fly'); sb.classList.add('hidden') }
-    }, 220)
-  })
-  ;[['tasks', '.tk-left'], ['skills', '.sk-left']].forEach(([view, sel]) => {
-    const btn = railbar.querySelector(`[data-nav="${view}"]`)
-    if (!btn) return
-    btn.addEventListener('mouseenter', () => {
-      if (state.sbPinned || state.view !== view) return
-      const panel = document.querySelector(sel)
-      if (panel) panel.classList.add('fly-sb')
-    })
-    btn.addEventListener('mouseleave', () => {
-      if (state.sbPinned) return
-      setTimeout(() => {
-        const panel = document.querySelector(sel)
-        if (panel && !panel.matches(':hover')) panel.classList.remove('fly-sb')
-      }, 220)
-    })
-  })
 }
 
 function openRailMore(anchor) {
@@ -393,6 +438,221 @@ function openRailMore(anchor) {
 }
 
 let __projCardTimer = null
+function openProjectMenu(anchor, id) {
+  document.querySelectorAll('.conv-menu').forEach((pop) => pop.remove())
+  const p = (state.sidebarProjects || []).find((x) => x.id === id)
+  if (!p) return
+  const pop = document.createElement('div')
+  pop.className = 'conv-menu'
+  const item = (act, ic, label, arrow = false) => `<button class="cm-item" data-pjm="${act}">
+    <span class="ico">${icon(ic)}</span><span class="cm-label">${label}</span>${arrow ? '<span class="cm-arrow">›</span>' : ''}
+  </button>`
+  pop.innerHTML = [
+    item('pin', 'pin', p.pinned ? '取消置顶' : '置顶'),
+    item('edit', 'gear', '编辑'),
+    '<div class="cm-sep"></div>',
+    item('section', 'grid', '分区', true),
+    item('reveal', 'folder', '在资源管理器中打开'),
+    '<div class="cm-sep"></div>',
+    item('archive', 'inbox', '归档聊天'),
+    '<div class="cm-sep"></div>',
+    item('remove', 'close', '移除项目'),
+  ].join('')
+  document.body.appendChild(pop)
+  const r = anchor.getBoundingClientRect()
+  pop.style.left = `${Math.max(64, Math.min(window.innerWidth - 236, r.right + 8))}px`
+  pop.style.top = `${Math.max(46, Math.min(window.innerHeight - 360, r.top - 8))}px`
+  pop.querySelectorAll('[data-pjm]').forEach((button) => button.addEventListener('click', async (ev) => {
+    ev.stopPropagation()
+    const act = button.dataset.pjm
+    if (act === 'section') { pop.remove(); openProjectSectionPicker(anchor, p); return }
+    pop.remove()
+    if (act === 'pin') return setProjectPinned(p, !p.pinned)
+    if (act === 'edit') return openProjectEditCard(anchor, p.id)
+    if (act === 'reveal') return revealProjectFolder(p)
+    if (act === 'archive') return archiveProjectChats(p)
+    if (act === 'remove') return confirmRemoveProject(p)
+  }))
+  setTimeout(() => document.addEventListener('click', function close(e) {
+    if (!pop.contains(e.target)) { pop.remove(); document.removeEventListener('click', close) }
+  }), 0)
+}
+
+function startProjectChat(p) {
+  state.conversation = null
+  state.chatSteps = []
+  state.chatError = ''
+  state.activeProjectId = p.id
+  state.activeProjectName = p.name
+  state.activeProjectCwd = p.cwd || ''
+  state.view = 'home'
+  state.draft = ''
+  render()
+  setTimeout(() => document.getElementById('draft')?.focus(), 60)
+}
+
+function openProjectRowMenu(anchor, id) {
+  document.querySelectorAll('.prj-row-menu').forEach((pop) => pop.remove())
+  const p = (state.projects || []).find((x) => x.id === id)
+  if (!p) return
+  const menu = document.createElement('div')
+  menu.className = 'prj-row-menu'
+  const item = (act, ic, label) => `<button class="prj-row-menu-item" data-prjm="${act}"><span class="ico">${icon(ic)}</span><span>${label}</span></button>`
+  menu.innerHTML = [
+    item('new', 'compose', '新聊天'),
+    item('pin', 'pin', p.pinned ? '取消置顶项目' : '置顶项目'),
+    item('edit', 'gear', '编辑项目'),
+    item('archive', 'inbox', '归档聊天'),
+    item('remove', 'close', '移除项目'),
+  ].join('')
+  document.body.appendChild(menu)
+  const r = anchor.getBoundingClientRect()
+  const w = menu.offsetWidth || 200
+  const h = menu.offsetHeight || 220
+  menu.style.left = `${Math.max(8, Math.min(window.innerWidth - w - 10, r.right - w))}px`
+  menu.style.top = `${Math.max(8, Math.min(window.innerHeight - h - 8, r.bottom + 8))}px`
+  menu.querySelectorAll('[data-prjm]').forEach((button) => button.addEventListener('click', async (ev) => {
+    ev.stopPropagation()
+    const act = button.dataset.prjm
+    menu.remove()
+    if (act === 'new') return startProjectChat(p)
+    if (act === 'pin') {
+      await setProjectPinned(p, !p.pinned)
+      return renderView()
+    }
+    if (act === 'edit') return openProjectEditCard(anchor, p.id)
+    if (act === 'archive') return archiveProjectChats(p)
+    if (act === 'remove') return confirmRemoveProject(p)
+  }))
+  setTimeout(() => document.addEventListener('pointerdown', function close(e) {
+    if (!menu.contains(e.target)) {
+      menu.remove()
+      document.removeEventListener('pointerdown', close, true)
+    }
+  }, true), 0)
+}
+
+async function setProjectPinned(p, next) {
+  const { ok, body } = await api('/api/projects/update', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ id: p.id, pinned: next }),
+  })
+  if (!ok || !body.item) return toast(body?.error || '置顶项目失败', true)
+  Object.assign(p, body.item)
+  const mirror = (state.projects || []).find((x) => x.id === p.id)
+  if (mirror) Object.assign(mirror, body.item)
+  renderSidebar()
+  toast(p.pinned ? `已置顶项目「${p.name}」` : `已取消置顶项目「${p.name}」`)
+}
+
+function openProjectSectionPicker(anchor, p) {
+  document.querySelectorAll('.conv-menu').forEach((pop) => pop.remove())
+  const sections = state.projectSections || []
+  const current = (state.projectSectionMap || {})[p.id] || ''
+  const pop = document.createElement('div')
+  pop.className = 'conv-menu'
+  pop.innerHTML = `<div class="cm-head">项目分区</div>` +
+    `<button class="cm-item" data-pjs=""><span class="ico">${icon('grid')}</span><span class="cm-label">无分区</span>${current ? '' : '<span class="cm-key">✓</span>'}</button>` +
+    sections.map((section) => `<button class="cm-item" data-pjs="${esc(section.id)}"><span class="ico">${icon('folder')}</span><span class="cm-label">${esc(section.name)}</span>${current === section.id ? '<span class="cm-key">✓</span>' : ''}</button>`).join('') +
+    `<div class="cm-sep"></div><button class="cm-item" data-pjs-new><span class="ico">${icon('plus')}</span><span class="cm-label">新建分区</span></button>`
+  document.body.appendChild(pop)
+  const r = anchor.getBoundingClientRect()
+  pop.style.left = `${Math.max(64, Math.min(window.innerWidth - 236, r.right + 8))}px`
+  pop.style.top = `${Math.max(46, Math.min(window.innerHeight - 280, r.top - 4))}px`
+  const persist = () => {
+    try {
+      localStorage.setItem('jg.projectSections', JSON.stringify(state.projectSections || []))
+      localStorage.setItem('jg.projectSectionMap', JSON.stringify(state.projectSectionMap || {}))
+    } catch (e) { /* 本地不可写时只保留进程内状态 */ }
+  }
+  pop.querySelectorAll('[data-pjs]').forEach((button) => button.addEventListener('click', (ev) => {
+    ev.stopPropagation()
+    const id = button.dataset.pjs
+    state.projectSectionMap = state.projectSectionMap || {}
+    if (id) state.projectSectionMap[p.id] = id
+    else delete state.projectSectionMap[p.id]
+    persist()
+    pop.remove()
+    const name = sections.find((section) => section.id === id)?.name
+    toast(name ? `已将「${p.name}」放入分区「${name}」` : `已清除「${p.name}」的项目分区`)
+  }))
+  pop.querySelector('[data-pjs-new]')?.addEventListener('click', (ev) => {
+    ev.stopPropagation()
+    pop.remove()
+    const mask = openModal('新建项目分区', `
+      <div class="form-note">分区只用于整理项目列表，不会移动本地目录或改动项目文件。</div>
+      <div class="form-label">分区名称</div>
+      <input class="text-input" id="pjsName" placeholder="例如：在办项目" autocomplete="off" />
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">
+        <button class="btn" data-cancel>取消</button><button class="btn primary" data-ok>新建并放入</button>
+      </div>`)
+    mask.querySelector('[data-cancel]')?.addEventListener('click', () => mask.remove())
+    mask.querySelector('[data-ok]')?.addEventListener('click', () => {
+      const name = mask.querySelector('#pjsName')?.value.trim()
+      if (!name) return toast('请填写分区名称', true)
+      const section = { id: `PSEC-${Date.now()}`, name }
+      state.projectSections = [...(state.projectSections || []), section]
+      state.projectSectionMap = { ...(state.projectSectionMap || {}), [p.id]: section.id }
+      persist()
+      mask.remove()
+      toast(`已新建分区「${name}」并放入「${p.name}」`)
+    })
+  })
+  setTimeout(() => document.addEventListener('click', function close(e) {
+    if (!pop.contains(e.target)) { pop.remove(); document.removeEventListener('click', close) }
+  }), 0)
+}
+
+async function revealProjectFolder(p) {
+  if (!p?.cwd) return toast('该项目尚未绑定本地文件夹', true)
+  if (!window.jgClient?.revealPath) return toast('当前环境不支持打开本地文件夹', true)
+  const result = await window.jgClient.revealPath(p.cwd).catch(() => null)
+  if (!result?.ok) return toast(result?.error || '打开文件夹失败', true)
+}
+
+function persistArchivedConvs() {
+  try { localStorage.setItem('jg.archivedConvs', JSON.stringify(state.archivedConvs || [])) } catch (e) { /* 本地不可写时只保留进程内状态 */ }
+}
+
+function archiveProjectChats(p) {
+  const ids = (state.conversations || []).filter((c) => c.projectId === p.id).map((c) => c.id)
+  if (!ids.length) return toast('该项目暂无聊天记录', true)
+  state.archivedConvs = [...new Set([...(state.archivedConvs || []), ...ids])]
+  persistArchivedConvs()
+  renderSidebar()
+  toast(`已归档「${p.name}」下的 ${ids.length} 条聊天`)
+}
+
+function confirmRemoveProject(p) {
+  const mask = openModal('移除项目', `
+    <div class="notice">只移除平台记录，不会删除本地文件夹、文件或会话历史。项目下的会话会转为普通聊天。</div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">
+      <button class="btn" data-cancel>取消</button><button class="btn" style="color:var(--danger)" data-ok>移除项目</button>
+    </div>`)
+  mask.querySelector('[data-cancel]')?.addEventListener('click', () => mask.remove())
+  mask.querySelector('[data-ok]')?.addEventListener('click', async () => {
+    const { ok, body } = await api('/api/projects/remove', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id: p.id }),
+    })
+    if (!ok) return toast(body?.error || '移除失败', true)
+    mask.remove()
+    if (state.activeProjectId === p.id) {
+      state.activeProjectId = ''
+      state.activeProjectName = ''
+      state.activeProjectCwd = ''
+    }
+    state.projects = (state.projects || []).filter((x) => x.id !== p.id)
+    state.sidebarProjects = (state.sidebarProjects || []).filter((x) => x.id !== p.id)
+    if (state.projectSectionMap) delete state.projectSectionMap[p.id]
+    try { localStorage.setItem('jg.projectSectionMap', JSON.stringify(state.projectSectionMap || {})) } catch (e) { /* 本地不可写时只保留进程内状态 */ }
+    render()
+    renderSidebar()
+    toast('项目记录已移除，本地文件未删除')
+  })
+}
+
 function scheduleProjectCardClose() {
   clearTimeout(__projCardTimer)
   __projCardTimer = setTimeout(() => {
@@ -433,7 +693,28 @@ function openProjectCard(anchor) {
   card.style.top = `${Math.max(46, r.top - 4)}px`
   card.addEventListener('mouseenter', () => clearTimeout(__projCardTimer))
   card.addEventListener('mouseleave', () => scheduleProjectCardClose())
-  card.querySelector('.pc-pin')?.addEventListener('click', () => { toast(p.pinned ? '已取消置顶' : '已置顶项目（演示）'); card.remove() })
+  card.querySelector('.pc-pin')?.addEventListener('click', async (ev) => {
+    ev.stopPropagation()
+    const button = ev.currentTarget
+    if (button.disabled) return
+    button.disabled = true
+    const next = !p.pinned
+    const { ok, body } = await api('/api/projects/update', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id: p.id, pinned: next }),
+    })
+    if (!ok || !body.item) {
+      button.disabled = false
+      return toast(body?.error || '置顶项目失败', true)
+    }
+    Object.assign(p, body.item)
+    const mirror = (state.projects || []).find((x) => x.id === p.id)
+    if (mirror) Object.assign(mirror, body.item)
+    card.remove()
+    renderSidebar()
+    toast(p.pinned ? `已置顶项目「${p.name}」` : `已取消置顶项目「${p.name}」`)
+  })
   card.querySelector('[data-pcedit]')?.addEventListener('click', (ev) => {
     ev.stopPropagation()
     card.remove()
@@ -442,7 +723,7 @@ function openProjectCard(anchor) {
 }
 
 function openProjectEditCard(anchor, id) {
-  const p = (state.sidebarProjects || []).find((x) => x.id === id)
+  const p = (state.sidebarProjects || []).find((x) => x.id === id) || (state.projects || []).find((x) => x.id === id)
   if (!p) return
   document.querySelectorAll('.proj-card').forEach((c) => c.remove())
   const hasBridge = Boolean(window.jgClient && window.jgClient.chooseFolder)
@@ -608,8 +889,8 @@ function openProjectDisplayMenu(anchor) {
   const pop = document.createElement('div')
   pop.className = 'conv-menu proj-menu'
   pop.innerHTML = `
-    <button class="cm-item" data-pm="arrange"><span class="ico">${icon('layers')}</span><span class="cm-label">整理侧边栏</span><span class="cm-arrow">›</span></button>
-    <button class="cm-item" data-pm="order"><span class="ico">${icon('sort')}</span><span class="cm-label">聊天排序方式</span><span class="cm-arrow">›</span></button>
+    <button class="cm-item" data-pm="arrange" disabled style="opacity:.45;cursor:not-allowed"><span class="ico">${icon('layers')}</span><span class="cm-label">整理侧边栏</span><span class="cm-arrow">›</span></button>
+    <button class="cm-item" data-pm="order" disabled style="opacity:.45;cursor:not-allowed"><span class="ico">${icon('sort')}</span><span class="cm-label">聊天排序方式</span><span class="cm-arrow">›</span></button>
     <div class="cm-sep"></div>
     <button class="cm-item" data-pm="split"><span class="ico">${icon('folder')}</span><span class="cm-label">分项目显示</span>${state.projMerge ? '' : '<span class="cm-key">✓</span>'}</button>
     <button class="cm-item" data-pm="merge"><span class="ico">${icon('list')}</span><span class="cm-label">合并显示</span>${state.projMerge ? '<span class="cm-key">✓</span>' : ''}</button>`
@@ -619,12 +900,11 @@ function openProjectDisplayMenu(anchor) {
   pop.style.top = `${Math.max(46, r.bottom + 6)}px`
   pop.querySelectorAll('[data-pm]').forEach((b) => b.addEventListener('click', (e) => {
     e.stopPropagation()
+    if (b.disabled) return
     const act = b.dataset.pm
     pop.remove()
     if (act === 'split') { state.projMerge = false; renderSidebar() }
     else if (act === 'merge') { state.projMerge = true; renderSidebar() }
-    else if (act === 'arrange') toast('侧边栏已按项目整理（演示）')
-    else toast('聊天排序：按最近活动（演示）')
   }))
   setTimeout(() => document.addEventListener('click', function close(e) {
     if (!pop.contains(e.target)) { pop.remove(); window.__plusPop = null; document.removeEventListener('click', close) }
@@ -727,6 +1007,7 @@ function openArrangeSidebar() {
     const all = new Set(convs.map((c) => c.id))
     const keep = new Set([...mask.querySelectorAll('[data-keep]')].filter((x) => x.checked).map((x) => x.dataset.keep))
     state.archivedConvs = [...all].filter((id) => !keep.has(id))
+    persistArchivedConvs()
     mask.remove()
     renderSidebar()
     toast(state.archivedConvs.length ? `已归档 ${state.archivedConvs.length} 条会话` : '已保留全部会话')
@@ -788,16 +1069,23 @@ function openSectionMenu(anchor, id) {
   }), 0)
 }
 
+let homeSidebarCacheHtml = ''
 function renderSidebar() {
   const { user } = state.boot
   const sidebar = document.getElementById('sidebar')
-  sidebar.classList.toggle('hidden', !sbFixed())
-  if (state.view === 'tasks') {
-    sidebar.classList.add('tk-sidebar')
-    sidebar.innerHTML = ''
+  sidebar.classList.remove('tk-sidebar', 'fly', 'hidden')
+  if (!hasSidebarView()) {
+    layout.clearSidebar()
     return
   }
-  sidebar.classList.remove('tk-sidebar')
+  // 非工作区页面由 AppLayout 在页面渲染完成后挂载模块提供的侧栏内容。
+  if (!['home', 'chat'].includes(state.view)) {
+    sidebar.innerHTML = `<div class="layout-sidebar-placeholder" aria-busy="true">
+      <div class="layout-sidebar-placeholder-title">${esc(pageLayout().sidebarTitle || '')}</div>
+      <div class="layout-sidebar-placeholder-note">正在加载模块侧边栏…</div>
+    </div>`
+    return
+  }
 
   const convs = (state.conversations || []).filter((c) => !(state.archivedConvs || []).includes(c.id))
   const pinnedIds = state.pinnedConvs || []
@@ -823,23 +1111,29 @@ function renderSidebar() {
 
   const projConvs = (p) => convs.filter((c) => c.projectId === p.id)
 
-  const projRow = (p) => `<div class="sb-projrow" data-projhover="${p.id}">
+  const projRow = (p) => `<div class="sb-projrow">
       <button class="sb-row sb-proj" data-project="${p.id}" title="${state.projFolds?.[p.id] ? '展开项目会话' : '收起项目会话'}">
         <span class="ico sb-row-ico">${icon('folder')}</span><span class="sb-row-txt">${esc(p.name)}</span>
       </button>
-      <div class="sb-projacts" style="pointer-events:none">
-        <button class="sb-morebtn" data-projedit="${p.id}" title="编辑项目" style="pointer-events:auto"><span class="ico">${icon('pen')}</span></button>
-        <button class="sb-morebtn" data-projmenu2="${p.id}" title="更多" style="pointer-events:auto"><span class="ico">${icon('dots')}</span></button>
+      <div class="sb-projacts">
+        <button class="sb-morebtn" data-projmenu2="${p.id}" title="更多项目操作"><span class="ico">${icon('dots')}</span></button>
       </div>
     </div>`
 
   sidebar.innerHTML = `
     <div class="brand">
       <button class="brand-name" id="brandMenu" title="九规智能中枢">九规智能中枢</button>
+      <div class="brand-icons">
+        <button class="brand-icon" id="sbSearch" title="搜索（Ctrl+K）"><span class="ico">${icon('search')}</span></button>
+        <button class="brand-icon" id="notifyTrigger" title="通知中心"><span class="ico">${icon('bell')}</span></button>
+      </div>
+    </div>
+    <div class="sb-top-actions">
+      <button class="sb-new" id="sbNew" title="开始全新对话：不继承当前项目、上下文与执行策略"><span class="ico">${icon('pen')}</span>新聊天</button>
+      <div class="sb-divider"></div>
     </div>
     <div class="sidebar-scroll">
-      <button class="sb-new" id="sbNew" title="开始全新对话：不继承当前项目、上下文与执行策略"><span class="ico">${icon('pen')}</span>新聊天</button>
-      <div class="sb-label">置顶</div>
+      <div class="sb-label sb-section-head">置顶</div>
       ${pins.map((c) => convRow(c, true)).join('') || '<div class="sb-empty">暂无置顶会话</div>'}
       ${state.showProjects ? `<div class="sb-label sb-label-row"><span>项目</span>
         <button class="sb-collapse" id="projNew" title="新建项目"><span class="ico">${icon('plus')}</span></button>
@@ -873,7 +1167,8 @@ function renderSidebar() {
   </div>
   <div class="pane-grip" id="sbGrip" title="拖动调整左右宽度 · 双击复位"></div>`
 
-  document.getElementById('searchTrigger')?.addEventListener('click', () => openSearchPalette())
+  document.getElementById('notifyTrigger')?.addEventListener('click', (ev) => { ev.stopPropagation(); openNotifications(ev.currentTarget) })
+  document.getElementById('sbSearch')?.addEventListener('click', (ev) => { ev.stopPropagation(); openSearchPalette() })
   document.getElementById('brandMenu').addEventListener('click', (ev) => { ev.stopPropagation(); openAccountMenu(ev.currentTarget) })
   document.getElementById('sbNew').addEventListener('click', () => startFreshChat())
   document.getElementById('projMore')?.addEventListener('click', (ev) => { ev.stopPropagation(); openProjectDisplayMenu(ev.currentTarget) })
@@ -889,15 +1184,9 @@ function renderSidebar() {
     ev.stopPropagation()
     openSectionMenu(ev.currentTarget, b.dataset.secmenu)
   }))
-  sidebar.querySelectorAll('[data-projhover]').forEach((row) => {
-    row.addEventListener('mouseenter', () => {
-      openProjectCard(sidebar.querySelector(`[data-project="${row.dataset.projhover}"]`))
-    })
-    row.addEventListener('mouseleave', () => scheduleProjectCardClose())
-  })
-  sidebar.querySelectorAll('[data-projedit]').forEach((b) => b.addEventListener('click', (ev) => {
+  sidebar.querySelectorAll('[data-projmenu2]').forEach((b) => b.addEventListener('click', (ev) => {
     ev.stopPropagation()
-    openProjectEditCard(ev.currentTarget.closest('.sb-projrow') || ev.currentTarget, b.dataset.projedit)
+    openProjectMenu(ev.currentTarget, b.dataset.projmenu2)
   }))
   sidebar.querySelectorAll('[data-conv]').forEach((b) => b.addEventListener('click', () => openConversation(b.dataset.conv)))
   sidebar.querySelectorAll('[data-unpin]').forEach((b) => b.addEventListener('click', (ev) => {
@@ -924,9 +1213,184 @@ function renderSidebar() {
     b.setAttribute('aria-expanded', folded ? 'false' : 'true')
   }))
   bindSidebarResize()
+  homeSidebarCacheHtml = sidebar.innerHTML
 }
 
-/* ------------------- 会话行「更多」菜单（对齐 ChatGPT 最近） ------------------- */
+function bindHomeSidebarFloatResize(float) {
+  const handle = float.querySelector('#hsGrip')
+  if (!handle) return
+  const applyWidth = (next) => {
+    state.sidebarWidth = next
+    state.sbUserW = next
+    float.style.width = `${next}px`
+    document.documentElement.style.setProperty('--sidebar-w', `${next}px`)
+    document.documentElement.style.setProperty('--layout-sidebar-w', `${next}px`)
+    document.documentElement.style.setProperty('--pane-w', `${next}px`)
+  }
+  handle.addEventListener('dblclick', () => {
+    state.sbUserW = 0
+    state.sidebarWidth = LAYOUT_TOKENS.sidebarWidth
+    localStorage.removeItem(PANE_RATIO_KEY)
+    localStorage.removeItem('jg.sidebarW')
+    applyWidth(sidebarWidthValue())
+    applyLayout()
+  })
+  handle.addEventListener('pointerdown', (ev) => {
+    ev.preventDefault()
+    homeSidebarDragging = true
+    homeSidebarIgnoreHideUntil = Date.now() + 10000
+    const startX = ev.clientX
+    const startW = float.getBoundingClientRect().width
+    const cloudW = document.getElementById('cbPanel')?.getBoundingClientRect().width || 0
+    const maxW = Math.max(220, window.innerWidth - 58 - cloudW - 160)
+    const move = (e) => applyWidth(Math.min(maxW, Math.max(180, startW + (e.clientX - startX))))
+    const up = () => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+      const panesW = Math.max(1, window.innerWidth - 58)
+      localStorage.setItem(PANE_RATIO_KEY, String(state.sidebarWidth / panesW))
+      localStorage.setItem('jg.sidebarW', String(state.sidebarWidth))
+      document.body.classList.remove('resizing')
+      homeSidebarDragging = false
+      homeSidebarIgnoreHideUntil = Date.now() + 3000
+      homeSidebarIgnoreOutsideUntil = Date.now() + 800
+    }
+    document.body.classList.add('resizing')
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+  })
+}
+
+let homeSidebarHideTimer = null
+let homeSidebarDragging = false
+let homeSidebarIgnoreOutsideUntil = 0
+let homeSidebarIgnoreHideUntil = 0
+function cancelHomeSidebarHide() {
+  if (homeSidebarHideTimer) { clearTimeout(homeSidebarHideTimer); homeSidebarHideTimer = null }
+}
+function scheduleHomeSidebarHide() {
+  if (homeSidebarDragging || Date.now() < homeSidebarIgnoreHideUntil) return
+  cancelHomeSidebarHide()
+  homeSidebarHideTimer = setTimeout(() => {
+    homeSidebarHideTimer = null
+    document.getElementById('homeSidebarFloat')?.remove()
+  }, 320)
+}
+function showHomeSidebarFloat() {
+  cancelHomeSidebarHide()
+  if (['home', 'chat'].includes(state.view)) return
+  if (document.getElementById('homeSidebarFloat')) return
+  if (!homeSidebarCacheHtml) return
+  const float = document.createElement('div')
+  float.id = 'homeSidebarFloat'
+  float.className = 'sidebar hs-float'
+  float.setAttribute('role', 'dialog')
+  float.setAttribute('aria-label', '首页侧栏')
+  float.innerHTML = homeSidebarCacheHtml
+  float.querySelector('.pane-grip')?.remove()
+  const liveSidebar = document.getElementById('sidebar')
+  const liveW = liveSidebar?.getBoundingClientRect().width || 0
+  float.style.width = `${liveW >= 180 ? Math.round(liveW) : sidebarWidthValue()}px`
+  const grip = document.createElement('div')
+  grip.className = 'pane-grip'
+  grip.id = 'hsGrip'
+  grip.title = '拖动调整左右宽度 · 双击复位'
+  float.appendChild(grip)
+  document.body.appendChild(float)
+  bindHomeSidebarFloatResize(float)
+  const close = () => { cancelHomeSidebarHide(); float.remove(); document.removeEventListener('keydown', onKey); document.removeEventListener('click', outside) }
+  const onKey = (e) => { if (e.key === 'Escape') close() }
+  const outside = (e) => {
+    if (Date.now() < homeSidebarIgnoreOutsideUntil) return
+    if (!float.contains(e.target) && !e.target.closest('[data-nav="home"]')) close()
+  }
+  float.addEventListener('mouseenter', cancelHomeSidebarHide)
+  float.addEventListener('mouseleave', scheduleHomeSidebarHide)
+  float.querySelector('#sbSearch')?.addEventListener('click', (ev) => { ev.stopPropagation(); openSearchPalette() })
+  float.querySelector('#notifyTrigger')?.addEventListener('click', (ev) => { ev.stopPropagation(); openNotifications(ev.currentTarget) })
+  float.querySelector('#sbNew')?.addEventListener('click', () => { close(); startFreshChat() })
+  float.querySelector('#recentNew')?.addEventListener('click', () => { close(); startFreshChat() })
+  float.querySelector('#brandMenu')?.addEventListener('click', (ev) => { ev.stopPropagation(); openAccountMenu(ev.currentTarget) })
+  float.querySelectorAll('[data-conv]').forEach((b) => b.addEventListener('click', () => { close(); openConversation(b.dataset.conv) }))
+  document.addEventListener('keydown', onKey)
+  setTimeout(() => document.addEventListener('click', outside), 0)
+}
+
+function bindHomeHoverSidebar() {
+  const railbar = document.getElementById('railbar')
+  if (!railbar || railbar.__homeHoverBound) return
+  railbar.__homeHoverBound = true
+  railbar.addEventListener('mouseover', (e) => {
+    if (e.target.closest('[data-nav="home"]')) showHomeSidebarFloat()
+  })
+  railbar.addEventListener('mouseout', (e) => {
+    if (!e.target.closest('[data-nav="home"]')) return
+    const to = e.relatedTarget
+    if (to && (to.closest?.('#homeSidebarFloat') || to.closest?.('[data-nav="home"]'))) return
+    scheduleHomeSidebarHide()
+  })
+}
+
+const PAGE_SIDEBAR_SELECTORS = {
+  skills: '.sk-left',
+  settings: '.settings-side',
+  admin: '.mc-nav',
+  im: '.im-left',
+}
+
+function ensureSidebarGrip() {
+  const sb = document.getElementById('sidebar')
+  if (!sb) return
+  if (!sb.querySelector('.pane-grip')) {
+    const grip = document.createElement('div')
+    grip.className = 'pane-grip'
+    grip.id = 'sbGrip'
+    grip.title = '拖动调整左右宽度 · 双击复位'
+    sb.appendChild(grip)
+  }
+  bindSidebarResize()
+}
+
+/**
+ * 业务模块只提供侧栏内容节点，AppLayout 统一把它挂载到全局 #sidebar。
+ * 这样侧栏的宽度、背景、滚动、动画和显隐只由布局系统控制。
+ */
+function mountPageSidebar() {
+  if (!hasSidebarView()) return
+  const sb = document.getElementById('sidebar')
+  const view = document.getElementById('view')
+  if (!sb || !view) return
+  if (state.view === 'tasks') {
+    // 定时任务侧栏由 renderTaskCenter 直接写入全局容器；这里只补齐统一拖拽边。
+    if (sb.querySelector('.tk-left')) ensureSidebarGrip()
+    applyLayout()
+    return
+  }
+  if (['home', 'chat'].includes(state.view)) {
+    applyLayout()
+    return
+  }
+  const selector = PAGE_SIDEBAR_SELECTORS[state.view]
+  const node = selector ? view.querySelector(selector) : null
+  if (!node) {
+    sb.innerHTML = `<div class="layout-sidebar-placeholder">
+      <div class="layout-sidebar-placeholder-title">${esc(pageLayout().sidebarTitle || '')}</div>
+      <div class="layout-sidebar-placeholder-note">当前模块未提供侧边栏内容</div>
+    </div>`
+    applyLayout()
+    return
+  }
+  node.classList.add('layout-sidebar-content')
+  sb.replaceChildren(node)
+  view.querySelectorAll('.pane-splitter').forEach((h) => {
+    const box = h.parentElement
+    if (box && [...box.children].filter((c) => c !== h).length < 2) h.remove()
+  })
+  ensureSidebarGrip()
+  applyLayout()
+}
+
+
 
 function togglePinnedConversation(id) {
   const conv = (state.conversations || []).find((c) => c.id === id)
@@ -948,23 +1412,27 @@ function openConversationMenu(anchor, id) {
   const items = [
     ['rename', 'pen', '重命名', 'Ctrl+Alt+R'],
     ['pin', 'pin', (state.pinnedConvs || []).includes(id) ? '取消置顶' : '置顶', 'Ctrl+Alt+P'],
-    ['section', 'grid', '分区', ''],
-    ['lock', 'shield', '锁定聊天', ''],
-    ['share', 'send', '分享', ''],
+    ['section', 'grid', '分区', '', true],
+    ['lock', 'shield', '锁定聊天', '', true],
+    ['share', 'send', '分享', '', true],
     ['—', '', '', ''],
-    ['open', 'globe', '在 九规智能中枢 网页版打开', ''],
+    ['open', 'globe', '打开会话', ''],
+    ['fork', 'layers', '分叉会话', ''],
     ['export', 'download', '导出为 Markdown', ''],
+    ['copy', 'doc', '复制完整对话', ''],
+    ['sessionlog', 'inbox', '导出完整会话日志（ZIP）', ''],
+    ...(conv.projectId ? [['—', '', '', ''], ['files', 'folder', '浏览项目文件', '']] : []),
     ['—', '', '', ''],
-    ['archive', 'inbox', '归档', 'Ctrl+Shift+A'],
+    ['archive', 'inbox', '归档', 'Ctrl+Shift+A', true],
     ['delete', 'close', '删除', ''],
     ['—', '', '', ''],
     ['move', 'folder', '移至项目', ''],
   ]
   const pop = document.createElement('div')
   pop.className = 'conv-menu'
-  pop.innerHTML = items.map(([act, ic, label, key]) => act === '—'
+  pop.innerHTML = items.map(([act, ic, label, key, off]) => act === '—'
     ? '<div class="cm-sep"></div>'
-    : `<button class="cm-item" data-cm="${act}">
+    : `<button class="cm-item" data-cm="${act}"${off ? ' disabled style="opacity:.45;cursor:not-allowed"' : ''}>
         <span class="ico">${icon(ic)}</span><span class="cm-label">${label}</span>
         ${key ? `<span class="cm-key">${key}</span>` : ''}
         ${['section', 'move'].includes(act) ? '<span class="cm-arrow">›</span>' : ''}
@@ -975,6 +1443,7 @@ function openConversationMenu(anchor, id) {
   pop.style.top = `${Math.max(46, Math.min(window.innerHeight - 430, r.top - 6))}px`
   pop.querySelectorAll('[data-cm]').forEach((it) => it.addEventListener('click', (ev) => {
     ev.stopPropagation()
+    if (it.disabled) return
     const act = it.dataset.cm
     if (act === 'move') { pop.remove(); openMoveToProject(anchor, id); return }
     pop.remove()
@@ -1028,14 +1497,60 @@ function runConversationAction(act, id) {
     toast('已导出为 Markdown')
     return
   }
+  if (act === 'copy') {
+    const text = (conv.messages || []).map((m) => `${m.role === 'user' ? '用户' : '助手'}（${m.time || ''}）：\n${m.text || ''}`).join('\n\n')
+    const done = () => toast('已复制完整对话到剪贴板')
+    if (navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(text).then(done).catch(() => toast('复制失败，请改用导出 Markdown', true))
+    } else {
+      const area = document.createElement('textarea')
+      area.value = text
+      area.style.position = 'fixed'
+      area.style.opacity = '0'
+      document.body.appendChild(area)
+      area.select()
+      const ok = document.execCommand('copy')
+      area.remove()
+      ok ? done() : toast('复制失败，请改用导出 Markdown', true)
+    }
+    return
+  }
+  if (act === 'files' && conv.projectId) { openProjectFiles({ projectId: conv.projectId }); return }
+  if (act === 'sessionlog') {
+    const a = document.createElement('a')
+    a.href = `/api/conversation/session-log?id=${encodeURIComponent(id)}`
+    a.download = `jg-${id}.session-log.zip`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    toast('正在导出 DSH 原始会话日志（ZIP）')
+    return
+  }
+  if (act === 'fork') {
+    const mask = openModal('分叉会话', `
+      <div class="form-note">将把当前可见对话历史复制为一个新会话，并从新的 DSH 会话继续。底层 DSH 会话日志不会复制，因此不是原生 fork。</div>
+      <div class="form-foot"><span class="mono">${conv.messages?.length || 0} 条消息</span><span class="spacer"></span><button class="btn" data-mclose>取消</button><button class="btn primary" id="forkOk">创建分叉</button></div>`)
+    mask.querySelector('#forkOk').addEventListener('click', async (ev) => {
+      ev.currentTarget.disabled = true
+      const { ok, body } = await api('/api/conversation/fork', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ conversationId: id, index: (conv.messages?.length || 1) - 1 }),
+      })
+      if (!ok) { ev.currentTarget.disabled = false; return toast(body?.error || '分叉失败', true) }
+      mask.querySelector('[data-mclose]')?.click()
+      state.conversations = [body.conversation, ...(state.conversations || []).filter((c) => c.id !== body.conversation.id)]
+      renderSidebar()
+      openConversation(body.conversation.id)
+      toast('已创建分叉会话；下一轮将基于复制出的历史上下文')
+    })
+    return
+  }
   if (act === 'pin') {
     togglePinnedConversation(id)
     return
   }
   if (act === 'archive') {
-    state.archivedConvs = Array.from(new Set([...(state.archivedConvs || []), id]))
-    render()
-    toast(`已归档「${conv.title}」，可在归档中恢复（演示）`)
     return
   }
   if (act === 'delete') {
@@ -1055,6 +1570,7 @@ function runConversationAction(act, id) {
       if (!ok) { delBtn.disabled = false; return toast(body.error || '删除会话失败', true) }
       state.conversations = state.conversations.filter((c) => c.id !== id)
       state.archivedConvs = (state.archivedConvs || []).filter((x) => x !== id)
+      persistArchivedConvs()
       if (state.conversation?.id === id) { state.conversation = null; state.chatSteps = [] }
       mask.remove()
       render()
@@ -1080,20 +1596,15 @@ function runConversationAction(act, id) {
     setTimeout(() => input.focus(), 60)
     return
   }
-  const say = {
-    section: '分区：可把会话归入「项目 / 学习 / 待办」等分区（演示）',
-    lock: '已锁定该会话，需再次验证身份才能打开（演示）',
-    share: '已生成只读分享链接，有效期 7 天并登记审计（演示）',
-  }[act]
-  toast(say || '该操作在演示版未接入')
+  return
 }
 
 function renderMenubar() {
   const mb = document.getElementById('menubar')
   const menus = {
     file: ['文件', [
-      ['新建窗口', '', 'newWindow'], ['新聊天', 'Ctrl+N', 'newChat'], ['新建临时聊天', 'Ctrl+Shift+N', 'tempChat'],
-      ['新建项目...', '', 'newProject'], ['—', '', ''], ['打开文件夹', 'Ctrl+O', 'openFolder'], ['关闭', 'Ctrl+W', 'close'],
+      ['新建窗口', '', 'newWindow'], ['新聊天', 'Ctrl+N', 'newChat'], ['新建临时聊天', 'Ctrl+Shift+N', 'tempChat', true],
+      ['新建项目...', '', 'newProject'], ['—', '', ''], ['打开文件夹', 'Ctrl+O', 'openFolder', true], ['关闭', 'Ctrl+W', 'close', true],
       ['—', '', ''], ['退出登录', '', 'logout'],
     ]],
     edit: ['编辑', [
@@ -1102,38 +1613,32 @@ function renderMenubar() {
       ['—', '', ''], ['设置', 'Ctrl+,', 'settings'],
     ]],
     view: ['视图', [
-      ['显示/隐藏侧边栏', 'Ctrl+Shift+S', 'toggleSidebar'], ['显示/隐藏导航面板', 'Ctrl+Shift+E', 'toggleSidebar'],
       ['浏览器', '', 'cloud'], ['—', '', ''], ['查找', 'Ctrl+F', 'find'], ['—', '', ''], ['放大', 'Ctrl+Shift+=', 'zoomIn'],
       ['缩小', 'Ctrl+-', 'zoomOut'], ['实际大小', 'Ctrl+0', 'zoomReset'], ['—', '', ''], ['切换全屏', 'F11', 'fullscreen'],
     ]],
     help: ['帮助', [
-      ['文档', '', 'docs'], ['显示键盘快捷键', 'Ctrl+/', 'shortcuts'], ['新功能', '', 'whatsnew'], ['—', '', ''],
+      ['文档', '', 'docs', true], ['显示键盘快捷键', 'Ctrl+/', 'shortcuts'], ['新功能', '', 'whatsnew'], ['—', '', ''],
       ['故障排除', '', 'trouble'], ['系统状态', '', 'status'], ['反馈', '', 'feedback'], ['—', '', ''],
-      ['任务管理器', '', 'taskmgr'], ['—', '', ''], ['检查更新...', '', 'update'], ['关于九规智能中枢', '', 'about'],
+      ['任务管理器', '', 'taskmgr', true], ['—', '', ''], ['检查更新...', '', 'update', true], ['关于九规智能中枢', '', 'about'],
     ]],
   }
   mb.innerHTML = `
     <div class="mb-left">
       <button class="mb-icon" title="后退" data-mbact="back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M20 12H5M11 6L5 12l6 6"/></svg></button>
       <button class="mb-icon" title="前进" data-mbact="forward"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 12h15M13 6l6 6-6 6"/></svg></button>
-      ${hasSidebarView() ? `<button class="mb-icon sb-switch${state.sbPinned ? ' on' : ''}" id="mbRailToggle" title="${state.sbPinned ? '隐藏侧边栏' : '显示侧边栏'}（Ctrl+Shift+S）"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="4" width="18" height="16" rx="3"/>${state.sbPinned ? '<rect x="3.8" y="4.8" width="4.4" height="14.4" rx="2" fill="currentColor" stroke="none" opacity="0.5"/>' : '<path d="M9 4v16" opacity="0.4"/>'}</svg></button>` : ''}
     </div>
     <div class="mb-menus">
+      ${hasSidebarView() ? `<button class="mb-icon mb-sidebar-toggle${state.sbPinned ? ' on' : ''}" id="mbLayoutToggle" title="${state.sbPinned ? '隐藏侧边栏' : '显示侧边栏'}（Ctrl+Shift+S）" aria-pressed="${state.sbPinned}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="4" width="18" height="16" rx="3"/>${state.sbPinned ? '<rect x="3.8" y="4.8" width="4.4" height="14.4" rx="2" fill="currentColor" stroke="none" opacity="0.55"/>' : '<path d="M9 4v16" opacity="0.45"/>'}</svg></button>` : ''}
       ${Object.entries(menus).map(([k, [label, items]]) => `<button class="mb-menu" data-menu="${k}">${label}</button>`).join('')}
-      <button class="mb-icon mb-searchbtn" id="mbSearch" title="搜索（Ctrl+K）" aria-label="搜索">${icon('search')}</button>
+      ${cloudAllowed() ? `<button class="mb-icon mb-cloud-toggle${state.cloudOpen ? ' on' : ''}" id="mbCloudToggle" title="${state.cloudOpen ? '折叠云浏览器' : '展开云浏览器'}" aria-label="云浏览器">${icon('globe')}</button>` : ''}
     </div>
     <div class="mb-win">
       <span class="mb-winbtn" title="最小化"><svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 6h8"/></svg></span>
       <span class="mb-winbtn" title="最大化"><svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2.5" y="2.5" width="7" height="7"/></svg></span>
       <span class="mb-winbtn close" title="关闭"><svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3 3l6 6M9 3L3 9"/></svg></span>
     </div>`
-  mb.querySelector('#mbRailToggle')?.addEventListener('click', () => {
-    state.sbPinned = !state.sbPinned
-    renderMenubar()
-    render()
-  })
-  const mbSearch = mb.querySelector('#mbSearch')
-  mbSearch.addEventListener('click', () => openSearchPalette())
+  mb.querySelector('#mbLayoutToggle')?.addEventListener('click', () => toggleGlobalSidebar())
+  mb.querySelector('#mbCloudToggle')?.addEventListener('click', () => toggleCloudPanel())
   mb.querySelectorAll('[data-mbact]').forEach((b) => b.addEventListener('click', () => {
     if (b.dataset.mbact === 'back') history.back()
     else toast('已是最近的历史记录')
@@ -1144,14 +1649,15 @@ function renderMenubar() {
     const [label, items] = menus[btn.dataset.menu]
     const pop = document.createElement('div')
     pop.className = 'mb-pop'
-    pop.innerHTML = items.map(([text, key, act]) => text === '—'
+    pop.innerHTML = items.map(([text, key, act, off]) => text === '—'
       ? '<div class="mb-sep"></div>'
-      : `<button class="mb-item" data-act="${act}"><span>${text}</span>${key ? `<span class="mb-key">${key}</span>` : ''}</button>`).join('')
+      : `<button class="mb-item" data-act="${act}"${off ? ' disabled style="opacity:.45;cursor:not-allowed"' : ''}><span>${text}</span>${key ? `<span class="mb-key">${key}</span>` : ''}</button>`).join('')
     document.body.appendChild(pop)
     const r = btn.getBoundingClientRect()
     pop.style.left = `${r.left}px`
     pop.style.top = `${r.bottom + 4}px`
     pop.querySelectorAll('[data-act]').forEach((it) => it.addEventListener('click', () => {
+      if (it.disabled) return
       pop.remove()
       runMenuAction(it.dataset.act)
     }))
@@ -1176,12 +1682,12 @@ function runMenuAction(act) {
   const map = {
     newWindow: () => window.open(location.href, '_blank'),
     newChat: focusHome,
-    tempChat: () => { state.draft = ''; focusHome(); toast('已新建临时聊天，退出后不保留（演示）') },
+    tempChat: () => {},
     newProject: () => { state.view = 'projects'; render(); setTimeout(() => openProjectForm(), 120) },
-    openFolder: () => toast('已打开本地成果目录（演示）'),
-    close: () => toast('关闭当前标签（演示）'),
+    openFolder: () => {},
+    close: () => {},
     logout: async () => { await logout() },
-    quit: () => toast('桌面客户端退出由外壳接管（演示）'),
+    quit: () => {},
     undo: () => document.execCommand('undo'),
     redo: () => document.execCommand('redo'),
     cut: () => document.execCommand('cut'),
@@ -1190,24 +1696,24 @@ function runMenuAction(act) {
     del: () => document.execCommand('delete'),
     selectAll: () => document.execCommand('selectAll'),
     settings: () => { state.view = 'settings'; state.settingsTab = 'general'; state.settingsQuery = ''; render() },
-    toggleSidebar: () => { if (hasSidebarView()) { state.sbPinned = !state.sbPinned; render() } else { state.rail = !state.rail; render() } },
+    toggleSidebar: () => { toggleGlobalSidebar() },
     cloud: () => toggleCloudPanel(),
     find: () => openSearchPalette(''),
     zoomIn: () => { document.body.style.zoom = String(Math.min(1.4, (Number(document.body.style.zoom) || 1) + 0.1)) },
     zoomOut: () => { document.body.style.zoom = String(Math.max(0.7, (Number(document.body.style.zoom) || 1) - 0.1)) },
     zoomReset: () => { document.body.style.zoom = '1' },
     fullscreen: () => { if (document.fullscreenElement) document.exitFullscreen(); else document.documentElement.requestFullscreen?.() },
-    docs: () => toast('已打开使用文档（演示）'),
+    docs: () => {},
     shortcuts: () => toast('Ctrl+K 全局搜索 · Ctrl+, 设置 · Ctrl+Shift+S 侧边栏'),
     whatsnew: () => toast('新功能：首页置顶 / 项目 / 最近，定时任务与插件市场'),
     trouble: () => toast('故障排查：检查网络归属、模型能力与授权范围'),
     status: () => { state.view = 'admin'; render() },
     feedback: () => openFeedbackModal(),
-    taskmgr: () => toast('任务管理器：当前 1 个活动会话（演示）'),
-    update: () => toast('已是最新版本 1.6（演示）'),
+    taskmgr: () => {},
+    update: () => {},
     about: () => openAboutModal(),
   }
-  ;(map[act] || (() => toast('该功能在演示版未接入')))()
+  ;(map[act] || (() => {}))()
 }
 
 function openAboutModal() {
@@ -1227,30 +1733,35 @@ function bindSidebarResize() {
   if (!handle) return
   handle.addEventListener('dblclick', () => {
     state.sbUserW = 0
+    state.sidebarWidth = LAYOUT_TOKENS.sidebarWidth
     localStorage.removeItem(PANE_RATIO_KEY)
-    const paneW = paneWidthFor(Math.max(0, window.innerWidth - 58))
-    document.documentElement.style.setProperty('--pane-w', `${paneW}px`)
-    document.documentElement.style.setProperty('--sidebar-w', `${paneW}px`)
+    localStorage.removeItem('jg.sidebarW')
     applyLayout()
+    const float = document.getElementById('homeSidebarFloat')
+    if (float) float.style.width = `${sidebarWidthValue()}px`
   })
   handle.addEventListener('pointerdown', (ev) => {
     ev.preventDefault()
     const startX = ev.clientX
     const startW = document.getElementById('sidebar').getBoundingClientRect().width
     const cloudW = document.getElementById('cbPanel')?.getBoundingClientRect().width || 0
-    const maxW = Math.max(196, Math.min(Math.round(window.innerWidth * 0.6), window.innerWidth - 58 - cloudW - 240))
+    const maxW = Math.max(220, window.innerWidth - 58 - cloudW - 160)
     const move = (e) => {
-      const next = Math.min(maxW, Math.max(196, startW + (e.clientX - startX)))
+      const next = Math.min(maxW, Math.max(180, startW + (e.clientX - startX)))
       state.sidebarWidth = next
       state.sbUserW = next
       document.documentElement.style.setProperty('--sidebar-w', `${next}px`)
+      document.documentElement.style.setProperty('--layout-sidebar-w', `${next}px`)
       document.documentElement.style.setProperty('--pane-w', `${next}px`)
+      const float = document.getElementById('homeSidebarFloat')
+      if (float) float.style.width = `${next}px`
     }
     const up = () => {
       window.removeEventListener('pointermove', move)
       window.removeEventListener('pointerup', up)
       const panesW = Math.max(1, window.innerWidth - 58)
       localStorage.setItem(PANE_RATIO_KEY, String(state.sidebarWidth / panesW))
+      localStorage.setItem('jg.sidebarW', String(state.sidebarWidth))
       document.body.classList.remove('resizing')
     }
     document.body.classList.add('resizing')
@@ -1260,16 +1771,28 @@ function bindSidebarResize() {
 }
 
 
-const SIDEBAR_VIEWS = ['home', 'chat', 'tasks', 'skills']
+const PAGE_LAYOUTS = {
+  home: { sidebar: true, sidebarTitle: '工作区' },
+  chat: { sidebar: true, sidebarTitle: '工作区' },
+  tasks: { sidebar: true, sidebarTitle: '定时任务' },
+  automation: { sidebar: true, sidebarTitle: '定时任务' },
+  skills: { sidebar: true, sidebarTitle: '插件与技能' },
+  settings: { sidebar: true, sidebarTitle: '设置' },
+  admin: { sidebar: true, sidebarTitle: '管理中心' },
+  im: { sidebar: true, sidebarTitle: '即时通讯' },
+}
 const CLOUD_VIEWS = ['home', 'chat', 'tasks', 'knowledge', 'academy']
+function pageLayout(view = state.view) {
+  return PAGE_LAYOUTS[view] || { sidebar: false }
+}
 function cloudAllowed() {
-  return CLOUD_VIEWS.includes(state.view)
+  return true
 }
 function hasSidebarView() {
-  return SIDEBAR_VIEWS.includes(state.view)
+  return Boolean(pageLayout().sidebar)
 }
 function sbFixed() {
-  return (['home', 'chat', 'tasks'].includes(state.view)) && state.sbPinned && !state.rail
+  return hasSidebarView() && state.sbPinned
 }
 
 const PANE_RATIO_KEY = 'jg.paneRatio.v4'
@@ -1281,30 +1804,33 @@ function paneWidthFor(width) {
   return Math.round(Math.min(900, Math.max(150, width * paneRatio())))
 }
 
+function sidebarWidthValue() {
+  const raw = Number(state.sbUserW || state.sidebarWidth || LAYOUT_TOKENS.sidebarWidth)
+  return Math.round(Math.min(LAYOUT_TOKENS.sidebarMaxWidth, Math.max(LAYOUT_TOKENS.sidebarMinWidth, raw)))
+}
+
 function applyLayout() {
-  const showSb = sbFixed()
-  const panesW = Math.max(0, window.innerWidth - 58)
-  const paneW = paneWidthFor(panesW)
-  document.documentElement.style.setProperty('--pane-w', `${paneW}px`)
+  const enabled = hasSidebarView()
+  const open = enabled && state.sbPinned
   const cloud = state.cloudOpen && cloudAllowed()
-  const homeCloud = state.view === 'home' && cloud
-  let sbW = showSb ? paneW : 0
-  let cbW = cloud ? (state.cbUserW || Math.round(panesW / 4)) : 0
-  const minMain = 240
-  if (sbW + cbW > panesW - minMain) {
-    sbW = Math.min(sbW, Math.max(196, panesW - cbW - minMain))
-    cbW = Math.min(cbW, Math.max(220, panesW - sbW - minMain))
-  }
-  document.documentElement.style.setProperty('--sidebar-w', `${sbW}px`)
+  if (!cloud) closeNativeWeb()
+  const panesW = Math.max(0, window.innerWidth - 58)
+  const cbW = cloud ? (state.cbUserW || Math.round(panesW / 4)) : 0
   document.documentElement.style.setProperty('--cb-w', `${cbW}px`)
-  document.documentElement.style.setProperty('--set-nav-w', `${state.setNavWidth}px`)
+  document.documentElement.style.setProperty('--pane-w', `${sidebarWidthValue()}px`)
+  const hsFloat = document.getElementById('homeSidebarFloat')
+  if (hsFloat) hsFloat.style.width = `${sidebarWidthValue()}px`
+  document.documentElement.style.setProperty('--set-nav-w', '0px')
+  layout.configure({
+    sidebarEnabled: enabled,
+    sidebarOpen: open,
+    width: sidebarWidthValue(),
+    page: state.view,
+  })
   const app = document.getElementById('app')
-  app?.classList.toggle('home-cloud', homeCloud)
-  const sb = document.getElementById('sidebar')
-  if (sb) {
-    sb.classList.toggle('hidden', !showSb)
-    if (!showSb) sb.classList.remove('fly')
-  }
+  app?.classList.toggle('home-cloud', state.view === 'home' && cloud)
+  if (document.getElementById('cbWebSlot')) requestAnimationFrame(sendNativeBounds)
+  requestAnimationFrame(syncPaneScrollbars)
 }
 window.addEventListener('resize', () => applyLayout())
 
@@ -1313,6 +1839,7 @@ function navIcon(id) {
     home: 'home', history: 'history', projects: 'folder', tasks: 'clock', skills: 'plugin', automation: 'clock',
     imagegen: 'image',
     datacenter: 'database', knowledge: 'book', oneMap: 'map', review: 'layers', finance: 'wallet',
+    adminops: 'briefcase',
     apps: 'grid', cloudbrowser: 'globe', settings: 'settings', admin: 'shield',
     drive: 'cloud', contacts: 'users', im: 'message', notice: 'megaphone', academy: 'cap', more: 'more',
     bid: 'doc', monitor: 'pulse',
@@ -1408,13 +1935,20 @@ function openFavorites() {
   refresh()
 }
 
-const QUOTA = { used: '12.4M', limit: '20M', pct: 62 }
 const PERSONAL_STORAGE = { totalGB: 50, cloudGB: 6.2, notebookGB: 14.8 }
 const storageUsedGB = () => Math.round((PERSONAL_STORAGE.cloudGB + PERSONAL_STORAGE.notebookGB) * 10) / 10
 const storagePct = () => Math.min(100, Math.round((storageUsedGB() / PERSONAL_STORAGE.totalGB) * 100))
-const usageUsed = () => QUOTA.used
-const usageLimit = () => QUOTA.limit
-const usagePct = () => QUOTA.pct
+const usageTokens = () => Number(state.usageSummary?.totals?.totalTokens || 0)
+const usageMeta = () => state.usageSummary?.totals?.requests
+  ? `${usageTokens().toLocaleString('zh-CN')} tokens · ${state.usageSummary.totals.requests} 次`
+  : '暂无真实用量'
+async function loadUsageSummary() {
+  const { ok, body } = await api('/api/usage/summary')
+  if (!ok) return null
+  state.usageSummary = body
+  if (state.view === 'settings' && state.settingsTab === 'usage') renderView()
+  return body
+}
 
 function openAccountMenu(anchor) {
   document.querySelectorAll('.account-pop').forEach((p) => p.remove())
@@ -1440,7 +1974,7 @@ function openAccountMenu(anchor) {
       <span class="tag ${state.boot.network?.id === 'secret' ? 'secret' : ''}" style="margin-left:auto;flex:none">${esc(state.boot.network?.badge || '互联网')}</span>
     </div>
     <div class="acct-sep"></div>
-    ${item('usage', 'pulse', 'Token 用量', `${usageUsed()} / ${usageLimit()} · ${usagePct()}%`)}
+    ${item('usage', 'pulse', 'Token 用量', usageMeta())}
     ${item('favorites', 'star', '我的收藏', `${getFavs().length} 项`)}
     ${item('storage', 'cloud', '个人云存储', `${storageUsedGB()} / ${PERSONAL_STORAGE.totalGB} GB · ${storagePct()}%`)}
     ${item('models', 'spark', '模型配置', '个人中心')}
@@ -1449,7 +1983,7 @@ function openAccountMenu(anchor) {
     ${item('settings', 'settings', '设置', 'Ctrl+,')}
     <div class="acct-sep"></div>
     ${item('audit', 'task', '审计日志')}
-    ${item('role', 'shield', '切换演示角色', `${(state.boot.allRoles || []).length} 个角色可选`)}
+    ${item('role', 'shield', '登录其他账号', `${(state.boot.allRoles || []).length} 个账号可选`)}
     ${item('network', 'map', '切换演示网络', esc(state.boot.network?.label || '互联网'))}
     <div class="acct-sep"></div>
     ${item('help', 'doc', '帮助与反馈')}
@@ -1511,20 +2045,9 @@ function openAccountMenu(anchor) {
         return
       }
       if (act === 'role') {
-        const roleOrder = ['employee', 'ops', 'guest']
-        const roles = (state.boot.allRoles || []).slice().sort((a, b) => roleOrder.indexOf(a.id) - roleOrder.indexOf(b.id))
-        pop.innerHTML = `
-          <div class="acct-subhead"><span>切换演示角色</span><button class="acct-back" data-back>返回</button></div>
-          ${roles.map((r) => `
-            <button class="acct-item${r.id === state.boot.user.role ? ' on' : ''}" data-role="${r.id}">
-              <span class="acct-ico">${icon('shield')}</span>
-              <span class="acct-main"><span class="acct-label">${esc(r.name)}</span><span class="acct-meta">${esc(r.label)} · ${esc(r.unit)}</span></span>
-              ${r.id === state.boot.user.role ? '<span class="acct-tick">当前</span>' : ''}
-            </button>`).join('')}`
-        setTimeout(() => {
-          pop.querySelectorAll('[data-role]').forEach((b) => b.addEventListener('click', (ev) => { ev.stopPropagation(); pop.remove(); window.__accountPop = null; switchRole(b.dataset.role) }))
-          pop.querySelector('[data-back]').addEventListener('click', (ev) => { ev.stopPropagation(); pop.remove(); window.__accountPop = null; openAccountMenu(anchor) })
-        }, 0)
+        pop.remove()
+        window.__accountPop = null
+        logout()
         return
       }
       pop.remove()
@@ -1542,18 +2065,19 @@ function openAccountMenu(anchor) {
 
 /* ------------------------------ topbar ------------------------------ */
 
+// 统一布局不再保留“企业空间 / 模块”面包屑顶栏；侧边栏开关移入菜单栏。
 function renderTopbar() {
-  const { user, allRoles, modules } = state.boot
-  const unread = state.notifications.filter((n) => n.unread).length
-  document.getElementById('topbar').innerHTML = `
-    <div class="top-left">
-      <div class="crumb">企业空间 <span style="color:#c9c9c3">/</span> <b>${modules[state.view]?.label || '新会话'}</b></div>
-    </div>
-    <div class="top-actions">
-      ${cloudAllowed() ? `<button class="mb-icon cb-switch${state.cloudOpen ? ' on' : ''}" id="cbToggle" title="${state.cloudOpen ? '折叠云浏览器' : '展开云浏览器'}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="4" width="18" height="16" rx="3"/>${state.cloudOpen ? '<rect x="15" y="4" width="6" height="16" rx="2.6" fill="currentColor" stroke="none" opacity="0.85"/>' : '<path d="M15 4v16" opacity="0.45"/>'}</svg></button>` : ''}
-      <span class="environment"><span class="dot"></span>${esc(state.boot.network?.label || '互联网')} · 客户端 1.6</span>
-    </div>`
-  document.getElementById('cbToggle')?.addEventListener('click', () => toggleCloudPanel())
+  const topbar = document.getElementById('topbar')
+  if (!topbar) return
+  topbar.innerHTML = ''
+  topbar.hidden = true
+}
+
+function toggleGlobalSidebar() {
+  if (!hasSidebarView()) return
+  state.sbPinned = !state.sbPinned
+  applyLayout()
+  renderMenubar()
 }
 
 function openNotifications(anchor) {
@@ -1615,39 +2139,213 @@ async function loadNotifications() {
 /* --------------------------- 全局搜索面板 --------------------------- */
 
 async function openSearchPalette(initial = '') {
-  document.querySelectorAll('.sp-backdrop').forEach((p) => p.remove())
+  document.querySelectorAll('.search-overlay,.sp-backdrop').forEach((p) => p.remove())
   const { modules } = state.boot
   const visible = (id) => state.boot.user.visibleModules.includes(id)
-  const view = state.view
-  const viewLabel = {
-    home: '首页', chat: '对话', history: '历史对话', projects: '项目', datacenter: '数据中心',
-    skills: '技能', apps: '应用', settings: '设置', tasks: '任务', automation: '自动化', admin: '管理中心',
-    drive: '云空间', contacts: '通讯录', im: '即时通讯', knowledge: '知识库', notice: '通知公告',
-    academy: '学习中心', imagegen: '图像生成', cloudbrowser: '云浏览器', more: '更多',
-  }[view] || modules[view]?.label || '当前模块'
 
   const wrap = document.createElement('div')
-  wrap.className = 'sp-backdrop'
+  wrap.className = 'search-overlay'
   wrap.innerHTML = `
-    <div class="sp-panel">
-      <div class="sp-head">
-        <span class="ico">${icon('search')}</span>
-        <input id="spInput" placeholder="输入关键词搜索" autocomplete="off" value="${esc(initial)}" />
-        <span class="sp-kbd">Esc</span>
+    <div class="search-modal" role="dialog" aria-modal="true" aria-label="搜索九规智能中枢">
+      <div class="search-top">
+        <input id="spInput" class="search-input" placeholder="搜索 九规智能中枢" autocomplete="off" spellcheck="false" value="${esc(initial)}" />
+        <span class="search-esc">Esc</span>
       </div>
-      <div class="sp-suggest" id="spSuggest"></div>
-      <div class="sp-body" id="spBody"></div>
+      <div class="search-results" id="spBody"></div>
+      <div class="search-tabs" role="tablist" aria-label="搜索范围">
+        <button class="search-tab on" data-filter="all" role="tab" aria-selected="true">全部</button>
+        <button class="search-tab" data-filter="actions" role="tab" aria-selected="false">操作</button>
+        <button class="search-tab" data-filter="chats" role="tab" aria-selected="false">聊天</button>
+      </div>
     </div>`
   document.body.appendChild(wrap)
+  const modal = wrap.querySelector('.search-modal')
   const input = wrap.querySelector('#spInput')
-  const sug = wrap.querySelector('#spSuggest')
   const body = wrap.querySelector('#spBody')
+  let filter = 'all'
+  let rows = []
+  let active = 0
   input.focus()
   input.setSelectionRange(input.value.length, input.value.length)
+
+  const close = () => {
+    wrap.remove()
+    document.removeEventListener('keydown', onKey)
+  }
+  const go = (id) => { close(); state.view = id; render() }
+  const newChat = () => {
+    close()
+    state.conversation = null
+    state.chatSteps = []
+    state.chatError = ''
+    state.activeProjectId = ''
+    state.activeProjectName = ''
+    state.activeProjectCwd = ''
+    state.view = 'home'
+    render()
+    setTimeout(() => document.getElementById('draft')?.focus(), 60)
+  }
+
+  const quickActions = [
+    { id: 'new', label: '新聊天', kbd: 'Ctrl+N', ic: 'pen', keywords: '新聊天 新建 对话', run: newChat },
+    { id: 'folder', label: '打开文件夹', kbd: 'Ctrl+O', ic: 'folder', keywords: '打开 文件夹 云空间 资料', run: () => go('drive') },
+  ]
+
+  const settingIcons = {
+    general: 'gear', appearance: 'spark', notifications: 'bell', profile: 'users',
+    network: 'globe', models: 'spark', usage: 'chart', data: 'download',
+    integrations: 'grid', runtime: 'play', mcp: 'layers', about: 'book',
+  }
+  const settingContent = {
+    general: '权限 默认工作区 文件读写 工具自动执行 互联网访问 默认模型 界面语言 关闭窗口前确认 启动 状态栏 自动执行',
+    appearance: '主题 深色 浅色 跟随系统 密度 字号 侧栏 品牌色 外观 个性化',
+    notifications: '通知 任务 审批 授权 涉密 维护 渠道 免打扰 声音 角标',
+    profile: '姓名 编码 岗位 任职 认证 设备 授权 头像 个人资料',
+    network: '网络 政务网 互联网 涉密内网 令牌 凭证 诊断 代理 证书 网络与凭证',
+    models: '模型 密钥 外发 个人 Key 默认模型 推理 网关 模型与密钥',
+    usage: 'token 用量 配额 账单 超额 模型 统计 用量与配额',
+    data: '保留 导出 缓存 归档 导入 数据管理 清理 存储',
+    integrations: '插件 技能 MCP 工具 地址 安装 启用 插件与工具',
+    runtime: 'Agent 运行时 设置中心 运行时 Agent loop 模型路由 shell subagent 会话日志 配置 执行策略 推理强度',
+    mcp: 'MCP 资源 数据中心 通知 服务器 工具 健康 订阅 连接',
+    about: '版本 基线 更新 帮助 关于',
+  }
+  const settingActions = settingsTabs
+    .filter((t) => t.scope === 'personal')
+    .map((t) => ({
+      id: t.id,
+      label: t.label,
+      ic: settingIcons[t.id] || 'gear',
+      keywords: `${t.label} ${t.kw || ''} ${settingContent[t.id] || ''}`,
+      run: () => {
+        close()
+        state.view = 'settings'
+        state.settingsTab = t.id
+        state.settingsQuery = ''
+        render()
+      },
+    }))
+
+  const settingItemSeeds = [
+    { tab: 'general', group: '权限', label: '默认工作区文件读写', desc: '允许在工作区内读取与整理文件；访问工作区外目录需单次授权', kw: '文件读写 工作区外 授权 读写权限' },
+    { tab: 'general', group: '权限', label: '工具自动执行', desc: '仅低风险只读工具可自动执行；写操作与高危调用始终二次确认', kw: '自动执行 只读工具 高危 二次确认' },
+    { tab: 'general', group: '权限', label: '互联网访问', desc: '涉密内网环境不可开启；外发内容按数据级别策略控制', kw: '联网 外发 涉密 数据级别' },
+    { tab: 'general', group: '常规', label: '默认工作区', desc: '会话与任务的默认落盘位置，仍受数据中心授权约束', kw: '工作区 落盘 目录 路径 存储' },
+    { tab: 'general', group: '常规', label: '默认模型', desc: '逻辑模型标识稳定，展示名与版本由平台统一维护', kw: '模型 默认 云模型 路由' },
+    { tab: 'general', group: '常规', label: '界面语言', desc: '界面文案语言，不改变数据内容的语言', kw: '语言 中文 自动检测' },
+    { tab: 'general', group: '常规', label: '关闭窗口前确认', desc: '使用关闭快捷键导致窗口关闭时给出提示', kw: '关闭 快捷键 确认 窗口' },
+    { tab: 'general', group: '常规', label: '登录时启动应用', desc: '开机后随系统登录自动启动客户端', kw: '开机 启动 登录 自启动' },
+    { tab: 'general', group: '常规', label: '底部状态栏', desc: '在客户端底部显示网络域、任务与连接状态', kw: '状态栏 网络域 连接 任务' },
+    { tab: 'appearance', group: '界面', label: '主题', desc: '企业规范以浅色为主，深色用于夜间与投屏场景', kw: '浅色 深色 夜间 跟随系统 外观' },
+    { tab: 'appearance', group: '界面', label: '界面密度', desc: '影响列表行高与卡片间距', kw: '密度 紧凑 行高 间距' },
+    { tab: 'appearance', group: '界面', label: '正文字号', desc: '仅影响会话与文档阅读区', kw: '字号 字体 阅读 文本大小' },
+    { tab: 'appearance', group: '界面', label: '侧栏默认展开', desc: '启动时展开导航；窄窗口自动收起', kw: '侧栏 展开 导航 窄窗口' },
+    { tab: 'appearance', group: '品牌', label: '强调色', desc: '用于选中态、链接与生成按钮；默认蓝色，可切换为绿、黄、粉、橙、紫、黑、灰', kw: '品牌色 主题色 蓝色 选中态 链接' },
+    { tab: 'appearance', group: '品牌', label: '客户端标识', desc: '启动页与关于页展示的企业名称', kw: '标识 企业名称 启动页 关于页' },
+    { tab: 'appearance', group: '企业工作台', label: '收起与置顶', desc: '选择哪些企业模块收进图标栏的「更多」，AI 工作台不参与调整', kw: '图标栏 更多 模块 置顶' },
+    { tab: 'notifications', group: '提醒类型', label: '任务完成提醒', desc: '自动化任务与长任务结束、失败时提醒', kw: '任务 完成 失败 提醒' },
+    { tab: 'notifications', group: '提醒类型', label: '审批与授权变更', desc: '授权范围、应用审核、工单状态变化时提醒', kw: '审批 授权 工单 应用审核' },
+    { tab: 'notifications', group: '提醒类型', label: '涉密访问被拒绝', desc: '安全事件必达，不可关闭', kw: '涉密 拒绝 安全事件 不可关闭' },
+    { tab: 'notifications', group: '提醒类型', label: '系统维护通知', desc: '客户端与服务端维护窗口提前告知', kw: '维护 窗口 系统通知' },
+    { tab: 'notifications', group: '投递', label: '通知渠道', desc: '站内消息为默认渠道，邮件需本域邮件服务已接入', kw: '站内消息 邮件 渠道 投递' },
+    { tab: 'notifications', group: '投递', label: '免打扰时段', desc: '该时段内仅保留安全事件提醒', kw: '免打扰 静音 时段 夜间' },
+    { tab: 'profile', group: '身份', label: '姓名', desc: '当前登录账号的姓名', kw: '姓名 名字 账号' },
+    { tab: 'profile', group: '身份', label: '员工编码', desc: '集团唯一编码，跨网一致；各网络独立认证', kw: '员工编码 工号 跨网 认证' },
+    { tab: 'profile', group: '身份', label: '所属单位', desc: '当前账号所属组织与单位', kw: '单位 组织 部门 所属' },
+    { tab: 'profile', group: '身份', label: '岗位', desc: '一人多岗时以主岗展示，兼任关系在授权服务维护', kw: '岗位 主岗 兼任 职责' },
+    { tab: 'profile', group: '安全', label: '登录密码', desc: '账号密码登录与首次登录改密', kw: '密码 修改 登录 password' },
+    { tab: 'profile', group: '安全', label: '二次认证', desc: '登录与高危操作需二次认证，认证记录进审计', kw: '二次认证 MFA 高危 审计 重新认证' },
+    { tab: 'profile', group: '安全', label: '当前设备', desc: 'Windows 客户端版本与本机内网地址段', kw: '设备 终端 客户端 登录设备' },
+    { tab: 'network', group: '网络', label: '当前网络', desc: '决定可用模型、数据源与工具集合', kw: '当前网络 安全域 模型 数据源' },
+    { tab: 'network', group: '网络', label: '涉密内网', desc: '已连接，本地推理与涉密数据源可用', kw: '涉密 内网 本地推理 连接' },
+    { tab: 'network', group: '网络', label: '政务网', desc: '独立实例，未在本机接入', kw: '政务网 实例 接入' },
+    { tab: 'network', group: '网络', label: '互联网', desc: '隔离，未经批准不得跨网访问', kw: '互联网 隔离 跨网 外网' },
+    { tab: 'network', group: '网络', label: '网络诊断', desc: '检查模型连通性、数据中心接口与证书有效期', kw: '诊断 连通性 证书 接口 检测' },
+    { tab: 'network', group: '凭证', label: '政务模型 Token', desc: '由服务端持有，客户端不落盘、不展示', kw: 'token 令牌 政务模型 服务端' },
+    { tab: 'network', group: '凭证', label: '操作系统凭证库', desc: '个人密钥存入系统受保护存储，不以明文出现在配置与日志', kw: '凭证库 keychain 密钥 明文' },
+    { tab: 'network', group: '凭证', label: '会话有效期', desc: '超过时限需重新认证，长任务由服务端续跑', kw: '会话 有效期 超时 重新认证' },
+    { tab: 'models', group: '可用模型', label: '企业统一模型', desc: '逻辑 ID jg-enterprise；展示名与版本由平台维护', kw: '企业模型 统一模型 jg-enterprise 可用' },
+    { tab: 'models', group: '可用模型', label: '内网推理模型', desc: '本地推理模型，量化格式待实测确认', kw: '内网 推理 本地 量化' },
+    { tab: 'models', group: '可用模型', label: '政务模型', desc: '九江统一政务模型；Token 服务端持有，按配额计量', kw: '政务 模型 配额 九江' },
+    { tab: 'models', group: '个人密钥', label: '个人 API Key', desc: '仅互联网环境使用；涉密内容禁止经个人密钥外发', kw: 'API Key 个人密钥 key 外发' },
+    { tab: 'models', group: '个人密钥', label: '数据外发策略', desc: '决定个人模型可接触的数据级别', kw: '外发 数据级别 涉密 敏感 审批' },
+    { tab: 'usage', group: '真实计量', label: '累计 tokens', desc: '来自每轮运行时返回的 usage；没有 usage 的轮次不计入', kw: 'token 累计 用量 统计' },
+    { tab: 'usage', group: '真实计量', label: '输入 / 输出', desc: '输入 = 上下文与提示词；输出 = 模型生成', kw: '输入 输出 上下文 提示词 生成' },
+    { tab: 'usage', group: '真实计量', label: '模型调用次数', desc: '按真实 usage.calls 汇总，不是前端点击次数', kw: '调用 次数 请求 usage' },
+    { tab: 'usage', group: '真实计量', label: '缓存读 / 写', desc: '缓存命中与写入分别计量', kw: '缓存 命中 读取 写入' },
+    { tab: 'usage', group: '真实计量', label: '推理 tokens', desc: '仅统计上游返回的 reasoning_tokens', kw: '推理 reasoning 思考 token' },
+    { tab: 'usage', group: '真实计量', label: '采集覆盖', desc: '只统计已落库的真实计量，不用估算值补齐', kw: '采集 覆盖 落库 估算 助手消息' },
+    { tab: 'usage', group: '口径', label: '数据来源', desc: '本机会话库中的助手消息 usageAt / usage 字段，刷新后从服务端重新聚合', kw: '来源 会话库 usage 聚合' },
+    { tab: 'usage', group: '口径', label: '不计入项', desc: '历史轮次未返回 usage 的部分、失败且无 usage 的请求、客户端本地估算', kw: '不计入 失败 估算 历史' },
+    { tab: 'data', group: '会话与任务', label: '会话保留期', desc: '服务端保留会话与结果的期限，到期归档', kw: '保留 期限 归档 180天 90天 30天' },
+    { tab: 'data', group: '会话与任务', label: '导出会话', desc: '导出为 Markdown 或 JSON；涉密内容导出需审批并留痕', kw: '导出 markdown json 审批 留痕' },
+    { tab: 'data', group: '会话与任务', label: '归档会话', desc: '查看已归档会话与任务记录', kw: '归档 历史 会话记录 任务记录' },
+    { tab: 'data', group: '本机', label: '本地缓存', desc: '仅缓存界面资源与会话索引；业务数据不在客户端留存', kw: '缓存 清理 客户端 留存' },
+    { tab: 'data', group: '本机', label: '离线可用', desc: '缓存最近会话与文档摘要，断网时可读不可写', kw: '离线 断网 可读 文档摘要' },
+    { tab: 'integrations', group: '已启用', label: '运行时技能', desc: '技能按账号或项目安装；平台公共能力由管理中心统一配置', kw: '技能 运行时 安装 项目' },
+    { tab: 'integrations', group: '已启用', label: '个人技能', desc: '仅本人可用；发布给他人需走企业技能审核', kw: '个人技能 审核 发布 本人' },
+    { tab: 'integrations', group: 'MCP 与接口', label: 'MCP 服务地址', desc: '本域工具服务，连接前校验证书与授权范围', kw: 'MCP 地址 服务 证书 授权 连接测试' },
+    { tab: 'integrations', group: 'MCP 与接口', label: '写操作确认', desc: 'MCP 工具的写操作默认二次确认，不可全局关闭', kw: '写操作 确认 二次确认 不可关闭' },
+    { tab: 'runtime', group: '新会话默认值', label: '默认执行策略', desc: '只影响新开的会话；当前会话可在输入框内单独切换', kw: '执行策略 帮我批准 请求批准 新会话' },
+    { tab: 'runtime', group: '新会话默认值', label: '默认推理强度', desc: '只影响新开的会话；低/中/高映射到模型实际支持的强度档', kw: '推理强度 低 中 高 思考' },
+    { tab: 'runtime', group: '新会话默认值', label: '每轮文件变更摘要', desc: '执行前后对项目目录做只读快照并列出新增/修改/删除；关闭后不再生成该块', kw: '文件变更 摘要 快照 新增 修改 删除' },
+    { tab: 'runtime', group: '运行时状态', label: 'DSH 版本', desc: '当前锁定并实际加载的 DeepSeek Harness 版本', kw: 'DSH 版本 harness 运行时' },
+    { tab: 'runtime', group: '运行时状态', label: '加载 profile', desc: 'SDK 运行时使用的 profile 名称', kw: 'profile 配置 加载 sdk' },
+    { tab: 'runtime', group: '运行时状态', label: '配置条目', desc: '当前 profile dump 中的插件条目总数', kw: '配置 条目 插件 dump' },
+    { tab: 'runtime', group: '运行时状态', label: '活跃运行时', desc: '当前进程内已持有沙箱根运行时的数量', kw: '活跃 运行时 沙箱 进程' },
+    { tab: 'runtime', group: '运行时状态', label: '会话', desc: '事务库中的会话总数与仍在运行的数量', kw: '会话 运行中 事务库' },
+    { tab: 'runtime', group: '运行时状态', label: '状态刷新', desc: '重新读取本机运行时与配置快照', kw: '刷新 状态 快照 重新读取' },
+    { tab: 'runtime', group: '配置与日志位置', label: 'Profile patch', desc: '设置写入平台快照；此文件为当前 profile 的叠加配置', kw: 'patch 配置 叠加 路径' },
+    { tab: 'runtime', group: '配置与日志位置', label: '配置快照', desc: '能力盘点所用的实际挂载配置，只读', kw: '快照 挂载 只读 能力盘点' },
+    { tab: 'runtime', group: '配置与日志位置', label: '会话日志', desc: '原始会话日志目录，由运行时写入，平台只读索引', kw: '日志 目录 会话 只读 索引' },
+    { tab: 'runtime', group: 'DSH 原生设置（只读）', label: '配置权威', desc: '产品设置中心是唯一可写入口；原生设置仅供运行时使用', kw: '配置权威 唯一可写 产品设置' },
+    { tab: 'runtime', group: 'DSH 原生设置（只读）', label: '原生 settings', desc: '运行时插件，负责 schema 表单与配置投影；产品只读状态，不写入', kw: '原生 settings schema 投影' },
+    { tab: 'runtime', group: 'DSH 原生设置（只读）', label: '原生 config-editor', desc: 'DSH 自带的配置编辑入口；产品不暴露，避免绕过产品设置', kw: 'config-editor 配置编辑 绕过' },
+    { tab: 'runtime', group: 'DSH 原生设置（只读）', label: '原生 authorization', desc: '运行时授权插件；审批策略仍以产品设置与输入框切换为准', kw: '授权 authorization 审批策略' },
+    { tab: 'runtime', group: 'DSH 原生设置（只读）', label: '原生会话检索', desc: '通过 session-query 让模型检索当前工作区的历史会话', kw: '会话检索 历史 工作区 session-query' },
+    { tab: 'runtime', group: 'DSH 原生设置（只读）', label: '会话导出', desc: '产品按真实消息记录导出 Markdown；原生会话日志继续由运行时保存', kw: '导出 markdown 消息记录 日志' },
+    { tab: 'runtime', group: 'DSH 原生设置（只读）', label: '凭据文件', desc: '本地凭据文件；产品不读取内容，也不允许从这里取模型密钥', kw: '凭据 文件 密钥 不读取' },
+    { tab: 'runtime', group: 'DSH 原生设置（只读）', label: '模型密钥来源', desc: '模型密钥由产品「模型与密钥」保存，按会话注入子进程环境', kw: '模型密钥 来源 子进程 环境变量' },
+    { tab: 'runtime', group: 'PTC 与实验执行器', label: 'workflow-ptc', desc: '工作流内的程序化调用已挂载，可供工作流使用', kw: 'workflow ptc 工作流 程序化调用' },
+    { tab: 'runtime', group: 'PTC 与实验执行器', label: '直接 tool-executor-ptc', desc: '默认关闭：会改变模型调用工具的协议，并使嵌套工具调用难以逐步确认', kw: 'tool-executor ptc 默认关闭 嵌套调用' },
+    { tab: 'runtime', group: '技能目录（只读）', label: '目录技能', desc: '运行时实际加载的目录技能', kw: '目录技能 skills 加载' },
+    { tab: 'runtime', group: '技能目录（只读）', label: 'Office 技能', desc: '通过 skill-office 插件加载，不在 skills 目录中', kw: 'office 技能 插件 skill-office' },
+    { tab: 'runtime', group: '技能目录（只读）', label: '技能根目录', desc: '技能文件所在根目录，只读', kw: '技能根目录 路径 只读' },
+    { tab: 'runtime', group: '会话检查点（只读）', label: '检查点策略', desc: '模型请求、顶层工具调用前做语义持久化；保证会话可恢复，不是文件内容备份', kw: '检查点 持久化 可恢复 备份' },
+    { tab: 'runtime', group: '会话检查点（只读）', label: '文件回滚', desc: '当前只记录文件大小与修改时间，不能还原文件内容', kw: '文件回滚 还原 修改时间' },
+    { tab: 'runtime', group: 'DSH 插件运行时', label: '插件条目', desc: '查看当前 profile 的真实挂载清单，启停单个条目；重启运行时后生效', kw: '插件 挂载 启停 重启 清单' },
+    { tab: 'runtime', group: 'Agent 预设', label: '预设', desc: '保存常用 Agent 的行为要求、默认策略与推理强度；只影响新会话', kw: '预设 agent 行为要求 推理强度' },
+    { tab: 'mcp', group: '服务状态', label: 'MCP 服务', desc: '本域产品工具以 stdio 接入 Harness，资源目录与工具共用同一身份', kw: 'MCP 服务 stdio 连接 身份' },
+    { tab: 'mcp', group: '服务状态', label: '服务名与命名空间', desc: '模型侧工具名形如 mcp__jg__drive_search，资源按 jg:// 寻址', kw: '命名空间 服务名 mcp__jg jg://' },
+    { tab: 'mcp', group: '服务状态', label: '能力', desc: '工具列表、资源列表、资源模板与资源读取均已声明', kw: '能力 tools resources 模板 读取' },
+    { tab: 'mcp', group: '服务状态', label: '订阅', desc: '当前服务未声明资源变更订阅，页面按手动刷新读取', kw: '订阅 资源变更 刷新' },
+    { tab: 'mcp', group: '资源目录', label: '资源检索', desc: '按名称、说明、类型或 URI 过滤当前身份可见的资源', kw: '资源检索 名称 说明 类型 URI' },
+    { tab: 'about', group: '版本', label: '客户端版本', desc: 'Windows 客户端，随内网离线包分发', kw: '客户端 版本 windows 离线包' },
+    { tab: 'about', group: '版本', label: '运行时基线', desc: 'DeepSeek Harness，锁定版本并按季度吸收上游补丁', kw: '运行时 基线 harness 补丁' },
+    { tab: 'about', group: '版本', label: '更新通道', desc: '内网离线包，更新前完成回归与签名校验', kw: '更新 通道 回归 签名 校验' },
+    { tab: 'about', group: '帮助', label: '帮助与反馈', desc: '内网文档站与工单由本域运维受理', kw: '帮助 反馈 文档 工单 运维' },
+    { tab: 'about', group: '帮助', label: '许可与合规', desc: '使用范围受集团信息安全制度与数据分级约束', kw: '许可 合规 制度 数据分级' },
+  ]
+  const settingItems = settingItemSeeds.map((x, i) => ({
+    ...x,
+    id: `si-${i}`,
+    ic: settingIcons[x.tab] || 'gear',
+    tabLabel: settingsTabs.find((t) => t.id === x.tab)?.label || x.tab,
+    keywords: `${x.label} ${x.desc || ''} ${x.kw || ''} ${x.group}`,
+  }))
+
+  const settingItemRow = (a) => `<button class="search-row" data-setting="${a.id}">
+    <span class="search-row-ico">${icon(a.ic)}</span>
+    <span class="search-row-main">${esc(a.label)}</span>
+    <span class="search-row-meta">${esc(a.tabLabel)} · ${esc(a.group)}</span>
+  </button>`
+
+  const placeholders = { all: '搜索 九规智能中枢', actions: '搜索操作', chats: '搜索聊天' }
 
   const [res, appsRes, prjRes, convRes] = await Promise.all([
     api('/api/resources'), api('/api/apps'), api('/api/projects'), api('/api/conversations?withText=1'),
   ])
+  if (!wrap.isConnected) return
   const resources = res.ok ? res.body.items || [] : []
   const apps = appsRes.ok ? appsRes.body.items || [] : []
   const projects = prjRes.ok ? prjRes.body.items || [] : []
@@ -1655,118 +2353,189 @@ async function openSearchPalette(initial = '') {
   const conversations = convRes.ok ? convRes.body.items || [] : (state.conversations || [])
   const navRows = Object.keys(modules).filter(visible)
 
-  let scope = 'current'
-  const close = () => { wrap.remove(); document.removeEventListener('keydown', onKey) }
-  const go = (id) => { close(); state.view = id; render() }
-  const group = (title, rows) => rows.length ? `<div class="sp-group">${title}</div>${rows.join('')}` : ''
-  const hit = (s) => {
-    const q = input.value.trim().toLowerCase()
-    return q && String(s || '').toLowerCase().includes(q)
+  const q = () => input.value.trim().toLowerCase()
+  const matchPos = (text, value) => {
+    const s = String(text || '')
+    if (!value) return 0
+    if (/^[a-z0-9_+-]{1,3}$/.test(value)) {
+      const escRe = value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      const re = new RegExp(`(^|[^a-z0-9_])${escRe}(?=$|[^a-z0-9_])`, 'i')
+      const m = re.exec(s)
+      return m ? m.index + (m[1] ? m[1].length : 0) : -1
+    }
+    return s.toLowerCase().indexOf(value)
+  }
+  const hit = (s) => matchPos(s, q()) >= 0
+  const section = (title, inner) => inner ? `<div class="search-section"><div class="search-section-title">${title}</div>${inner}</div>` : ''
+
+  const actionRow = (a) => `<button class="search-row" data-qaction="${a.id}">
+    <span class="search-row-ico">${icon(a.ic)}</span>
+    <span class="search-row-main">${esc(a.label)}</span>
+    <span class="search-kbd">${esc(a.kbd)}</span>
+  </button>`
+
+  const settingRow = (a) => `<button class="search-row" data-qaction="${a.id}">
+    <span class="search-row-ico">${icon(a.ic)}</span>
+    <span class="search-row-main">${esc(a.label)}</span>
+  </button>`
+
+  const findSnippet = (text, query) => {
+    if (!text || !query) return ''
+    const idx = matchPos(text, query)
+    if (idx < 0) return ''
+    const start = Math.max(0, idx - 10)
+    const end = Math.min(text.length, idx + query.length + 26)
+    return `${start > 0 ? '…' : ''}${text.slice(start, end).replace(/\s+/g, ' ')}${end < text.length ? '…' : ''}`
   }
 
-  const navRow = (id) => `<button class="sp-row" data-view="${id}"><span class="ico">${icon(navIcon(id))}</span><span class="sp-main">${esc(modules[id].label)}</span><span class="sp-meta">模块</span></button>`
-  const resourceRow = (r) => `<button class="sp-row" data-res="${esc(r.id)}"><span class="ico">${icon('database')}</span><span class="sp-main">${esc(r.name)}</span><span class="sp-meta">${esc(r.type || '资源')} · ${esc(r.source || '数据中心')}</span></button>`
-  const appRow = (a) => `<button class="sp-row" data-view="skills"><span class="ico">${icon('grid')}</span><span class="sp-main">${esc(a.name)}</span><span class="sp-meta">应用 · ${esc(a.category || '内置')}</span></button>`
-  const taskRow = (t) => `<button class="sp-row" data-view="tasks"><span class="ico">${icon('task')}</span><span class="sp-main">${esc(t.title || t.name)}</span><span class="sp-meta">任务 · ${esc(t.status || '')}</span></button>`
-  const projectRow = (p) => `<button class="sp-row" data-project="${esc(p.id)}"><span class="ico">${icon('folder')}</span><span class="sp-main">${esc(p.name)}</span><span class="sp-meta">项目</span></button>`
-  const convRow = (c) => `<button class="sp-row" data-conv="${esc(c.id)}"><span class="ico">${icon('chat')}</span><span class="sp-main">${esc(c.title)}</span><span class="sp-meta">${hit(c.searchText || '') ? '正文命中' : '会话'}</span></button>`
+  const bubbleIco = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 4h12a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H9l-5 4v-13a2 2 0 0 1 2-2z"/></svg>`
 
-  const limits = (global) => ({ nav: global ? 6 : 10, res: global ? 6 : 10, prj: 4, app: 4, task: 4, conv: 4 })
-  const groups = (global) => {
-    const lim = limits(global)
-    const nav = group('导航', navRows.filter((id) => hit(modules[id].label)).slice(0, lim.nav).map(navRow))
-    const resource = group('资源', resources.filter((r) => hit(`${r.name} ${r.source || ''} ${r.dataOwner || ''}`)).slice(0, lim.res).map(resourceRow))
-    const project = group('项目', projects.filter((p) => hit(`${p.name || ''} ${p.desc || ''}`)).slice(0, lim.prj).map(projectRow))
-    const app = group('应用', apps.filter((a) => hit(`${a.name || ''} ${a.category || ''}`)).slice(0, lim.app).map(appRow))
-    const task = group('任务', tasks.filter((t) => hit(`${t.title || t.name || ''} ${t.status || ''}`)).slice(0, lim.task).map(taskRow))
-    const conv = group('会话', conversations.filter((c) => hit(`${c.title || ''}\n${c.searchText || ''}`)).slice(0, lim.conv).map(convRow))
-    if (global) return [nav, resource, project, app, task, conv]
-    if (view === 'datacenter' || view === 'drive' || view === 'knowledge') return [resource]
-    if (view === 'projects') return [project]
-    if (view === 'skills' || view === 'apps') return [app]
-    if (view === 'tasks' || view === 'automation') return [task]
-    if (view === 'im' || view === 'chat' || view === 'history') return [conv]
-    return [nav]
+  const convRow = (c, query = '') => {
+    const proj = projects.find((p) => p.id === c.projectId)
+    const bodyMeta = findSnippet(c.searchText || '', query)
+    const meta = bodyMeta || proj?.name || ''
+    return `<button class="search-row" data-conv="${esc(c.id)}">
+    <span class="search-row-ico bubble" aria-hidden="true">${bubbleIco}</span>
+    <span class="search-row-main">${esc(c.title || '未命名会话')}</span>
+    ${meta ? `<span class="search-row-meta">${esc(meta)}</span>` : ''}
+  </button>`
   }
 
-  const options = [
-    { id: 'current', title: '搜索当前模块', sub: viewLabel || '当前模块', ic: 'search' },
-    { id: 'global', title: '搜索全局', sub: '全系统 · 模块、资源、项目、应用、任务、会话', ic: 'globe' },
-  ]
+  const navRow = (id) => `<button class="search-row" data-view="${id}">
+    <span class="search-row-ico">${icon(navIcon(id))}</span>
+    <span class="search-row-main">${esc(modules[id].label)}</span>
+    <span class="search-row-meta">导航</span>
+  </button>`
 
-  const paintSuggest = () => {
-    sug.querySelectorAll('.sp-sug').forEach((b) => b.classList.toggle('on', b.dataset.scope === scope))
+  const resourceRow = (r) => `<button class="search-row" data-res="${esc(r.id)}">
+    <span class="search-row-ico">${icon('database')}</span>
+    <span class="search-row-main">${esc(r.name)}</span>
+    <span class="search-row-meta">${esc(r.type || '资源')} · ${esc(r.source || '数据中心')}</span>
+  </button>`
+
+  const appRow = (a) => `<button class="search-row" data-view="skills">
+    <span class="search-row-ico">${icon('grid')}</span>
+    <span class="search-row-main">${esc(a.name)}</span>
+    <span class="search-row-meta">应用 · ${esc(a.category || '内置')}</span>
+  </button>`
+
+  const taskRow = (t) => `<button class="search-row" data-view="tasks">
+    <span class="search-row-ico">${icon('task')}</span>
+    <span class="search-row-main">${esc(t.title || t.name)}</span>
+    <span class="search-row-meta">任务 · ${esc(t.status || '')}</span>
+  </button>`
+
+  const projectRow = (p) => `<button class="search-row" data-project="${esc(p.id)}">
+    <span class="search-row-ico">${icon('folder')}</span>
+    <span class="search-row-main">${esc(p.name)}</span>
+    <span class="search-row-meta">项目</span>
+  </button>`
+
+  const paint = () => {
+    const query = q()
+    const parts = []
+    if (filter === 'all' || filter === 'actions') {
+      const acts = quickActions.filter((a) => hit(`${a.label} ${a.keywords}`))
+      const tabsMatched = settingActions.filter((a) => hit(`${a.label} ${a.keywords}`))
+      const itemsMatched = settingItems.filter((a) => hit(`${a.keywords} ${a.tabLabel}`))
+      const setHtml = query
+        ? itemsMatched.slice(0, filter === 'actions' ? itemsMatched.length : 6).map(settingItemRow).join('')
+        : tabsMatched.map(settingRow).join('')
+      parts.push(section('快捷操作', acts.map(actionRow).join('')))
+      parts.push(section('设置', setHtml))
+    }
+    if (filter === 'all' || filter === 'chats') {
+      const matched = conversations.filter((c) => hit(`${c.title || ''}\n${c.searchText || ''}`))
+      if (query) {
+        matched.sort((a, b) => (matchPos(a.title, query) >= 0 ? 0 : 1) - (matchPos(b.title, query) >= 0 ? 0 : 1))
+      }
+      const shown = query ? matched : matched.slice(0, 8)
+      parts.push(section('聊天', shown.map((c) => convRow(c, query)).join('')))
+    }
+    if (filter === 'all' && query) {
+      parts.push(section('导航', navRows.filter((id) => hit(modules[id].label)).slice(0, 5).map(navRow).join('')))
+      parts.push(section('资源', resources.filter((r) => hit(`${r.name} ${r.source || ''} ${r.dataOwner || ''}`)).slice(0, 5).map(resourceRow).join('')))
+      parts.push(section('项目', projects.filter((p) => hit(`${p.name || ''} ${p.desc || ''}`)).slice(0, 4).map(projectRow).join('')))
+      parts.push(section('应用', apps.filter((a) => hit(`${a.name || ''} ${a.category || ''}`)).slice(0, 4).map(appRow).join('')))
+      parts.push(section('任务', tasks.filter((t) => hit(`${t.title || t.name || ''} ${t.status || ''}`)).slice(0, 4).map(taskRow).join('')))
+    }
+    body.innerHTML = parts.filter(Boolean).join('')
+    if (!parts.filter(Boolean).length) {
+      body.innerHTML = `<div class="search-empty">没有找到「${esc(input.value.trim())}」相关结果</div>`
+    }
+    rows = Array.from(body.querySelectorAll('.search-row'))
+    active = rows.length ? 0 : -1
+    paintActive()
+    bindRows()
   }
 
-  const openSuggest = () => {
-    const q = input.value.trim()
-    if (!q) { sug.removeAttribute('data-open'); sug.innerHTML = ''; return }
-    sug.dataset.open = '1'
-    sug.innerHTML = options.map((o) => `
-      <button class="sp-sug${scope === o.id ? ' on' : ''}" data-scope="${o.id}">
-        <span class="sp-sug-ico">${icon(o.ic)}</span>
-        <span class="sp-sug-main"><span class="sp-sug-title">${o.title}</span><span class="sp-sug-sub">${esc(o.sub)}</span></span>
-        <span class="sp-sug-key">Enter</span>
-      </button>`).join('') + '<div class="sp-sug-foot">↑↓ 切换 · Enter 搜索 · Esc 关闭</div>'
-    sug.querySelectorAll('.sp-sug').forEach((b) => {
-      b.addEventListener('mouseenter', () => { scope = b.dataset.scope; paintSuggest() })
-      b.addEventListener('click', () => execute(b.dataset.scope))
-    })
-    paintSuggest()
+  const paintActive = () => {
+    rows.forEach((r, i) => r.classList.toggle('on', i === active))
   }
-
-  const hideSuggest = () => { sug.removeAttribute('data-open'); sug.innerHTML = '' }
 
   const bindRows = () => {
-    wrap.querySelectorAll('[data-view]').forEach((b) => b.addEventListener('click', () => go(b.dataset.view)))
-    wrap.querySelectorAll('[data-res]').forEach((b) => b.addEventListener('click', () => { close(); openResource(b.dataset.res) }))
-    wrap.querySelectorAll('[data-project]').forEach((b) => b.addEventListener('click', () => { close(); openProject(b.dataset.project) }))
-    wrap.querySelectorAll('[data-conv]').forEach((b) => b.addEventListener('click', () => { close(); openConversation(b.dataset.conv) }))
+    body.querySelectorAll('[data-qaction]').forEach((b) => b.addEventListener('click', () => {
+      const act = quickActions.find((a) => a.id === b.dataset.qaction) || settingActions.find((a) => a.id === b.dataset.qaction)
+      if (act) act.run()
+    }))
+    body.querySelectorAll('[data-setting]').forEach((b) => b.addEventListener('click', () => {
+      const item = settingItems.find((x) => x.id === b.dataset.setting)
+      if (!item) return
+      close()
+      state.view = 'settings'
+      state.settingsTab = item.tab
+      state.settingsQuery = ''
+      state.settingsFocus = item.label
+      render()
+    }))
+    body.querySelectorAll('[data-view]').forEach((b) => b.addEventListener('click', () => go(b.dataset.view)))
+    body.querySelectorAll('[data-res]').forEach((b) => b.addEventListener('click', () => { close(); openResource(b.dataset.res) }))
+    body.querySelectorAll('[data-project]').forEach((b) => b.addEventListener('click', () => { close(); openProject(b.dataset.project) }))
+    body.querySelectorAll('[data-conv]').forEach((b) => b.addEventListener('click', () => { close(); openConversation(b.dataset.conv) }))
   }
 
-  const execute = (which = scope) => {
-    const q = input.value.trim()
-    if (!q) { input.focus(); return }
-    scope = which === 'global' ? 'global' : 'current'
-    hideSuggest()
-    const rendered = groups(scope === 'global').filter(Boolean)
-    body.innerHTML = rendered.length ? rendered.join('')
-      : `<div class="sp-empty">${scope === 'global' ? '没有找到匹配结果，试试「影像」「审图」「出图」' : '当前模块内没有匹配结果，按 ↑ 切换到全局搜索'}</div>`
-    bindRows()
+  wrap.querySelectorAll('.search-tab').forEach((b) => b.addEventListener('click', () => {
+    filter = b.dataset.filter
+    wrap.querySelectorAll('.search-tab').forEach((x) => {
+      const on = x === b
+      x.classList.toggle('on', on)
+      x.setAttribute('aria-selected', on ? 'true' : 'false')
+    })
+    input.value = ''
+    input.placeholder = placeholders[filter] || placeholders.all
+    paint()
     input.focus()
-  }
+  }))
 
   const onKey = (e) => {
     if (e.key === 'Escape') { e.preventDefault(); close(); return }
-    if (!input.value.trim()) return
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      if (!rows.length) return
       e.preventDefault()
-      if (!sug.dataset.open) openSuggest()
-      scope = scope === 'current' ? 'global' : 'current'
-      paintSuggest()
+      active = (active + (e.key === 'ArrowDown' ? 1 : -1) + rows.length) % rows.length
+      paintActive()
+      rows[active].scrollIntoView({ block: 'nearest' })
       return
     }
     if (e.key === 'Enter') {
+      if (!input.value.trim() || !rows.length) return
       e.preventDefault()
-      execute(scope)
+      rows[Math.max(active, 0)]?.click()
     }
   }
 
-  input.addEventListener('input', () => {
-    scope = 'current'
-    body.innerHTML = ''
-    openSuggest()
-  })
+  input.addEventListener('input', paint)
   wrap.addEventListener('click', (e) => { if (e.target === wrap) close() })
   document.addEventListener('keydown', onKey)
-  if (initial.trim()) openSuggest()
+  paint()
 }
 
 /* -------------------------------- views ----------------------------- */
 
-async function renderView() {
+async function renderViewInner() {
   const view = document.getElementById('view')
   if (!state.boot.authed) return renderLogin(view)
+  if (state.boot.mustChangePassword) return renderPasswordSetup(view)
   const guestBase = ['home', 'settings', 'imagegen', 'cloudbrowser', 'more']
   const guestGrants = (state.boot.user.grants || [])
   if (state.boot.user.role === 'guest' && !guestBase.includes(state.view) && !guestGrants.includes(state.view)) {
@@ -1777,6 +2546,7 @@ async function renderView() {
   if (state.view === 'history') return renderHistory(view)
   if (state.view === 'projects') return renderProjects(view)
   if (state.view === 'datacenter') return renderDatacenter(view)
+  if (state.view === 'formats') return renderFormats(view)
   if (state.view === 'skills') return renderSkills(view)
   if (state.view === 'apps') return renderApps(view)
   if (state.view === 'settings') return renderSettings(view)
@@ -1788,6 +2558,7 @@ async function renderView() {
     }
   }
   if (state.view === 'admin') return renderAdmin(view)
+  if (state.view === 'codereview') return renderCodeReview(view)
   if (state.view === 'automation') return renderTaskCenter(view)
   if (state.view === 'knowledge') {
     try { return await renderNotebook(view) } catch (e) {
@@ -1804,20 +2575,64 @@ async function renderView() {
   return renderPlaceholder(view)
 }
 
+/** 所有模块统一从这里进入渲染，渲染完由 AppLayout 接管侧栏挂载。 */
+async function renderView() {
+  await renderViewInner()
+  mountPageSidebar()
+  requestAnimationFrame(syncPaneScrollbars)
+}
+
+/** 业务侧栏只有真正溢出时才显示滑轨，避免空内容或轻微溢出也常驻一条轨道线。 */
+let paneScrollObserver = null
+function syncPaneScrollbars() {
+  const sidebar = document.getElementById('sidebar')
+  if (!sidebar) return
+  const panels = sidebar.querySelectorAll('[data-scrollwatch],.tk-left,.sk-left,.nt-left,.im-left,.ac-left,.mc-nav,.settings-side,.layout-sidebar-content,.pl-installed,.sidebar-scroll')
+  panels.forEach((el) => {
+    if (!el.dataset.scrollwatch) {
+      if (!/^(auto|scroll)$/.test(getComputedStyle(el).overflowY)) return
+      el.dataset.scrollwatch = '1'
+    }
+    const overflowing = el.scrollHeight - el.clientHeight > 16
+    el.toggleAttribute('data-side-scroll', overflowing)
+    el.style.setProperty('overflow-y', overflowing ? 'auto' : 'hidden', 'important')
+  })
+  if (!paneScrollObserver) {
+    paneScrollObserver = new MutationObserver(() => requestAnimationFrame(syncPaneScrollbars))
+    paneScrollObserver.observe(sidebar, { childList: true, subtree: true })
+  }
+  if (!sidebar.dataset.scrollHoverBound) {
+    sidebar.dataset.scrollHoverBound = '1'
+    const clearHot = () => sidebar.querySelectorAll('[data-side-scroll].scroll-hot').forEach((el) => el.classList.remove('scroll-hot'))
+    sidebar.addEventListener('pointermove', (e) => {
+      sidebar.querySelectorAll('[data-side-scroll]').forEach((el) => {
+        const r = el.getBoundingClientRect()
+        const nearRail = e.clientX >= r.right - 16 && e.clientX <= r.right + 2 && e.clientY >= r.top && e.clientY <= r.bottom
+        el.classList.toggle('scroll-hot', nearRail)
+      })
+    }, { passive: true })
+    sidebar.addEventListener('pointerleave', clearHot, { passive: true })
+  }
+}
+
 function composerPlusItems() {
   const installed = (state.plugins || []).filter((p) => p.status === 'enabled')
   const skills = installed.filter((p) => p.kind === 'personal')
   const plugins = installed.filter((p) => p.kind !== 'personal')
   return [
     { act: 'attach', ic: 'plus', label: '添加照片和文件', desc: '从计算机上传' },
+    { act: 'deepThink', ic: 'spark', label: `${state.deepThink ? '✓ ' : ''}深度思索`, desc: state.deepThink ? '已开启 · 当前会话使用推理模型' : 'DeepSeek Reasoner · 更深层推理' },
     { act: 'library', ic: 'database', label: '从资料库添加', desc: '浏览数据中心的资源' },
-    { act: 'image', ic: 'image', label: '创建图像', desc: '按描述生成图片' },
-    { act: 'web', ic: 'globe', label: '网页搜索', desc: '当前网络未开放', off: true },
+    { act: 'image', ic: 'image', label: '创建图像', desc: '尚未接入', off: true },
+    { act: 'web', ic: 'globe', label: '网页搜索', desc: state.webSearch ? '已启用 · 本轮会检索网页' : '使用平台 Web 搜索与抓取' },
     { act: 'project', ic: 'folder', label: '在项目中工作', desc: '在项目里开始对话' },
     { act: 'skillPicker', ic: 'layers', label: '技能', desc: skills.length ? `${skills.length} 项已启用 ›` : '暂无已启用技能 ›' },
     { act: 'pluginPicker', ic: 'plugin', label: '插件', desc: plugins.length ? `${plugins.length} 项已启用 ›` : '暂无已启用插件 ›' },
     { act: 'presetPicker', ic: 'target', label: 'Agent 预设', desc: state.agentPresets.length ? `${state.agentPresetId ? (state.agentPresets.find((x) => x.id === state.agentPresetId)?.name || '已选择') : `${state.agentPresets.length} 个`} ›` : '未创建 ›' },
-    { act: 'research', ic: 'book', label: '深度研究', desc: '暂未开放', off: true },
+    ...['agent-team', 'worktree', 'auto-review'].map((id) => {
+      const e = (state.agentEntries || []).find((x) => x.id === id) || { id, label: id === 'agent-team' ? 'Agent 团队' : id === 'worktree' ? '工作树' : '自动审查（权限层）', enabled: false, desc: '运行时未启用' }
+      return { act: 'agentEntry', entry: id, ic: id === 'worktree' ? 'folder' : id === 'auto-review' ? 'check' : 'spark', label: e.label, desc: e.enabled ? e.desc : (e.runtimeEnabled ? '实验权限层尚未接入' : '运行时未启用'), off: !e.enabled }
+    }),
     { act: 'draw', ic: 'pen', label: '绘图', desc: '暂未开放', off: true },
     { act: 'sep' },
     { act: 'docx', ic: 'doc', label: '新建文档', desc: '.docx' },
@@ -1868,7 +2683,7 @@ function composerPresetPickerItems() {
 function paintComposerPlus(pop, items, pickerKind) {
   pop.innerHTML = items.map((it) => (it.act === 'sep'
     ? '<div class="pp-sep"></div>'
-    : `<button class="pp-row${it.off ? ' off' : ''}" data-plus="${it.act}"${it.plugin ? ` data-plugin="${esc(it.plugin)}"` : ''}${it.preset !== undefined ? ` data-preset="${esc(it.preset)}"` : ''}${it.off ? ' disabled' : ''}>
+    : `<button class="pp-row${it.off ? ' off' : ''}" data-plus="${it.act}"${it.plugin ? ` data-plugin="${esc(it.plugin)}"` : ''}${it.entry ? ` data-entry="${esc(it.entry)}"` : ''}${it.preset !== undefined ? ` data-preset="${esc(it.preset)}"` : ''}${it.off ? ' disabled' : ''}>
         <span class="ico pp-ico">${icon(it.ic)}</span>
         <span class="pp-label">${esc(it.label)}</span>
         <span class="pp-desc">${esc(it.desc || '')}</span>
@@ -1925,6 +2740,13 @@ function paintComposerPlus(pop, items, pickerKind) {
     if (act === 'attach') openChatAttachment()
     if (act === 'library') openLibraryPicker()
     if (act === 'image') { state.view = 'imagegen'; render() }
+    if (act === 'web') {
+      state.webSearch = !state.webSearch
+      renderView()
+      toast(state.webSearch ? '网页搜索已启用，本轮回答将检索外部网页' : '网页搜索已关闭')
+    }
+    if (act === 'deepThink') toggleDeepThink()
+    if (act === 'agentEntry') startAgentEntry(b.dataset.entry)
     if (act === 'project') openWorkspacePicker()
     if (['pdf', 'docx', 'xlsx', 'pptx'].includes(act)) openDocDialog(act)
   }))
@@ -1932,6 +2754,14 @@ function paintComposerPlus(pop, items, pickerKind) {
 
 function reasoningLabel(id) {
   return { low: '低', medium: '中', high: '高' }[id] || '中'
+}
+
+function toggleDeepThink() {
+  if (state.chatBusy) return
+  state.deepThink = !state.deepThink
+  if (state.deepThink) state.reasoningEffort = 'high'
+  renderView()
+  toast(state.deepThink ? '已开启深度思索：当前会话使用 DeepSeek 推理模型' : '已关闭深度思索：恢复普通对话模型')
 }
 
 function openReasoningMenu(anchor) {
@@ -2214,8 +3044,13 @@ function openTaskModeMenu(anchor) {
 }
 
 function policyControl() {
+  if (state.taskMode === 'chat') {
+    return `<button class="quick" id="policyToggle" disabled title="对话模式固定只读：不允许写文件或执行有副作用命令；切换到工作模式后可选择审批方式" style="display:inline-flex;align-items:center;gap:6px;line-height:1.2;background:#f1f2f4;border:0;border-radius:999px;height:32px;padding:0 12px;color:#8a8f96;box-shadow:none;white-space:nowrap;cursor:default;opacity:.75">
+      <span class="ico" style="display:inline-flex;align-items:center;justify-content:center">${icon('shield')}</span>只读
+    </button>`
+  }
   const manual = state.executionPolicy === 'manual'
-  return `<button class="quick" id="policyToggle" style="display:inline-flex;align-items:center;gap:6px;line-height:1.2;background:#f1f2f4;border:0;border-radius:999px;height:32px;padding:0 12px;color:#5f6368;box-shadow:none;white-space:nowrap" title="${manual ? '编辑外部文件和使用互联网时始终询问' : '仅对检测到的风险操作请求批准'}">
+  return `<button class="quick" id="policyToggle" style="display:inline-flex;align-items:center;gap:6px;line-height:1.2;background:#f1f2f4;border:0;border-radius:999px;height:32px;padding:0 12px;color:#5f6368;box-shadow:none;white-space:nowrap" title="${manual ? '工作区内写入与执行也逐次确认' : '工作区内直接执行，越界或升级才确认'}">
     <span class="ico" style="display:inline-flex;align-items:center;justify-content:center">${icon(manual ? 'shield' : 'pulse')}</span>${manual ? '请求批准' : '帮我批准'}
   </button>`
 }
@@ -2223,7 +3058,7 @@ function policyControl() {
 /** 待审批胶囊：放在输入框内「＋」右侧，点击后再让用户选择，不直接放行。 */
 function approvalControl() {
   return `<button class="quick" id="approvalToggle" style="display:inline-flex;align-items:center;gap:6px;line-height:1.2;background:#f1f2f4;border:0;border-radius:999px;height:32px;padding:0 12px;color:#5f6368;box-shadow:none;white-space:nowrap" title="有 1 项工具调用等待你批准">
-    <span class="ico" style="display:inline-flex;align-items:center;justify-content:center">${icon('shield')}</span>请求批准
+    <span class="ico" style="display:inline-flex;align-items:center;justify-content:center">${icon('shield')}</span>待批准
   </button>`
 }
 
@@ -2254,15 +3089,42 @@ function openApprovalMenu(anchor) {
   document.querySelectorAll('.policy-pop').forEach((p) => p.remove())
   const p = state.pendingInteraction
   if (!p || p.kind !== 'approval') return
+  const riskText = { low: '低', medium: '中', high: '高' }[p.risk] || p.risk
+  const ruleText = {
+    'dsh-workspace-write-escalation': 'DSH 工作区越界升级',
+    'dsh-read-only-approval': 'DSH 只读策略升级',
+    'chat-mode-no-escalation': '对话模式只读',
+    'external-side-effect': '外部副作用',
+    'dsh-scheduled-escalation-unavailable': '定时任务无人值守',
+  }[p.rule] || p.rule
+  const isReasonOnly = !p.arguments && /^审批原因：/.test(String(p.summary || ''))
+  const isNestedPtc = /:ptc:\d+$/i.test(String(p.callId || ''))
   const pop = document.createElement('div')
   pop.className = 'plus-pop approval-pop'
-  pop.style.width = '340px'
+  pop.style.width = '360px'
   pop.innerHTML = `
     <div style="padding:12px 14px 8px">
       <div style="font-size:14px;color:#202124;font-weight:500;line-height:1.4">工具调用需要确认</div>
       <div style="font-size:12px;color:#7b8087;line-height:1.5;margin-top:3px">${esc(toolLabel(p.toolName))} 将在你的账号下执行，仅本次有效。</div>
     </div>
-    ${p.summary ? `<div style="margin:0 12px 10px;padding:9px 10px;background:#f6f7f8;border-radius:8px;font-size:12px;color:#4b5056;line-height:1.5;word-break:break-word">${esc(p.summary)}</div>` : ''}
+    <div style="margin:0 12px 10px;border:1px solid #e7ebf1;border-radius:8px;overflow:hidden;background:#fff">
+      <div style="display:flex;align-items:center;gap:7px;padding:7px 10px;background:#f7f8fa;border-bottom:1px solid #e7ebf1">
+        <b style="font-size:11px;color:#3f444a;font-weight:600">审批摘要</b>
+        ${isNestedPtc ? '<span style="font-size:10px;color:#7b8087;border:1px solid #e7ebf1;border-radius:4px;padding:1px 5px;background:#fff">PTC 嵌套</span>' : ''}
+        <span style="flex:1"></span>
+        <span style="font-size:10px;color:#9aa1aa">仅本次</span>
+      </div>
+      <div style="display:grid;grid-template-columns:52px minmax(0,1fr);gap:5px 9px;padding:8px 10px;font-size:11px;line-height:1.55;color:#4b5056">
+        <span style="color:#8a8f96">工具</span>
+        <span style="word-break:break-all">${esc(toolLabel(p.toolName))}${p.toolName && p.toolName !== toolLabel(p.toolName) ? ` <span class="mono" style="font-size:10px;color:#9aa1aa">${esc(p.toolName)}</span>` : ''}</span>
+        ${p.operation ? `<span style="color:#8a8f96">操作</span><span>${esc(p.operation)}</span>` : ''}
+        ${p.resource ? `<span style="color:#8a8f96">目标</span><span style="word-break:break-all">${esc(p.resource)}</span>` : ''}
+        <span style="color:#8a8f96">风险</span>
+        <span>${esc(riskText)}${ruleText ? ` · ${esc(ruleText)}` : ''}</span>
+      </div>
+      ${p.summary ? `<div style="margin:0 10px 9px;padding:7px 8px;border-radius:6px;background:#f6f7f8;font-size:11px;color:#4b5056;line-height:1.55;word-break:break-word"><span style="color:#8a8f96">摘要</span><br>${esc(p.summary)}</div>` : ''}
+      ${isReasonOnly ? '<div style="padding:0 10px 9px;font-size:10px;color:#8a8f96;line-height:1.5">工具未回传精确参数，以上摘要来自运行时升级原因，不冒充完整参数。</div>' : ''}
+    </div>
     <button data-approval="allowed-once" style="display:flex;align-items:center;gap:10px;width:100%;border:0;background:transparent;padding:10px 13px;font:inherit;text-align:left;cursor:pointer">
       <span class="ico" style="flex:none">${icon('check')}</span>
       <span style="display:flex;flex-direction:column;gap:2px;min-width:0"><span style="font-size:13px;color:#202124">允许本次执行</span><span style="font-size:12px;color:#7b8087">执行后才会写入结果</span></span>
@@ -2274,7 +3136,7 @@ function openApprovalMenu(anchor) {
   document.body.appendChild(pop)
   window.__approvalPop = pop
   const r = anchor.getBoundingClientRect()
-  pop.style.left = `${Math.round(Math.min(window.innerWidth - 352, Math.max(12, r.left - 8)))}px`
+  pop.style.left = `${Math.round(Math.min(window.innerWidth - 372, Math.max(12, r.left - 8)))}px`
   pop.style.top = `${Math.round(Math.max(12, r.top - pop.offsetHeight - 8))}px`
   pop.querySelectorAll('[data-approval]').forEach((b) => b.addEventListener('click', (e) => {
     e.stopPropagation()
@@ -2289,6 +3151,7 @@ function openApprovalMenu(anchor) {
 
 /** 审批策略菜单，用词与交互参考 Codex：点击后让用户选择，不直接切换。 */
 function openPolicyMenu(anchor) {
+  if (state.taskMode === 'chat') { toast('对话模式固定只读，切换到工作模式后可选择审批方式'); return }
   document.querySelectorAll('.policy-pop').forEach((p) => p.remove())
   document.querySelectorAll('.mode-pop').forEach((p) => p.remove())
   if (window.__policyPop) { window.__policyPop.remove(); window.__policyPop = null; return }
@@ -2296,8 +3159,8 @@ function openPolicyMenu(anchor) {
   pop.className = 'plus-pop policy-pop'
   pop.style.width = '326px'
   pop.innerHTML = [
-    ['manual', '请求批准', '编辑外部文件和使用互联网时始终询问', 'shield'],
-    ['auto', '帮我批准', '仅对检测到的风险操作请求批准', 'pulse'],
+    ['manual', '请求批准', '工作区内写入与执行也逐次确认', 'shield'],
+    ['auto', '帮我批准', '工作区内直接执行，越界或升级才确认', 'pulse'],
   ].map(([id, label, desc, ico]) => `<button class="pp-row" data-policy="${id}" style="align-items:flex-start;padding:10px 12px 10px 10px">
       <span class="ico pp-ico" style="margin-top:1px;flex:none">${icon(ico)}</span>
       <span style="display:flex;flex-direction:column;gap:2px;min-width:0;text-align:left;flex:1">
@@ -2338,7 +3201,7 @@ async function openWorkspacePicker(trigger) {
   Object.assign(wrap.style, { position: 'fixed', zIndex: '80', width: '420px' })
   wrap.innerHTML = `
     <div style="display:flex;align-items:center;gap:2px;background:#eef0f3;border-radius:14px;padding:4px;width:max-content;margin:0 0 8px 6px">
-      <button data-wtab="project" style="display:flex;align-items:center;gap:8px;border:0;background:#e3e5e8;border-radius:11px;padding:9px 14px;font:inherit;font-size:var(--fs-sub);color:var(--text);cursor:default">
+      <button data-wtab="project" style="display:flex;align-items:center;gap:8px;border:0;background:var(--accent-soft);border-radius:11px;padding:9px 14px;font:inherit;font-size:var(--fs-sub);color:var(--accent);cursor:default">
         <span class="ico" style="width:17px;height:17px">${icon('folder')}</span>选择项目
       </button>
       <button data-wtab="file" style="display:flex;align-items:center;gap:8px;border:0;background:transparent;border-radius:11px;padding:9px 14px;font:inherit;font-size:var(--fs-sub);color:var(--text);cursor:pointer">
@@ -2426,45 +3289,137 @@ async function openWorkspacePicker(trigger) {
   }), 0)
 }
 
-let voiceRec = null
-let voiceBase = ''
-function startVoiceInput(btn) {
-  const Ctor = window.SpeechRecognition || window.webkitSpeechRecognition
-  if (!Ctor) return toast('当前客户端不支持浏览器语音识别', true)
-  if (voiceRec) {
-    try { voiceRec.stop() } catch {}
+let voiceMedia = null
+let voiceChunks = []
+let voiceBusy = false
+
+function writePcmWav(samples, sampleRate = 16000) {
+  const length = samples.length
+  const buffer = new ArrayBuffer(44 + length * 2)
+  const view = new DataView(buffer)
+  const writeString = (offset, value) => { for (let i = 0; i < value.length; i += 1) view.setUint8(offset + i, value.charCodeAt(i)) }
+  writeString(0, 'RIFF')
+  view.setUint32(4, 36 + length * 2, true)
+  writeString(8, 'WAVE')
+  writeString(12, 'fmt ')
+  view.setUint32(16, 16, true)
+  view.setUint16(20, 1, true)
+  view.setUint16(22, 1, true)
+  view.setUint32(24, sampleRate, true)
+  view.setUint32(28, sampleRate * 2, true)
+  view.setUint16(32, 2, true)
+  view.setUint16(34, 16, true)
+  writeString(36, 'data')
+  view.setUint32(40, length * 2, true)
+  for (let i = 0; i < length; i += 1) view.setInt16(44 + i * 2, Math.max(-1, Math.min(1, samples[i])) * 0x7fff, true)
+  return new Blob([buffer], { type: 'audio/wav' })
+}
+
+async function blobToWav(blob) {
+  const array = await blob.arrayBuffer()
+  const decodeContext = new AudioContext()
+  const decoded = await decodeContext.decodeAudioData(array.slice(0))
+  await decodeContext.close()
+  const seconds = Math.max(0.1, decoded.duration)
+  const target = new OfflineAudioContext(1, Math.ceil(seconds * 16000), 16000)
+  const source = target.createBufferSource()
+  source.buffer = decoded
+  source.connect(target.destination)
+  source.start(0)
+  const rendered = await target.startRendering()
+  return writePcmWav(rendered.getChannelData(0), 16000)
+}
+
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result).split(',')[1] || '')
+    reader.onerror = () => reject(new Error('音频读取失败'))
+    reader.readAsDataURL(blob)
+  })
+}
+
+async function startVoiceInput(btn) {
+  if (voiceMedia && voiceMedia.state === 'recording') {
+    voiceMedia.stop()
     return
   }
+  if (voiceBusy) return
   const input = document.getElementById('draft')
   if (!input) return
-  const rec = new Ctor()
-  voiceRec = rec
-  voiceBase = input.value || ''
-  rec.lang = 'zh-CN'
-  rec.continuous = false
-  rec.interimResults = true
-  btn.title = '正在聆听，点击停止'
-  rec.onresult = (event) => {
-    let finalText = ''
-    let interim = ''
-    for (let i = event.resultIndex; i < event.results.length; i += 1) {
-      const item = event.results[i]
-      if (item.isFinal) finalText += item[0].transcript
-      else interim += item[0].transcript
+  const { ok, body } = await api('/api/speech/catalog')
+  if (!ok) return toast(body?.error || '本地语音服务不可用', true)
+  if (!body.ready) return toast('本地语音模型尚未准备，请联系管理员在管理中心的本地语音中下载模型', true)
+  let stream
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+  } catch (error) {
+    return toast(error?.name === 'NotAllowedError' ? '麦克风未授权' : `麦克风启动失败：${error?.message || 'unknown'}`, true)
+  }
+  const recorder = new MediaRecorder(stream)
+  voiceMedia = recorder
+  voiceChunks = []
+  voiceBusy = true
+  const baseValue = input.value || ''
+  btn.title = '正在录音，点击停止'
+  recorder.ondataavailable = (event) => { if (event.data?.size) voiceChunks.push(event.data) }
+  recorder.onstop = async () => {
+    stream.getTracks().forEach((track) => track.stop())
+    voiceMedia = null
+    btn.title = '本地转写中…'
+    try {
+      const wav = await blobToWav(new Blob(voiceChunks, { type: recorder.mimeType || 'audio/webm' }))
+      const audioBase64 = await blobToBase64(wav)
+      const result = await api('/api/speech/transcribe', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ audioBase64, language: 'zh' }),
+      })
+      if (!result.ok) {
+        if (result.body?.error?.includes('尚未准备')) toast(result.body.error, true)
+        else toast(result.body?.error || '本地语音识别失败', true)
+        return
+      }
+      const text = (result.body?.text || '').trim()
+      if (!text) return toast('没有识别到语音内容', true)
+      input.value = `${baseValue}${baseValue ? ' ' : ''}${text}`
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+      toast('已在本机完成语音转写')
+    } catch (error) {
+      toast(`本地语音识别失败：${error?.message || 'unknown'}`, true)
+    } finally {
+      voiceBusy = false
+      btn.title = '语音输入'
     }
-    input.value = `${voiceBase}${finalText}${interim}`
-    if (finalText) voiceBase = input.value
-    input.dispatchEvent(new Event('input', { bubbles: true }))
   }
-  rec.onerror = (event) => {
-    const reason = event.error === 'not-allowed' ? '麦克风未授权' : (event.error === 'no-speech' ? '没有听到语音' : `语音识别失败（${event.error || 'unknown'}）`)
-    toast(reason, true)
+  recorder.start()
+}
+
+function openSpeechSettings() {
+  const mask = openModal('本地离线语音', `
+    <div class="mc-block"><div class="mc-id">识别模型</div><div class="field-value">SenseVoiceSmall ONNX · CPU 本地推理 · 音频不上传云端</div><div class="mc-id" id="speechState" style="margin-top:8px">读取中…</div><div class="mc-id" id="speechProgress" style="margin-top:4px"></div></div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px"><button class="btn primary" id="speechPrepare">下载/校验本地模型</button></div>`)
+  const stateEl = mask.querySelector('#speechState')
+  const progressEl = mask.querySelector('#speechProgress')
+  const btn = mask.querySelector('#speechPrepare')
+  const refresh = async () => {
+    const { ok, body } = await api('/api/speech/catalog')
+    if (!ok) { stateEl.textContent = body?.error || '状态读取失败'; return }
+    stateEl.textContent = body.ready ? '模型已就绪，可在输入框使用本地语音输入' : `模型未准备（缺少：${(body.missing || []).join('、') || '模型文件'}）`
+    progressEl.textContent = body.state === 'preparing' ? `正在下载 ${(body.progress / 1024 / 1024).toFixed(1)} / ${(body.progressTotal / 1024 / 1024).toFixed(1)} MB` : ''
   }
-  rec.onend = () => {
-    if (voiceRec === rec) voiceRec = null
-    btn.title = '语音输入'
-  }
-  try { rec.start() } catch (err) { voiceRec = null; btn.title = '语音输入'; toast(`语音识别启动失败：${err.message}`, true) }
+  refresh()
+  btn.addEventListener('click', async () => {
+    btn.disabled = true
+    btn.textContent = '正在准备…'
+    const timer = setInterval(refresh, 1000)
+    const { ok, body } = await api('/api/speech/prepare', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+    clearInterval(timer)
+    btn.disabled = false
+    btn.textContent = '重新校验'
+    if (!ok) toast(body?.error || '本地模型准备失败', true)
+    else toast('本地语音模型已就绪')
+    refresh()
+  })
 }
 
 
@@ -2567,7 +3522,7 @@ async function setExecutionPolicy(next) {
   } else {
     state.executionPolicy = next
   }
-  toast(state.executionPolicy === 'manual' ? '已切换为「请求批准」：编辑外部文件和使用互联网时始终询问' : '已切换为「帮我批准」：仅对检测到的风险操作请求批准')
+  toast(state.executionPolicy === 'manual' ? '已切换为「请求批准」：工作区内写入与执行也逐次确认' : '已切换为「帮我批准」：工作区内直接执行，越界或升级才确认')
   renderView()
 }
 
@@ -2592,6 +3547,7 @@ async function openConversation(id) {
   state.taskMode = ['auto', 'chat', 'work'].includes(one.item.taskMode) ? one.item.taskMode : 'auto'
   state.agentPresetId = one.item.agentPresetId || ''
   if (one.item.reasoningEffort) state.reasoningEffort = one.item.reasoningEffort
+  state.deepThink = Boolean(one.item.deepThink)
   state.chatSteps = []
   state.chatError = ''
   state.pendingConfirm = null
@@ -2628,6 +3584,7 @@ function startFreshChat() {
   state.executionPolicy = state.runtimeSettings?.defaultPolicy === 'manual' ? 'manual' : 'auto'
   state.taskMode = 'auto'
   state.reasoningEffort = state.runtimeSettings?.defaultEffort || 'medium'
+  state.deepThink = false
   render()
   toast('已开始全新对话：项目、上下文和策略均已重置')
   setTimeout(() => document.getElementById('draft')?.focus(), 50)
@@ -2683,22 +3640,22 @@ async function renderProjects(el) {
       ${list.length ? pageItems.map((p) => `
         <div class="prj-row" data-project="${p.id}">
           <span class="prj-ico">${icon('folder')}</span>
-          <span class="prj-name">${esc(p.name)}</span>
+          <span class="prj-name">${esc(p.name)}${p.cwd ? `<span class="prj-cwd" title="已连接本地文件夹">${icon('window')}</span>` : ''}</span>
           <span class="spacer"></span>
           <span class="prj-time mono">${relTime(p.updated)}</span>
           <span class="prj-acts">
             <button class="icon-btn" data-pmore="${p.id}" title="更多">${icon('dots')}</button>
             <button class="icon-btn${p.pinned ? ' on' : ''}" data-ppin="${p.id}" title="${p.pinned ? '取消置顶' : '置顶'}">${icon('pin')}</button>
-            <button class="icon-btn" data-popen="${p.id}" title="打开项目">${icon('arrow')}</button>
+            <button class="icon-btn" data-pnewchat="${p.id}" title="在该项目中新建聊天">${icon('compose')}</button>
           </span>
         </div>`).join('') : '<div class="prj-empty">没有匹配的项目。个人项目仅自己可见，点右上角「创建」新建。</div>'}
     </div>
-    <div class="ac-pager prj-pager">
-      ${pages > 1 ? `<button class="ac-pg" data-ppage="${page - 1}" ${page <= 1 ? 'disabled' : ''}>上一页</button>
+    ${pages > 1 ? `<div class="ac-pager prj-pager">
+      <button class="ac-pg" data-ppage="${page - 1}" ${page <= 1 ? 'disabled' : ''}>上一页</button>
       ${pageSeq(page, pages).map((p) => p === '…' ? '<span class="ac-pager-dots">…</span>' : `<button class="ac-pg num ${p === page ? 'on' : ''}" data-ppage="${p}">${p}</button>`).join('')}
-      <button class="ac-pg" data-ppage="${page + 1}" ${page >= pages ? 'disabled' : ''}>下一页</button>` : ''}
+      <button class="ac-pg" data-ppage="${page + 1}" ${page >= pages ? 'disabled' : ''}>下一页</button>
       <span class="ac-pager-info">每页最多 ${pageSize} 条 · 共 ${list.length} 条</span>
-    </div>`
+    </div>` : ''}`
   const input = el.querySelector('#prjSearch')
   if (input) {
     input.addEventListener('input', debounce((e) => {
@@ -2721,13 +3678,14 @@ async function renderProjects(el) {
     state.prjPage = Math.min(Math.max(p, 1), pages)
     renderView()
   }))
-  el.querySelectorAll('[data-popen]').forEach((b) => b.addEventListener('click', (ev) => {
+  el.querySelectorAll('[data-pnewchat]').forEach((b) => b.addEventListener('click', (ev) => {
     ev.stopPropagation()
-    openProject(b.dataset.popen)
+    const p = state.projects.find((x) => x.id === b.dataset.pnewchat)
+    if (p) startProjectChat(p)
   }))
   el.querySelectorAll('[data-pmore]').forEach((b) => b.addEventListener('click', (ev) => {
     ev.stopPropagation()
-    openProject(b.dataset.pmore)
+    openProjectRowMenu(b, b.dataset.pmore)
   }))
   el.querySelectorAll('[data-ppin]').forEach((b) => b.addEventListener('click', (ev) => {
     ev.stopPropagation()
@@ -2741,6 +3699,79 @@ async function renderProjects(el) {
     toast(p.pinned ? `已置顶「${p.name}」` : `已取消置顶「${p.name}」`)
   }))
   el.querySelectorAll('.prj-row').forEach((row) => row.addEventListener('click', () => openProject(row.dataset.project)))
+}
+
+function openProjectFiles({ projectId = '', conversationId = '' } = {}) {
+  if (!projectId && !conversationId) return toast('缺少项目或会话目录', true)
+  const query = projectId ? `projectId=${encodeURIComponent(projectId)}` : `conversationId=${encodeURIComponent(conversationId)}`
+  const mask = openModal('文件浏览', `
+    <div style="display:flex;gap:12px;min-height:52vh;align-items:stretch">
+      <div style="width:38%;min-width:220px;border-right:1px solid var(--line);padding-right:10px;display:flex;flex-direction:column">
+        <div class="mc-id" id="fileRoot" style="margin-bottom:8px">正在读取目录…</div>
+        <div id="fileTree" style="overflow:auto;flex:1;font-size:12px"></div>
+      </div>
+      <div style="flex:1;min-width:0;display:flex;flex-direction:column">
+        <div class="mc-id" id="fileHead">选择左侧文件预览</div>
+        <pre id="fileBody" class="mono" style="flex:1;overflow:auto;white-space:pre-wrap;word-break:break-word;margin:8px 0 0;padding:10px;background:var(--panel);border:1px solid var(--line);border-radius:8px;min-height:260px"></pre>
+      </div>
+    </div>`)
+  const rootEl = mask.querySelector('#fileRoot')
+  const treeEl = mask.querySelector('#fileTree')
+  const headEl = mask.querySelector('#fileHead')
+  const bodyEl = mask.querySelector('#fileBody')
+  const iconFor = (item) => item.type === 'dir' ? icon('folder') : (['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg'].includes(item.ext) ? icon('image') : icon('doc'))
+  const preview = async (item) => {
+    headEl.textContent = `${item.path} · ${item.type === 'dir' ? '目录' : (item.size < 1024 ? `${item.size} B` : `${(item.size / 1024).toFixed(1)} KB`)}`
+    bodyEl.textContent = '正在读取…'
+    const { ok, body } = await api(`/api/files/content?${query}&path=${encodeURIComponent(item.path)}`)
+    if (!ok) { bodyEl.textContent = body?.error || '读取失败'; return }
+    if (body.image && body.rawUrl) {
+      bodyEl.innerHTML = `<img src="${body.rawUrl}" alt="${esc(body.name)}" style="max-width:100%;height:auto;border-radius:6px" />`
+      return
+    }
+    if (body.binary) {
+      bodyEl.textContent = '二进制文件，不提供文本预览。'
+      return
+    }
+    if (body.tooLarge) { bodyEl.textContent = '文件超过 1MB，未在弹窗内预览。'; return }
+    bodyEl.textContent = body.text || '（空文件）'
+    if (body.truncated) bodyEl.textContent += '\n\n[内容过长，仅显示前 400,000 字符]'
+  }
+  const loadDir = async (path, container, depth) => {
+    const { ok, body } = await api(`/api/files/tree?${query}&path=${encodeURIComponent(path)}&depth=1`)
+    if (!ok) { container.textContent = body?.error || '读取目录失败'; return }
+    if (!body.entries.length) { container.innerHTML = '<div class="mc-dim" style="padding:6px">空目录</div>'; return }
+    for (const item of body.entries) {
+      const row = document.createElement('div')
+      row.style.cssText = `display:flex;align-items:center;gap:6px;padding:4px 6px;padding-left:${6 + depth * 12}px;border-radius:6px;cursor:pointer`
+      row.innerHTML = `<span class="ico">${iconFor(item)}</span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(item.name)}</span>`
+      const children = document.createElement('div')
+      children.style.display = 'none'
+      container.appendChild(row)
+      container.appendChild(children)
+      if (item.type === 'dir') {
+        let loaded = false
+        row.addEventListener('click', async () => {
+          if (!loaded) {
+            loaded = true
+            children.style.display = 'block'
+            row.querySelector('.ico').style.transform = 'rotate(0deg)'
+            await loadDir(item.path, children, depth + 1)
+          } else {
+            children.style.display = children.style.display === 'none' ? 'block' : 'none'
+          }
+        })
+      } else {
+        row.addEventListener('click', () => preview(item))
+      }
+    }
+  }
+  api(`/api/files/tree?${query}&depth=1`).then(({ ok, body }) => {
+    rootEl.textContent = ok ? `${body.label} · ${body.root}` : (body.error || '目录不可用')
+    if (!ok) { treeEl.textContent = body.error || '目录不可用'; return }
+    treeEl.innerHTML = ''
+    loadDir('', treeEl, 0)
+  })
 }
 
 function openProject(id) {
@@ -2772,10 +3803,12 @@ function openProject(id) {
     </div>
     <div class="slide-foot" style="flex-wrap:wrap">
       <button class="btn primary" data-ask ${p.cwd ? '' : 'disabled'}>在项目中提问</button>
+      ${p.cwd ? '<button class="btn" data-files>浏览文件</button>' : ''}
       <button class="btn" data-rename>重命名</button>
       <button class="btn" data-remove>移除项目</button>
     </div>`
   wireSlide(slide)
+  slide.querySelector('[data-files]')?.addEventListener('click', () => openProjectFiles({ projectId: p.id }))
   slide.querySelector('[data-ask]')?.addEventListener('click', () => {
     slide.classList.remove('open')
     state.conversation = null
@@ -3083,6 +4116,8 @@ async function sendMessage(text) {
   closeSlashMenu()
   state.chatAbort = false
   const runId = ++state.chatRunId
+  const idempotencyKey = (globalThis.crypto?.randomUUID?.() || `chat-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`)
+  state.lastChatKey = idempotencyKey
   state.chatBusy = true
   state.chatError = ''
   state.pendingConfirm = null
@@ -3096,6 +4131,7 @@ async function sendMessage(text) {
       title: text.length > 26 ? `${text.slice(0, 26)}…` : text,
       time: '刚刚', messages: [], status: 'running', projectId: state.activeProjectId || null,
       executionPolicy: state.executionPolicy,
+      deepThink: Boolean(state.deepThink),
     }
     state.conversation = conv
   }
@@ -3112,12 +4148,15 @@ async function sendMessage(text) {
       model: state.composerModel,
       tools: state.composerTools,
       reasoningEffort: state.reasoningEffort || 'medium',
+      deepThink: Boolean(state.deepThink),
       ownApiKey: localStorage.getItem('jg.ownKey') || '',
       refs,
       mode: state.taskMode || 'auto',
       projectId: state.activeProjectId || '',
       executionPolicy: state.executionPolicy,
       presetId: state.agentPresetId || '',
+      webSearch: Boolean(state.webSearch),
+      idempotencyKey,
     }),
   })
 
@@ -3129,6 +4168,13 @@ async function sendMessage(text) {
     state.chatBusy = false
     state.chatError = res.body.error || '模型或工具调用失败'
     renderView()
+    return
+  }
+  if (res.body.duplicate) {
+    state.chatBusy = false
+    if (res.body.conversation) state.conversation = res.body.conversation
+    renderView()
+    toast('该请求此前已提交，已返回原会话结果')
     return
   }
 
@@ -3296,6 +4342,266 @@ function debounce(fn, wait) {
   return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), wait) }
 }
 
+async function renderFormats(el) {
+  const { body, ok } = await api('/api/formats/capabilities').catch(() => ({ ok: false, body: {} }))
+  const items = ok ? (body.items || []) : []
+  const fallback = [
+    { id: 'pdf', label: 'PDF', family: '文档', read: ['页数与页面尺寸', '文本提取', '内嵌预览'], write: ['合并', '按页范围拆分'], note: '本机 pdf-lib 运行时' },
+    { id: 'gis', label: 'GIS / SHP / GDB / GeoJSON', family: '空间数据', read: ['GeoJSON 要素与几何', 'Shapefile 要素/属性', 'File Geodatabase 多图层', 'SHP / GDB 文件夹直读', 'ZIP 数据包', '范围 bbox', '坐标系声明', 'SVG 预览'], write: ['输出 Shapefile', '输出 File Geodatabase', '多个 SHP 合并 GDB', 'SHP / GDB / GeoJSON 互转'], note: '以 SHP 与 GDB 为主格式：SHP 可直接选文件夹或一次多选 .shp/.dbf/.shx/.prj，GDB 直接选 .gdb 文件夹，均无需压缩；GDB 下载为 ZIP，解压后为 .gdb 文件夹；不做投影转换。' },
+    { id: 'cad', label: 'CAD / DXF', family: '空间数据', read: ['实体', '图层', '范围', 'SVG 预览'], write: ['ASCII DXF 回写'], note: 'DWG 需先转 DXF' },
+  ]
+  const cards = (items.length ? items : fallback)
+  el.innerHTML = `<div style="max-width:1180px;margin:0 auto;padding:24px">
+    <div style="display:flex;align-items:flex-start;gap:16px;flex-wrap:wrap">
+      <div>
+        <div style="font-size:24px;font-weight:700">数据格式基座</div>
+        <div style="color:var(--muted);margin-top:6px;max-width:820px;line-height:1.7">PDF / GIS / CAD 是平台级读写能力，由数据中心、智能笔记本、Harness Agent 与 MCP 工具共用。这里只提供基座控制台，不属于数据中心功能模块。</div>
+      </div>
+      <div style="margin-left:auto;display:flex;gap:8px;align-items:center"><span class="tag">平台级</span><span class="tag">本机运行</span></div>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-top:18px">
+      ${cards.map((item) => `<div class="mc-block" style="padding:14px;grid-column:auto !important">
+        <div style="display:flex;align-items:center;gap:8px"><b>${esc(item.label)}</b><span class="tag">${esc(item.family || '数据')}</span></div>
+        <div class="mc-id" style="margin-top:8px">读取：${esc((item.read || []).join('、'))}</div>
+        <div class="mc-id" style="margin-top:2px">输出：${esc((item.write || []).join('、'))}</div>
+        <div class="form-note" style="margin-top:8px">${esc(item.note || '')}</div>
+      </div>`).join('')}
+    </div>
+    <div class="mc-block" style="padding:14px;margin-top:14px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <div style="flex:1;min-width:260px"><b>格式运行器</b><div class="mc-id" style="margin-top:4px">SHP / GDB 可直接选择文件夹，不需要压缩；SHP 与 GDB 可互转，GeoJSON 可转换为 SHP 或 GDB。PDF、GIS、CAD 共用同一套 inspect / export 服务。</div></div>
+      <button class="btn primary" id="fmtPdf">打开 PDF 运行器</button>
+      <button class="btn" id="fmtSpatial">打开 GIS / CAD 运行器</button>
+    </div>
+    <div class="form-note" style="margin-top:12px">Agent 与 MCP 可通过 format_capabilities / format_inspect / format_export 调用同一基座；PDF 合并与拆分、GeoJSON 规范化、DXF 回写均返回真实文件。</div>
+  </div>`
+  el.querySelector('#fmtPdf')?.addEventListener('click', openPdfTool)
+  el.querySelector('#fmtSpatial')?.addEventListener('click', openSpatialTool)
+}
+
+async function openSpatialTool() {
+  const mask = openModal('GIS / CAD 格式运行器', `<div style="min-width:760px;max-width:86vw">
+    <div class="mc-id" style="margin-bottom:10px">平台格式基座 · 直接读取 SHP / GDB 文件夹，不需要压缩；SHP 与 GDB 可互转，GeoJSON 可转换为这两种主格式。DWG 需先转换为 DXF。</div>
+    <div class="mc-block" style="padding:12px;margin-bottom:10px">
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <input type="file" id="geoFolder" webkitdirectory directory multiple style="display:none">
+        <input type="file" id="geoFile" accept=".geojson,.json,.dxf,.zip,.shp,.dbf,.shx,.prj,.cpg,.sbn,.sbx,.qix,.gdb,application/geo+json,application/zip" multiple style="display:none">
+        <button class="btn sm primary" id="geoPickFolder">选择 SHP / GDB 文件夹</button>
+        <button class="btn sm" id="geoPickFile">选择单个文件</button>
+        <span class="mc-dim" id="geoPickInfo">尚未选择数据</span>
+      </div>
+      <div class="mc-id" style="margin-top:8px">SHP 文件夹需包含 .shp/.dbf/.shx（建议带 .prj）；一个文件夹里有多个 SHP 时可合并输出为一个 GDB。GDB 直接选择整个 .gdb 文件夹。GeoJSON 与 ZIP 包也可直接选择。</div>
+    </div>
+    <div id="geoOut"><div class="mc-block" style="padding:12px"><div class="mc-dim">选择数据后解析真实几何、图层、范围与要素数量。</div></div></div>
+  </div>`, { wide: true })
+  const folderInput = mask.querySelector('#geoFolder')
+  const fileInput = mask.querySelector('#geoFile')
+  const pickInfo = mask.querySelector('#geoPickInfo')
+  const out = mask.querySelector('#geoOut')
+  let chosen = []
+  let uploaded = []
+  let inspectName = ''
+  let singleMode = false
+
+  mask.querySelector('#geoPickFolder')?.addEventListener('click', () => folderInput.click())
+  mask.querySelector('#geoPickFile')?.addEventListener('click', () => fileInput.click())
+  folderInput?.addEventListener('change', () => {
+    chosen = [...(folderInput.files || [])]
+    singleMode = false
+    const root = chosen[0]?.webkitRelativePath?.split('/')[0] || '空间数据'
+    inspectName = root
+    pickInfo.textContent = chosen.length ? `${root}（${chosen.length} 个文件）` : '尚未选择数据'
+    if (chosen.length) run()
+  })
+  fileInput?.addEventListener('change', () => {
+    chosen = [...(fileInput.files || [])]
+    singleMode = chosen.length === 1 && !/\.(shp|gdb)$/i.test(chosen[0]?.name || '')
+    const stems = [...new Set(chosen.map((file) => String(file.name || '').replace(/\.(shp|dbf|shx|prj|cpg|sbn|sbx|qix)$/i, '')))].filter(Boolean)
+    inspectName = chosen.length === 1 ? (chosen[0]?.name || '') : (stems.length === 1 ? stems[0] : '合并数据')
+    pickInfo.textContent = chosen.length
+      ? (chosen.length === 1 ? `${chosen[0].name}（${(chosen[0].size / 1024).toFixed(1)} KB）` : `${chosen.length} 个文件`)
+      : '尚未选择数据'
+    if (chosen.length) run()
+  })
+
+  function pathOf(file) {
+    return String(file.webkitRelativePath || file.name || 'data.bin').replace(/\\/g, '/')
+  }
+
+  async function uploadAll() {
+    uploaded = []
+    for (const [index, file] of chosen.entries()) {
+      pickInfo.textContent = `正在上传 ${index + 1}/${chosen.length}：${file.name}`
+      const res = await fetch(`/api/files/upload?kind=spatial&name=${encodeURIComponent(file.name)}`, {
+        method: 'POST',
+        headers: { 'content-type': file.type || 'application/octet-stream' },
+        body: file,
+      })
+      const body = await res.json().catch(() => ({}))
+      if (!res.ok || !body?.file?.id) throw new Error(body?.error || `上传 ${file.name} 失败`)
+      uploaded.push({ id: body.file.id, path: pathOf(file), name: file.name })
+    }
+    return uploaded
+  }
+
+  async function run() {
+    if (!chosen.length) return
+    try {
+      out.innerHTML = `<div class="mc-block" style="padding:12px"><div class="mc-dim">正在上传 ${esc(inspectName || chosen[0].name)}…</div></div>`
+      await uploadAll()
+      const first = chosen[0]
+      const useFileId = singleMode && !/\.(shp|gdb)$/i.test(first.name) && !first.webkitRelativePath
+      const body = useFileId
+        ? { fileId: uploaded[0].id, name: inspectName, mime: first.type || '' }
+        : { files: uploaded, name: inspectName || first.name.replace(/\.(shp|gdb)$/i, '') }
+      const result = await api('/api/formats/inspect', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+      if (!result.ok) throw new Error(result.body?.detail || result.body?.error || '解析失败')
+      const d = result.body
+      const isDxf = d.format === 'cad' || d.kind === 'dxf'
+      const targets = isDxf ? [] : ['shp', 'gdb']
+      const targetLabel = { shp: '输出 SHP', gdb: '输出 GDB' }
+      out.innerHTML = `<div class="mc-block" style="padding:12px">
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><b>${esc(d.name || inspectName)}</b><span class="tag ok">${esc(d.formatLabel || (isDxf ? 'DXF' : '空间数据'))}</span><span class="mc-dim">${d.features} 个${isDxf ? '实体' : '要素'} · ${d.pointCount || 0} 个坐标点${d.previewFeatures && d.previewFeatures < d.features ? `（预览 ${d.previewFeatures} 个）` : ''}</span></div>
+        <div class="mc-id" style="margin-top:6px">范围：${(d.bbox || []).join(' , ') || '未声明'} · 坐标系：${esc(d.crs)}${d.crsMixed ? '（多坐标系，按图层保留）' : ''} · 图层：${esc((d.layers || []).join('、') || '未声明')}</div>
+        <div class="mc-id" style="margin-top:2px">类型：${esc((d.geometryTypes || d.entityTypes || []).join('、'))}</div>
+        ${d.sourceFiles?.length > 1 ? `<div class="mc-id" style="margin-top:2px">数据源：${esc(d.sourceFiles.slice(0, 8).join('、'))}${d.sourceFiles.length > 8 ? ' …' : ''}</div>` : ''}
+        ${d.fields?.length ? `<div class="mc-id" style="margin-top:2px">属性字段：${esc(d.fields.slice(0, 12).join('、'))}${d.fields.length > 12 ? ' …' : ''}</div>` : ''}
+        ${d.layerDetails?.length ? `<div class="mc-id" style="margin-top:2px">图层：${esc(d.layerDetails.map((x) => `${x.name}（${x.features}）`).join('、'))}</div>` : ''}
+        ${d.note ? `<div class="form-note" style="margin-top:6px">${esc(d.note)}</div>` : ''}
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">${targets.map((target) => `<button class="btn sm" data-fmt-export="${target}">${targetLabel[target]}</button>`).join('')}${isDxf ? `<button class="btn sm" data-fmt-export="dxf">输出 DXF</button>` : ''}<span class="mc-dim" id="fmtExportStatus"></span></div>
+        <div id="fmtExportOut"></div>
+        <div style="border:1px solid var(--line);border-radius:10px;overflow:hidden;margin-top:10px;height:430px;background:#fff">${d.svg || ''}</div>
+        <div class="mc-id" style="margin-top:6px">预览由本机解析出的坐标生成；不是静态图片，也不做投影转换。</div>
+      </div>`
+      out.querySelectorAll('[data-fmt-export]').forEach((button) => button.addEventListener('click', () => exportTarget(button)))
+      async function exportTarget(button) {
+        const status = out.querySelector('#fmtExportStatus')
+        const exportOut = out.querySelector('#fmtExportOut')
+        const target = button.dataset.fmtExport
+        button.disabled = true
+        if (status) status.textContent = `正在生成 ${target.toUpperCase()}…`
+        try {
+          let exported
+          if (target === 'dxf') {
+            exported = await api('/api/formats/export', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ format: 'cad', op: 'normalize', fileId: uploaded[0].id, name: inspectName || chosen[0].name }) })
+          } else {
+            const useFiles = !useFileId
+            exported = await api('/api/formats/export', {
+              method: 'POST', headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({
+                format: 'gis', op: 'convert', target,
+                name: useFiles ? (inspectName || chosen[0].name || '数据').replace(/\.(zip|shp|gdb|geojson|json)$/i, '') : (chosen[0]?.name || inspectName),
+                ...(useFiles ? { files: uploaded } : { fileId: uploaded[0].id }),
+              }),
+            })
+          }
+          if (!exported.ok) throw new Error(exported.body?.detail || exported.body?.error || '输出失败')
+          if (status) status.textContent = exported.body.files?.length ? `已输出 ${exported.body.files.length} 个文件` : '已输出'
+          if (exportOut) {
+            const files = exported.body.files || []
+            exportOut.innerHTML = `<div style="margin-top:8px;display:flex;flex-direction:column;gap:6px">${files.map((file) => `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span class="mono" style="font-size:12px">${esc(file.name)}</span><span class="mc-dim">${file.size < 1024 ? `${file.size} B` : `${Math.round(file.size / 1024)} KB`}</span><a class="btn sm" href="${esc(file.url)}" download>下载</a></div>`).join('')}</div>${target === 'gdb' ? '<div class="form-note" style="margin-top:6px">GDB 是文件夹格式，下载 ZIP 后解压即得到 .gdb 文件夹。</div>' : target === 'shp' ? '<div class="form-note" style="margin-top:6px">SHP 为多文件格式，请把同一名称的 .shp/.dbf/.shx/.prj 放在同一文件夹中使用。</div>' : ''}`
+          }
+        } catch (error) {
+          if (status) status.textContent = error?.message || '输出失败'
+          if (exportOut) exportOut.innerHTML = `<div class="mc-id" style="margin-top:6px;color:var(--warn)">${esc(error?.message || '输出失败')}</div>`
+        } finally { button.disabled = false }
+      }
+    } catch (error) {
+      out.innerHTML = `<div class="mc-block" style="padding:12px;color:var(--warn)">${esc(error?.message || '解析失败')}</div>`
+    }
+  }
+}
+
+async function openPdfTool() {
+  const mask = openModal('PDF 格式运行器', `<div style="min-width:720px;max-width:86vw">
+    <div class="mc-id" style="margin-bottom:10px">平台格式基座 · 真实解析、合并、拆分与文本提取；文件在本机处理，不调用外部服务。</div>
+    <div class="mc-block" style="padding:12px;margin-bottom:10px">
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <input type="file" id="pdfFiles" accept="application/pdf,.pdf" multiple style="display:none">
+        <button class="btn sm primary" id="pdfPick">选择 PDF 文件</button>
+        <span class="mc-dim" id="pdfPickInfo">尚未选择文件</span>
+      </div>
+      <div class="mc-id" style="margin-top:8px">支持选择多个文件用于合并；解析、拆分、提取文本使用第一个文件。</div>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+      <button class="btn sm" data-pdf-op="inspect">解析 / 预览</button>
+      <button class="btn sm" data-pdf-op="merge">合并</button>
+      <input id="pdfRanges" placeholder="拆分页范围，如 1-3,5" style="width:190px;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:transparent;color:inherit">
+      <button class="btn sm" data-pdf-op="split">拆分</button>
+      <button class="btn sm" data-pdf-op="extract">提取文本</button>
+    </div>
+    <div id="pdfOut"><div class="mc-block" style="padding:12px"><div class="mc-dim">选择 PDF 后执行操作。解析结果、页数和下载链接都来自后端真实文件。</div></div></div>
+  </div>`, { wide: true })
+  const filesInput = mask.querySelector('#pdfFiles')
+  const pickInfo = mask.querySelector('#pdfPickInfo')
+  const out = mask.querySelector('#pdfOut')
+  let selected = []
+  let uploaded = []
+  const setBusy = (text) => { out.innerHTML = `<div class="mc-block" style="padding:12px"><div class="mc-dim">${esc(text)}</div></div>` }
+  const uploadAll = async () => {
+    uploaded = []
+    if (!selected.length) throw new Error('请先选择 PDF 文件')
+    for (const file of selected) {
+      const res = await fetch(`/api/files/upload?kind=pdf&name=${encodeURIComponent(file.name)}`, {
+        method: 'POST', headers: { 'content-type': file.type || 'application/pdf' }, body: file,
+      })
+      const body = await res.json().catch(() => ({}))
+      if (!res.ok || !body?.file?.id) throw new Error(body?.error || `上传失败：${file.name}`)
+      uploaded.push({ ...body.file, localName: file.name })
+    }
+    return uploaded
+  }
+  const outputLinks = (files) => files.map((file) => `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px">
+    <span class="mono" style="font-size:12px;word-break:break-all">${esc(file.name)}</span>
+    <span class="mc-dim">${file.pages ? `第 ${esc(file.pages)} 页 · ` : ''}${(Number(file.size || 0) / 1024).toFixed(0)} KB</span>
+    <a class="btn sm" href="${esc(file.url)}" download>下载</a>
+    ${file.id ? `<a class="btn sm subtle" href="/api/pdf/view?fileId=${encodeURIComponent(file.id)}" target="_blank">打开</a>` : ''}
+  </div>`).join('')
+  mask.querySelector('#pdfPick').addEventListener('click', () => filesInput.click())
+  filesInput.addEventListener('change', () => {
+    selected = [...filesInput.files].filter((file) => /\.pdf$/i.test(file.name) || file.type === 'application/pdf')
+    pickInfo.textContent = selected.length ? `${selected.map((f) => f.name).join('、')}（${selected.length} 个）` : '未选择有效的 PDF 文件'
+  })
+  mask.querySelectorAll('[data-pdf-op]').forEach((button) => button.addEventListener('click', async () => {
+    const op = button.dataset.pdfOp
+    try {
+      setBusy('正在上传并读取 PDF…')
+      if (!uploaded.length || uploaded.length !== selected.length) await uploadAll()
+      if (op === 'inspect') {
+        const info = await api('/api/formats/inspect', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ fileId: uploaded[0].id, name: uploaded[0].localName, mime: 'application/pdf' }) })
+        if (!info.ok) throw new Error(info.body?.error || '解析失败')
+        const d = info.body
+        out.innerHTML = `<div class="mc-block" style="padding:12px">
+          <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap"><b>${esc(uploaded[0].localName)}</b><span class="tag ok">${d.pageCount} 页</span><span class="mc-dim">${(d.bytes / 1024).toFixed(0)} KB</span></div>
+          <div class="mc-id" style="margin-top:8px">标题：${esc(d.title || '未设置')} · 作者：${esc(d.author || '未设置')} · 生成器：${esc(d.producer || '未设置')}</div>
+          <div class="mc-id" style="margin-top:4px">页面：${d.pages.map((p) => `${p.index}（${p.width}×${p.height}${p.rotation ? `，旋转 ${p.rotation}°` : ''}）`).join('、')}</div>
+          <iframe src="/api/pdf/view?fileId=${encodeURIComponent(uploaded[0].id)}" style="width:100%;height:420px;border:1px solid var(--line);border-radius:10px;margin-top:10px;background:#fff" title="PDF 预览"></iframe>
+          <div class="mc-id" style="margin-top:6px">预览来自真实 PDF 文件；若浏览器无法内嵌，可用下方“下载/打开”链接。</div>
+          <div style="margin-top:8px"><a class="btn sm" href="/api/files/download?id=${encodeURIComponent(uploaded[0].id)}" download>下载原文件</a></div>
+        </div>`
+      } else if (op === 'merge') {
+        if (uploaded.length < 2) throw new Error('合并至少需要选择两个 PDF 文件')
+        const result = await api('/api/formats/export', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ format: 'pdf', op: 'merge', fileIds: uploaded.map((f) => f.id), name: '合并文档' }) })
+        if (!result.ok) throw new Error(result.body?.error || '合并失败')
+        out.innerHTML = `<div class="mc-block" style="padding:12px"><b>合并完成</b><span class="tag ok" style="margin-left:8px">${result.body.files.length} 个文件</span>${outputLinks(result.body.files)}</div>`
+      } else if (op === 'split') {
+        const ranges = mask.querySelector('#pdfRanges').value.trim()
+        const result = await api('/api/formats/export', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ format: 'pdf', op: 'split', fileId: uploaded[0].id, ranges, name: '拆分文档' }) })
+        if (!result.ok) throw new Error(result.body?.error || result.body?.detail || '拆分失败')
+        out.innerHTML = `<div class="mc-block" style="padding:12px"><b>拆分完成</b><span class="tag ok" style="margin-left:8px">${result.body.files.length} 个文件</span>${outputLinks(result.body.files)}</div>`
+      } else if (op === 'extract') {
+        const result = await api('/api/formats/extract', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ fileId: uploaded[0].id, name: uploaded[0].localName, mime: 'application/pdf' }) })
+        if (!result.ok) throw new Error(result.body?.error || '提取失败')
+        const text = result.body.text || ''
+        out.innerHTML = `<div class="mc-block" style="padding:12px"><b>文本提取</b><span class="tag ok" style="margin-left:8px">${text.length} 字符</span>
+          <div class="mc-id" style="margin-top:4px">${esc(result.body.note || '')}</div>
+          <div class="mono" style="white-space:pre-wrap;word-break:break-word;max-height:340px;overflow:auto;margin-top:8px;font-size:12px;line-height:1.6">${esc(text || '（没有提取到可显示文本）')}</div></div>`
+      }
+    } catch (error) {
+      out.innerHTML = `<div class="mc-block" style="padding:12px;color:var(--warn)">${esc(error?.message || '操作失败')}</div>`
+    }
+  }))
+}
+
 function pageSeq(page, pages) {
   if (pages <= 7) return Array.from({ length: pages }, (_, i) => i + 1)
   const keep = new Set([1, pages, page - 1, page, page + 1])
@@ -3335,7 +4641,7 @@ async function loadResources() {
       <span><span class="tag">${esc(d.latency)}</span></span>
     </button>`
     }).join('') || `<div style="padding:24px;text-align:center;color:var(--muted)">当前没有可用的数据服务</div>`
-    rows0.querySelectorAll('[data-svc]').forEach((b) => b.addEventListener('click', () => toast('数据服务调用需在应用侧申请，调用留痕并入本域审计（演示）')))
+    rows0.querySelectorAll('[data-svc]').forEach((b) => b.addEventListener('click', () => toast('接口调用需在应用侧申请，调用留痕并入本域审计')))
     const pager0 = document.getElementById('dcPager')
     if (pager0) {
       pager0.innerHTML = pages > 1
@@ -3787,11 +5093,11 @@ async function renderSkills(el) {
   const marketCard = (m, i) => {
     const t = marketType(m)
     return `
-    <div class="pl-item" data-mopen="${esc(m.id)}" style="cursor:pointer">
+    <div class="pl-item pl-card" data-mopen="${esc(m.id)}" data-search="${esc(`${m.name} ${m.desc} ${m.publisher || ''}`.toLowerCase())}" style="cursor:pointer">
       <span class="pl-ico ${tone(i)}">${icon(typeIcon(t))}</span>
-      <div class="pl-item-main"><div class="pl-item-name">${esc(m.name)} <span class="tag" style="font-size:10px">${typeLabel(t)}</span></div><div class="pl-item-desc">${esc(m.desc)}</div><div class="pl-item-desc" style="font-size:11px;opacity:.72">发布：${esc(m.publisher || '未标注')}</div></div>
+      <div class="pl-item-main"><div class="pl-item-name">${esc(m.name)}</div><div class="pl-item-desc">${esc(m.desc)}</div></div>
       ${m.installed
-        ? `<button class="pl-act" data-muninstall="${m.id}" title="卸载，仅影响当前账号">${icon('close')}</button>`
+        ? `<button class="pl-act" data-mmenu="${esc(m.id)}" data-mname="${esc(m.name)}" title="已安装，更多操作">${icon('dots')}</button>`
         : m.available === false
           ? `<span class="tag" style="font-size:10px">待上架</span>`
           : `<button class="pl-act add" data-minstall="${m.id}" title="安装到当前账号">${icon('plus')}</button>`}
@@ -3820,8 +5126,8 @@ async function renderSkills(el) {
   const marketSections = (type) => {
     const list = filterMarket(type)
     if (!list.length) return ''
-    const title = type === 'plugin' ? '插件市场' : '技能市场'
-    return sec(title, list.map(marketCard).join(''), '1fr')
+    const sectionName = list[0].section || (type === 'plugin' ? '插件市场' : '技能市场')
+    return sec(sectionName, list.map(marketCard).join(''))
   }
 
   const personalSections = `
@@ -3836,7 +5142,9 @@ async function renderSkills(el) {
       </div>`
     }).join('') : '<div class="sk-empty">当前账号还没有创建插件，点右上「添加」开始创建</div>')}`
 
-  const pluginMarketSection = filterMarket('plugin').length ? marketSections('plugin') : ''
+  const pluginMarketSection = filterMarket('plugin').length
+    ? marketSections('plugin')
+    : `<section class="pl-sec"><h2 class="pl-sec-title">插件市场<span class="pl-arrow">›</span></h2><div class="pl2-empty">${state.skillQuery ? `没有找到与“${esc(state.skillQuery)}”匹配的插件` : '暂无公开插件。员工提交并通过安全审核的插件会出现在这里。'}</div></section>`
 
   const skillMarketSections = filterMarket('skill').length ? marketSections('skill') : '<section class="pl-sec"><h2 class="pl-sec-title">技能市场<span class="pl-arrow">›</span></h2><div class="sk-empty">当前没有可安装的技能；官方与员工创建的上架技能都会出现在这里</div></section>'
   const skillSubs = subs.filter((x) => x.kind === 'skill')
@@ -3860,42 +5168,51 @@ async function renderSkills(el) {
   el.innerHTML = `
     <div class="sk-wrap pl-wrap${state.sbPinned ? '' : ' sb-off'}">
       <aside class="sk-left pl-left">
-        <div class="pl-brand">插件与技能</div>
+        <div class="pl2-side-head">
+          <div class="pl-brand">自定义</div>
+          <button class="pl2-side-search" id="skSideSearchBtn" title="搜索插件或技能">${icon('search')}</button>
+        </div>
         <nav class="pl-nav">
           <button class="pl-nav-item${tab === 'plugin' ? ' on' : ''}" data-sktab="plugin"><span class="pl-nav-ico">${icon('plugin')}</span>插件</button>
           <button class="pl-nav-item${tab === 'skill' ? ' on' : ''}" data-sktab="skill"><span class="pl-nav-ico">${icon('spark')}</span>技能</button>
         </nav>
-        <div class="pl-label">${tab === 'plugin' ? '已安装插件' : '已安装技能'}</div>
+        <div class="pl-label pl2-label">已安装</div>
         <div class="pl-installed">
-          ${installed.map((x, i) => `
-            <button class="pl-inst" ${instAttr(x)}>
-              <span class="pl-inst-ico ${tone(i)}">${icon(tab === 'plugin' ? 'plugin' : 'spark')}</span><span>${esc(x.name)}</span>
-            </button>`).join('') || `<div class="sk-empty">${tab === 'plugin' ? '暂无已安装插件' : '暂无已安装技能'}</div>`}
+          ${installed.map((x, i) => {
+            const mid = x.marketId || (state.market.find((m) => m.name === x.name)?.id) || (tab === 'plugin' ? x.id : '')
+            return `<div class="pl-inst" ${instAttr(x)} role="button" tabindex="0">
+              <span class="pl-inst-ico ${tone(i)}">${icon(tab === 'plugin' ? 'plugin' : 'spark')}</span><span class="pl-inst-name">${esc(x.name)}</span>
+              ${mid ? `<button class="pl-inst-more" data-mi-menu="${esc(mid)}" data-mi-name="${esc(x.name)}" title="更多操作" type="button">${icon('dots')}</button>` : ''}
+            </div>`
+          }).join('') || `<div class="pl2-inst-empty">${tab === 'plugin' ? '暂无已安装插件' : '暂无已安装技能'}</div>`}
         </div>
         <div class="pl-foot">插件与技能经安全审核后上架；个人安装只在本账号生效。</div>
       </aside>
       <div class="sk-main pl-main">
-        <div class="pl-head" style="display:block">
-          <div style="display:flex;align-items:flex-start">
-            <div class="pl-head-main">
-              <h1 class="pl-title">${title}</h1>
-            </div>
-            <div class="pl-acts">
-              <input class="text-input" id="skSearch" placeholder="搜索${tab === 'plugin' ? '插件' : '技能'}" value="${esc(state.skillQuery || '')}" style="width:180px;height:32px" />
-              <button class="pl-ico-btn" id="skRefresh" title="刷新">${icon('refresh')}</button>
-              <button class="pl-add" id="skAddLeft" style="background:#111;color:#fff;border-color:#111">添加</button>
-            </div>
+        <div class="pl-head pl2-head">
+          <h1 class="pl-title">${title}</h1>
+          <div class="pl2-toolbar">
+            <label class="pl2-search">
+              <span class="pl2-search-ico">${icon('search')}</span>
+              <input id="skSearch" placeholder="搜索${tab === 'plugin' ? '插件' : '技能'}" value="${esc(state.skillQuery || '')}" />
+            </label>
+            <button class="pl-ico-btn pl2-tool" id="skRefresh" title="刷新">${icon('refresh')}</button>
+            <button class="pl-add pl2-add" id="skAddLeft">添加</button>
           </div>
           <div class="pl-sub">${sub}</div>
         </div>
-        <div class="pl-tabs">
+        <div class="pl-tabs pl2-tabs">
           <button class="pl-tab${scop === 'public' ? ' on' : ''}" data-skscope="public">公开</button>
           <button class="pl-tab${scop === 'personal' ? ' on' : ''}" data-skscope="personal">个人</button>
         </div>
-        ${tab === 'plugin' && scop === 'public' ? pluginMarketSection : ''}
-        ${tab === 'plugin' && scop === 'personal' ? personalSections : ''}
-        ${tab === 'skill' && scop === 'public' ? skillMarketSections : ''}
-        ${tab === 'skill' && scop === 'personal' ? skillPersonalSections : ''}
+        <div class="pl2-market">
+          ${tab === 'plugin' && scop === 'public' ? pluginMarketSection : ''}
+          ${tab === 'plugin' && scop === 'personal' ? personalSections : ''}
+          ${tab === 'skill' && scop === 'public' ? skillMarketSections : ''}
+          ${tab === 'skill' && scop === 'personal' ? skillPersonalSections : ''}
+          <div class="pl2-noresult" id="plNoResult" hidden>没有找到匹配的内容，换个关键词试试。</div>
+        </div>
+      </div>
       </div>
     </div>`
 
@@ -3903,11 +5220,20 @@ async function renderSkills(el) {
   el.querySelectorAll('[data-skscope]').forEach((b) => { b.onclick = () => { state.skillScope = b.dataset.skscope; renderView() } })
   el.querySelector('#skRefresh').addEventListener('click', () => { toast('已刷新插件目录'); renderView() })
   const search = el.querySelector('#skSearch')
-  search.addEventListener('keydown', (e) => {
-    if (e.key !== 'Enter') return
-    state.skillQuery = search.value.trim()
-    renderView()
-  })
+  const applyQuery = () => {
+    const q = search.value.trim().toLowerCase()
+    const cards = Array.from(el.querySelectorAll('.pl-card'))
+    cards.forEach((card) => { card.hidden = !String(card.dataset.search || '').includes(q) })
+    el.querySelectorAll('.pl2-market .pl-sec').forEach((secEl) => {
+      const secCards = Array.from(secEl.querySelectorAll('.pl-card'))
+      secEl.hidden = secCards.length ? !secCards.some((c) => !c.hidden) : false
+    })
+    const noResult = el.querySelector('#plNoResult')
+    if (noResult) noResult.hidden = !(cards.length && cards.every((c) => c.hidden))
+  }
+  search.addEventListener('input', () => { state.skillQuery = search.value; applyQuery() })
+  search.addEventListener('keydown', (e) => { if (e.key === 'Enter') e.preventDefault() })
+  el.querySelector('#skSideSearchBtn').addEventListener('click', () => search.focus())
   el.querySelector('#skAddLeft').addEventListener('click', () => {
     openPluginPublish()
   })
@@ -3917,6 +5243,14 @@ async function renderSkills(el) {
     if (!ok) return toast(body.error || '安装失败', true)
     toast(body.message || (body.item.installed ? `已安装「${body.item.name}」，下一轮对话生效` : `已卸载「${body.item.name}」`))
     renderView()
+  }))
+  el.querySelectorAll('[data-mmenu]').forEach((b) => b.addEventListener('click', (e) => {
+    e.stopPropagation()
+    openRowMenu(b, b.dataset.mmenu, b.dataset.mname || '')
+  }))
+  el.querySelectorAll('[data-mi-menu]').forEach((b) => b.addEventListener('click', (e) => {
+    e.stopPropagation()
+    openRowMenu(b, b.dataset.miMenu, b.dataset.miName || '')
   }))
   el.querySelectorAll('[data-muninstall]').forEach((b) => b.addEventListener('click', async (e) => {
     e.stopPropagation()
@@ -4316,7 +5650,7 @@ function bindNotebookStudio(el, ctx) {
     if (!r?.ok) return toast(r?.error || '生成失败')
     state.noteId = r.notes[0].id
     state.noteOpen = false
-    toast(`已生成 ${label}，保存在 Studio（演示输出）`)
+    toast(`已生成 ${label}，保存在 Studio`)
     renderView()
   }))
   el.querySelector('#nbSaveNote')?.addEventListener('click', async () => {
@@ -4542,7 +5876,12 @@ async function renderNotebook(el) {
   const openNote = note && state.noteOpen
   const startMode = !chat.length && !notes.length
   const featured = list.filter((n) => n.featured).sort((a, b) => (a.featuredRank || 99) - (b.featuredRank || 99))
-  const recent = list.filter((n) => !n.featured).slice().sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned) || String(b.updated || '').localeCompare(String(a.updated || '')))
+  const recent = list.filter((n) => !n.featured).slice().sort((a, b) => {
+    const pin = Number(!!b.pinned) - Number(!!a.pinned)
+    if (pin) return pin
+    if (state.nbSortMode === 'title') return String(a.title || '').localeCompare(String(b.title || ''), 'zh-Hans-CN')
+    return String(b.updated || '').localeCompare(String(a.updated || ''))
+  })
   state.notebookCollections = listBody.collections || state.notebookCollections || []
   const cnDate = (s) => {
     const [y, m, d] = String(s || '').slice(0, 10).split('-')
@@ -4615,11 +5954,10 @@ async function renderNotebook(el) {
     <div class="kn-gal">
       <div class="kn-gal-head">
         <h2 class="kn-gal-title">精选笔记本</h2>
-        <span class="kn-gal-note">推荐票前五自动入选</span>
-        <button class="kn-link" id="nbSeeAll">查看更多 ${icon('arrow')}</button>
+        ${featured.length > 5 ? `<button class="kn-link" id="nbSeeAll">查看更多 ${icon('arrow')}</button>` : ''}
       </div>
       ${featured.length ? `<div class="kn-feat-grid">
-        ${featured.map((n) => `
+        ${featured.slice(0, 5).map((n) => `
         <div class="kn-feat kn-tone-${Number(n.coverTone) || 0} ${n.coverTone === 2 ? 'is-dark' : ''}" data-nb="${n.id}" role="button" tabindex="0">
           <div class="kn-feat-cover">${icon(n.coverIcon || 'doc')}</div>
           <div class="kn-feat-top">
@@ -4633,11 +5971,17 @@ async function renderNotebook(el) {
           </div>
           <button class="kn-vote" data-nbv="${n.id}" title="推荐这个笔记本">${voteIcon}<span>${n.votes || 0}</span></button>
         </div>`).join('')}
-      </div>` : '<div class="kn-empty">还没有满足精选条件的笔记本。共享后按推荐票前五自动入选，票数不足时先出现在「查看更多」里。</div>'}
+      </div>` : '<div class="kn-empty">待揭晓</div>'}
 
       <div class="kn-gal-head kn-recent-head">
         <h2 class="kn-gal-title">最近打开过的笔记本</h2>
-        <button class="kn-sort" id="nbSort" title="按最近打开排序">${icon('filter')}</button>
+        <div class="kn-sort-wrap">
+          <button class="kn-sort" id="nbSort" title="排序方式" aria-haspopup="menu" aria-expanded="false">${icon('filter')}</button>
+          <div class="kn-sort-pop" id="nbSortPop" role="menu" hidden>
+            <button class="kn-sort-item${state.nbSortMode === 'recent' ? ' on' : ''}" role="menuitemradio" aria-checked="${state.nbSortMode === 'recent'}" data-nbsort="recent">最近${state.nbSortMode === 'recent' ? icon('check') : ''}</button>
+            <button class="kn-sort-item${state.nbSortMode === 'title' ? ' on' : ''}" role="menuitemradio" aria-checked="${state.nbSortMode === 'title'}" data-nbsort="title">标题${state.nbSortMode === 'title' ? icon('check') : ''}</button>
+          </div>
+        </div>
         <span class="spacer"></span>
         <button class="kn-new" id="nbNew2">${icon('plus')}新建笔记本</button>
       </div>
@@ -4700,7 +6044,34 @@ async function renderNotebook(el) {
     if (nb) openNotebookMore(b, nb, nb.featured ? 'shared' : 'normal')
   }))
   el.querySelector('#nbSeeAll')?.addEventListener('click', () => openNotebookSharedDialog(list, state.notebookCollections || []))
-  el.querySelector('#nbSort')?.addEventListener('click', () => toast('最近列表按「置顶优先、更新时间」排序'))
+  const sortBtn = el.querySelector('#nbSort')
+  const sortPop = el.querySelector('#nbSortPop')
+  if (sortBtn && sortPop) {
+    const closeSort = () => {
+      sortPop.hidden = true
+      sortBtn.setAttribute('aria-expanded', 'false')
+      document.removeEventListener('pointerdown', onSortOutside, true)
+      document.removeEventListener('keydown', onSortKey, true)
+    }
+    const onSortOutside = (e) => {
+      if (!sortPop.contains(e.target) && !sortBtn.contains(e.target)) closeSort()
+    }
+    const onSortKey = (e) => { if (e.key === 'Escape') closeSort() }
+    sortBtn.addEventListener('click', (e) => {
+      e.stopPropagation()
+      if (!sortPop.hidden) return closeSort()
+      sortPop.hidden = false
+      sortBtn.setAttribute('aria-expanded', 'true')
+      setTimeout(() => {
+        document.addEventListener('pointerdown', onSortOutside, true)
+        document.addEventListener('keydown', onSortKey, true)
+      }, 0)
+    })
+    sortPop.querySelectorAll('[data-nbsort]').forEach((b) => b.addEventListener('click', () => {
+      state.nbSortMode = b.dataset.nbsort === 'title' ? 'title' : 'recent'
+      renderView()
+    }))
+  }
 
   // 添加来源：本地上传（默认） / 数据中心 / 云空间
   el.querySelector('#nbAddSource')?.addEventListener('click', () => openNotebookSourcePicker(detail))
@@ -5733,14 +7104,43 @@ async function ensureCloud() {
   return state.cloud
 }
 
-function toggleCloudPanel(force) {
-  const next = typeof force === 'boolean' ? force : !state.cloudOpen
+async function openCloudWebTab(url, title = '') {
+  const target = String(url || '').trim()
+  if (!/^https?:\/\//i.test(target)) return toast('只能打开 http/https 网页', true)
+  if (!cloudAllowed()) return toast('自带浏览器只在首页或会话侧栏可用', true)
+  if (!window.jgClient?.browser) { window.open(target, '_blank'); return }
+  const existing = state.cloudTabs?.find((t) => t.kind === 'web' && t.url === target)
+  if (existing) {
+    state.cloudTab = existing.id
+    state.cloudOpen = true
+    applyLayout()
+    renderCloudPanel()
+    renderTopbar()
+    return
+  }
+  try { await ensureCloud() } catch { return toast('自带浏览器初始化失败', true) }
+  let host = '网页'
+  try { host = new URL(target).hostname.replace(/^www\./, '') } catch (_) {}
+  const id = `web-${Date.now()}`
+  const name = String(title || host).trim().slice(0, 48) || host
+  state.cloudTabs = (state.cloudTabs || []).filter((t) => t.kind !== 'new')
+  state.cloudTabs.push({ id, kind: 'web', title: name, url: target })
+  state.cloudTab = id
+  state.cloudOpen = true
+  applyLayout()
+  renderCloudPanel()
+  renderTopbar()
+  toast('已在右侧自带浏览器打开')
+}
+
+function toggleCloudPanel(force) {  const next = typeof force === 'boolean' ? force : !state.cloudOpen
   state.cloudOpen = next
   applyLayout()
+  renderMenubar()
   if (next) {
-    ensureCloud().then(() => { renderCloudPanel(); renderTopbar() })
+    ensureCloud().then(() => { renderCloudPanel(); renderTopbar(); renderMenubar() })
   } else {
-    endAllCloudSessions().then(() => { renderCloudPanel(); renderTopbar() })
+    endAllCloudSessions().then(() => { renderCloudPanel(); renderTopbar(); renderMenubar() })
   }
 }
 
@@ -5765,9 +7165,9 @@ function cloudHomeHTML() {
       <button class="cb-nav cb-reload" id="cbReload" title="刷新">${icon('refresh')}</button>
       <input id="cbAddr" placeholder="搜索或输入网址" autocomplete="off">
       <div class="cb-actgrp">
-        <button class="cb-nav cb-ext-btn" id="cbExt" title="扩展程序"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 5h3v2.5a1.5 1.5 0 1 0 3 0V5h3v4h2.5a1.5 1.5 0 1 0 0 3H18v4h-4v2.5a1.5 1.5 0 1 0-3 0V16H5v-4H7.5a1.5 1.5 0 1 0 0-3H5V5h4z"/></svg><span class="cb-ext-dot">${state.cloudExts?.filter((x) => x.on).length || 0}</span></button>
+        <button class="cb-nav cb-ext-btn" id="cbExt" title="扩展程序尚未接入" disabled style="opacity:.45;cursor:not-allowed"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 5h3v2.5a1.5 1.5 0 1 0 3 0V5h3v4h2.5a1.5 1.5 0 1 0 0 3H18v4h-4v2.5a1.5 1.5 0 1 0-3 0V16H5v-4H7.5a1.5 1.5 0 1 0 0-3H5V5h4z"/></svg><span class="cb-ext-dot">${state.cloudExts?.filter((x) => x.on).length || 0}</span></button>
         <button class="cb-nav" id="cbDownload" title="下载"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 4v10M8 11l4 4 4-4M5 19h14"/></svg></button>
-        <button class="cb-nav" id="cbMore" title="更多"><svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><circle cx="6" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="18" cy="12" r="1.6"/></svg></button>
+        <button class="cb-nav" id="cbMore" title="更多工具尚未接入" disabled style="opacity:.45;cursor:not-allowed"><svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><circle cx="6" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="18" cy="12" r="1.6"/></svg></button>
       </div>
     </div>
     <div class="cb-h">工具</div>
@@ -5822,6 +7222,25 @@ function cloudSessionHTML(tab) {
     </div>`
 }
 
+function cloudWebHTML(tab) {
+  return `
+    <div class="cb-frame" style="padding:0;display:flex;flex-direction:column;height:100%;min-height:0">
+      <div class="cb-frame-bar">
+        <span class="cb-dots"><i></i><i></i><i></i></span>
+        <span class="mono cb-frame-url" title="${esc(tab.url)}">${esc(tab.url.replace(/^https?:\/\//, ''))}</span>
+        <span class="spacer"></span>
+        <span class="tag ok">网页</span>
+        <button class="btn sm subtle" data-web-reload title="刷新">刷新</button>
+        <button class="btn sm subtle" data-web-handoff title="把当前网页交给 AI">转交 AI</button>
+        <button class="btn sm subtle" data-web-download title="下载 / 文件">文件</button>
+        <button class="btn sm subtle" data-web-external="${esc(tab.url)}" title="在系统浏览器打开">外部打开</button>
+      </div>
+      <div id="cbWebSlot" style="flex:1;width:100%;min-height:0;background:#fff;position:relative">
+        <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:var(--fs-sub)">正在加载网页…</div>
+      </div>
+    </div>`
+}
+
 function renderCloudPanel() {
   let panel = document.getElementById('cbPanel')
   const app = document.getElementById('app')
@@ -5829,6 +7248,7 @@ function renderCloudPanel() {
     panel?.remove()
     app?.classList.remove('has-cloud')
     document.documentElement.style.setProperty('--cb-w', '0px')
+    closeNativeWeb()
     return
   }
   app?.classList.add('has-cloud')
@@ -5862,7 +7282,7 @@ function renderCloudPanel() {
         : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>'}</button>
       <button class="cb-icon-btn" id="cbFold" title="折叠云浏览器"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M15 4v16"/></svg></button>
     </div>
-    <div class="cb-body">${active.kind === 'session' ? cloudSessionHTML(active) : cloudHomeHTML()}</div>
+    <div class="cb-body">${active.kind === 'session' ? cloudSessionHTML(active) : active.kind === 'web' ? cloudWebHTML(active) : cloudHomeHTML()}</div>
     ${state.cbFull ? `<div class="cb-composer">
       <button class="cbc-plus" title="附件">${icon('plus')}</button>
       <input id="cbcInput" placeholder="询问 九规智能中枢" autocomplete="off">
@@ -5898,25 +7318,39 @@ function renderCloudPanel() {
   })
   panel.querySelector('#cbFold').addEventListener('click', () => toggleCloudPanel(false))
   panel.querySelector('#cbExt')?.addEventListener('click', (ev) => { ev.stopPropagation(); openCloudExtensions(ev.currentTarget) })
-  panel.querySelector('#cbDownload')?.addEventListener('click', () => toast('下载任务：仅保存已授权文件，下载记录进审计（演示）'))
+  panel.querySelector('#cbDownload')?.addEventListener('click', () => openCloudDownloads())
   panel.querySelector('#cbMore')?.addEventListener('click', (ev) => { ev.stopPropagation(); openCloudMore(ev.currentTarget) })
   const cbc = panel.querySelector('#cbcInput')
   if (cbc) {
-    const send = () => {
-      const v = cbc.value.trim()
-      if (!v) return
-      cbc.value = ''
-      toast('已转交 AI 助手处理（演示）：' + v.slice(0, 18))
-    }
-    panel.querySelector('#cbcSend').addEventListener('click', send)
-    cbc.addEventListener('keydown', (e) => { if (e.key === 'Enter') send() })
+    cbc.disabled = true
+    cbc.style.opacity = '.55'
+    const send = panel.querySelector('#cbcSend')
+    if (send) { send.disabled = true; send.style.opacity = '.45'; send.style.cursor = 'not-allowed' }
   }
 
   panel.querySelectorAll('[data-open]').forEach((b) => b.addEventListener('click', () => openCloudTab(b.dataset.open)))
   panel.querySelector('#cbAddr')?.addEventListener('keydown', (e) => { if (e.key === 'Enter') submitCloudAddr(panel) })
   panel.querySelector('#cbReload')?.addEventListener('click', () => { renderCloudPanel(); toast('已刷新云浏览器视图（会话仍托管在企业侧）') })
-  panel.querySelector('#cbToolFile')?.addEventListener('click', () => toast('文件工具：从本地选择附件，经外发策略校验后上传（演示）'))
-  panel.querySelector('#cbToolMore')?.addEventListener('click', () => toast('更多工具：截图 / 下载 / 打印 / 审图比对（演示）'))
+  panel.querySelector('[data-web-reload]')?.addEventListener('click', () => {
+    if (window.jgClient?.browser) window.jgClient.browser.reload()
+    else renderCloudPanel()
+  })
+  panel.querySelector('[data-web-external]')?.addEventListener('click', (e) => {
+    const url = e.currentTarget.dataset.webExternal
+    if (window.jgClient?.browser) window.jgClient.browser.openExternal(url)
+    else window.open(url, '_blank')
+  })
+  panel.querySelector('[data-web-handoff]')?.addEventListener('click', () => handoffWebPageToAI())
+  panel.querySelector('[data-web-download]')?.addEventListener('click', () => openCloudDownloads())
+  panel.querySelector('#cbToolFile')?.addEventListener('click', () => openCloudDownloads())
+  panel.querySelector('#cbToolMore')?.addEventListener('click', () => toast('更多浏览器工具尚未接入', true))
+  const moreTool = panel.querySelector('#cbToolMore')
+  if (moreTool) { moreTool.disabled = true; moreTool.style.opacity = '.45'; moreTool.style.cursor = 'not-allowed' }
+  panel.querySelectorAll('[data-portal]').forEach((b) => {
+    b.disabled = true
+    b.style.opacity = '.45'
+    b.style.cursor = 'not-allowed'
+  })
   panel.querySelector('[data-end]')?.addEventListener('click', async (e) => {
     await api('/api/cloud/close', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: e.currentTarget.dataset.end }) })
     state.cloudTabs = state.cloudTabs.filter((t) => t.id !== e.currentTarget.dataset.end)
@@ -5938,6 +7372,7 @@ function renderCloudPanel() {
       state.cbW = Math.min(maxW, Math.max(220, startW + (startX - e2.clientX)))
       state.cbUserW = state.cbW
       document.documentElement.style.setProperty('--cb-w', `${state.cbW}px`)
+      sendNativeBounds()
     }
     const up = () => {
       grip.removeEventListener('pointermove', move)
@@ -5949,7 +7384,141 @@ function renderCloudPanel() {
     grip.addEventListener('pointermove', move)
     grip.addEventListener('pointerup', up)
   })
+  syncNativeBrowser(active)
 }
+
+var nativeWebUrl = ''
+var nativeWebObserver = null
+
+function sendNativeBounds() {
+  const bridge = window.jgClient?.browser
+  const slot = document.getElementById('cbWebSlot')
+  if (!bridge || !slot) return
+  const r = slot.getBoundingClientRect()
+  bridge.bounds({
+    x: Math.round(r.left),
+    y: Math.round(r.top),
+    width: Math.round(r.width),
+    height: Math.round(r.height),
+  })
+}
+
+function closeNativeWeb() {
+  nativeWebUrl = ''
+  if (nativeWebObserver) { nativeWebObserver.disconnect(); nativeWebObserver = null }
+  window.jgClient?.browser?.close()
+}
+
+function syncNativeBrowser(active) {
+  const bridge = window.jgClient?.browser
+  if (!bridge) return
+  if (!active || active.kind !== 'web') return closeNativeWeb()
+  if (nativeWebUrl !== active.url) {
+    nativeWebUrl = active.url
+    bridge.open(active.url)
+  }
+  requestAnimationFrame(sendNativeBounds)
+  if (window.ResizeObserver) {
+    if (!nativeWebObserver) nativeWebObserver = new ResizeObserver(() => sendNativeBounds())
+    nativeWebObserver.disconnect()
+    const slot = document.getElementById('cbWebSlot')
+    if (slot) nativeWebObserver.observe(slot)
+  }
+}
+
+window.addEventListener('resize', () => { if (nativeWebUrl) requestAnimationFrame(sendNativeBounds) })
+
+var cloudDownloads = []
+var cloudDownloadsBound = false
+function initCloudBrowserBridge() {
+  const bridge = window.jgClient?.browser
+  if (!bridge || cloudDownloadsBound) return
+  cloudDownloadsBound = true
+  if (typeof bridge.onDownload === 'function') {
+    bridge.onDownload((entry) => {
+      if (!entry?.id) return
+      cloudDownloads = [entry, ...cloudDownloads.filter((x) => x.id !== entry.id)].slice(0, 40)
+      const list = document.getElementById('cbDlList')
+      if (list) list.innerHTML = cloudDownloadRows(cloudDownloads)
+      if (entry.state === 'completed') toast(`下载完成：${entry.name}`)
+      if (entry.state === 'failed') toast(`下载失败：${entry.name}`, true)
+    })
+  }
+  bridge.downloads?.().then((res) => { if (res?.items?.length) cloudDownloads = res.items }).catch(() => {})
+}
+
+function cloudDownloadRows(items) {
+  if (!items.length) return `<div class="mc-block" style="padding:12px"><div class="mc-dim">还没有下载记录。在右侧网页里点击下载链接后，文件会保存到本机“下载/九规智能中枢”目录。</div></div>`
+  return items.map((item) => {
+    const stateLabel = item.state === 'completed' ? '已完成' : item.state === 'downloading' ? '下载中' : item.state === 'cancelled' ? '已取消' : '失败'
+    const pct = item.total ? Math.min(100, Math.round((item.received / item.total) * 100)) : 0
+    return `<div class="mc-block" style="padding:10px;margin-bottom:8px">
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <div style="flex:1;min-width:220px"><div style="font-size:12px">${esc(item.name)}</div>
+        <div class="mc-id mono" style="margin-top:4px;word-break:break-all">${esc(item.path || '')}</div></div>
+        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+          <span class="tag${item.state === 'completed' ? ' ok' : ''}">${stateLabel}${item.state === 'downloading' && item.total ? ` ${pct}%` : ''}</span>
+          ${item.state === 'completed' ? `<button class="btn sm" data-dl-open="${esc(item.path)}">打开</button><button class="btn sm" data-dl-reveal="${esc(item.path)}">定位</button>` : ''}
+        </div>
+      </div>
+    </div>`
+  }).join('')
+}
+
+async function openCloudDownloads() {
+  initCloudBrowserBridge()
+  const bridge = window.jgClient?.browser
+  if (!bridge) return toast('当前环境没有 Electron 下载桥接', true)
+  const mask = openModal('浏览器下载与文件', `<div style="min-width:620px;max-width:80vw">
+    <div class="mc-id" style="margin-bottom:10px">真实下载记录 · 保存位置：系统“下载/九规智能中枢”</div>
+    <div id="cbDlList"><div class="mc-dim">正在读取下载记录…</div></div>
+    <div class="mc-id" style="margin-top:10px">下载完成后可打开文件或在资源管理器中定位；未完成的下载不会显示为成功。</div>
+  </div>`, { wide: true })
+  const list = mask.querySelector('#cbDlList')
+  try {
+    const res = await bridge.downloads()
+    cloudDownloads = res?.items || cloudDownloads
+    list.innerHTML = cloudDownloadRows(cloudDownloads)
+  } catch (error) {
+    list.innerHTML = `<div class="mc-block" style="padding:12px">${esc(error?.message || '读取下载记录失败')}</div>`
+  }
+  list.addEventListener('click', (event) => {
+    const open = event.target.closest('[data-dl-open]')
+    const reveal = event.target.closest('[data-dl-reveal]')
+    if (open) bridge.openDownload(open.dataset.dlOpen)
+    else if (reveal) bridge.revealDownload(reveal.dataset.dlReveal)
+  })
+}
+
+async function handoffWebPageToAI() {
+  const bridge = window.jgClient?.browser
+  if (!bridge) return toast('当前环境没有网页桥接', true)
+  let info = {}
+  let pageText = ''
+  try { info = await bridge.pageInfo() } catch (_) {}
+  try { const res = await bridge.pageText(); pageText = String(res?.text || '') } catch (_) {}
+  const url = String(info?.url || nativeWebUrl || '').trim()
+  const title = String(info?.title || '').trim() || url
+  if (!url) return toast('当前没有可转交的网页', true)
+  const excerpt = pageText.replace(/\s+/g, ' ').trim().slice(0, 6000)
+  state.cloudOpen = false
+  closeNativeWeb()
+  state.view = state.view === 'chat' ? 'chat' : 'home'
+  state.taskMode = 'work'
+  state.draft = `请阅读以下网页，并基于它回答我的问题。\n标题：${title}\n链接：${url}\n${excerpt ? `\n网页正文（截取）：\n${excerpt}\n` : ''}\n我的问题：`
+  applyLayout()
+  render()
+  renderTopbar()
+  setTimeout(() => {
+    const input = document.getElementById('draft')
+    if (input) {
+      input.focus()
+      input.setSelectionRange(input.value.length, input.value.length)
+    }
+  }, 30)
+  toast('网页已转交到对话输入框，补充问题后发送')
+}
+
 
 function openCloudMore(anchor) {
   document.querySelectorAll('.cb-more-pop').forEach((p) => p.remove())
@@ -6159,17 +7728,15 @@ async function openRegisterForm() {
   const mapCategories = [['satellite', '01 卫星影像'], ['current', '02 现状数据'], ['planning', '03 规划数据'], ['construction', '04 建设工程数据'], ['management', '05 管理数据'], ['socioeconomic', '06 社会经济数据'], ['threeD', '07 三维数据']]
   const spatialTypes = [['GIS_VECTOR', 'GIS 矢量'], ['GIS_RASTER', 'GIS 栅格'], ['3D_MODEL', '三维模型'], ['POINT_CLOUD', '点云'], ['BIM', 'BIM 模型']]
   const zones = [['intranet', '内网'], ['gov', '政务外网'], ['inet', '互联网']]
-  let sourceType = 'local'
   let kind = 'pure'
   let files = []
-  let cloudSpace = 'CL-DEPT'
-  let cloudItems = []
-  let driveSpaces = []
-  try {
-    const first = await api('/api/drive?space=CL-DEPT')
-    driveSpaces = first.body.spaces || []
-    cloudItems = first.body.items || []
-  } catch (e) { /* 云空间不可用时仍可本地上传 */ }
+  let projects = state.projects || []
+  if (!projects.length) {
+    try {
+      const res = await api('/api/projects')
+      projects = res.ok ? (res.body.items || []) : []
+    } catch (e) { projects = [] }
+  }
 
   const now = new Date()
   const pad2 = (n) => String(n).padStart(2, '0')
@@ -6178,47 +7745,60 @@ async function openRegisterForm() {
   const body = `
     <div class="reg-wrap">
       <div class="reg-stepper" id="rfStepper">
-        <div class="reg-stepper-item on" data-step-item="1"><i>1</i><span>资源元数据确认</span></div>
+        <div class="reg-stepper-item on" data-step-item="1"><i>1</i><span>数据类型与上传</span></div>
         <div class="reg-stepper-line"></div>
-        <div class="reg-stepper-item" data-step-item="2"><i>2</i><span>智能识别与分类</span></div>
+        <div class="reg-stepper-item" data-step-item="2"><i>2</i><span>元数据信息</span></div>
         <div class="reg-stepper-line"></div>
         <div class="reg-stepper-item" data-step-item="3"><i>3</i><span>安全与授权</span></div>
       </div>
-      <div class="reg-lead" id="rfLead">按《九规集团统一数据中心元数据标准 V1.0》登记：系统自动生成数据 ID、数据来源、数据负责人、上传时间、格式和大小；员工填写数据名称、业务分类、数据简介并完成安全授权。登记分普通数据、成果数据、数据服务三类，质检可按需选择。</div>
+      <div class="reg-lead" id="rfLead">先选择数据类型并上传本地数据；数据就绪后再填写元数据、空间分类与简介；最后确认安全与授权。</div>
 
       <div class="reg-block" data-reg-step="1">
-        <div class="reg-block-head">1 资源元数据确认</div>
-        <div class="reg-sub-head">1.1 数据来源</div>
-        <div class="reg-seg" id="rfSourceSeg">
-          <button type="button" class="reg-seg-btn on" data-src="local">${icon('upload')}本地上传</button>
-          <button type="button" class="reg-seg-btn" data-src="cloud">${icon('cloud')}从云空间选择</button>
-        </div>
-        <div id="rfLocalPane">
-          <div class="reg-drop">
-            <div class="reg-drop-title">支持单文件、整个文件夹和压缩包</div>
-            <div class="reg-drop-note">文件夹会读取相对路径形成 manifest；ZIP / 7Z / RAR 由登记服务解包后检测目录结构与格式。</div>
-            <div class="reg-drop-acts">
-              <label class="btn sm">${icon('doc')}选择文件<input type="file" id="rfFiles" multiple hidden></label>
-              <label class="btn sm">${icon('folder')}选择文件夹<input type="file" id="rfFolder" webkitdirectory directory multiple hidden></label>
-              <label class="btn sm">${icon('cloud')}选择压缩包<input type="file" id="rfZip" accept=".zip,.7z,.rar,.tar,.gz" hidden></label>
-            </div>
-          </div>
-          <div id="rfFileList" class="reg-filelist"></div>
-        </div>
-        <div id="rfCloudPane" hidden>
-          <div class="reg-cloud-bar">
-            <select id="rfSpace">${ (driveSpaces.length ? driveSpaces : [{ id: 'CL-DEPT', name: '规划一所' }]).map((s) => `<option value="${esc(s.id)}">${esc(s.name)}（${s.kind === 'team' ? '专班' : '部门'}空间）</option>`).join('') }</select>
-            <span class="mono" id="rfCloudHint">选中文件或整个成果包，只登记引用，原文件保留在云空间</span>
-          </div>
-          <div id="rfCloudList" class="reg-cloud-list"></div>
-        </div>
-
-        <div class="reg-sub-head">1.2 数据类型与基础信息</div>
+        <div class="reg-block-head">1 数据类型</div>
         <div class="reg-kinds" id="rfKinds">
           <button type="button" class="reg-kind on" data-kind="pure"><span class="ico">${icon('doc')}</span><span class="reg-kind-name">普通数据</span><span class="reg-kind-desc">单项数据，单文件或单图层</span></button>
           <button type="button" class="reg-kind" data-kind="deliverable"><span class="ico">${icon('folder')}</span><span class="reg-kind-name">成果数据</span><span class="reg-kind-desc">生产部门标准成果，文件夹内含多种格式</span></button>
           <button type="button" class="reg-kind" data-kind="service"><span class="ico">${icon('globe')}</span><span class="reg-kind-name">数据服务</span><span class="reg-kind-desc">发布一个地址，按服务方式调用</span></button>
         </div>
+        <div id="rfDeliverableFields" hidden>
+          <div class="reg-sub-head">1.1 关联 OA 立项项目与成果信息</div>
+          <div class="form-grid">
+            <label>关联 OA 立项项目（必填）<select id="rfProjectSel"><option value="">请选择 OA 立项项目</option>${projects.map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('')}</select></label>
+            <label>OA 立项编号（自动带入）<input id="rfProjectId" readonly placeholder="选择 OA 立项项目后自动带入"></label>
+            <label>成果类别<select id="rfResultCategory"><option>规划成果</option><option>建筑成果</option><option>市政成果</option><option>风景园林成果</option><option>测绘成果</option><option>其他成果</option></select></label>
+            <label>项目阶段<select id="rfResultStage"><option>方案阶段</option><option>初步设计</option><option>施工图</option><option>竣工成果</option><option>历史成果</option></select></label>
+            <label>成果版本<input id="rfResultVersion" value="V1.0" placeholder="例如：V1.0"></label>
+          </div>
+          <div class="form-note">成果数据必须绑定 OA 立项项目；OA 立项编号作为业务关联键，版本用于历史追溯与重复校验。</div>
+        </div>
+        <div id="rfServiceFields" hidden>
+          <div class="reg-sub-head">1.1 服务地址与检测</div>
+          <div class="form-grid">
+            <label>服务地址（必填）<input id="rfServiceUrl" placeholder="例如：https://map.jg.local/qgis/wms/city-plan"></label>
+            <label>服务类型<select id="rfServiceType"><option>QGIS WMS</option><option>QGIS WFS</option><option>QGIS WMTS</option><option>OGC API</option><option>Cesium 3D Tiles</option><option>PostGIS 空间 API</option><option>REST API</option></select></label>
+          </div>
+          <div class="ver-acts" style="margin-top:2px"><button type="button" class="btn sm" id="rfServiceDetect">检测服务</button><span class="form-note" id="rfServiceDetectStatus" style="margin:0">输入地址后可检测协议、格式与连接状态。</span></div>
+          <div class="form-note">服务登记只建立资源记录与访问配置，不重复存储源数据；访问密钥须由安全凭据管理，不得明文写入元数据。</div>
+        </div>
+        <div id="rfUploadFields">
+          <div class="reg-sub-head" id="rfUploadSubhead">1.1 上传文件或文件夹</div>
+          <div class="reg-drop" id="rfDrop">
+            <div class="reg-drop-title">拖拽文件、文件夹或压缩包到这里</div>
+            <div class="reg-drop-note">也可以从本地选择；文件夹会读取相对路径形成 manifest，ZIP / 7Z / RAR 由登记服务解包后检测目录结构与格式。</div>
+            <div class="reg-drop-acts">
+              <label class="btn sm">${icon('doc')}选择文件<input type="file" id="rfFiles" multiple hidden></label>
+              <label class="btn sm">${icon('folder')}选择文件夹<input type="file" id="rfFolder" webkitdirectory directory multiple hidden></label>
+              <label class="btn sm">${icon('upload')}选择压缩包<input type="file" id="rfZip" accept=".zip,.7z,.rar,.tar,.gz" hidden></label>
+            </div>
+          </div>
+          <div id="rfFileList" class="reg-filelist"></div>
+        </div>
+        <div id="rfServiceNoFile" class="form-note" hidden>数据服务无需上传文件，下一步填写服务地址与元数据。</div>
+      </div>
+
+      <div class="reg-block" data-reg-step="2" hidden>
+        <div class="reg-block-head">2 元数据信息</div>
+        <div class="reg-sub-head">2.1 基础信息</div>
         <div class="form-grid">
           <label>数据 ID（系统生成）<input id="rfDataId" value="提交后自动生成" readonly></label>
           <label>数据名称<input id="rfName" placeholder="例如：九江市道路中心线"></label>
@@ -6227,16 +7807,11 @@ async function openRegisterForm() {
           <label>数据负责人（系统生成）<input id="rfDataOwner" value="${esc(user.name)}" readonly></label>
           <label>原始来源<select id="rfOriginalSource"><option>集团自产</option><option>外部单位提供</option><option>上级部门下发</option><option>其他</option></select></label>
           <label>数据上传时间（系统生成）<input id="rfUploadAt" value="${esc(uploadAt)}" readonly></label>
-        </div>
-      </div>
-
-      <div class="reg-block" data-reg-step="2" hidden>
-        <div class="reg-block-head">2 智能识别与分类</div>
-        <div class="form-grid">
           <label>数据格式（自动识别）<input id="rfFormatsAuto" readonly placeholder="选择文件后自动汇总"></label>
           <label>数据大小（自动计算）<input id="rfSizeAuto" readonly placeholder="选择文件后自动计算"></label>
         </div>
-        <label class="check-line" style="margin-top:12px"><input type="checkbox" id="rfSpatialToggle">识别为 GIS / 三维空间数据，填写一张图分类与空间字段</label>
+        <div id="rfKindFields"></div>
+        <label class="check-line" style="margin-top:16px"><input type="checkbox" id="rfSpatialToggle">识别为 GIS / 三维空间数据，填写一张图分类与空间字段</label>
         <div id="rfSpatialFields" hidden>
           <div class="form-grid">
             <label>空间数据类型<select id="rfSpatialType">${spatialTypes.map(([v, l]) => `<option value="${v}">${l}</option>`).join('')}</select></label>
@@ -6260,22 +7835,23 @@ async function openRegisterForm() {
         </div>
       </div>
 
-      <div class="reg-block" id="rfKindFields" data-reg-step="2" hidden></div>
 
       <div class="reg-block" data-reg-step="3" hidden>
         <div class="reg-block-head">3 安全与授权</div>
         <div class="form-grid">
           <label>内部安全等级<select id="rfInternalLevel"><option>L1</option><option selected>L2</option><option>L3</option><option>L4</option><option>L5</option></select></label>
           <label>涉密属性<select id="rfSecrecy"><option>非涉密</option><option>待认定</option><option>秘密</option><option>机密</option><option>绝密</option></select></label>
-          <label>授权类型<select id="rfAuthType"><option value="group">集团内部公开</option><option value="orgs">指定组织</option></select></label>
+          <label>访问范围<select id="rfAccessScope"><option value="self">仅本人</option><option value="dept" selected>本部门可见</option><option value="group">集团内部可见</option><option value="orgs">指定人员或角色</option></select></label>
           <label>数据权属及使用依据<input id="rfRightsBasis" placeholder="例如：集团数据权属管理办法 / 项目合同"></label>
         </div>
         <div class="form-label">允许访问环境（申请）</div>
         <div class="check-row">${zones.map(([v, l]) => `<label class="check"><input type="checkbox" class="rf-zone" value="${v}" ${v === (state.boot.network?.id || 'inet') ? 'checked' : ''}>${esc(l)}</label>`).join('')}</div>
+        <div class="form-note">网络可见范围按层级展开：勾选互联网会自动包含政务外网与内网；勾选政务外网会自动包含内网。内网目录的数据最全。</div>
         <div id="rfOrgsWrap" hidden>
-          <div class="form-label">授权组织（部门或子公司）</div>
+          <div class="form-label">授权部门或角色</div>
           <div class="check-row">${orgOptions.map(([v, l]) => `<label class="check"><input type="checkbox" class="rf-org" value="${v}">${esc(l)}</label>`).join('')}</div>
         </div>
+        <div class="form-note">登记成功只表示资源进入统一目录，不等于已发布或开放访问；发布状态独立管理（未发布 / 待审核 / 已发布 / 已停用）。</div>
         <div class="form-note">员工申报、系统校验、有权人员批准。即使勾选互联网，也不等于可把内网数据直接发布到互联网；跨安全域须走独立安全审批与交换流程。</div>
         <div class="reg-sub-head">3.1 登记流程</div>
         <div class="reg-flow">
@@ -6287,7 +7863,7 @@ async function openRegisterForm() {
         <div class="form-note" id="rfFlowNote"></div>
       </div>
     </div>
-    <div class="form-foot"><span class="mono">网络：${esc(state.boot.network?.label || '')}（登记到本网目录）</span><span class="spacer"></span><button class="btn" data-mclose>取消</button><button class="btn" id="rfPrev" hidden>上一步</button><button class="btn primary" id="rfNext">下一步：智能识别与分类</button><button class="btn primary" id="rfSubmit" hidden>提交登记</button></div>`
+    <div class="form-foot"><span class="mono">网络：${esc(state.boot.network?.label || '')}（登记到本网目录）</span><span class="spacer"></span><button class="btn" data-mclose>取消</button><button class="btn" id="rfPrev" hidden>上一步</button><button class="btn primary" id="rfNext">下一步：填写元数据</button><button class="btn primary" id="rfSubmit" hidden>提交登记</button></div>`
 
   const mask = openModal('登记资源', body, { wide: true })
   mask.querySelectorAll('[data-mclose]').forEach((b) => b.addEventListener('click', () => mask.remove()))
@@ -6305,7 +7881,7 @@ async function openRegisterForm() {
     q('rfNext').hidden = step === 3
     q('rfSubmit').hidden = step !== 3
     q('rfLead').hidden = step !== 1
-    q('rfNext').textContent = step === 1 ? '下一步：智能识别与分类' : '下一步：安全与授权'
+    q('rfNext').textContent = step === 1 ? '下一步：填写元数据' : '下一步：安全与授权'
     mask.querySelector('.jg-modal-body').scrollTop = 0
   }
   const fmtSize = (n) => {
@@ -6316,26 +7892,19 @@ async function openRegisterForm() {
     return `${n} B`
   }
 
-  function selectedCloud() {
-    return cloudItems.filter((it) => mask.querySelector(`.rf-cloud-check[value="${CSS.escape(it.id)}"]`)?.checked)
-  }
-
   function extOf(f) {
     const m = String(f.name || f.path || '').match(/\.([a-z0-9]+)$/i)
     return m ? m[1].toUpperCase() : '未知'
   }
 
   function updateAutoMeta() {
-    const selected = selectedCloud()
-    let autoFormats = []
-    let autoSize = ''
-    if (sourceType === 'cloud') {
-      autoFormats = [...new Set(selected.map((it) => String(it.type || 'file').toUpperCase()))]
-      autoSize = selected.length ? `${selected.length} 个云空间对象 · ${selected.map((it) => it.size).join(' / ')}` : ''
-    } else {
-      autoFormats = [...new Set(files.map(extOf).filter((x) => x && x !== '未知'))]
-      const total = files.reduce((sum, f) => sum + (Number(f.size) || 0), 0)
-      autoSize = files.length ? `${files.length} 个文件 / ${fmtSize(total)}` : ''
+    let autoFormats = [...new Set(files.map(extOf).filter((x) => x && x !== '未知'))]
+    const total = files.reduce((sum, f) => sum + (Number(f.size) || 0), 0)
+    let autoSize = files.length ? `${files.length} 个文件 / ${fmtSize(total)}` : ''
+    if (kind === 'service') {
+      const st = q('rfServiceType')?.value
+      if (st) autoFormats = [st]
+      autoSize = '不适用（数据服务）'
     }
     if (kind === 'service') {
       const st = q('rfServiceType')?.value
@@ -6392,7 +7961,24 @@ async function openRegisterForm() {
 
   function toggleAuthOrgs() {
     const wrap = q('rfOrgsWrap')
-    if (wrap) wrap.hidden = q('rfAuthType')?.value !== 'orgs'
+    if (wrap) wrap.hidden = q('rfAccessScope')?.value !== 'orgs'
+  }
+
+  function applyZoneHierarchy() {
+    const boxes = [...mask.querySelectorAll('.rf-zone')]
+    if (!boxes.length) return
+    const by = Object.fromEntries(boxes.map((b) => [b.value, b]))
+    if (by.inet?.checked) {
+      if (by.gov) by.gov.checked = true
+      if (by.intranet) by.intranet.checked = true
+    } else if (by.gov?.checked && by.intranet) {
+      by.intranet.checked = true
+    }
+    if (by.intranet && !by.intranet.checked) {
+      if (by.gov) by.gov.checked = false
+      if (by.inet) by.inet.checked = false
+    }
+    if (by.gov && !by.gov.checked && by.inet) by.inet.checked = false
   }
 
   async function autoExtentFromFiles() {
@@ -6430,41 +8016,16 @@ async function openRegisterForm() {
   function renderFiles() {
     const list = q('rfFileList')
     if (!list) return
-    if (sourceType === 'cloud') {
-      const sel = selectedCloud()
-      list.innerHTML = sel.length
-        ? `<div class="reg-file-sum">已选 ${sel.length} 个云空间对象</div>${sel.map((it) => `<div class="reg-file-row"><span class="reg-file-name">${esc(it.name)} · ${esc(String(it.type || 'file').toUpperCase())}</span><span>${esc(it.size)}</span></div>`).join('')}`
-        : '<span class="mono">尚未选择云空间文件</span>'
-      updateAutoMeta()
-      return
-    }
     list.innerHTML = files.length
-      ? `<div class="reg-file-sum">共 ${files.length} 个文件 / ${files.some((f) => f.path) ? '文件夹' : '文件'}${files.some((f) => /\.(zip|7z|rar|tar|gz)$/i.test(f.name)) ? ' · 含压缩包' : ''}</div>${files.slice(0, 8).map((f) => `<div class="reg-file-row"><span class="reg-file-name">${esc(f.path || f.name)}</span><span>${fmtSize(f.size)}</span></div>`).join('')}${files.length > 8 ? `<div class="reg-file-more">另有 ${files.length - 8} 个文件未展开</div>` : ''}`
-      : '<span class="mono">尚未选择文件；可选择单个文件、整个文件夹或压缩包</span>'
+      ? `<div class="reg-file-sum">共 ${files.length} 个文件 / ${files.some((f) => f.relPath || f.webkitRelativePath) ? '文件夹' : '文件'}${files.some((f) => /\.(zip|7z|rar|tar|gz)$/i.test(f.name)) ? ' · 含压缩包' : ''}</div>${files.slice(0, 8).map((f) => `<div class="reg-file-row"><span class="reg-file-name">${esc(f.relPath || f.webkitRelativePath || f.name)}</span><span>${fmtSize(f.size)}</span></div>`).join('')}${files.length > 8 ? `<div class="reg-file-more">另有 ${files.length - 8} 个文件未展开</div>` : ''}`
+      : '<span class="mono">尚未选择文件；可选择单个文件、整个文件夹、压缩包，或直接拖拽到上方区域</span>'
     updateAutoMeta()
-  }
-
-  function renderCloud() {
-    const list = q('rfCloudList')
-    if (!list) return
-    list.innerHTML = cloudItems.length
-      ? cloudItems.map((it) => `<label class="reg-cloud-row"><input type="checkbox" class="rf-cloud-check" value="${esc(it.id)}"><span class="reg-cloud-name">${esc(it.name)}</span><span class="reg-cloud-meta">${esc(String(it.type || 'file').toUpperCase())} · ${esc(it.size)} · ${esc(it.owner)}</span></label>`).join('')
-      : '<span class="mono">当前空间暂无可选文件</span>'
-    list.querySelectorAll('.rf-cloud-check').forEach((c) => c.addEventListener('change', renderFiles))
-  }
-
-  function setSource(src) {
-    sourceType = src
-    mask.querySelectorAll('#rfSourceSeg [data-src]').forEach((b) => b.classList.toggle('on', b.dataset.src === src))
-    q('rfLocalPane').hidden = src !== 'local'
-    q('rfCloudPane').hidden = src !== 'cloud'
-    renderFiles()
   }
 
   function renderKindFields() {
     const zone = q('rfKindFields')
     if (kind === 'pure') {
-      zone.innerHTML = `<div class="reg-sub-head">2.1 普通数据补充</div>
+      zone.innerHTML = `<div class="reg-sub-head">2.2 普通数据补充</div>
         <div class="form-grid">
           <label>技术类型<select id="rfType">${pureTypes.map((t) => `<option value="${t}"${t === 'document' ? ' selected' : ''}>${typeMap[t].label}</option>`).join('')}</select></label>
         </div>
@@ -6472,7 +8033,7 @@ async function openRegisterForm() {
       const t = q('rfType')
       if (t) t.addEventListener('change', updateAutoMeta)
     } else if (kind === 'deliverable') {
-      zone.innerHTML = `<div class="reg-sub-head">2.1 成果数据专属</div>
+      zone.innerHTML = `<div class="reg-sub-head">2.2 成果数据专属</div>
         <div class="form-grid">
           <label>成果资源 ID<input readonly value="提交后自动生成"></label>
           <label>内部数据 ID<input readonly value="按成果包结构自动生成"></label>
@@ -6481,6 +8042,7 @@ async function openRegisterForm() {
           <label>包含格式<span class="reg-format-row">${formats.map((f) => `<label class="check"><input type="checkbox" class="rf-format" value="${esc(f)}">${esc(f)}</label>`).join('')}</span></label>
           <label class="check-line"><input type="checkbox" id="rfManifest" checked>包含成果清单与元数据说明</label>
           <label class="check-line"><input type="checkbox" id="rfBatch" checked>按分幅 / 分区批量登记</label>
+          <label class="check-line"><input type="checkbox" id="rfFormalResult">登记后标记为“正式成果”（需项目负责人确认）</label>
         </div>
         <div class="reg-qc-panel"><span class="ico">${icon('shield')}</span><span>质检为可选项。如需质检，部门负责人同意后由质检软件执行完整性、坐标系、拓扑、属性与格式检查；质检结果绑定受检资源版本并回写详情。</span></div>`
       const spatialFormats = ['SHP', 'GDB', 'GeoTIFF', '3D Tiles', 'LAS', 'PLY', 'OSGB', 'DWG']
@@ -6491,15 +8053,21 @@ async function openRegisterForm() {
         toggleSpatial()
       }))
     } else {
-      zone.innerHTML = `<div class="reg-sub-head">2.1 数据服务专属</div>
+      zone.innerHTML = `<div class="reg-sub-head">2.2 数据服务专属</div>
         <div class="form-grid">
-          <label>服务地址<input id="rfServiceUrl" placeholder="例如：https://map.jg.local/qgis/wms/city-plan"></label>
-          <label>服务类型<select id="rfServiceType"><option>QGIS WMS</option><option>QGIS WFS</option><option>QGIS WMTS</option><option>OGC API</option><option>Cesium 3D Tiles</option><option>PostGIS 空间 API</option></select></label>
-          <label>图层数量<input id="rfLayerCount" placeholder="例如：12"></label>
+          <label>服务提供方（默认当前部门）<input id="rfServiceProvider" value="${esc(user.unit || '')}" placeholder="例如：集团信息中心"></label>
+          <label>网络域（按地址推断，可修改）<select id="rfServiceZone"><option>内网</option><option>政务外网</option><option>互联网</option></select></label>
           <label>鉴权方式<select id="rfAuthMode"><option>统一网关票据</option><option>OAuth2 客户端凭证</option><option>内网 IP 白名单</option><option>无鉴权（仅内网）</option></select></label>
-          <label>可用性 / SLA<input id="rfSla" placeholder="例如：99.5% / 200 ms"></label>
         </div>
-        <div class="form-note">数据服务登记“发布一个地址”的形式；登记审批通过后进入服务目录，调用量、延迟与鉴权方式由服务网关回写。</div>`
+        <div class="form-note">服务通过连接校验后完成登记并进入服务目录；开放调用前另行执行发布审核。调用量、延迟与鉴权状态由服务网关回写。</div>`
+      const zoneSel = q('rfServiceZone')
+      if (zoneSel) {
+        if (mask.dataset.serviceZone) zoneSel.value = mask.dataset.serviceZone
+        zoneSel.addEventListener('change', () => {
+          zoneSel.dataset.touched = '1'
+          mask.dataset.serviceZone = zoneSel.value
+        })
+      }
       const st = q('rfServiceType')
       if (st) st.addEventListener('change', updateAutoMeta)
     }
@@ -6530,52 +8098,189 @@ async function openRegisterForm() {
     renderFlow()
   }
 
-  mask.querySelectorAll('#rfSourceSeg [data-src]').forEach((b) => b.addEventListener('click', () => setSource(b.dataset.src)))
+  function syncKindUpload() {
+    const upload = q('rfUploadFields')
+    const note = q('rfServiceNoFile')
+    const deliverable = q('rfDeliverableFields')
+    const service = q('rfServiceFields')
+    const isService = kind === 'service'
+    if (upload) upload.hidden = isService
+    const uploadSubhead = q('rfUploadSubhead')
+    if (uploadSubhead) uploadSubhead.textContent = kind === 'deliverable' ? '1.2 上传成果文件' : '1.1 上传文件或文件夹'
+    if (note) note.hidden = true
+    if (deliverable) deliverable.hidden = kind !== 'deliverable'
+    if (service) service.hidden = !isService
+  }
+
+  function syncProjectFields() {
+    const sel = q('rfProjectSel')
+    const p = projects.find((x) => x.id === (sel?.value || ''))
+    const idEl = q('rfProjectId')
+    if (idEl) idEl.value = p ? p.id : ''
+  }
+
+  function inferServiceZone(url) {
+    try {
+      const host = new URL(url).hostname.toLowerCase()
+      if (/^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(host) || host.endsWith('.local')) return '内网'
+      if (host.endsWith('.gov.cn') || host.endsWith('.gov')) return '政务外网'
+      return '互联网'
+    } catch (e) {
+      return ''
+    }
+  }
+
+  function syncInferredServiceZone() {
+    const inferred = inferServiceZone(q('rfServiceUrl')?.value.trim() || '')
+    if (!inferred) return
+    mask.dataset.serviceZone = inferred
+    const z = q('rfServiceZone')
+    if (z && !z.dataset.touched) z.value = inferred
+  }
+
+  async function detectService() {
+    const urlEl = q('rfServiceUrl')
+    const statusEl = q('rfServiceDetectStatus')
+    const url = urlEl?.value.trim() || ''
+    if (!/^https?:\/\//i.test(url)) {
+      if (statusEl) statusEl.textContent = '请填写以 http:// 或 https:// 开头的服务地址。'
+      return
+    }
+    let parsed
+    try { parsed = new URL(url) } catch (e) {
+      if (statusEl) statusEl.textContent = '服务地址格式不正确。'
+      return
+    }
+    const path = parsed.pathname.toLowerCase()
+    const st = q('rfServiceType')
+    if (st) {
+      if (path.includes('wmts')) st.value = 'QGIS WMTS'
+      else if (path.includes('wfs')) st.value = 'QGIS WFS'
+      else if (path.includes('wms')) st.value = 'QGIS WMS'
+      else if (path.includes('3dtiles') || path.includes('tileset')) st.value = 'Cesium 3D Tiles'
+      else if (path.includes('/api') || path.includes('rest')) st.value = 'REST API'
+      else st.value = 'OGC API'
+    }
+    syncInferredServiceZone()
+    updateAutoMeta()
+    if (statusEl) statusEl.textContent = '正在检测服务连接…'
+    const ctrl = new AbortController()
+    const timer = setTimeout(() => ctrl.abort(), 6000)
+    try {
+      const res = await fetch(url, { method: 'GET', signal: ctrl.signal, credentials: 'omit' })
+      const type = res.headers.get('content-type') || '未知类型'
+      if (statusEl) statusEl.textContent = `连接成功 · HTTP ${res.status} · ${type}`
+    } catch (e) {
+      if (statusEl) statusEl.textContent = e.name === 'AbortError'
+        ? '检测超时（6 秒），请确认地址可达，或交由服务端检测。'
+        : '浏览器无法直连该地址（可能为跨域或内网限制），请交由服务端检测。'
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  async function readDroppedEntry(entry, prefix, out) {
+    if (!entry) return
+    if (entry.isFile) {
+      const file = await new Promise((resolve, reject) => entry.file(resolve, reject))
+      try { file.relPath = prefix ? `${prefix}/${file.name}` : file.name } catch (e) { /* 保留原始文件名 */ }
+      out.push(file)
+      return
+    }
+    if (entry.isDirectory) {
+      const dirPrefix = prefix ? `${prefix}/${entry.name}` : entry.name
+      const reader = entry.createReader()
+      const readBatch = () => new Promise((resolve, reject) => reader.readEntries(resolve, reject))
+      let batch = []
+      do {
+        batch = await readBatch()
+        for (const child of batch) await readDroppedEntry(child, dirPrefix, out)
+      } while (batch.length)
+    }
+  }
+
   mask.querySelectorAll('#rfKinds [data-kind]').forEach((b) => b.addEventListener('click', () => {
     kind = b.dataset.kind
     mask.querySelectorAll('#rfKinds [data-kind]').forEach((x) => x.classList.toggle('on', x === b))
     const spatialToggle = q('rfSpatialToggle')
     if (spatialToggle) spatialToggle.checked = false
+    syncKindUpload()
     renderKindFields()
   }))
   q('rfFiles').addEventListener('change', async (e) => { files = [...files, ...Array.from(e.target.files)]; e.target.value = ''; renderFiles(); await autoExtentFromFiles() })
   q('rfFolder').addEventListener('change', async (e) => { files = [...files, ...Array.from(e.target.files)]; e.target.value = ''; renderFiles(); await autoExtentFromFiles() })
   q('rfZip').addEventListener('change', async (e) => { files = [...files, ...Array.from(e.target.files)]; e.target.value = ''; renderFiles(); await autoExtentFromFiles() })
-  q('rfSpace').addEventListener('change', async (e) => {
-    cloudSpace = e.target.value
-    const { body: d } = await api('/api/drive?space=' + encodeURIComponent(cloudSpace))
-    cloudItems = d.items || []
-    renderCloud()
-    updateAutoMeta()
-  })
+  const dropZone = q('rfDrop')
+  if (dropZone) {
+    ['dragenter', 'dragover'].forEach((type) => dropZone.addEventListener(type, (e) => {
+      e.preventDefault()
+      e.stopPropagation()
+      dropZone.classList.add('is-drag')
+    }));
+    ['dragleave', 'dragend'].forEach((type) => dropZone.addEventListener(type, (e) => {
+      e.preventDefault()
+      dropZone.classList.remove('is-drag')
+    }))
+    dropZone.addEventListener('drop', async (e) => {
+      e.preventDefault()
+      e.stopPropagation()
+      dropZone.classList.remove('is-drag')
+      const items = Array.from(e.dataTransfer.items || [])
+      const entries = items.map((it) => (it.webkitGetAsEntry ? it.webkitGetAsEntry() : null)).filter(Boolean)
+      if (entries.length) {
+        const dropped = []
+        for (const entry of entries) await readDroppedEntry(entry, '', dropped)
+        if (dropped.length) files = [...files, ...dropped]
+      } else if (e.dataTransfer.files?.length) {
+        files = [...files, ...Array.from(e.dataTransfer.files)]
+      }
+      renderFiles()
+      await autoExtentFromFiles()
+    })
+  }
   q('rfQcToggle').addEventListener('change', syncQc)
+  q('rfProjectSel')?.addEventListener('change', syncProjectFields)
+  q('rfServiceDetect')?.addEventListener('click', detectService)
+  q('rfServiceUrl')?.addEventListener('input', syncInferredServiceZone)
+  mask.querySelectorAll('.rf-zone').forEach((b) => b.addEventListener('change', applyZoneHierarchy))
   q('rfSpatialToggle').addEventListener('change', toggleSpatial)
   q('rfRegionBtn').addEventListener('click', recognizeRegions)
   q('rfExtent').addEventListener('change', recognizeRegions)
-  q('rfAuthType').addEventListener('change', toggleAuthOrgs)
+  q('rfAccessScope').addEventListener('change', toggleAuthOrgs)
 
   renderKindFields()
-  renderCloud()
   renderFiles()
   syncQc()
+  syncKindUpload()
+  syncProjectFields()
   toggleAuthOrgs()
+  applyZoneHierarchy()
   setWizardStep(1)
 
   q('rfPrev').addEventListener('click', () => setWizardStep(Math.max(1, wizardStep - 1)))
   q('rfNext').addEventListener('click', () => {
-    if (wizardStep === 1 && !q('rfName').value.trim()) return toast('请先填写数据名称', true)
+    if (wizardStep === 1) {
+      if (kind === 'deliverable' && !q('rfProjectSel')?.value) return toast('请先选择要关联的 OA 立项项目', true)
+      if (kind === 'service' && !q('rfServiceUrl')?.value.trim()) return toast('请先填写服务地址', true)
+      if (kind !== 'service' && !files.length) {
+        const list = q('rfFileList')
+        if (list) list.innerHTML = '<div style="padding:10px 2px 0;color:#c0392b;font-size:var(--fs-meta)">请先上传数据文件；可将文件、文件夹或压缩包拖拽到上方虚线区域。</div>'
+        q('rfDrop')?.scrollIntoView({ block: 'center' })
+        return toast('请先上传数据文件', true)
+      }
+    }
+    if (wizardStep === 2 && !q('rfName').value.trim()) return toast('请先填写数据名称', true)
     setWizardStep(Math.min(3, wizardStep + 1))
   })
 
   q('rfSubmit').addEventListener('click', async () => {
     const name = q('rfName').value.trim()
     if (!name) return toast('请填写数据名称', true)
-    const localFiles = files.map((f) => ({ name: f.name, path: f.webkitRelativePath || f.name, size: fmtSize(f.size), bytes: f.size }))
-    const selectedCloud = [...mask.querySelectorAll('.rf-cloud-check:checked')].map((c) => cloudItems.find((it) => it.id === c.value)).filter(Boolean)
-    const manifest = sourceType === 'cloud' ? selectedCloud.map((it) => ({ name: it.name, path: it.name, size: it.size, type: it.type })) : localFiles
-    if (kind !== 'service' && !manifest.length) return toast('请先选择文件、文件夹、压缩包，或从云空间选择对象', true)
+    const localFiles = files.map((f) => ({ name: f.name, path: f.relPath || f.webkitRelativePath || f.name, size: fmtSize(f.size), bytes: f.size }))
+    const manifest = localFiles
+    if (kind !== 'service' && !manifest.length) return toast('请先上传数据文件', true)
     let fileIds = []
-    if (sourceType === 'local' && kind !== 'service') {
+    if (kind !== 'service') {
       const submitBtn = q('rfSubmit')
       submitBtn.disabled = true
       try {
@@ -6616,13 +8321,13 @@ async function openRegisterForm() {
       scale: q('rfScale').value.trim(),
     } : { enabled: false }
     const zones = [...mask.querySelectorAll('.rf-zone:checked')].map((c) => c.value)
-    const authType = q('rfAuthType').value
+    const accessScope = q('rfAccessScope').value
+    const authType = accessScope === 'orgs' ? 'orgs' : 'group'
     const orgs = authType === 'orgs' ? [...mask.querySelectorAll('.rf-org:checked')].map((c) => c.value) : []
     const type = kind === 'pure' ? q('rfType').value : kind === 'deliverable' ? 'deliverable' : 'service'
     const format = kind === 'pure' ? (autoFormats[0] || 'PDF') : kind === 'deliverable' ? '成果包（多格式）' : q('rfServiceType').value
     const size = q('rfSizeAuto').value || (manifest.length ? `${manifest.length} 个文件` : '—')
     const sizeBytes = localFiles.reduce((sum, f) => sum + (Number(f.bytes) || 0), 0)
-    const spaceName = (driveSpaces.find((s) => s.id === cloudSpace) || {}).name || '企业云空间'
     const qcRequired = !!q('rfQcToggle')?.checked
     const { ok, body: res } = await api('/api/resources/register', {
       method: 'POST', headers: { 'content-type': 'application/json' },
@@ -6634,9 +8339,9 @@ async function openRegisterForm() {
         format,
         size,
         sizeBytes,
-        sourceType,
-        source: sourceType === 'cloud' ? `企业云空间 · ${spaceName}` : '本地上传',
-        sourceRef: sourceType === 'cloud' ? selectedCloud.map((it) => it.id) : localFiles.map((f) => f.path),
+        sourceType: 'local',
+        source: '本地上传',
+        sourceRef: localFiles.map((f) => f.path),
         files: manifestWithIds,
         fileIds,
         formats,
@@ -6652,9 +8357,13 @@ async function openRegisterForm() {
         keywords: [],
         caps: [],
         description: q('rfDesc').value.trim(),
-        projectLinked: false,
-        projectId: '',
-        projectName: '',
+        projectLinked: kind === 'deliverable',
+        projectId: kind === 'deliverable' ? q('rfProjectSel').value : '',
+        projectName: kind === 'deliverable' ? (q('rfProjectSel').selectedOptions[0]?.textContent?.trim() || '') : '',
+        resultCategory: kind === 'deliverable' ? q('rfResultCategory').value : '',
+        resultStage: kind === 'deliverable' ? q('rfResultStage').value : '',
+        version: kind === 'deliverable' ? q('rfResultVersion').value.trim() : '',
+        formalResult: kind === 'deliverable' ? !!q('rfFormalResult')?.checked : false,
         owner: sourceOrgName,
         producer: sourceOrgName,
         contact: user.name,
@@ -6662,6 +8371,7 @@ async function openRegisterForm() {
         secrecy: q('rfSecrecy').value,
         zones,
         authorizationType: authType,
+        accessScope,
         authorizedOrgs: orgs,
         rightsBasis: q('rfRightsBasis').value.trim(),
         spatial,
@@ -6669,14 +8379,17 @@ async function openRegisterForm() {
         coverage: spatial.extent || '',
         serviceUrl: url,
         serviceType: kind === 'service' ? q('rfServiceType').value : '',
-        layerCount: kind === 'service' ? Number(q('rfLayerCount')?.value || 0) : 0,
+        serviceProvider: kind === 'service' ? q('rfServiceProvider').value.trim() : '',
+        serviceZone: kind === 'service' ? q('rfServiceZone').value : '',
+        serviceDetectStatus: kind === 'service' ? (q('rfServiceDetectStatus')?.textContent || '') : '',
         authMode: kind === 'service' ? q('rfAuthMode').value : '',
-        sla: kind === 'service' ? q('rfSla').value.trim() : '',
       }),
     })
     if (!ok) return toast(res.error || '登记失败', true)
     mask.remove()
-    toast(`${res.item.id} 已提交，等待部门负责人同意`)
+    toast(res.item.status === 'authorized'
+      ? (kind === 'service' ? `${res.item.id} 已登记，服务发布待审核` : `${res.item.id} 已登记并进入资源目录`)
+      : `${res.item.id} 已提交，等待部门负责人同意`)
     state.view = 'datacenter'
     state.resourceType = 'all'
     state.resourceCategory = 'all'
@@ -6923,12 +8636,15 @@ function openAppRegister() {
 /* ---- 自动化 ---- */
 
 function openAutomationForm(idea) {
-  const pre = idea || {}
+  const pre = idea ? { ...idea, sch: idea.schedule || idea.sch, desc: idea.prompt || idea.desc } : {}
+  const scheduleOptions = ['每天 08:30', '每周一 09:00', '每周五 17:00', '每季度首月 5 日', '每天 09:00']
+  if (pre.sch && !scheduleOptions.includes(pre.sch)) scheduleOptions.unshift(pre.sch)
+  const scheduleHtml = scheduleOptions.map((s) => `<option${pre.sch === s || (!pre.sch && s === '每天 08:30') ? ' selected' : ''}>${esc(s)}</option>`).join('')
   const body = `
     <div class="form-note">定时任务由系统 AI 按时执行：到点自动按指令运行一次，产出投递到你指定的位置，并生成一条执行记录。</div>
     <div class="form-grid">
       <label>名称<input id="auName" placeholder="例如：每日公示项目变更摘要" value="${esc(pre.name || '')}"></label>
-      <label>频率<select id="auSch"><option>每天 08:30</option><option${pre.sch === '每周一 09:00' ? ' selected' : ''}>每周一 09:00</option><option${pre.sch === '每周五 17:00' ? ' selected' : ''}>每周五 17:00</option><option${pre.sch === '每季度首月 5 日' ? ' selected' : ''}>每季度首月 5 日</option><option${pre.sch === '每天 09:00' ? ' selected' : ''}>每天 09:00</option></select></label>
+      <label>频率<select id="auSch">${scheduleHtml}</select></label>
     </div>
     <div class="form-label">执行内容</div>
     <textarea id="auPrompt" rows="3" class="form-area" placeholder="写给 AI 的指令，例如：读取公示项目台账，比昨日快照，列出新增、变更与到期节点">${esc(pre.desc || '')}</textarea>
@@ -7053,6 +8769,7 @@ function installPaneSplitters() {
   PANE_SPLITS.forEach((cfg) => {
     document.querySelectorAll(cfg.sel).forEach((box) => {
       if (box.querySelector('.pane-splitter')) return
+      if (box.children.length < 2) return
       const baseW = () => {
         const rootW = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--pane-w'))
         return Number.isFinite(rootW) && rootW >= cfg.min ? Math.round(rootW) : paneWidthFor(Math.max(0, window.innerWidth - 58))
@@ -7064,16 +8781,30 @@ function installPaneSplitters() {
       handle.className = 'pane-splitter'
       handle.title = '拖动调整左右宽度 · 双击复位'
       box.appendChild(handle)
+      const syncHandle = () => {
+        const first = box.firstElementChild
+        const width = first ? first.getBoundingClientRect().width : baseW()
+        handle.style.left = Math.max(0, Math.round(width) - 3) + 'px'
+      }
+      syncHandle()
+      requestAnimationFrame(syncHandle)
+      if (window.ResizeObserver) {
+        const ro = new ResizeObserver(syncHandle)
+        ro.observe(box)
+        if (box.firstElementChild) ro.observe(box.firstElementChild)
+      }
       let dragging = false
       let lastW = initW
       const apply = (w, persist) => {
         lastW = Math.round(Math.min(cfg.max, Math.max(cfg.min, w)))
         document.documentElement.style.setProperty('--pane-w', lastW + 'px')
         document.documentElement.style.setProperty('--sidebar-w', lastW + 'px')
+        syncHandle()
         if (persist) localStorage.setItem(PANE_RATIO_KEY, String(lastW / Math.max(1, window.innerWidth - 58)))
       }
       handle.addEventListener('dblclick', () => {
         localStorage.removeItem(PANE_RATIO_KEY)
+    localStorage.removeItem('jg.sidebarW')
         const paneW = paneWidthFor(Math.max(0, window.innerWidth - 58))
         document.documentElement.style.setProperty('--pane-w', paneW + 'px')
         document.documentElement.style.setProperty('--sidebar-w', paneW + 'px')
@@ -7109,15 +8840,17 @@ function installPaneSplitters() {
 }
 
 function render() {
+  if (['home', 'chat'].includes(state.view)) document.getElementById('homeSidebarFloat')?.remove()
   document.querySelectorAll('.account-pop, .rail-pop').forEach((p) => p.remove())
   window.__accountPop = null
   window.__morePop = null
   applyLayout()
   renderMenubar()
   renderRail()
+  bindHomeHoverSidebar()
   renderSidebar()
   renderTopbar()
-  // 顶栏只剩云浏览器开关；收起空 header 带，避免主内容上方留白。
+  // 全局顶栏在所有模块保持一致，不因云浏览器或单栏页面收起。
   const topbar = document.getElementById('topbar')
   if (topbar) topbar.hidden = true
   if (!cloudAllowed()) {
@@ -7146,25 +8879,7 @@ function render() {
   })
 
   const roleSwitcher = document.getElementById('roleSwitcher')
-  roleSwitcher?.addEventListener('change', (e) => switchRole(e.target.value))
-}
-
-async function switchRole(roleId) {
-  const { body } = await api('/api/login', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ role: roleId }),
-  })
-  if (!body.user) return
-  await loadBoot()
-  try { state.modelCfg = (await api('/api/model/config')).body } catch { state.modelCfg = {} }
-  state.selectedResource = null
-  state.cloud = null
-  state.cloudTabs = [{ id: 'new', kind: 'new', title: '新标签页' }]
-  state.cloudTab = 'new'
-  if (state.cloudOpen) ensureCloud().then(renderCloudPanel)
-  render()
-  toast(`已切换为 ${body.user.name}（${body.user.label}），可见范围已按授权重算`)
+  roleSwitcher?.addEventListener('change', () => logout())
 }
 
 async function main() {
@@ -7172,7 +8887,11 @@ async function main() {
   const s = Number(localStorage.getItem('jg.setNavW'))
   const cw = Number(localStorage.getItem('jg.cbW'))
   const cp = Number(localStorage.getItem('jg.cbPaneW'))
-  if (w >= 240 && w <= 400) state.sidebarWidth = w
+  if (w >= 180 && w <= 520) state.sidebarWidth = w
+  else {
+    const r = Number(localStorage.getItem(PANE_RATIO_KEY))
+    if (r >= 0.2 && r <= 0.9) state.sidebarWidth = Math.round(Math.max(180, Math.min(520, (window.innerWidth - 58) * r)))
+  }
   if (s >= 160 && s <= 360) state.setNavWidth = s
   if (cp >= 220 && cp <= 900) state.cbUserW = cp
   if (cp >= 220 && cp <= 900) state.cbUserW = cp
@@ -7193,9 +8912,7 @@ async function main() {
   document.addEventListener('keydown', (e) => {
     if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 's' && hasSidebarView()) {
       e.preventDefault()
-      state.sbPinned = !state.sbPinned
-      renderMenubar()
-      render()
+      toggleGlobalSidebar()
       return
     }
     if ((e.ctrlKey || e.metaKey) && e.key === ',') {
@@ -7521,7 +9238,7 @@ function openDriveMoreMenu(it, anchor, el, spaces, personal) {
     <button class="drive-more-item" data-dact="share"><span class="ico">${icon('users')}</span>分享</button>
     <button class="drive-more-item" data-dact="download"><span class="ico">${icon('download')}</span>下载</button>
     <div class="drive-more-sep"></div>
-    <button class="drive-more-item" data-dact="move"><span class="ico">${icon('folder')}</span>移动</button>
+    <button class="drive-more-item" data-dact="move" disabled title="移动尚未接入" style="opacity:.45;cursor:not-allowed"><span class="ico">${icon('folder')}</span>移动</button>
     <button class="drive-more-item" data-dact="rename"><span class="ico">${icon('pen')}</span>重命名</button>
     <button class="drive-more-item" data-dact="remove" style="color:#b2413b"><span class="ico" style="color:#b2413b">${icon('trash')}</span>删除</button>`
   document.body.appendChild(pop)
@@ -7535,7 +9252,7 @@ function openDriveMoreMenu(it, anchor, el, spaces, personal) {
     if (act === 'share') { if (it.local) return toast('演示上传文件暂不支持共享'); return openShareCard(it.id, anchor) }
     if (act === 'download') {
       if (it.url) return window.open(it.url, '_blank')
-      return toast('该文件暂无下载地址（演示）')
+      return toast('该文件暂无下载地址')
     }
     if (act === 'move') return openDriveMove(it, spaces, el)
     if (act === 'rename') return openDriveRename(it, el)
@@ -7768,11 +9485,11 @@ async function openCloudPreview(id) {
     </div>
     ${viewHTML}
     <div class="form-foot"><span class="mono">预览为只读，原始文件以下载件为准</span><span class="spacer"></span>
-      <button class="btn" data-dl2="${esc(it.name)}">下载</button>
+      <button class="btn" data-dl2="${esc(it.name)}" disabled title="下载尚未接入" style="opacity:.45;cursor:not-allowed">下载</button>
       ${['docx', 'xlsx', 'pptx'].includes(it.type) ? `<button class="btn primary" data-edit2="${esc(it.id)}">在线编辑</button>` : ''}
     </div>`, { wide: true })
   const dl = mask.querySelector('[data-dl2]')
-  if (dl) dl.addEventListener('click', () => toast(`已下载：${dl.dataset.dl2}（演示）`))
+  if (dl) dl.addEventListener('click', () => {})
   const ed = mask.querySelector('[data-edit2]')
   if (ed) ed.addEventListener('click', () => { mask.remove(); openDocEditor(ed.dataset.edit2, true) })
 }
@@ -7857,7 +9574,7 @@ async function renderContacts(el) {
           <div class="ct-meta">${esc(c.phone)}</div>
         </div>
         <div class="ct-acts">
-          <button class="dr-btn" data-call="${esc(c.name)}">呼叫</button>
+          <button class="dr-btn" data-call="${esc(c.name)}" disabled title="呼叫尚未接入" style="opacity:.45;cursor:not-allowed">呼叫</button>
           <button class="dr-btn primary" data-cim="${esc(c.name)}">发消息</button>
         </div>
       </div>`).join('')}
@@ -7887,7 +9604,7 @@ async function renderContacts(el) {
     state.contactPage = Math.min(Math.max(p, 1), pages)
     renderView()
   }))
-  el.querySelectorAll('[data-call]').forEach((b) => b.addEventListener('click', () => toast(`正在呼叫 ${b.dataset.call}（演示）`)))
+  el.querySelectorAll('[data-call]').forEach((b) => b.addEventListener('click', () => {}))
   el.querySelectorAll('[data-cim]').forEach((b) => b.addEventListener('click', () => {
     state.imTarget = b.dataset.cim
     state.view = 'im'
@@ -8099,19 +9816,19 @@ async function renderIM(el) {
           <span class="avatar sm">${esc(t.name.slice(0, 1))}</span>
           <span class="im-th-main"><span class="im-th-name">${esc(t.name)}</span><span class="im-th-last">${esc(lastText(t))}</span></span>
           <span class="im-th-meta"><span>${esc(t.time)}</span>${t.unread ? `<i class="im-badge">${t.unread}</i>` : ''}</span>
-        </button>`).join('')}
+        </button>`).join('') || '<div class="im-empty">暂无会话</div>'}
     </div>
     <div class="im-right">
       <div class="im-head">
-        <div class="im-h-main"><div class="im-h-name">${esc(thread?.name || '')}</div><div class="im-h-meta">${thread?.kind === 'group' ? `${thread.members} 人 · 群聊` : '单聊'}</div></div>
-        <div class="im-head-acts">
+        <div class="im-h-main"><div class="im-h-name">${esc(thread?.name || '未选择会话')}</div><div class="im-h-meta">${thread ? (thread.kind === 'group' ? `${thread.members} 人 · 群聊` : '单聊') : '选择左侧会话开始沟通'}</div></div>
+        ${thread ? `<div class="im-head-acts">
           <button class="icon-btn im-more" id="imMore" title="更多功能" aria-haspopup="true" aria-expanded="false">${icon('dots')}</button>
           <div class="im-menu" id="imMenu" hidden>
             ${tabDefs.map((t) => `<button type="button" class="im-menu-item ${tab === t.id ? 'on' : ''}" data-imtab="${t.id}"><span>${t.label}</span>${tab === t.id ? '<span class="im-menu-check">✓</span>' : ''}</button>`).join('')}
           </div>
-        </div>
+        </div>` : ''}
       </div>
-      ${tab === 'files' ? filesPanel : tab === 'cloud' ? cloudPanel : tab === 'search' ? searchPanel : tab === 'members' ? membersPanel : chatPanel}
+      ${thread ? (tab === 'files' ? filesPanel : tab === 'cloud' ? cloudPanel : tab === 'search' ? searchPanel : tab === 'members' ? membersPanel : chatPanel) : `<div class="im-no-thread">${icon('message')}<b>暂无会话</b><span>当前账号还没有可打开的会话。收到新消息后会显示在这里。</span></div>`}
     </div>
   </div>`
 
@@ -8269,7 +9986,7 @@ function openImComposeMenu(thread, input, anchor) {
     ['cloud', 'cloud', '云空间', '选部门共享资料'],
     ['shot', 'window', '截图', '截当前窗口'],
     ['ai', 'spark', '问智能助手', '分析会话文档'],
-  ].map(([k, ic, label, desc]) => `<button class="cm-item im-plus-item" data-imp="${k}">
+  ].map(([k, ic, label, desc]) => `<button class="cm-item im-plus-item" data-imp="${k}"${k === 'shot' ? ' disabled title="截图发送尚未接入" style="opacity:.45;cursor:not-allowed"' : ''}>
       <span class="ico">${icon(ic)}</span>
       <span class="cm-label">${label}</span>
       <span class="cm-key">${desc}</span>
@@ -8729,7 +10446,7 @@ async function renderNotices(el) {
           <div class="nt-h-title">${esc(n.title)}</div>
           <div class="nt-body">${(n.body || []).map((p) => `<p>${esc(p)}</p>`).join('')}</div>
           <div class="nt-foot">
-            <button class="dr-btn" data-ntim="${esc(n.title)}">转发到即时通讯</button>
+            <button class="dr-btn" data-ntim="${esc(n.title)}" disabled title="转发尚未接入" style="opacity:.45;cursor:not-allowed">转发到即时通讯</button>
             <button class="dr-btn" data-ntask="${esc(n.title)}">在会话中提问</button>
           </div>
         </div>
@@ -8761,15 +10478,10 @@ async function renderNotices(el) {
     <div class="ac-page-head">
       <div>
         <div class="ac-page-title">通知公告</div>
-        <div class="ac-page-sub">集团通知、公告与文章 · 打开后自动标记已读</div>
       </div>
-      <span class="spacer"></span>
-      <span class="ac-count">共 ${list.length} 条内容</span>
     </div>
     <div class="ac-toolbar">
-      <div class="nt-tabs">${(body.categories || ['全部', '通知', '公告', '文章']).map((c) => `<button class="drive-tab ${cat === c ? 'on' : ''}" data-ncat="${esc(c)}">${esc(c)}</button>`).join('')}</div>
-      <span class="spacer"></span>
-      <span class="ac-count">第 ${page} / ${pages} 页</span>
+      <div class="ac-tabs">${(body.categories || ['全部', '通知', '公告', '文章']).map((c) => `<button class="ac-tab ${cat === c ? 'on' : ''}" data-ncat="${esc(c)}">${esc(c)}</button>`).join('')}</div>
     </div>
     <div class="nt-files">
       ${pageItems.map((n) => `<button class="ac-file nt-file" data-nrow="${esc(n.id)}">
@@ -8784,12 +10496,12 @@ async function renderNotices(el) {
       </button>`).join('')}
       ${list.length ? '' : '<div class="empty">该分类暂无内容</div>'}
     </div>
-    ${pages > 1 ? `<div class="ac-pager">
+    <div class="ac-pager">
       <button class="ac-pg" data-npage="${page - 1}" ${page <= 1 ? 'disabled' : ''}>上一页</button>
       ${pageSeq(page, pages).map((p) => p === '…' ? '<span class="ac-pager-dots">…</span>' : `<button class="ac-pg num ${p === page ? 'on' : ''}" data-npage="${p}">${p}</button>`).join('')}
       <button class="ac-pg" data-npage="${page + 1}" ${page >= pages ? 'disabled' : ''}>下一页</button>
       <span class="ac-pager-info">每页 ${pageSize} 条 · 共 ${list.length} 条</span>
-    </div>` : ''}
+    </div>
   </div>`
 
   el.querySelectorAll('[data-ncat]').forEach((b) => b.addEventListener('click', () => {
@@ -8865,8 +10577,6 @@ async function renderAcademy(el) {
   const items = body.items || []
   const cat = state.academyCat || 'all'
   const list = items.filter((it) => (cat === 'all' ? true : it.kind === cat))
-  const learningCount = items.filter((it) => it.kind !== 'classic').length
-  const classicCount = items.filter((it) => it.kind === 'classic').length
   const itemIcon = (it) => (it.kind === 'classic' ? 'star' : it.kind === 'video' ? 'video' : it.kind === 'spec' ? 'shield' : 'doc')
   const itemMeta = (it) => it.kind === 'classic'
     ? `经典项目 · ${esc(it.honor || '总工办认定')} · ${esc(it.dept)}`
@@ -8904,7 +10614,7 @@ async function renderAcademy(el) {
       <div class="ac-sum">${esc(it.summary)}</div>
       <div class="ac-tags">${(it.tags || []).map((t) => `<span class="ac-tag">${esc(t)}</span>`).join('')}</div>`}
     <div class="ac-acts">
-      <button class="btn primary" data-mstart="${it.id}">${it.kind === 'classic' ? '查看项目档案' : it.kind === 'video' ? '查看视频' : '打开阅读'}</button>
+      <button class="btn primary" data-mstart="${it.id}" disabled title="档案打开尚未接入" style="opacity:.45;cursor:not-allowed">${it.kind === 'classic' ? '查看项目档案' : it.kind === 'video' ? '查看视频' : '打开阅读'}</button>
       <button class="btn" data-mai="${it.id}">用 AI 解读</button>
       <button class="btn fav-btn ${isFav(it.id) ? 'on' : ''}" data-mfav="${it.id}">${icon('star')}<span>${isFav(it.id) ? '已收藏' : '收藏'}</span></button>
     </div>
@@ -8931,9 +10641,7 @@ async function renderAcademy(el) {
     document.addEventListener('keydown', onKey)
     wrap.addEventListener('click', (e) => { if (e.target === wrap) close() })
     wrap.querySelector('[data-acclose]')?.addEventListener('click', close)
-    wrap.querySelector('[data-mstart]')?.addEventListener('click', () => {
-      toast(it.kind === 'classic' ? '已打开项目档案（演示）' : it.kind === 'video' ? '已打开视频查看（演示）' : '已打开文件阅读（演示）')
-    })
+    wrap.querySelector('[data-mstart]')?.addEventListener('click', () => {})
     wrap.querySelector('[data-mai]')?.addEventListener('click', () => {
       state.draft = it.kind === 'classic'
         ? `请解读经典项目《${it.title}》的获奖点、总工办评价和可复用做法，并给出适用于规划一所的三条借鉴建议。`
@@ -8955,19 +10663,10 @@ async function renderAcademy(el) {
     <div class="ac-page-head">
       <div>
         <div class="ac-page-title">教学园地</div>
-        <div class="ac-page-sub">学习文件与经典项目展示 · 数据来自数据中心</div>
-      </div>
-      <span class="spacer"></span>
-      <div class="ac-stats">
-        <span><b>${learningCount}</b> 份学习文件</span>
-        <span><b>${classicCount}</b> 个经典项目</span>
-        <span class="ac-source">${icon('database')}数据中心</span>
       </div>
     </div>
     <div class="ac-toolbar">
       <div class="ac-tabs">${(body.categories || []).map((c) => `<button class="ac-tab ${cat === c.key ? 'on' : ''}" data-acat="${c.key}">${c.label}</button>`).join('')}</div>
-      <span class="spacer"></span>
-      <span class="ac-count">共 ${list.length} 条 · 第 ${page} / ${pages} 页</span>
     </div>
     <div class="ac-files">
       ${pageItems.map((it) => `
@@ -9010,25 +10709,28 @@ async function renderAcademy(el) {
 
 /* -------------------------------- 更多 -------------------------------- */
 const ENTERPRISE_ITEMS = [
+  ['knowledge', '智能笔记本', 'book'],
+  ['academy', '教学园地', 'cap'],
+  ['bid', '智能投标', 'doc'],
   ['notice', '通知公告', 'megaphone'],
-  ['contacts', '通讯录', 'users'],
-  ['im', '工作消息', 'message'],
   ['oa', 'OA 办公', 'doc'],
-  ['drive', '云空间', 'cloud'],
   ['datacenter', '数据中心', 'database'],
   ['oneMap', '一张图', 'map'],
 ]
 
+const MORE_PLACEHOLDERS = [
+  ['contacts', '通讯录', 'users'],
+  ['im', '即时通讯', 'message'],
+  ['drive', '云空间', 'cloud'],
+]
+
 const MORE_ITEMS = [
-  ['knowledge', '智能笔记本', 'book'],
-  ['academy', '教学园地', 'cap'],
-  ['bid', '智能投标', 'doc'],
   ['monitor', '综合监测', 'pulse'],
   ['renewal', '城市体检和更新', 'target'],
   ['hr', '人事组织', 'users'],
   ['review', '审图平台', 'layers'],
   ['finance', '财务管理', 'chart'],
-  ['adminops', '综合管理', 'shield'],
+  ['adminops', '综合管理', 'briefcase'],
 ]
 
 // 图标栏单列容量：超出后新模块/次要模块自动进入「更多」，不再占图标栏
@@ -9037,7 +10739,7 @@ function railPlan() {
   const { user } = state.boot
   const vis = (id) => user.visibleModules.includes(id)
   const core = ['imagegen', 'tasks', 'skills', 'projects'].filter(vis)
-  const pinned = state.morePinned.filter(vis)
+  const pinned = state.morePinned.filter((id) => vis(id) && MORE_ITEMS.some(([itemId]) => itemId === id))
   const entAll = ENTERPRISE_ITEMS.map(([id]) => id).filter(vis)
   const slots = Math.max(0, RAIL_CAP - core.length)
   const entPool = entAll.filter((id) => !state.moreSet.includes(id))
@@ -9085,7 +10787,13 @@ function openMoreMenu(anchor) {
         </button>
         <button class="more-pin${on ? ' is-on' : ''}" data-mpin="${id}" title="${on ? '取消置顶' : '置顶到图标栏'}" style="${show ? '' : 'display:none'}">${icon('pin')}</button>
       </div>`
-    }).join('')}`
+    }).join('')}
+    ${MORE_PLACEHOLDERS.map(([id, label, ic]) => `
+      <div class="rail-pop-row more-placeholder">
+        <button class="rail-pop-item" disabled>
+          <span class="ico">${icon(ic)}</span><span>${label}</span>
+        </button>
+      </div>`).join('')}`
   document.body.appendChild(pop)
   pop.__anchor = anchor
   window.__morePop = pop
@@ -9201,7 +10909,7 @@ function renderGuestShell(el, view) {
 function renderChat(el) {
   const conv = state.conversation
   const msgs = conv?.messages || []
-  const running = state.chatBusy && state.chatSteps.length
+  const running = state.chatBusy && (state.chatSteps.length || state.deepThink)
   const project = currentProject()
   if (state.activeProjectId && !project) {
     state.activeProjectId = ''
@@ -9222,7 +10930,7 @@ function renderChat(el) {
             <div class="chat-empty-title">${esc(conv ? '继续这个会话' : '有什么可以帮你？')}</div>
             <div class="chat-empty-sub">${project ? `${esc(project.cwd)} · Agent 将直接读取该目录中的文件` : '普通问答不需要项目；需要操作本地文件时，再在输入框下方绑定项目或文件夹。'}</div>
           </div>`}
-        ${running ? `<div class="steps-card"><div class="steps-title">正在执行</div>${state.chatSteps.map(stepRow).join('')}</div>` : ''}
+        ${running ? `<div class="steps-card"><div class="steps-title">${state.chatSteps.length ? '正在执行' : '深度思索中'}</div>${state.chatSteps.length ? state.chatSteps.map(stepRow).join('') : `<div style="font-size:12px;color:var(--muted);line-height:1.6">正在调用 DeepSeek 推理模型，完成思考后给出回答…</div>`}</div>` : ''}
         ${state.chatError ? `<div class="chat-error"><b>调用失败</b><span>${esc(state.chatError)}</span><button class="btn sm" id="retryMsg">重试</button></div>` : ''}
         ${state.pendingConfirm ? renderConfirm() : ''}
         ${state.pendingInteraction ? renderInteraction() : ''}
@@ -9438,13 +11146,30 @@ function workflowBlock(workflows) {
 function subagentBlock(subs) {
   if (!subs || !subs.length) return ''
   const stateOf = (s) => s.status === 'error' || s.status === 'failed' ? '失败' : s.status === 'running' ? '进行中' : '完成'
-  return `<details class="steps-block">
-    <summary class="steps-title">子代理 · ${subs.length}</summary>
-    ${subs.map((s) => `<div class="step" style="align-items:flex-start">
-      <span class="step-dot ${/error|fail/i.test(s.status || '') ? 'bad' : s.status === 'running' ? 'warn' : 'ok'}"></span>
-      <span class="step-tool" style="flex:0 0 96px">${esc(s.provider || '子代理')}</span>
-      <span class="step-detail" style="flex:1;white-space:pre-wrap;word-break:break-word">${stateOf(s)}${s.stopReason ? ` · ${esc(s.stopReason)}` : ''} · <span class="mono">${esc(s.childSessionId || '')}</span>${s.output ? `<br>${esc(s.output)}` : '<br>未返回正文'}</span>
-    </div>`).join('')}
+  const toneOf = (s) => /error|fail/i.test(s.status || '') ? 'bad' : s.status === 'running' ? 'warn' : 'ok'
+  const done = subs.filter((s) => s.status !== 'running').length
+  const active = subs.filter((s) => s.status === 'running').length
+  return `<details class="steps-block" open>
+    <summary class="steps-title">Agent Team · 任务板 · ${done}/${subs.length} 已结束${active ? ` · ${active} 个进行中` : ''}</summary>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:8px;padding:2px 12px 12px">
+      ${subs.map((s, i) => {
+        const label = s.name || s.provider || `子代理 ${i + 1}`
+        const child = String(s.childSessionId || '').slice(0, 8)
+        const task = s.task || `子代理会话 ${child || '—'}`
+        const output = String(s.output || '').replace(/\s+$/, '').slice(0, 240)
+        return `<div style="border:1px solid #e7ebf1;border-radius:8px;background:#fff;padding:9px 10px;min-width:0">
+          <div style="display:flex;align-items:center;gap:6px;min-width:0">
+            <span class="mc-tag ${toneOf(s)}">${esc(stateOf(s))}</span>
+            <b style="font-size:12px;color:#202124;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(label)}</b>
+            <span style="flex:1"></span>
+            <span class="mono" style="font-size:10px;color:#9aa1aa" title="${esc(s.childSessionId || '')}">${esc(child || '—')}</span>
+          </div>
+          <div style="font-size:11px;color:#4b5056;line-height:1.5;margin-top:5px;word-break:break-word">${esc(task)}</div>
+          <div style="font-size:11px;color:#7b8087;line-height:1.55;margin-top:6px;white-space:pre-wrap;word-break:break-word">${output ? esc(output) : '未返回正文'}${String(s.output || '').length > 240 ? '…' : ''}</div>
+          ${s.stopReason ? `<div style="font-size:10px;color:#9aa1aa;margin-top:5px">结束原因 · ${esc(s.stopReason)}</div>` : ''}
+        </div>`
+      }).join('')}
+    </div>
   </details>`
 }
 
@@ -9476,6 +11201,78 @@ function usageTip(u) {
   return `${u.calls} 次模型调用 · ${parts.join(' / ')}`
 }
 
+function traceEventSummary(event) {
+  const data = event && event.data && typeof event.data === 'object' ? event.data : {}
+  const type = String(event?.type || 'event')
+  if (data.toolName || data.name) return `${data.toolName || data.name}`
+  if (data.toolCallId) return `调用 ${data.toolCallId}`
+  if (data.text) return String(data.text).replace(/\s+/g, ' ').slice(0, 120)
+  if (data.message) return String(data.message).replace(/\s+/g, ' ').slice(0, 120)
+  if (data.reason) return typeof data.reason === 'string' ? data.reason : JSON.stringify(data.reason).slice(0, 120)
+  return type === 'turn/end' ? '本轮结束' : ''
+}
+
+function traceRowsHtml(trace) {
+  const events = Array.isArray(trace?.events) ? trace.events : []
+  const shown = events.slice(0, 1200)
+  return shown.map((event, i) => {
+    const type = String(event?.type || 'event')
+    const data = JSON.stringify(event?.data ?? {}, null, 0)
+    return `<tr class="mc-trow">
+      <td class="mono" style="width:48px">${i + 1}</td>
+      <td><span class="mc-tag">${esc(type)}</span></td>
+      <td style="white-space:pre-wrap;word-break:break-word">${esc(traceEventSummary(event))}</td>
+      <td><details><summary class="mono" style="cursor:pointer">原始</summary><div class="mono" style="max-width:520px;max-height:180px;overflow:auto;white-space:pre-wrap;word-break:break-all">${esc(data)}</div></details></td>
+    </tr>`
+  }).join('') || '<tr class="mc-trow"><td colspan="4">本轮没有可展示的 SDK 事件</td></tr>'
+}
+
+async function openRunTrace(conversationId, traceId) {
+  const { ok, body } = await api(`/api/conversation/trace?id=${encodeURIComponent(conversationId)}&trace=${encodeURIComponent(traceId)}`)
+  if (!ok || !body.trace) return toast(body?.error || '本轮轨迹不存在', true)
+  const trace = body.trace
+  const stats = trace.stats || {}
+  const mask = openModal('运行轨迹', `
+    <div class="mc-block" style="margin:0">
+      <div class="mc-block-head"><b>本轮事件流</b><span class="mono">${esc(trace.traceId || traceId)} · ${Number(stats.eventCount || trace.events?.length || 0)} 个事件</span></div>
+      <div class="form-note">来源：DSH SDK 本轮真实返回的 events / notifications；不是前端演示轨迹。</div>
+      <div style="display:flex;gap:8px;margin:8px 0;flex-wrap:wrap">
+        <button class="btn sm" id="traceReplay">回放</button>
+        <button class="btn sm" id="traceDownload">下载 JSON</button>
+        <span class="mono" style="align-self:center">模型 ${esc(stats.model || trace.model || '—')} · ${Number(stats.durationMs || 0)} ms · ${Number(stats.toolCalls || 0)} 次工具调用</span>
+      </div>
+      <div style="max-height:58vh;overflow:auto">
+        <table class="mc-table"><thead class="mc-thead"><tr><th>#</th><th>事件</th><th>摘要</th><th>数据</th></tr></thead>
+        <tbody id="traceRows">${traceRowsHtml(trace)}</tbody></table>
+      </div>
+    </div>`)
+  mask.querySelector('#traceDownload').addEventListener('click', () => {
+    const blob = new Blob([JSON.stringify(trace, null, 2)], { type: 'application/json' })
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(blob)
+    a.download = `${trace.traceId || traceId}.json`
+    a.click()
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000)
+  })
+  mask.querySelector('#traceReplay').addEventListener('click', (ev) => {
+    const rows = [...mask.querySelectorAll('#traceRows .mc-trow')]
+    if (!rows.length) return
+    rows.forEach((r) => { r.style.display = 'none' })
+    let i = 0
+    ev.currentTarget.disabled = true
+    const timer = setInterval(() => {
+      if (i >= rows.length) {
+        clearInterval(timer)
+        ev.currentTarget.disabled = false
+        return
+      }
+      rows[i].style.display = ''
+      rows[i].scrollIntoView({ block: 'nearest' })
+      i++
+    }, 180)
+  })
+}
+
 function renderMsg(m, idx = null) {
   if (m.role === 'user') {
     return `<div class="msg user"><div class="bubble">${esc(m.text)}</div><div class="msg-time">${esc(m.time || '')}</div></div>`
@@ -9487,14 +11284,15 @@ function renderMsg(m, idx = null) {
       ${workflowBlock(m.workflows)}
       ${subagentBlock(m.subagents)}
       ${stepsBlock(m.steps)}
-      <div class="bubble">${esc(m.text)}${m.streaming ? '<span class="caret"></span>' : ''}</div>
+      <div class="bubble">${richTextHTML(m.text)}${m.streaming ? '<span class="caret"></span>' : ''}</div>
       ${deliverableBlock(m.deliverables)}
       ${changeBlock(m.workspaceChanges)}
-      ${m.citations?.length ? `<div class="cite-row">${m.citations.map((c) => `<span class="cite">${esc(c)}</span>`).join('')}</div>` : ''}
+      ${m.citations?.length ? `<div class="cite-row">${m.citations.map((c) => `<span class="cite">${richTextHTML(c)}</span>`).join('')}</div>` : ''}
       <div class="msg-time">${esc(m.time || '')}${m.usage?.calls ? `<span title="${esc(usageTip(m.usage))}"> · ${esc(usageText(m.usage))}</span>` : ''}</div>
-      ${idx != null && !m.streaming ? `<div style="display:flex;gap:4px;margin-top:4px">
+      ${idx != null && !m.streaming ? `<div style="display:flex;gap:4px;margin-top:4px;flex-wrap:wrap">
         <button class="btn sm subtle" style="padding:1px 7px;font-size:var(--fs-micro)" data-fb="${idx}" data-fbv="${m.feedback === 'up' ? 'clear' : 'up'}">${m.feedback === 'up' ? '✓ ' : ''}有帮助</button>
         <button class="btn sm subtle" style="padding:1px 7px;font-size:var(--fs-micro)" data-fb="${idx}" data-fbv="${m.feedback === 'down' ? 'clear' : 'down'}">${m.feedback === 'down' ? '× ' : ''}需改进</button>
+        ${m.traceId ? `<button class="btn sm subtle" style="padding:1px 7px;font-size:var(--fs-micro)" data-trace="${esc(m.traceId)}">运行轨迹</button><button class="btn sm subtle" style="padding:1px 7px;font-size:var(--fs-micro)" data-tstats="${esc(m.traceId)}">本轮统计</button>` : ''}
       </div>` : ''}
     </div>
   </div>`
@@ -9561,7 +11359,104 @@ async function sendFeedback(index, value) {
   toast(value === 'clear' ? '已撤销反馈' : (value === 'up' ? '已标记为有帮助' : '已记录改进意见'))
 }
 
+async function openRunStats(conversationId, traceId) {
+  const { ok, body } = await api(`/api/conversation/trace?id=${encodeURIComponent(conversationId)}&trace=${encodeURIComponent(traceId)}`)
+  if (!ok || !body.trace) return toast(body?.error || '本轮统计不存在', true)
+  const t = body.trace
+  const s = t.stats || {}
+  const fmt = (n) => Number(n || 0).toLocaleString('zh-CN')
+  const rows = [
+    ['模型调用', `${fmt(s.modelCalls)} 次`],
+    ['输入 tokens', fmt(s.inputTokens)],
+    ['输出 tokens', fmt(s.outputTokens)],
+    ['缓存读 tokens', fmt(s.cacheReadTokens)],
+    ['缓存写 tokens', fmt(s.cacheWriteTokens)],
+    ['推理 tokens', fmt(s.reasoningTokens)],
+    ['缓存命中率', `${Number((s.cacheHitRate || 0) * 100).toFixed(1)}%`],
+    ['上下文', `${fmt(s.contextChars)} 字符 ≈ ${fmt(s.contextEstimateTokens)} tokens`],
+    ['工具调用 / 失败', `${fmt(s.toolCalls)} / ${fmt(s.toolFailures)}`],
+    ['步骤 / 事件', `${fmt(s.steps)} / ${fmt(s.eventCount)}`],
+    ['本轮耗时', `${fmt(s.durationMs)} ms`],
+  ]
+  openModal('本轮统计', `
+    <div class="mc-block" style="margin:0">
+      <div class="mc-block-head"><b>${esc(t.model || '—')}</b><span class="mono">${esc(t.traceId || traceId)}</span></div>
+      <div class="form-note">统计来自本轮 DSH 返回的真实 usage 与事件流；缓存命中率 = 缓存读 /（输入 + 缓存读 + 缓存写）。</div>
+      <table class="mc-table"><thead class="mc-thead"><tr><th>指标</th><th>值</th></tr></thead><tbody>
+        ${rows.map(([k, v]) => `<tr class="mc-trow"><td>${esc(k)}</td><td class="mono">${esc(v)}</td></tr>`).join('')}
+      </tbody></table>
+    </div>`)
+}
+
+function openAdminTerminal() {
+  const mask = openModal('平台开发终端', `
+    <div class="mc-block" style="margin:0">
+      <div class="mc-block-head"><b>持久 PowerShell</b><span class="mc-id" id="termMeta">初始化…</span><span class="spacer"></span><button class="btn sm" id="termReset">重启终端</button></div>
+      <div class="form-note">命令在服务端常驻 PowerShell 中执行，工作目录会在同一管理员会话内保持；仅管理员可用。</div>
+      <pre id="termOut" class="mono" style="min-height:220px;max-height:46vh;overflow:auto;white-space:pre-wrap;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:10px;margin:8px 0">正在连接终端…</pre>
+      <div style="display:flex;gap:8px;align-items:center">
+        <span class="mono">$</span>
+        <input class="text-input" id="termCmd" placeholder="输入 PowerShell 命令，回车执行" autocomplete="off" style="flex:1" />
+        <button class="btn primary" id="termRun">执行</button>
+      </div>
+    </div>`)
+  const out = mask.querySelector('#termOut')
+  const input = mask.querySelector('#termCmd')
+  const meta = mask.querySelector('#termMeta')
+  let busy = false
+  const append = (text) => {
+    out.textContent += `${out.textContent ? '\n' : ''}${text}`
+    out.scrollTop = out.scrollHeight
+  }
+  api('/api/terminal').then(({ ok, body }) => {
+    meta.textContent = ok ? `${body.cwd || ''} · PID ${body.pid || '—'}${body.memoryMB ? ` · 限额 ${body.memoryMB}MB/${body.maxProcesses || '—'}进程` : ''}` : (body.error || '终端不可用')
+    if (!ok) out.textContent = body.error || '终端不可用'
+  })
+  const run = async () => {
+    const command = input.value.trim()
+    if (!command || busy) return
+    busy = true
+    input.value = ''
+    if (out.textContent === '正在连接终端…') out.textContent = ''
+    append(`$ ${command}`)
+    const { ok, body } = await api('/api/terminal/exec', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ command }),
+    })
+    busy = false
+    append(body.output || '')
+    if (body.cwd) meta.textContent = `${body.cwd} · ${body.timeout ? '已超时重启' : `exit ${body.exitCode ?? '—'}`}`
+    if (!ok) append(`[${body.error || '执行失败'}]`)
+  }
+  mask.querySelector('#termRun').addEventListener('click', run)
+  input.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); run() } })
+  mask.querySelector('#termReset').addEventListener('click', async () => {
+    await api('/api/terminal/reset', { method: 'POST' })
+    out.textContent = '终端已重启'
+    meta.textContent = ''
+  })
+  setTimeout(() => input.focus(), 50)
+}
+
 document.addEventListener('click', (ev) => {
+  const webLink = ev.target?.closest?.('[data-weblink]')
+  if (webLink) {
+    ev.preventDefault()
+    return openCloudWebTab(webLink.dataset.weblink, webLink.textContent)
+  }
+  const traceBtn = ev.target?.closest?.('[data-trace]')
+  if (traceBtn) {
+    ev.preventDefault()
+    if (!state.conversation?.id) return
+    return openRunTrace(state.conversation.id, traceBtn.dataset.trace)
+  }
+  const statsBtn = ev.target?.closest?.('[data-tstats]')
+  if (statsBtn) {
+    ev.preventDefault()
+    if (!state.conversation?.id) return
+    return openRunStats(state.conversation.id, statsBtn.dataset.tstats)
+  }
   const btn = ev.target?.closest?.('[data-fb]')
   if (!btn) return
   ev.preventDefault()
@@ -9653,6 +11548,7 @@ async function renderHistory(el) {
     if (!one.item) return
     state.conversation = one.item
     if (one.item.reasoningEffort) state.reasoningEffort = one.item.reasoningEffort
+    state.deepThink = Boolean(one.item.deepThink)
     state.chatSteps = []
     state.chatError = ''
     state.pendingConfirm = null
@@ -9680,30 +11576,36 @@ function openTaskRuns(a) {
   mask.querySelectorAll('[data-resume]').forEach((row) => row.addEventListener('click', async () => {
     const task = (state.tasks || []).find((x) => x.id === row.dataset.resume)
     if (!task?.conversationId) return
-    mask.remove()
-    await openConversation(task.conversationId)
-    state.draft = task.prompt || ''
-    renderView()
-    toast('已回到原会话并填入原指令，确认后发送')
+    const mask2 = openModal('恢复执行', `
+      <div class="form-note">
+        任务：${esc(task.title)}<br>
+        中断阶段：${esc(task.checkpoint?.phase || task.state)} · 原会话 ${esc(task.conversationId)}<br><br>
+        恢复会沿用原会话与 DSH session，只继续未完成部分；但中断前已发出的工具动作可能已经产生副作用，系统不会自动重放，需要你确认后重新执行。
+      </div>
+      <div class="form-foot"><span class="mono">确认后将回到原会话并发送恢复指令</span><span class="spacer"></span>
+        <button class="btn" data-resume-cancel>取消</button>
+        <button class="btn primary" data-resume-run>继续执行</button>
+      </div>`)
+    mask2.querySelector('[data-resume-cancel]').addEventListener('click', () => mask2.remove())
+    const run = mask2.querySelector('[data-resume-run]')
+    run.addEventListener('click', async () => {
+      if (run.disabled) return
+      run.disabled = true
+      const text = `【恢复执行】原任务：${task.prompt || task.title}\n请先检查当前工作区与已有产出，只继续未完成的部分；不要重复已完成的写入、命令或外部操作。`
+      mask2.remove()
+      mask.remove()
+      await openConversation(task.conversationId)
+      state.draft = text
+      renderView()
+      await sendMessage(text)
+    })
   }))
 }
 
 function openTaskFiles(a) {
-  const files = [
-    { name: a.deliver || '任务产出', meta: '投递位置', ico: 'doc' },
-    { name: `${a.name} · 来源台账`, meta: '数据中心 · 关联台账', ico: 'database' },
-    { name: '执行记录.txt', meta: `最近执行 · ${a.last}`, ico: 'history' },
-  ]
-  const mask = openModal(`任务文件 · ${a.name}`, `
-    <div class="tk-files">
-      ${files.map((f) => `<button class="tk-file" data-task-file="${esc(f.name)}">
-        <span class="tk-file-ico">${icon(f.ico)}</span>
-        <span class="tk-file-body"><b>${esc(f.name)}</b><span>${esc(f.meta)}</span></span>
-        <span class="tk-file-open">${icon('arrow')}</span>
-      </button>`).join('')}
-    </div>
-    <div class="form-foot"><span class="mono">任务产出与来源文件统一归档在该任务下</span></div>`)
-  mask.querySelectorAll('[data-task-file]').forEach((b) => b.addEventListener('click', () => toast(`打开文件「${b.dataset.taskFile}」（演示）`)))
+  openModal(`任务文件 · ${a.name}`, `
+    <div class="tk-doc-empty">任务文件入口尚未接入；当前没有可展示的真实任务产出文件。</div>
+    <div class="form-foot"><span class="mono">接入后将按任务归档产出与来源文件</span></div>`)
 }
 
 const TASK_STATE_MAP = {
@@ -9736,7 +11638,7 @@ async function renderTaskCenter(el) {
 
   const emptyPane = `
     <div class="tk-empty">
-      <div class="tk-empty-ico">${icon('clock')}</div>
+      <div class="tk-empty-ico">${icon('alarm')}</div>
       <div class="tk-empty-title">新建定时任务</div>
       <div class="tk-empty-sub"></div>
       <div class="tk-ideas">
@@ -9755,7 +11657,7 @@ async function renderTaskCenter(el) {
         <div class="tk-doc-name">${esc(sel.name)}</div>
         <span class="spacer"></span>
         <button class="tk-ico-btn" data-tkact="more" title="更多">${icon('dots')}</button>
-        <button class="tk-ico-btn" data-tkact="share" title="分享">${icon('send')}</button>
+        <button class="tk-ico-btn" data-tkact="share" title="分享尚未接入" disabled style="opacity:.45;cursor:not-allowed">${icon('send')}</button>
       </div>
       <div class="tk-doc-scroll">
         <div class="tk-doc-inner">
@@ -9769,10 +11671,15 @@ async function renderTaskCenter(el) {
               <span class="tk-src">${icon('doc')}<em>${esc(it.src)}</em></span>
             </div>`).join('')}
             <div class="tk-doc-note">${esc(rp.note)}</div>
+          ` : sel.lastResult ? `
+            <h1 class="tk-doc-h1">${esc(sel.name)}</h1>
+            <div class="tk-doc-meta">${esc(sel.schedule)}　·　${sel.status === 'active' ? '已开启' : '已暂停'}　·　下次 ${esc(sel.next || '—')}</div>
+            <div class="tk-doc-lead">最近一次执行结果</div>
+            <p style="white-space:pre-wrap">${esc(sel.lastResult)}</p>
           ` : `
             <h1 class="tk-doc-h1">${esc(sel.name)}</h1>
             <div class="tk-doc-meta">${esc(sel.schedule)}　·　${sel.status === 'active' ? '已开启' : '已暂停'}</div>
-            <div class="tk-doc-empty">这个定时任务还没有产出：${sel.status === 'active' ? '首次执行完成后，结果会直接呈现在这里。' : `已暂停，最近一次失败原因：${esc(sel.last)}`}</div>
+            <div class="tk-doc-empty">这个定时任务还没有产出：${sel.status === 'active' ? '首次执行完成后，结果会直接呈现在这里。' : `已暂停，最近执行：${esc(sel.last)}`}</div>
           `}
           <div class="tk-doc-foot">
             <div class="tk-foot-k">指令</div>
@@ -9784,35 +11691,75 @@ async function renderTaskCenter(el) {
         </div>
       </div>
       <div class="tk-composer">
-        <button class="icon-btn" data-tkact="plus" title="添加要求">${icon('plus')}</button>
-        <input id="tkAsk" placeholder="询问智能助手">
+        <button class="icon-btn" data-tkact="plus" title="追加要求尚未接入" disabled style="opacity:.45;cursor:not-allowed">${icon('plus')}</button>
+        <input id="tkAsk" placeholder="追加要求尚未接入" disabled style="opacity:.55">
         <span class="tk-when">即时</span>
-        <button class="tk-send" id="tkAskSend">${icon('up')}</button>
+        <button class="tk-send" id="tkAskSend" disabled style="opacity:.45;cursor:not-allowed">${icon('up')}</button>
       </div>
     </div>` : emptyPane
 
+  const pinnedFirst = (a, b) => ((state.taskPins || []).includes(b.id) ? 1 : 0) - ((state.taskPins || []).includes(a.id) ? 1 : 0)
+  const autoItem = (a) => `
+          <button class="tk-item${a.id === selId ? ' on' : ''}" data-auto="${a.id}">
+            <span class="tk-item-main"><b>${esc(a.name)}</b><span>${esc(a.next || '—')} · ${esc(a.schedule)}</span></span>
+            ${a.status === 'active' ? '<span class="tk-dot"></span>' : ''}
+          </button>`
+  const statusOf = (a) => (a.status === 'active' ? 'active' : (a.status === 'done' || a.status === 'completed' ? 'done' : 'paused'))
+  let enabledStatus = state.taskStatus || ['active', 'paused', 'done']
+  let taskQuery = String(state.taskQuery || '').trim().toLowerCase()
+  const filteredTaskAutos = () => state.automations.filter((a) => {
+    if (!enabledStatus.includes(statusOf(a))) return false
+    if (!taskQuery) return true
+    return `${a.name} ${a.prompt || ''} ${a.schedule || ''} ${a.next || ''} ${a.lastResult || ''} ${a.deliver || ''}`
+      .toLowerCase().includes(taskQuery)
+  })
+  const listGroups = () => {
+    const filteredAutos = filteredTaskAutos()
+    const active = filteredAutos.filter((a) => statusOf(a) === 'active').sort(pinnedFirst)
+    const paused = filteredAutos.filter((a) => statusOf(a) === 'paused').sort(pinnedFirst)
+    const done = filteredAutos.filter((a) => statusOf(a) === 'done').sort(pinnedFirst)
+    return `
+      ${active.length ? `<div class="tk-group-label">已开启</div><div class="tk-list">${active.map(autoItem).join('')}</div>` : ''}
+      ${paused.length ? `<div class="tk-group-label">已暂停</div><div class="tk-list">${paused.map(autoItem).join('')}</div>` : ''}
+      ${done.length ? `<div class="tk-group-label">已完成</div><div class="tk-list">${done.map(autoItem).join('')}</div>` : ''}
+      ${filteredAutos.length ? '' : `<div class="tk-filter-empty">${taskQuery ? '没有找到匹配的定时任务' : '当前状态筛选下没有任务'}</div>`}`
+  }
+  const bindAutoRows = (root) => {
+    root.querySelectorAll('[data-auto]').forEach((b) => b.addEventListener('click', () => {
+      state.taskSel = b.dataset.auto === state.taskSel ? '' : b.dataset.auto
+      if (useSidebar) render()
+      else renderView()
+    }))
+  }
   const taskListHTML = `
     <aside class="tk-left">
-      <div class="tk-left-head"><span>定时任务</span><span class="spacer"></span>
-        <button class="tk-ico-btn" id="tkFilter" title="筛选">${icon('layers')}</button>
-        <button class="tk-ico-btn" id="tkSearch" title="搜索任务">${icon('search')}</button>
+      <div class="tk-left-head">
+        <span>定时任务</span><span class="spacer"></span>
+        <button class="tk-ico-btn${state.taskFilterOpen ? ' on' : ''}" id="tkFilter" title="筛选">${icon('filter')}</button>
+        <button class="tk-ico-btn${state.taskSearchOpen || taskQuery ? ' on' : ''}" id="tkTaskSearchBtn" title="搜索定时任务">${icon('search')}</button>
+        <div class="tk-filter-pop" id="tkFilterPop"${state.taskFilterOpen ? '' : ' hidden'}>
+          <div class="tk-filter-title">状态</div>
+          ${[['active', '已开启'], ['paused', '已暂停'], ['done', '已完成']].map(([key, label]) => `
+            <button class="tk-filter-row" data-tf="${key}">
+              <span>${label}</span>
+              <span class="tk-filter-check">${icon('check')}</span>
+            </button>`).join('')}
+        </div>
       </div>
+      ${(state.taskSearchOpen || taskQuery) ? `
+        <div class="tk-search-row">
+          <span class="tk-search-ico">${icon('search')}</span>
+          <input id="tkSearchInput" placeholder="搜索定时任务" value="${esc(state.taskQuery || '')}" />
+          <button class="tk-search-clear" id="tkSearchClear" title="清除">${icon('close')}</button>
+        </div>` : ''}
       <button class="tk-new" id="newAuto">${icon('plus')}<span>新建定时任务</span></button>
-      <div class="tk-group-label">已开启</div>
-      <div class="tk-list">
-        ${state.automations.slice().sort((a, b) => ((state.taskPins || []).includes(b.id) ? 1 : 0) - ((state.taskPins || []).includes(a.id) ? 1 : 0)).map((a) => `
-          <button class="tk-item${a.id === selId ? ' on' : ''}" data-auto="${a.id}">
-            <span class="tk-item-main"><b>${esc(a.name)}</b><span>${esc(a.next)} · ${esc(a.schedule)}</span></span>
-            ${a.status === 'active' ? '<span class="tk-dot"></span>' : ''}
-          </button>`).join('')}
-      </div>
+      <div class="tk-groups" id="tkGroups">${listGroups()}</div>
     </aside>`
 
-  const useSidebar = state.view === 'tasks'
+  const useSidebar = hasSidebarView()
   if (useSidebar) {
     const sb = document.getElementById('sidebar')
-    sb.classList.remove('hidden')
-    sb.classList.add('tk-sidebar')
+    sb.classList.remove('hidden', 'tk-sidebar')
     sb.innerHTML = `${taskListHTML}<div class="pane-grip" id="sbGrip" title="拖动调整左右宽度 · 双击复位"></div>`
     bindSidebarResize()
     el.innerHTML = `<div class="tk-main tk-main-page">${detailPane}</div>`
@@ -9826,13 +11773,61 @@ async function renderTaskCenter(el) {
 
   const listRoot = useSidebar ? document.getElementById('sidebar') : el
   listRoot.querySelector('#newAuto').addEventListener('click', () => openAutomationForm())
-  listRoot.querySelector('#tkFilter').addEventListener('click', () => toast('按状态、频率与负责人筛选（演示）'))
-  listRoot.querySelector('#tkSearch').addEventListener('click', () => toast('任务搜索：名称、执行内容与负责人（演示）'))
-  listRoot.querySelectorAll('[data-auto]').forEach((b) => b.addEventListener('click', () => {
-    state.taskSel = b.dataset.auto === state.taskSel ? '' : b.dataset.auto
-    if (useSidebar) render()
-    else renderView()
+  const filterBtn = listRoot.querySelector('#tkFilter')
+  const filterPop = listRoot.querySelector('#tkFilterPop')
+  filterBtn.addEventListener('click', (e) => {
+    e.stopPropagation()
+    state.taskFilterOpen = !state.taskFilterOpen
+    filterPop.hidden = !state.taskFilterOpen
+    filterBtn.classList.toggle('on', state.taskFilterOpen)
+  })
+  const filterRows = Array.from(listRoot.querySelectorAll('[data-tf]'))
+  const refreshChecks = () => {
+    filterRows.forEach((row) => { row.classList.toggle('checked', enabledStatus.includes(row.dataset.tf)) })
+  }
+  refreshChecks()
+  filterRows.forEach((row) => row.addEventListener('click', (e) => {
+    e.stopPropagation()
+    const key = row.dataset.tf
+    const next = enabledStatus.includes(key) ? enabledStatus.filter((x) => x !== key) : [...enabledStatus, key]
+    enabledStatus = next
+    state.taskStatus = next
+    refreshChecks()
+    const groupsEl = listRoot.querySelector('#tkGroups')
+    groupsEl.innerHTML = listGroups()
+    bindAutoRows(listRoot)
   }))
+  const searchBtn = listRoot.querySelector('#tkTaskSearchBtn')
+  searchBtn.addEventListener('click', () => {
+    state.taskFilterOpen = false
+    if (state.taskSearchOpen || state.taskQuery) {
+      state.taskSearchOpen = false
+      state.taskQuery = ''
+    } else {
+      state.taskSearchOpen = true
+    }
+    render()
+  })
+  const searchInput = listRoot.querySelector('#tkSearchInput')
+  if (searchInput) {
+    searchInput.addEventListener('input', () => {
+      state.taskQuery = searchInput.value
+      taskQuery = String(state.taskQuery || '').trim().toLowerCase()
+      const groupsEl = listRoot.querySelector('#tkGroups')
+      groupsEl.innerHTML = listGroups()
+      bindAutoRows(listRoot)
+    })
+    listRoot.querySelector('#tkSearchClear').addEventListener('click', () => {
+      state.taskQuery = ''
+      taskQuery = ''
+      searchInput.value = ''
+      const groupsEl = listRoot.querySelector('#tkGroups')
+      groupsEl.innerHTML = listGroups()
+      bindAutoRows(listRoot)
+      searchInput.focus()
+    })
+  }
+  bindAutoRows(listRoot)
   el.querySelectorAll('[data-idea]').forEach((b) => b.addEventListener('click', () => {
     const idea = TASK_IDEAS.find((t) => t.name === b.dataset.idea)
     openAutomationForm(idea)
@@ -9842,10 +11837,10 @@ async function renderTaskCenter(el) {
     const act = b.dataset.tkact
     const sel = state.automations.find((x) => x.id === state.taskSel)
     if (!sel) return
-    if (act === 'share') return toast('产出可分享给项目成员（演示）')
-    if (act === 'split') return toast('分屏：左侧任务清单、右侧产出，可并排查看（演示）')
-    if (act === 'panel') return toast('侧栏：执行记录与指令（演示）')
-    if (act === 'plus') return toast('可在下方输入框追加要求，下次执行时带入指令（演示）')
+    if (act === 'share') return
+    if (act === 'split') return
+    if (act === 'panel') return
+    if (act === 'plus') return
     if (act === 'more') {
       document.querySelectorAll('.tk-more-pop').forEach((p) => p.remove())
       const pinned = (state.taskPins || []).includes(sel.id)
@@ -9864,12 +11859,12 @@ async function renderTaskCenter(el) {
           <span class="tk-menu-ico">${icon('doc')}</span>
           <span class="tk-menu-label">查看任务中的文件</span>
         </button>
-        <button class="cm-item tk-menu-item" data-tk="openweb">
+        <button class="cm-item tk-menu-item" data-tk="openweb" disabled style="opacity:.45;cursor:not-allowed">
           <span class="tk-menu-ico">${icon('external')}</span>
           <span class="tk-menu-label">在网页端打开</span>
         </button>
         <div class="tk-menu-sep"></div>
-        <button class="cm-item tk-menu-item" data-tk="move">
+        <button class="cm-item tk-menu-item" data-tk="move" disabled style="opacity:.45;cursor:not-allowed">
           <span class="tk-menu-ico">${icon('folder')}</span>
           <span class="tk-menu-label">移至项目</span>
           <span class="tk-menu-caret">${icon('chevron')}</span>
@@ -9953,14 +11948,7 @@ async function renderTaskCenter(el) {
   if (runsLink) runsLink.addEventListener('click', () => openTaskRuns(state.automations.find((x) => x.id === state.taskSel)))
   const askSend = el.querySelector('#tkAskSend')
   if (askSend) {
-    const ask = () => {
-      const v = el.querySelector('#tkAsk').value.trim()
-      if (!v) return
-      toast('已把补充要求记入该任务，下次执行时按新要求生成（演示）')
-      el.querySelector('#tkAsk').value = ''
-    }
-    askSend.addEventListener('click', ask)
-    el.querySelector('#tkAsk').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); ask() } })
+    askSend.addEventListener('click', () => {})
   }
   el.querySelectorAll('[data-task]').forEach((r) => r.addEventListener('click', (ev) => {
     if (ev.target.closest('[data-retry]') || ev.target.closest('[data-result]')) return
@@ -9969,6 +11957,11 @@ async function renderTaskCenter(el) {
   el.querySelectorAll('[data-run]').forEach((b) => b.addEventListener('click', async () => {
     const { ok, body: res } = await api('/api/automations/run', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: b.dataset.run }) })
     if (!ok) return toast(res.error, true)
+    if (res.item) {
+      const current = state.automations.find((x) => x.id === res.item.id)
+      if (current) Object.assign(current, res.item)
+    }
+    await loadTasks()
     toast(`已触发执行，任务 ${res.task.id} 进入队列`)
     renderView()
   }))
@@ -9988,7 +11981,7 @@ async function renderTaskCenter(el) {
     toast('已重新入队，失败原因保留在任务记录中')
     renderView()
   }))
-  el.querySelectorAll('[data-result]').forEach((b) => b.addEventListener('click', (ev) => { ev.stopPropagation(); toast('结果入口：打开产物文件或回到会话定位（演示）') }))
+  el.querySelectorAll('[data-result]').forEach((b) => b.addEventListener('click', (ev) => { ev.stopPropagation() }))
 
   if (state.tasks.some((t) => ['running', 'queued'].includes(t.state))) {
     clearTimeout(renderTaskCenter._t)
@@ -9997,7 +11990,370 @@ async function renderTaskCenter(el) {
 }
 
 
+function openWorktreeTask(project, item = null) {
+  const where = item ? `使用已有工作树 ${item.path}（分支 ${item.branch || 'detached'}），先执行 working_directory 切换到该目录，再继续任务。` : '先为当前项目创建隔离工作树，再在隔离目录内执行，不要直接改动当前项目目录。'
+  state.draft = `请使用 worktree 工具：${where}\n项目：${project.name}（${project.cwd}）。\n任务要求：`
+  state.view = 'home'
+  state.taskMode = 'work'
+  closeModals()
+  render()
+  const input = document.getElementById('draft')
+  if (input) {
+    input.focus()
+    input.setSelectionRange(input.value.length, input.value.length)
+  }
+  toast(item ? '已填入工作树任务' : '已填入新建工作树任务')
+}
+
+async function openWorktreePanel(project) {
+  if (!project?.id) return toast('缺少项目', true)
+  if (!project.cwd || project.status !== 'online') return toast('项目本地目录不可用', true)
+  const mask = openModal('工作树', `
+    <div style="min-width:680px;max-width:80vw">
+      <div class="mc-id" id="wtMeta">正在读取 Git 工作树…</div>
+      <div style="display:flex;gap:8px;align-items:center;margin:10px 0 12px;flex-wrap:wrap">
+        <button class="btn sm" id="wtRefresh">刷新</button>
+        <button class="btn sm primary" id="wtNew">让 Agent 新建工作树</button>
+        <span class="mc-dim" id="wtNote" style="flex:1;min-width:180px"></span>
+      </div>
+      <div id="wtList"></div>
+    </div>`, { wide: true })
+  const meta = mask.querySelector('#wtMeta')
+  const note = mask.querySelector('#wtNote')
+  const list = mask.querySelector('#wtList')
+
+  const rowHTML = (item) => {
+    const shortHead = String(item.head || '').slice(0, 8)
+    const dirty = item.dirty ? `<span class="tag" style="color:var(--warn)">${item.dirty} 个未提交</span>` : '<span class="tag">干净</span>'
+    const stateTag = item.main ? '<span class="tag">主工作树</span>' : '<span class="tag">隔离工作树</span>'
+    return `<div class="mc-block" data-wtpath="${esc(item.path)}" style="padding:10px;margin-bottom:8px">
+      <div style="display:flex;gap:10px;align-items:flex-start;flex-wrap:wrap">
+        <div style="flex:1;min-width:260px">
+          <div class="mono" style="font-size:12px;word-break:break-all">${esc(item.path)}</div>
+          <div class="mc-id" style="margin-top:4px">${esc(item.branch || '分离 HEAD')} · ${shortHead} · ${stateTag} ${dirty}${item.statusError ? ` · ${esc(item.statusError)}` : ''}</div>
+        </div>
+        <div class="wt-actions" style="display:flex;gap:6px;flex-wrap:wrap">
+          <button class="btn sm" data-wt-copy>复制路径</button>
+          ${item.main ? '' : `<button class="btn sm" data-wt-use>在此执行</button><button class="btn sm" data-wt-merge>合并</button><button class="btn sm" data-wt-discard>丢弃</button>`}
+        </div>
+      </div>
+    </div>`
+  }
+
+  const branchRowHTML = (branch) => `<div class="mc-block" data-wbname="${esc(branch.name)}" style="padding:10px;margin-bottom:8px">
+    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <div style="flex:1;min-width:220px"><div class="mono" style="font-size:12px">${esc(branch.name)}</div>
+      <div class="mc-id" style="margin-top:4px">不再被任何工作树占用</div></div>
+      <div class="wt-branch-actions" style="display:flex;gap:6px;flex-wrap:wrap"><button class="btn sm" data-wb-del>删除分支</button></div>
+    </div>
+  </div>`
+
+  const confirmBranch = (row, branch) => {
+    const actions = row.querySelector('.wt-branch-actions')
+    actions.innerHTML = `<span class="mc-dim" style="align-self:center">确认删除分支 ${esc(branch.name)}？</span>
+      <button class="btn sm primary" data-wb-go>确认</button><button class="btn sm" data-wb-cancel>取消</button>`
+    actions.querySelector('[data-wb-cancel]').addEventListener('click', () => load())
+    actions.querySelector('[data-wb-go]').addEventListener('click', async () => {
+      actions.innerHTML = '<span class="mc-dim">正在删除分支…</span>'
+      const { ok, body } = await api('/api/worktrees/delete-branch', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ projectId: project.id, branch: branch.name }),
+      })
+      if (!ok) {
+        toast(body?.error || '删除分支失败', true)
+        if (body?.output) toast(String(body.output).slice(-400), true)
+        await load()
+        return
+      }
+      toast(`已删除分支 ${branch.name}`)
+      await load()
+    })
+  }
+
+  const runAction = async (row, action, item) => {
+    const actions = row.querySelector('.wt-actions')
+    actions.innerHTML = `<span class="mc-dim">正在${action === 'merge' ? '合并' : '移除'}…</span>`
+    const path = `/api/worktrees/${action === 'merge' ? 'merge' : 'discard'}`
+    const { ok, body } = await api(path, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ projectId: project.id, path: item.path }),
+    })
+    if (!ok) {
+      toast(body?.error || '操作失败', true)
+      if (body?.output) toast(String(body.output).slice(-400), true)
+      await load()
+      return
+    }
+    toast(action === 'merge' ? `已合并 ${item.branch || item.path}` : '已移除工作树，分支保留')
+    await load()
+  }
+
+  const confirmRow = (row, action, item) => {
+    const actions = row.querySelector('.wt-actions')
+    const verb = action === 'merge' ? '合并到主工作树' : '丢弃工作树（未提交改动会丢失，分支保留）'
+    actions.innerHTML = `<span class="mc-dim" style="align-self:center">确认${verb}？</span>
+      <button class="btn sm primary" data-wt-go>确认</button><button class="btn sm" data-wt-cancel>取消</button>`
+    actions.querySelector('[data-wt-go]').addEventListener('click', () => runAction(row, action, item))
+    actions.querySelector('[data-wt-cancel]').addEventListener('click', () => load())
+  }
+
+  const bindRow = (row, item) => {
+    const copy = row.querySelector('[data-wt-copy]')
+    if (copy) copy.addEventListener('click', async () => {
+      try { await navigator.clipboard.writeText(item.path); toast('工作树路径已复制') } catch { toast(item.path) }
+    })
+    const use = row.querySelector('[data-wt-use]')
+    if (use) use.addEventListener('click', () => openWorktreeTask(project, item))
+    const merge = row.querySelector('[data-wt-merge]')
+    if (merge) merge.addEventListener('click', () => confirmRow(row, 'merge', item))
+    const discard = row.querySelector('[data-wt-discard]')
+    if (discard) discard.addEventListener('click', () => confirmRow(row, 'discard', item))
+  }
+
+  const load = async () => {
+    list.textContent = '正在读取 Git 工作树…'
+    const { ok, body } = await api(`/api/worktrees?projectId=${encodeURIComponent(project.id)}`)
+    if (!ok) {
+      meta.textContent = `${project.name} · ${project.cwd}`
+      note.textContent = ''
+      list.innerHTML = `<div class="mc-block" style="padding:12px">${esc(body?.error || '读取工作树失败')}</div>`
+      return
+    }
+    meta.textContent = `${project.name} · ${body.cwd || project.cwd}`
+    note.textContent = body.note || ''
+    if (!body.repo) {
+      list.innerHTML = `<div class="mc-block" style="padding:12px"><div class="mc-dim">当前项目不是 Git 仓库，无法读取或创建工作树。</div><div class="mc-dim" style="margin-top:6px">先在项目目录执行 <span class="mono">git init</span>，再回来刷新。</div></div>`
+      return
+    }
+    if (!body.items.length) {
+      list.innerHTML = '<div class="mc-block" style="padding:12px"><div class="mc-dim">暂无工作树记录。</div></div>'
+      return
+    }
+    list.innerHTML = body.items.map(rowHTML).join('')
+    list.querySelectorAll('[data-wtpath]').forEach((row, index) => bindRow(row, body.items[index]))
+    const orphans = (body.branches || []).filter((branch) => branch.orphan)
+    if (orphans.length) {
+      list.insertAdjacentHTML('beforeend', `<div class="mc-id" style="margin:14px 0 8px"><b>孤立分支</b> · 工作树已移除，分支仍保留</div>${orphans.map(branchRowHTML).join('')}`)
+      list.querySelectorAll('[data-wbname]').forEach((row, index) => {
+        const branch = orphans[index]
+        row.querySelector('[data-wb-del]')?.addEventListener('click', () => confirmBranch(row, branch))
+      })
+    }
+  }
+
+  mask.querySelector('#wtRefresh').addEventListener('click', load)
+  mask.querySelector('#wtNew').addEventListener('click', () => openWorktreeTask(project))
+  await load()
+}
+
+function startAgentEntry(id) {
+  const project = currentProject()
+  if (id === 'worktree') {
+    if (!project || project.status !== 'online') {
+      toast('工作树需要先打开一个在线项目', true)
+      state.view = 'home'
+      render()
+      setTimeout(() => openWorkspacePicker(), 30)
+      return
+    }
+    openWorktreePanel(project)
+    return
+  }
+  if (id === 'auto-review') {
+    toast('自动审查是 DSH 实验性逐工具调用权限层，本产品尚未接入；它不是独立审查报告', true)
+    return
+  }
+  const label = id === 'agent-team' ? 'Agent 团队' : '自动审查'
+  if (!project || project.status !== 'online') {
+    toast(`${label}需要先打开一个在线项目`, true)
+    state.view = 'home'
+    render()
+    setTimeout(() => openWorkspacePicker(), 30)
+    return
+  }
+  const prefix = id === 'agent-team'
+    ? '请使用 Agent Team（tool-agent-team）能力：先判断任务能否拆成 2-3 个并行子任务，给每个子 Agent 明确边界，再汇总可核对的结论。'
+    : ''
+  state.draft = `${prefix}${project ? `\n项目：${project.name}（${project.cwd}）。` : ''}\n任务要求：`
+  state.view = 'home'
+  state.taskMode = 'work'
+  render()
+  const input = document.getElementById('draft')
+  if (input) {
+    input.focus()
+    input.setSelectionRange(input.value.length, input.value.length)
+  }
+  toast(`${label}入口已打开，补充任务要求后发送`)
+}
+
 /* ---------------------------- admin ---------------------------- */
+
+async function renderCodeReview(el) {
+  const res = await api('/api/projects').catch(() => null)
+  if (res?.ok) state.projects = res.body.items || []
+  const projects = (state.projects || []).filter((p) => !p.removed)
+  el.innerHTML = `<div style="max-width:1080px;margin:0 auto;padding:24px">
+    <div style="display:flex;align-items:flex-start;gap:16px;flex-wrap:wrap">
+      <div>
+        <div style="font-size:24px;font-weight:700">代码审查服务</div>
+        <div style="color:var(--muted);margin-top:6px">Harness 通用基础服务：任意项目、Chat/Work Agent 与 MCP 工具都可调用同一套只读审查能力。此页是服务控制台，不是 DSH 的 auto-review 权限层，也不生成伪造结论。</div>
+      </div>
+    </div>
+    <div class="mc-block" style="padding:14px;margin-top:18px">
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <select id="crProject" style="min-width:260px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:transparent;color:inherit">
+          <option value="">选择已绑定本地目录的项目</option>
+          ${projects.map((p) => `<option value="${esc(p.id)}">${esc(p.name)}${p.cwd ? '' : '（未绑定目录）'}</option>`).join('')}
+        </select>
+        <select id="crScope" style="padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:transparent;color:inherit">
+          <option value="all">全量源码</option>
+          <option value="changed">仅工作区改动</option>
+        </select>
+        <button class="btn primary" id="crRun">运行审查</button>
+        <span id="crStatus" style="color:var(--muted);font-size:12px"></span>
+      </div>
+      <div class="form-note" style="margin:10px 0 0">检查项：Node 语法检查、JSON 可解析性、硬编码密钥、eval、命令执行、TODO 与调试输出。扫描结果逐条带文件、行号与证据。</div>
+    </div>
+    <div id="crReport" style="margin-top:14px"><div class="mc-block" style="padding:18px;color:var(--muted)">选择项目并运行审查，报告会显示在这里。</div></div>
+  </div>`
+  const projectSelect = el.querySelector('#crProject')
+  const scopeSelect = el.querySelector('#crScope')
+  const status = el.querySelector('#crStatus')
+  const out = el.querySelector('#crReport')
+  el.querySelector('#crRun').addEventListener('click', async () => {
+    const projectId = projectSelect.value
+    if (!projectId) return toast('请先选择项目', true)
+    const button = el.querySelector('#crRun')
+    button.disabled = true
+    status.textContent = '正在读取目录并执行检查…'
+    out.innerHTML = `<div class="mc-block" style="padding:18px;color:var(--muted)">正在扫描源码，语法检查可能需要几秒…</div>`
+    try {
+      const res = await api('/api/harness/services/code-review', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ projectId, scope: scopeSelect.value }),
+      })
+      if (!res.ok) throw new Error(res.body?.error || res.body?.detail || '审查失败')
+      const { project, report } = res.body
+      const sev = (s) => ({ high: '#b42318', medium: '#b45309', low: '#64748b' }[s] || '#64748b')
+      const tag = (s) => `<span class="tag" style="color:${sev(s)};border-color:${sev(s)}55">${esc({ high: '高', medium: '中', low: '低' }[s] || s)}</span>`
+      const rows = report.findings.map((f) => `<div style="padding:10px 0;border-top:1px solid var(--line)">
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">${tag(f.severity)}<span class="mono" style="font-size:12px">${esc(f.file)}:${Number(f.line || 1)}</span><span class="mono" style="font-size:11px;color:var(--muted)">${esc(f.rule)}</span></div>
+        <div style="margin-top:4px">${esc(f.message)}</div>
+        ${f.evidence ? `<div class="mono" style="margin-top:4px;font-size:11px;color:var(--muted);white-space:pre-wrap;word-break:break-word">${esc(f.evidence)}</div>` : ''}
+      </div>`).join('')
+      const md = [`# 代码审查报告 · ${project.name}`, '', `- 项目：${project.name}`, `- 目录：${project.cwd}`, `- 范围：${report.scope === 'changed' ? '工作区改动' : '全量源码'}`, `- 扫描文件：${report.scanned}`, `- 高风险：${report.summary.high} / 中风险：${report.summary.medium} / 低风险：${report.summary.low}`, `- 语法检查：${report.checks.syntax.checked} 个，失败 ${report.checks.syntax.failed} 个`, ''].concat(report.findings.map((f) => `- [${f.severity}] ${f.file}:${f.line} ${f.rule} — ${f.message}`)).join('\n')
+      const blob = new Blob([md], { type: 'text/markdown;charset=utf-8' })
+      const url = URL.createObjectURL(blob)
+      out.innerHTML = `<div class="mc-block" style="padding:16px">
+        <div style="display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap">
+          <div><div style="font-size:18px;font-weight:700">${esc(project.name)}</div><div class="mono" style="font-size:11px;color:var(--muted);margin-top:4px">${esc(project.cwd)}</div></div>
+          <span class="tag ok" style="margin-left:auto">已扫描 ${report.scanned} 个文件</span>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-top:14px">
+          ${[['高风险', report.summary.high, '#b42318'], ['中风险', report.summary.medium, '#b45309'], ['低风险', report.summary.low, '#64748b'], ['语法失败', report.checks.syntax.failed, '#b42318']].map(([label, value, color]) => `<div style="border:1px solid var(--line);border-radius:10px;padding:10px"><div style="font-size:11px;color:var(--muted)">${label}</div><div style="font-size:22px;font-weight:700;color:${color}">${value}</div></div>`).join('')}
+        </div>
+        <div class="form-note" style="margin-top:12px">${esc(report.note)} ${esc(report.git?.note || '')}</div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px;gap:8px;flex-wrap:wrap">
+          <span class="mono" style="font-size:11px;color:var(--muted)">JSON 检查 ${report.checks.json.checked} 个，失败 ${report.checks.json.failed} 个</span>
+          <button class="btn sm" id="crExport">导出 Markdown 报告</button>
+        </div>
+        <div style="margin-top:10px">${rows || `<div style="padding:16px;color:var(--muted)">未命中任何规则，也没有语法错误。这是真实扫描结果，不代表代码没有业务缺陷。</div>`}</div>
+      </div>`
+      const exportBtn = out.querySelector('#crExport')
+      exportBtn.addEventListener('click', () => { const a = document.createElement('a'); a.href = url; a.download = `代码审查-${project.name}.md`; a.click() })
+      status.textContent = `完成：${report.scanned} 个文件，${report.summary.total} 条命中`
+    } catch (error) {
+      out.innerHTML = `<div class="mc-block" style="padding:16px;color:var(--warn)">${esc(error?.message || '审查失败')}</div>`
+      status.textContent = '执行失败'
+    } finally {
+      button.disabled = false
+    }
+  })
+}
+
+function renderAdminSettings(blocks, sec = {}) {
+  if (!blocks) return
+  const basic = sec.basic || {}
+  const writable = Boolean(sec.writable)
+  const sel = (value, current) => String(value) === String(current) ? ' selected' : ''
+  const settingRow = (label, control, note) => `<div style="padding:11px 12px;border-bottom:1px solid #eef0f3">
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <b style="font-size:12px;color:#202124;flex:1 1 120px;min-width:100px">${esc(label)}</b>
+      <span style="flex:0 1 210px;min-width:140px">${control}</span>
+    </div>
+    <div style="font-size:10px;color:#8a8f96;line-height:1.55;margin-top:4px">${esc(note)}</div>
+  </div>`
+  const infoRows = (items = []) => items.map((x) => `<div style="padding:10px 12px;border-bottom:1px solid #eef0f3">
+    <div style="display:flex;gap:10px;align-items:baseline;flex-wrap:wrap">
+      <b style="font-size:12px;color:#202124;min-width:82px;flex:0 0 auto">${esc(x.label)}</b>
+      <span style="font-size:11px;color:#30343a;word-break:break-all;flex:1 1 180px;min-width:0">${esc(x.value)}</span>
+    </div>
+    <div style="font-size:10px;color:#8a8f96;line-height:1.55;margin-top:3px">${esc(x.note || '—')}</div>
+  </div>`).join('') || '<div class="mc-row">暂无数据</div>'
+
+  const basicWrap = document.createElement('div')
+  basicWrap.className = 'mc-block'
+  const policyControl = `<select class="text-input" id="setPolicy" style="width:100%;min-width:0;box-sizing:border-box" ${writable ? '' : 'disabled'}>
+      <option value="auto"${sel('auto', basic.defaultPolicy)}>自动化执行</option>
+      <option value="manual"${sel('manual', basic.defaultPolicy)}>人工确认</option>
+    </select>`
+  const effortControl = `<select class="text-input" id="setEffort" style="width:100%;min-width:0;box-sizing:border-box" ${writable ? '' : 'disabled'}>
+      <option value="low"${sel('low', basic.defaultEffort)}>低</option>
+      <option value="medium"${sel('medium', basic.defaultEffort)}>中</option>
+      <option value="high"${sel('high', basic.defaultEffort)}>高</option>
+    </select>`
+  const workspaceControl = `<select class="text-input" id="setWorkspaceChanges" style="width:100%;min-width:0;box-sizing:border-box" ${writable ? '' : 'disabled'}>
+      <option value="true"${sel('true', basic.workspaceChanges !== false)}>开启</option>
+      <option value="false"${sel('false', basic.workspaceChanges !== false)}>关闭</option>
+    </select>`
+  basicWrap.innerHTML = `<div class="mc-block-head"><b>基础配置</b><span class="spacer"></span><span class="mc-count">${writable ? '可编辑' : '只读'}</span></div>
+    ${settingRow('默认执行策略', policyControl, '新对话的默认执行策略；已有对话不回溯。')}
+    ${settingRow('默认推理强度', effortControl, '影响新任务的首轮推理强度；用户仍可在对话中调整。')}
+    ${settingRow('工作区变更摘要', workspaceControl, '执行后生成工作区变更摘要；关闭后不额外采集文件差异。')}
+    <div style="display:flex;align-items:center;gap:8px;padding:10px 12px;border-top:1px solid #eef0f3;flex-wrap:wrap">
+      <span class="mc-dim">保存到本机 runtimeSettings；仅管理员可写，对新会话生效。</span>
+      <span class="spacer"></span>
+      <button class="btn sm primary" id="setSave" ${writable ? '' : 'disabled'}>保存基础配置</button>
+    </div>`
+  blocks.appendChild(basicWrap)
+  basicWrap.querySelector('#setSave')?.addEventListener('click', async (ev) => {
+    const button = ev.currentTarget
+    button.disabled = true
+    const payload = {
+      defaultPolicy: basicWrap.querySelector('#setPolicy').value,
+      defaultEffort: basicWrap.querySelector('#setEffort').value,
+      workspaceChanges: basicWrap.querySelector('#setWorkspaceChanges').value === 'true',
+    }
+    const { ok, body: saved } = await api('/api/settings', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+    if (!ok) {
+      button.disabled = false
+      return toast(saved.error || '基础配置保存失败', true)
+    }
+    state.runtimeSettings = saved.settings || { ...state.runtimeSettings, ...payload }
+    toast('基础配置已保存，对新会话生效')
+    renderView()
+  })
+
+  const versionWrap = document.createElement('div')
+  versionWrap.className = 'mc-block'
+  versionWrap.innerHTML = `<div class="mc-block-head"><b>客户端版本</b><span class="spacer"></span><span class="mc-count">只读</span></div>
+    ${infoRows(sec.version)}`
+  blocks.appendChild(versionWrap)
+
+  const envWrap = document.createElement('div')
+  envWrap.className = 'mc-block'
+  envWrap.innerHTML = `<div class="mc-block-head"><b>环境配置</b><span class="spacer"></span><span class="mc-count">只读</span></div>
+    ${infoRows(sec.environment)}
+    <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:10px 12px;border-top:1px solid #eef0f3">
+      <span class="mc-dim">网络：</span>
+      ${(sec.networks || []).map((n) => `<span class="mc-tag ${n.current ? 'ok' : ''}">${esc(n.label)}${n.current ? ' · 当前' : ''}</span>`).join('')}
+    </div>`
+  blocks.appendChild(envWrap)
+}
 
 async function renderAdmin(el) {
   const { body } = await api('/api/console')
@@ -10039,8 +12395,8 @@ async function renderAdmin(el) {
   }
   const sec = body.sections[tab]
   const STATUS = /^(正常|在线|成功|已发布|已通过|已闭环|已回收|已恢复|已修复|可用|开启|允许|通过|已入库|已生效|已显示|—)$/
-  const WARN = /^(待审核|待审批|待分派|待复核|待受理|待补录|处理中|草稿|降级|延迟|分发中|灰度|待发布|已暂停|待处理|预警|待确认)$/
-  const BAD = /^(失败|驳回|阻断|高风险|已锁定|超时|异常|关闭|禁用|无权限)$/
+  const WARN = /^(待审核|待审批|待分派|待复核|待受理|待补录|处理中|草稿|降级|延迟|分发中|灰度|待发布|已暂停|待处理|预警|待确认|已取消|已过期)$/
+  const BAD = /^(失败|驳回|已拒绝|阻断|高风险|已锁定|超时|异常|关闭|禁用|无权限)$/
   const cell = (x) => {
     const s = String(x == null ? '' : x)
     if (STATUS.test(s)) return `<span class="mc-tag ok">${esc(s)}</span>`
@@ -10070,10 +12426,14 @@ async function renderAdmin(el) {
       ${items.map((id) => `<button class="mc-nav-item${tab === id ? ' on' : ''}" data-mc="${id}"><span>${esc(meta[id].label)}</span></button>`).join('')}`
   }).join('')
 
-  el.innerHTML = `
+  const emptyState = tab !== 'ai' && !sec.kpis.length && !sec.blocks.length
+  // 先在离屏节点里组装完整页面，AI 能力管理的补充数据到位后再一次性挂载，
+  // 避免切换时先出现“侧栏导航重复、主区空白”的中间态。
+  const root = document.createElement('div')
+  root.innerHTML = `
     <div class="mc-shell">
       <div class="mc-nav">
-        <div class="mc-left-head"><div class="mc-title">管理中心</div><div class="mc-sub">统一控制台 · ${esc(body.modules[tab].label)}</div></div>
+        <div class="mc-left-head"><div class="mc-title">管理中心</div></div>
         ${navHTML}<div class="mc-nav-foot">${esc(role.name)}<span>${esc(role.scope)}</span></div>
       </div>
       <div class="mc-main">
@@ -10084,24 +12444,70 @@ async function renderAdmin(el) {
         </div>
         ${tab === 'overview' ? `<div class="mc-note">${esc(sec.meta)}</div>` : `<div class="mc-note">${esc(sec.meta)}</div>`}
         <div class="mc-kpis"${tab === 'ai' ? ' id="aiKpis"' : ''}>${tab === 'ai' ? '' : sec.kpis.map((k) => `<div class="mc-kpi"><div class="mc-kpi-k">${esc(k.k)}</div><div class="mc-kpi-v ${k.tone || ''}">${esc(k.v)}</div><div class="mc-kpi-note">${esc(k.note)}</div></div>`).join('')}</div>
-        ${tab === 'ai' ? `<style>.mc-seg{display:grid!important;grid-template-columns:repeat(4,minmax(0,1fr));gap:3px;margin-top:14px;padding:3px;border:1px solid #e7ebf1;border-radius:10px;background:#f7f8fa}.mc-seg-item{display:inline-flex;align-items:center;justify-content:center;gap:5px;border:1px solid transparent;background:transparent;border-radius:7px;padding:7px 3px;font-size:11px;color:#4a5057;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.mc-seg-item.on{background:#17191c;color:#fff;border-color:#17191c}.mc-seg-no{font-family:ui-monospace,Consolas,monospace;font-size:9px;color:#9aa1aa;flex:none}.mc-seg-item.on .mc-seg-no{color:#c9ced6}.mc-seg-note{margin:9px 0 0;font-size:var(--fs-dense);color:#7b828b;line-height:1.6}@media (max-width:760px){.mc-seg-no{display:none}}</style><div class="mc-seg" id="aiSeg">${AI_SEGMENTS.map((s) => `<button class="mc-seg-item${aiTab === s.id ? ' on' : ''}" style="${aiTab === s.id ? 'background:#17191c!important;color:#fff!important;border-color:#17191c!important' : ''}" data-aitab="${s.id}"><span class="mc-seg-no">${s.no}</span>${s.label}</button>`).join('')}</div>
+        ${tab === 'ai' ? `<style>.mc-seg{display:grid!important;grid-template-columns:repeat(4,minmax(0,1fr));gap:3px;margin-top:14px;padding:3px;border:1px solid #e7ebf1;border-radius:10px;background:#f7f8fa}.mc-seg-item{display:inline-flex;align-items:center;justify-content:center;gap:5px;border:1px solid transparent;background:transparent;border-radius:7px;padding:7px 3px;font-size:11px;color:#4a5057;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.mc-seg-item.on{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}.mc-seg-no{font-family:ui-monospace,Consolas,monospace;font-size:9px;color:#9aa1aa;flex:none}.mc-seg-item.on .mc-seg-no{color:var(--accent-ink)}.mc-seg-note{margin:9px 0 0;font-size:var(--fs-dense);color:#7b828b;line-height:1.6}@media (max-width:760px){.mc-seg-no{display:none}}</style><div class="mc-seg" id="aiSeg">${AI_SEGMENTS.map((s) => `<button class="mc-seg-item${aiTab === s.id ? ' on' : ''}" style="${aiTab === s.id ? 'background:var(--accent)!important;color:var(--accent-ink)!important;border-color:var(--accent)!important' : ''}" data-aitab="${s.id}"><span class="mc-seg-no">${s.no}</span>${s.label}</button>`).join('')}</div>
           <div class="mc-seg-note">${esc(AI_SEGMENTS.find((s) => s.id === aiTab).note)}</div>` : ''}
-        <div class="mc-blocks">${sec.blocks.map(block).join('')}</div>
+        <div class="mc-blocks">${sec.blocks.map(block).join('')}${emptyState ? `<div class="mc-empty">该模块尚未接入真实数据，暂不展示演示内容。</div>` : ''}</div>
       </div>
     </div>`
+  const blocks = root.querySelector('.mc-blocks')
 
-  el.querySelectorAll('[data-mc]').forEach((b) => b.addEventListener('click', () => {
+  root.querySelectorAll('[data-mc]').forEach((b) => b.addEventListener('click', () => {
     state.consoleTab = b.dataset.mc
     renderView()
   }))
-  el.querySelectorAll('[data-aitab]').forEach((b) => b.addEventListener('click', () => {
+  root.querySelectorAll('[data-aitab]').forEach((b) => b.addEventListener('click', () => {
     state.aiTab = b.dataset.aitab
     renderView()
   }))
-  el.querySelector('#mcRefresh').addEventListener('click', () => {
+  root.querySelector('#mcRefresh').addEventListener('click', () => {
     toast('已刷新：数据来自平台监控、模型网关与数据中心接口')
     renderView()
   })
+
+  if (tab === 'security') {
+    const { body: approvalBody } = await api('/api/approval-decisions?limit=50')
+    const items = approvalBody.items || []
+    const statusOf = (value) => {
+      if (/allowed/i.test(String(value || ''))) return ['ok', '已通过']
+      if (value === 'pending') return ['warn', '待审批']
+      if (/reject|deny/i.test(String(value || ''))) return ['bad', '已拒绝']
+      if (/cancel/i.test(String(value || ''))) return ['warn', '已取消']
+      if (/expire/i.test(String(value || ''))) return ['warn', '已过期']
+      return ['', value || '—']
+    }
+    const ruleOf = (value) => ({
+      'dsh-workspace-write-escalation': 'DSH 工作区越界升级',
+      'dsh-read-only-approval': 'DSH 只读策略升级',
+      'chat-mode-no-escalation': '对话模式只读',
+      'external-side-effect': '外部副作用',
+      'dsh-scheduled-escalation-unavailable': '定时任务无人值守',
+    }[value] || value || '—')
+    const riskOf = (value) => ({ high: '高风险', medium: '中风险', low: '低风险' }[value] || value || '—')
+    if (blocks) {
+      const wrap = document.createElement('div')
+      wrap.className = 'mc-block'
+      wrap.innerHTML = `<div class="mc-block-head"><b>审批决策列表</b><span class="spacer"></span><span class="mc-count">${items.length} 条</span></div>
+        ${items.length ? `<div style="display:flex;flex-direction:column">${items.map((x) => {
+          const [tone, label] = statusOf(x.decision)
+          const tool = toolLabel(x.tool)
+          const time = String(x.time || '').replace('T', ' ').slice(0, 16)
+          return `<div style="padding:10px 11px;border-bottom:1px solid #eef0f3;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px 10px">
+            <div style="min-width:0">
+              <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+                <b style="font-size:12px;color:#202124">${esc(tool)}</b>
+                ${x.operation && x.operation !== 'unknown' && x.operation !== x.tool ? `<span class="mc-dim" style="font-size:11px">${esc(x.operation)}</span>` : ''}
+                <span class="mono" style="font-size:10px;color:#9aa1aa">${esc(time)}</span>
+              </div>
+              <div style="font-size:10px;color:#8a8f96;line-height:1.5;margin-top:2px">${esc(x.actor || '—')} · ${esc(ruleOf(x.rule))}${x.risk ? ` · ${esc(riskOf(x.risk))}` : ''}</div>
+            </div>
+            <span class="mc-tag ${tone}" style="align-self:start">${esc(label)}</span>
+            <div style="grid-column:1/-1;font-size:11px;color:#4b5056;line-height:1.55;word-break:break-word">${esc(x.argsSummary || '未提供参数摘要')}</div>
+          </div>`
+        }).join('')}</div>` : `<div class="mc-row">暂无审批决策记录</div>`}
+        <div class="mc-block-note">PTC 嵌套调用无法回传精确参数时，摘要来自运行时升级原因，不冒充完整参数。</div>`
+      blocks.appendChild(wrap)
+    }
+  }
 
   if (tab === 'ai') {
     const [{ body: sub }, { body: runtimeInfo }, { body: modelCfg }] = await Promise.all([
@@ -10113,7 +12519,6 @@ async function renderAdmin(el) {
     const pendingPlugins = pending.filter((x) => x.kind !== 'skill')
     const pendingSkills = pending.filter((x) => x.kind === 'skill')
     const runtimePlugins = runtimeInfo.plugins || []
-    const blocks = el.querySelector('.mc-blocks')
     if (blocks) {
       const reviewRows = (items, emptyText, type) => items.map((x) => {
         const bad = (x.checks || []).some((c) => c[1] === '不通过')
@@ -10174,16 +12579,15 @@ async function renderAdmin(el) {
             <span>基础能力</span>
             <span class="mono" style="font-size:10px">${esc(x.module)}</span>
             <span><span class="mc-tag ${x.enabled ? 'ok' : 'warn'}">${x.enabled ? '已启用' : '缺失'}</span></span>
-            <span class="mc-acts" style="grid-column:1/-1"><span class="mc-dim">系统内核不可停用或卸载</span></span>
           </div>`).join('')}
           ${bundles.map((b) => `<div class="mc-trow">
             <span class="mc-first" title="${esc(b.label)}">${esc(b.label)} <span class="mc-dim mono">${esc(b.name)}</span></span>
             <span>插件</span>
             <span>核心运行时</span>
             <span><span class="mc-tag ${b.enabled ? 'ok' : 'warn'}">${b.enabled ? '已启用' : '缺失'}</span></span>
-            <span class="mc-acts" style="grid-column:1/-1"><span class="mc-dim">系统内核不可停用或卸载</span></span>
           </div>`).join('')}
-        </div>`
+        </div>
+        <div class="mc-block-note">系统内核不可停用或卸载</div>`
       blocks.appendChild(wrap)
     }
     const { body: capAdmin } = await api('/api/platform-capabilities')
@@ -10194,7 +12598,7 @@ async function renderAdmin(el) {
       const wrap = document.createElement('div')
       wrap.className = 'mc-block'
       wrap.innerHTML = `<div class="mc-block-head"><b>平台公共能力</b><span class="spacer"></span><span class="mc-count">${caps.filter((c) => c.enabled).length} / ${caps.length} 项已启用</span></div>
-        <div class="mc-table" style="--mc-cols:minmax(136px,1.7fr) minmax(90px,1fr) minmax(58px,.7fr) minmax(80px,.9fr)">
+        <div class="mc-table" style="--mc-cols:minmax(96px,1.6fr) minmax(78px,1.05fr) minmax(44px,.55fr) minmax(78px,.95fr)">
           <div class="mc-thead"><span>系统模块</span><span>运行时模块</span><span>权限</span><span>资源上限</span></div>
           ${caps.map((c) => `<div class="mc-trow">
             <span class="mc-first" title="${esc(c.name)}">${esc(c.shortName || c.name)} <span class="mc-tag ${c.disabled ? 'warn' : c.enabled ? 'ok' : 'bad'}">${c.disabled ? '已停用' : c.enabled ? '默认启用' : '未加载'}</span><span class="mc-dim" style="display:block;font-size:10px">${esc(c.accessibleTo || '全部授权用户')}</span></span>
@@ -10256,13 +12660,15 @@ async function renderAdmin(el) {
       const keyIds = ['agent', 'agent-loop', 'llm-deepseek', 'mcp-jg', 'skill-office', 'optional-session-search', 'schedule']
       const keyRows = keyIds.map((id) => runtimePlugins.find((p) => p.id === id)).filter(Boolean)
       const enabledCount = runtimePlugins.filter((p) => p.enabled).length
-      wrap.innerHTML = `<div class="mc-block-head"><b>DSH 运行时诊断</b><span class="spacer"></span><span class="mc-count">${enabledCount} / ${runtimePlugins.length} 启用 · ${runtimePlugins.filter((p) => !p.enabled).length} 停用</span><button class="btn sm" data-runtime-all>查看全部</button></div>
+      wrap.innerHTML = `<div class="mc-block-head"><b>DSH 运行时诊断</b><span class="spacer"></span><span class="mc-count">${enabledCount} / ${runtimePlugins.length} 启用 · ${runtimePlugins.filter((p) => !p.enabled).length} 停用</span><button class="btn sm" data-speech-open>本地语音</button><button class="btn sm" data-term-open>开发终端</button><button class="btn sm" data-runtime-all>查看全部</button></div>
         <div class="form-note" style="margin:0 0 8px">这里是 DSH 内部运行时模块，不是员工在插件市场安装的插件；停用项由当前 sdk profile 配置决定，属于运行诊断，不作为业务能力指标。</div>
-        <div class="mc-table" style="--mc-cols:minmax(100px,.9fr) minmax(210px,1.9fr) minmax(60px,.6fr)">
+        <div class="mc-table" style="--mc-cols:minmax(90px,.9fr) minmax(0,1.55fr) minmax(44px,.5fr)">
           <div class="mc-thead"><span>运行时 ID</span><span>插件包</span><span>状态</span></div>
           ${keyRows.map((p) => `<div class="mc-trow"><span class="mono" style="font-size:11px">${esc(p.id)}</span><span class="mono" style="font-size:10px">${esc(p.name)}</span><span><span class="mc-tag ${p.enabled ? 'ok' : 'warn'}">${p.enabled ? '启用' : '停用'}</span></span></div>`).join('') || '<div class="mc-row">运行时未返回插件清单</div>'}
         </div>`
       blocks.appendChild(wrap)
+      wrap.querySelector('[data-speech-open]').addEventListener('click', openSpeechSettings)
+      wrap.querySelector('[data-term-open]').addEventListener('click', openAdminTerminal)
       wrap.querySelector('[data-runtime-all]').addEventListener('click', () => {
         const rows = runtimePlugins.map((p) => `<div class="mc-trow" style="--mc-cols:minmax(120px,1fr) minmax(230px,2fr) minmax(54px,.6fr)">
           <span class="mono" style="font-size:11px">${esc(p.id)}</span>
@@ -10294,6 +12700,8 @@ async function renderAdmin(el) {
               <button class="btn sm" data-mkt-users="${esc(x.id)}">安装用户 ${(x.installUsers || []).filter((u) => u.scope !== 'baseline').length}</button>
               <button class="btn sm" data-mkt-edit="${esc(x.id)}">编辑</button>
               <button class="btn sm ${x.listed === false ? 'primary' : ''}" data-mkt-list="${esc(x.id)}" data-next="${x.listed === false ? 'list' : 'unlist'}">${x.listed === false ? '重新上架' : '下架'}</button>
+              ${x.origin === 'community' && x.kind !== 'plugin' ? `<button class="btn sm" data-mkt-upgrade="${esc(x.id)}">升级</button>` : ''}
+              ${x.canRollback ? `<button class="btn sm" data-mkt-rollback="${esc(x.id)}">回滚</button>` : ''}
               ${x.origin === 'community' ? `<button class="btn sm" data-mkt-del="${esc(x.id)}">删除</button>` : ''}
             </span>
           </div>`).join('')
@@ -10341,6 +12749,42 @@ async function renderAdmin(el) {
           </div>` : '<div class="mc-row">还没有安装记录</div>', )
         m.querySelector('[data-mclose]')?.addEventListener('click', () => m.remove())
       }))
+      wrap.querySelectorAll('[data-mkt-upgrade]').forEach((b) => b.addEventListener('click', () => {
+        const item = items.find((x) => x.id === b.dataset.mktUpgrade)
+        if (!item) return
+        const m = openModal('升级市场包', `
+          <div class="form-note">当前版本 <span class="mono">${esc(item.version || '—')}</span>。平台会先备份当前包；替换失败自动回滚，成功后可手动回滚到上一版本。</div>
+          <div class="form-label">新版本 ZIP 包</div><input class="text-input" type="file" id="mktUpFile" accept=".zip" />
+          <div class="form-label" style="margin-top:8px">版本号（可选）</div><input class="text-input" id="mktUpVersion" placeholder="例如 1.2.0" />
+          <div class="form-foot"><span class="spacer"></span><button class="btn" data-mclose>取消</button><button class="btn primary" id="mktUpOk">上传并升级</button></div>`)
+        m.querySelector('#mktUpOk').addEventListener('click', async (ev) => {
+          const file = m.querySelector('#mktUpFile').files?.[0]
+          if (!file) return toast('请选择升级 ZIP 包', true)
+          ev.currentTarget.disabled = true
+          const up = await uploadBinaryFile(file, 'plugin')
+          if (!up.ok) { ev.currentTarget.disabled = false; return toast(up.body?.error || '上传失败', true) }
+          const { ok, body } = await api('/api/admin/plugin-market', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: item.id, action: 'upgrade', fileId: up.file.id, version: m.querySelector('#mktUpVersion').value.trim() }) })
+          if (!ok) { ev.currentTarget.disabled = false; return toast(body?.error || '升级失败', true) }
+          m.remove()
+          toast(`已升级到 ${body.item?.version || '新版本'}${body.backup ? '，旧版本已备份' : ''}`)
+          renderView()
+        })
+      }))
+      wrap.querySelectorAll('[data-mkt-rollback]').forEach((b) => b.addEventListener('click', () => {
+        const item = items.find((x) => x.id === b.dataset.mktRollback)
+        if (!item) return
+        const m = openModal('回滚市场包', `
+          <div class="form-note">将把 <span class="mono">${esc(item.name)}</span> 恢复到上一备份版本 ${esc(item.versions?.[0]?.version || '')}。已安装账号的运行时会在下一轮重新加载。</div>
+          <div class="form-foot"><span class="spacer"></span><button class="btn" data-mclose>取消</button><button class="btn primary" id="mktRbOk">确认回滚</button></div>`)
+        m.querySelector('#mktRbOk').addEventListener('click', async (ev) => {
+          ev.currentTarget.disabled = true
+          const { ok, body } = await api('/api/admin/plugin-market', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: item.id, action: 'rollback' }) })
+          if (!ok) { ev.currentTarget.disabled = false; return toast(body?.error || '回滚失败', true) }
+          m.remove()
+          toast(`已回滚到 ${body.restoredVersion || '上一版本'}`)
+          renderView()
+        })
+      }))
       wrap.querySelectorAll('[data-mkt-edit]').forEach((b) => b.addEventListener('click', () => {
         const item = items.find((x) => x.id === b.dataset.mktEdit)
         if (!item) return
@@ -10363,9 +12807,10 @@ async function renderAdmin(el) {
         })
       }))
     }
-    const kpiBox = document.getElementById('aiKpis')
+    const kpiBox = root.querySelector('#aiKpis')
     if (kpiBox) {
       const marketItems = marketAdmin.items || []
+      const officialCount = marketItems.filter((x) => x.origin !== 'community').length
       const infraRows = baselineAdmin.infrastructure || []
       const enabledBundles = baselineBundleRows.filter((x) => x.enabled).length
       const enabledInfra = infraRows.filter((x) => x.enabled).length
@@ -10374,7 +12819,7 @@ async function renderAdmin(el) {
       const kpis = [
         { k: '系统内核', v: `${enabledBundles + enabledInfra} / ${kernelTotal}`, note: '启动底座与文件基础，只读' },
         { k: '平台公共能力', v: `${enabledCaps} / ${capRows.length}`, note: '系统级模块，可停用' },
-        { k: '市场条目', v: `${marketItems.length}`, note: `官方 4 · 待审核 ${pending.length}` },
+        { k: '市场条目', v: `${marketItems.length}`, note: `官方 ${officialCount} · 待审核 ${pending.length}` },
         { k: '待审核', v: `${pending.length}`, note: '员工插件与技能提交' },
       ]
       kpiBox.innerHTML = kpis.map((x) => `<div class="mc-kpi"><div class="mc-kpi-k">${esc(x.k)}</div><div class="mc-kpi-v">${esc(x.v)}</div><div class="mc-kpi-note">${esc(x.note)}</div></div>`).join('')
@@ -10390,6 +12835,9 @@ async function renderAdmin(el) {
       })
     }
   }
+  if (tab === 'settings') renderAdminSettings(blocks, sec)
+
+  el.replaceChildren(...root.childNodes)
 }
 
 async function renderTickets(box) {
@@ -10565,6 +13013,11 @@ async function renderAutomation(el) {
   el.querySelectorAll('[data-run]').forEach((b) => b.addEventListener('click', async () => {
     const { ok, body: res } = await api('/api/automations/run', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: b.dataset.run }) })
     if (!ok) return toast(res.error, true)
+    if (res.item) {
+      const current = state.automations.find((x) => x.id === res.item.id)
+      if (current) Object.assign(current, res.item)
+    }
+    await loadTasks()
     toast(`已触发执行，任务 ${res.task.id} 进入队列`)
     renderView()
   }))
@@ -10772,6 +13225,17 @@ function renderSettings(el) {
     })
   })
 
+  el.querySelector('[data-act="changePassword"]')?.addEventListener('click', openChangePassword)
+
+  const unavailableSettings = new Set(['workspace', 'workspaceReset', 'reauth', 'devices', 'diag', 'applyAccess', 'export', 'archive', 'clearCache', 'testMcp', 'update', 'help'])
+  el.querySelectorAll('[data-act]').forEach((b) => {
+    if (!unavailableSettings.has(b.dataset.act)) return
+    b.disabled = true
+    b.style.opacity = '.45'
+    b.style.cursor = 'not-allowed'
+    b.title = '功能尚未接入'
+  })
+
   const search = el.querySelector('#setSearch')
   search.addEventListener('input', (e) => {
     state.settingsQuery = e.target.value
@@ -10779,6 +13243,27 @@ function renderSettings(el) {
     renderView()
     const next = document.getElementById('setSearch')
     if (next) { next.focus(); next.setSelectionRange(next.value.length, next.value.length) }
+  })
+
+  const focusLabel = state.settingsFocus
+  if (focusLabel) {
+    state.settingsFocus = null
+    const row = Array.from(el.querySelectorAll('.set-label'))
+      .find((x) => x.textContent.trim() === focusLabel)?.closest('.set-row')
+    if (row) {
+      row.scrollIntoView({ block: 'center' })
+      row.style.boxShadow = 'inset 0 0 0 2px var(--accent)'
+      row.style.borderRadius = '10px'
+      setTimeout(() => { row.style.boxShadow = ''; row.style.borderRadius = '' }, 1400)
+    }
+  }
+
+  el.querySelector('[data-usage-refresh]')?.addEventListener('click', async (event) => {
+    const button = event.currentTarget
+    button.disabled = true
+    button.textContent = '刷新中…'
+    const summary = await loadUsageSummary().catch(() => null)
+    if (!summary) toast('用量汇总读取失败', true)
   })
 
   const mcpSearch = el.querySelector('#mcpSearch')
@@ -11037,6 +13522,7 @@ function settingsBody(tab) {
           srow('岗位', '一人多岗时以主岗展示，兼任关系在授权服务维护', `<span class="set-value">${esc(user.duty)}</span>`),
         ]),
         sgroup('安全', [
+          srow('登录密码', '用于账号密码登录；首次登录必须修改初始密码', '<span class="tag ok">已设置</span><span class="set-btn-gap"></span>' + sbtn('changePassword', '修改密码')),
           srow('二次认证', '登录与高危操作需二次认证，认证记录进审计', '<span class="tag ok">已启用</span><span class="set-btn-gap"></span>' + sbtn('reauth', '重新认证')),
           srow('当前设备', 'Windows 10 · 客户端 1.0.0-mvp · 内网地址段', sbtn('devices', '查看全部设备')),
         ]),
@@ -11246,6 +13732,37 @@ function settingsBody(tab) {
     }
   }
 
+  if (tab === 'usage') {
+    const summary = state.usageSummary
+    const totals = summary?.totals || {}
+    const fmt = (n) => Number(n || 0).toLocaleString('zh-CN')
+    const coverage = summary?.coverage || {}
+    const records = (summary?.records || []).slice(0, 8)
+    return {
+      title: 'Token 用量',
+      groups: [
+        sgroup('真实计量', [
+          srow('累计 tokens', '来自每轮 DSH 返回的 usage；没有 usage 的轮次不计入', `<span class="set-value mono">${summary ? fmt(totals.totalTokens) : '读取中…'}</span>`),
+          srow('输入 / 输出', '输入 = 上下文与提示词；输出 = 模型生成', `<span class="set-value mono">${fmt(totals.inputTokens)} / ${fmt(totals.outputTokens)}</span>`),
+          srow('模型调用次数', '按真实 usage.calls 汇总，不是前端点击次数', `<span class="set-value mono">${fmt(totals.requests)}</span>`),
+          srow('缓存读 / 写', '缓存命中与写入分别计量', `<span class="set-value mono">${fmt(totals.cacheReadTokens)} / ${fmt(totals.cacheWriteTokens)}</span>`),
+          srow('推理 tokens', '仅统计上游返回的 reasoning_tokens', `<span class="set-value mono">${fmt(totals.reasoningTokens)}</span>`),
+          srow('采集覆盖', '只统计已落库的真实计量，不用估算值补齐', `<span class="set-value mono">${coverage.usageMessages || 0} / ${coverage.assistantMessages || 0} 条助手消息</span><span class="set-btn-gap"></span><button class="btn sm" data-usage-refresh>刷新</button>`),
+        ]),
+        sgroup('按模型', (summary?.models || []).length
+          ? summary.models.map((m) => srow(m.model, `${fmt(m.requests)} 次调用 · 输入 ${fmt(m.inputTokens)} / 输出 ${fmt(m.outputTokens)}`, `<span class="set-value mono">${fmt(m.totalTokens)} tokens</span>`))
+          : [srow('暂无真实模型用量', '发起一次模型对话后，这里会出现按模型的真实统计', '<span class="set-value">—</span>')]),
+        sgroup('最近计量', records.length
+          ? records.map((r) => srow(`${r.conversationTitle}${r.time ? ` · ${r.time}` : ''}`, `${r.model} · ${r.calls} 次调用${r.at ? ` · ${r.at.slice(0, 16).replace('T', ' ')}` : ''}`, `<span class="set-value mono">${fmt(r.totalTokens)} tokens</span>`))
+          : [srow('暂无计量记录', '当前账号还没有带 usage 的模型轮次', '<span class="set-value">—</span>')]),
+        sgroup('口径', [
+          srow('数据来源', '本机会话库中的助手消息 usageAt / usage 字段，刷新后从服务端重新聚合', '<span class="set-value">会话持久化</span>'),
+          srow('不计入项', '历史轮次未返回 usage 的部分、失败且无 usage 的请求、客户端本地估算', '<span class="set-value">不估算</span>'),
+        ]),
+      ],
+    }
+  }
+
   return {
     title: '关于',
     groups: [
@@ -11265,69 +13782,452 @@ function settingsBody(tab) {
 
 /* ------------------------- 登录 / 登出 / 授权（恢复） ------------------------- */
 
+const LOGIN_REMEMBER_KEY = 'jg.login.remember'
+const LOGIN_ACCOUNT_KEY = 'jg.login.account'
+const LOGIN_USERNAME_KEY = 'jg.login.username'
+const LOGIN_PASSWORD_KEY = 'jg.login.password'
+
+function savedLogin() {
+  try {
+    return {
+      username: localStorage.getItem(LOGIN_USERNAME_KEY) || '',
+      accountId: localStorage.getItem(LOGIN_ACCOUNT_KEY) || '',
+      password: localStorage.getItem(LOGIN_PASSWORD_KEY) || '',
+      remember: localStorage.getItem(LOGIN_REMEMBER_KEY) === '1',
+    }
+  } catch (e) {
+    return { username: '', accountId: '', password: '', remember: false }
+  }
+}
+
+function persistLogin(username, password, remember, accountId = '') {
+  try {
+    if (!remember) {
+      localStorage.removeItem(LOGIN_REMEMBER_KEY)
+      localStorage.removeItem(LOGIN_ACCOUNT_KEY)
+      localStorage.removeItem(LOGIN_USERNAME_KEY)
+      localStorage.removeItem(LOGIN_PASSWORD_KEY)
+      return
+    }
+    localStorage.setItem(LOGIN_REMEMBER_KEY, '1')
+    localStorage.setItem(LOGIN_ACCOUNT_KEY, accountId || '')
+    localStorage.setItem(LOGIN_USERNAME_KEY, username || '')
+    localStorage.setItem(LOGIN_PASSWORD_KEY, password || '')
+  } catch (e) {}
+}
+
+function updateSavedLoginPassword(accountId, password) {
+  try {
+    if (localStorage.getItem(LOGIN_REMEMBER_KEY) !== '1') return
+    if (localStorage.getItem(LOGIN_ACCOUNT_KEY) !== String(accountId || '')) return
+    localStorage.setItem(LOGIN_PASSWORD_KEY, password || '')
+  } catch (e) {}
+}
+
+function loginError(message) {
+  const box = document.querySelector('#loginError')
+  if (box) {
+    box.textContent = message
+    box.hidden = false
+  } else {
+    toast(message, true)
+  }
+}
+
+function setLoginChrome(on) {
+  document.body.classList.toggle('login-mode', !!on)
+  for (const sel of ['#railbar', '#sidebar', '.menubar', '.topbar', '#cloudpanel']) {
+    const node = document.querySelector(sel)
+    if (!node) continue
+    if (on) node.style.setProperty('display', 'none', 'important')
+    else node.style.removeProperty('display')
+  }
+  const view = document.getElementById('view')
+  const app = document.querySelector('.app')
+  const main = document.querySelector('.main')
+  if (on) {
+    if (app) app.style.setProperty('grid-template-columns', '1fr', 'important')
+    if (main) {
+      main.style.setProperty('width', '100vw', 'important')
+      main.style.setProperty('max-width', 'none', 'important')
+      main.style.setProperty('margin', '0', 'important')
+      main.style.setProperty('grid-column', '1 / -1', 'important')
+    }
+  } else {
+    if (app) app.style.removeProperty('grid-template-columns')
+    if (main) {
+      main.style.removeProperty('width')
+      main.style.removeProperty('max-width')
+      main.style.removeProperty('margin')
+      main.style.removeProperty('grid-column')
+    }
+  }
+  if (view) {
+    if (on) {
+      view.style.setProperty('padding', '0', 'important')
+      view.style.setProperty('width', '100vw', 'important')
+      view.style.setProperty('height', '100vh', 'important')
+      view.style.setProperty('overflow', 'auto', 'important')
+    } else {
+      view.style.removeProperty('padding')
+      view.style.removeProperty('width')
+      view.style.removeProperty('height')
+      view.style.removeProperty('overflow')
+    }
+  }
+}
+
+async function loadLoginCaptcha(el, clearAnswer = true) {
+  const seq = (state.loginCaptchaSeq || 0) + 1
+  state.loginCaptchaSeq = seq
+  const box = el.querySelector('#loginCaptchaQuestion')
+  if (box) box.textContent = '加载中…'
+  state.loginCaptcha = null
+  const res = await api('/api/captcha')
+  if (seq !== state.loginCaptchaSeq) return
+  if (!res.ok || !res.body.captchaId) {
+    if (box) box.textContent = '验证码加载失败，请点「换一个」重试'
+    return
+  }
+  state.loginCaptcha = res.body
+  if (box) box.textContent = res.body.question || '验证码'
+  if (clearAnswer) {
+    state.loginCaptchaAnswerDraft = ''
+    const input = el.querySelector('#loginCaptcha')
+    if (input) input.value = ''
+  }
+}
+
+function loginEyeSvg(visible) {
+  return visible
+    ? `<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3l18 18"/><path d="M10.6 5.2A10.8 10.8 0 0 1 12 5c6.5 0 10 7 10 7a17.2 17.2 0 0 1-3.2 4.1"/><path d="M6.3 6.4C3.9 8 2 12 2 12s3.5 7 10 7c1.6 0 3-.4 4.3-1.1"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/></svg>`
+    : `<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg>`
+}
+
+function loginCloseButton() {
+  return `<button type="button" id="loginClose" class="login-close-btn" aria-label="关闭客户端" title="关闭客户端" style="position:fixed;top:14px;right:18px;z-index:10;height:32px;padding:0 10px;display:inline-flex;align-items:center;gap:5px;border:1px solid #7d8590;background:transparent;color:#2f353c;border-radius:8px;box-shadow:none;font-size:12px;font-weight:500;cursor:pointer"><span class="ico" style="width:14px;height:14px">${icon('close')}</span><span>关闭</span></button>`
+}
+
+function bindLoginClose(el) {
+  el.querySelector('#loginClose')?.addEventListener('click', () => {
+    if (window.jgClient?.close) return window.jgClient.close()
+    window.close()
+  })
+}
+
 function renderLogin(el) {
-  document.body.classList.add('login-mode')
+  setLoginChrome(true)
   const netId = state.loginNet || (state.boot.network && state.boot.network.id) || 'inet'
-  const roleId = state.loginRole || ''
+  const saved = savedLogin()
+  const savedAccount = (state.boot.allRoles || []).find((r) => (saved.accountId && r.id === saved.accountId) || (saved.username && String(r.username || '').toLowerCase() === saved.username.toLowerCase()))
+  const remember = state.loginRemember !== undefined ? state.loginRemember : saved.remember
+  const username = state.loginUsername !== undefined
+    ? state.loginUsername
+    : (saved.username || (savedAccount && savedAccount.username) || '')
+  const password = state.loginPasswordDraft !== undefined
+    ? state.loginPasswordDraft
+    : ((saved.username && username.toLowerCase() === saved.username.toLowerCase()) || (saved.accountId && savedAccount && savedAccount.id === saved.accountId) ? saved.password : '')
+  const captcha = state.loginCaptcha
+  const captchaAnswer = state.loginCaptchaAnswerDraft !== undefined ? state.loginCaptchaAnswerDraft : ''
   const nets = state.boot.allNetworks || []
-  const roles = state.boot.allRoles || []
   const netDesc = { inet: '统一模型与获准个人模型', gov: '政务网专用模型，数据不出网', secret: '涉密内网，物理隔离环境' }
+  const fieldStyle = 'width:100%!important;max-width:100%!important;box-sizing:border-box;height:40px;margin-top:8px;padding:0 12px;border:1px solid var(--line);border-radius:8px;background:#fff;font-size:var(--fs-sub);outline:none'
   el.innerHTML = `
-    <div class="login-wrap">
-      <div class="login-card">
-        <div class="login-brand">九规智能中枢</div>
-        <div class="login-sub">九江市规划设计集团 · 企业级 AI 中枢</div>
-        <div class="login-section">安全域</div>
-        <div class="login-nets">
-          ${nets.map((n) => `<button class="login-net ${n.id === netId ? 'on' : ''}" data-lnet="${esc(n.id)}"><b>${esc(n.label)}</b><span>${esc(netDesc[n.id] || '按本网授权口径')}</span></button>`).join('')}
+    <style>
+      .login-page{height:100vh;min-height:100vh;display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);background:#f7f8fa}
+      .login-brandpane{background:#f1f3f5;border-right:1px solid #e4e7eb;display:flex;align-items:center;justify-content:center;padding:40px 32px}
+      .login-brandinner{width:100%;max-width:400px}
+      .login-mark{display:block;width:48px;height:48px;object-fit:contain;margin-bottom:18px}
+      .login-formpane{background:#fff;display:flex;align-items:center;justify-content:center;padding:36px 28px;overflow:auto}
+      .login-form{position:relative;width:100%;max-width:520px}
+      .login-pwd-toggle{position:absolute;right:4px;top:50%;transform:translateY(-50%);width:34px;height:34px;display:grid;place-items:center;border:0;background:transparent;color:#8b929c;border-radius:7px;cursor:pointer;padding:0}
+      .login-pwd-toggle:hover{color:var(--accent);background:#f1f5fb}
+      .login-form-title{font-size:22px;font-weight:600;color:#1b1d21;letter-spacing:-.2px}
+      .login-form-sub{font-size:var(--fs-meta);color:var(--muted);margin-top:4px}
+      .login-nets-vertical{display:flex;flex-direction:column;gap:8px;margin-top:10px}
+      .login-nets-vertical .login-net{display:block;width:100%;border:1px solid transparent;border-bottom:1px solid #dfe3e8;border-radius:8px;background:transparent;padding:12px 12px 12px 14px;text-align:left;cursor:pointer}
+      .login-nets-vertical .login-net b{display:block;font-size:var(--fs-sub);color:#1b1d21}
+      .login-nets-vertical .login-net span{display:block;margin-top:3px;font-size:var(--fs-micro);color:var(--muted);line-height:1.45}
+      .login-nets-vertical .login-net.on{background:#fff;border:1px solid var(--accent);box-shadow:inset 3px 0 0 var(--accent)}
+      .login-side-note{margin-top:18px;padding-top:14px;border-top:1px solid #e1e5e9;font-size:var(--fs-micro);line-height:1.6;color:var(--muted)}
+      @media (max-width:900px){
+        .login-page{grid-template-columns:1fr;height:auto;min-height:100vh}
+        .login-brandpane{border-right:0;border-bottom:1px solid #e4e7eb;padding:26px 22px;align-items:flex-start}
+        .login-brandinner{max-width:none}
+        .login-mark{width:38px;height:38px;margin-bottom:12px}
+        .login-formpane{padding:24px 22px;align-items:flex-start}
+        .login-form{max-width:520px}
+        .login-brand{font-size:20px}
+        .login-form-title{font-size:20px}
+      }
+    </style>
+    <div class="login-page">
+      <aside class="login-brandpane">
+        <div class="login-brandinner">
+          <img src="./logo.png?v=2" alt="" class="login-mark">
+          <div class="login-brand">九规智能中枢</div>
+          <div class="login-sub">九江市规划设计集团 · 企业级 AI 中枢</div>
+          <div class="login-section">安全域</div>
+          <div class="login-nets-vertical">
+            ${nets.map((n) => `<button class="login-net ${n.id === netId ? 'on' : ''}" data-lnet="${esc(n.id)}"><b>${esc(n.label)}</b><span>${esc(netDesc[n.id] || '按本网授权口径')}</span></button>`).join('')}
+          </div>
+          <div class="login-side-note">先选安全域、再输入用户名；登录后只下发本域的模型、工具与资源目录。</div>
         </div>
-        <div class="login-section">账号</div>
-        <div class="login-users">
-          ${roles.map((r) => `<button class="login-user ${r.id === roleId ? 'on' : ''}" data-lrole="${esc(r.id)}"><span class="login-avatar">${esc(String(r.name || '').slice(-1))}</span><span><b>${esc(r.name)}</b><i style="display:block;font-style:normal;color:var(--muted);font-size:var(--fs-micro);margin-top:2px">${esc(r.label)} · ${esc(r.unit)}</i></span></button>`).join('')}
+      </aside>
+      <main class="login-formpane">
+        <div class="login-form">
+          ${loginCloseButton()}
+          <div class="login-form-title">登录</div>
+          <div class="login-form-sub">使用姓名全拼或已绑定手机号进入</div>
+          <div class="login-section">用户名</div>
+          <input id="loginUsername" class="mini-input" type="text" autocomplete="username" placeholder="姓名全拼，如 mile" value="${esc(username)}" style="${fieldStyle}">
+          <div class="login-note" style="margin-top:6px">用户名为姓名全拼，不区分大小写；后续支持绑定手机号登录。</div>
+          <div class="login-section">密码</div>
+          <div style="position:relative;margin-top:8px">
+            <input id="loginPassword" class="mini-input" type="password" autocomplete="current-password" placeholder="请输入登录密码" value="${esc(password)}" style="${fieldStyle};margin-top:0;padding-right:46px">
+            <button class="login-pwd-toggle" type="button" id="loginPwdToggle" aria-label="显示密码" title="显示密码" aria-pressed="false">${loginEyeSvg(false)}</button>
+          </div>
+          <div class="login-section">验证码</div>
+          <div style="display:flex;align-items:center;gap:10px;margin-top:8px;min-height:38px">
+            <span id="loginCaptchaQuestion" style="flex:1;font-size:var(--fs-sub);color:var(--text-2);letter-spacing:.2px">${captcha ? esc(captcha.question) : '加载中…'}</span>
+            <button class="btn sm" type="button" id="loginCaptchaRefresh" style="flex:none">换一个</button>
+          </div>
+          <input id="loginCaptcha" class="mini-input" type="text" inputmode="numeric" autocomplete="off" placeholder="填写计算结果" value="${esc(captchaAnswer)}" style="${fieldStyle}">
+          <label style="margin-top:12px;display:flex;align-items:center;gap:8px;font-size:var(--fs-meta);color:var(--text-2);cursor:pointer">
+            <input id="loginRemember" type="checkbox" ${remember ? 'checked' : ''} style="width:14px;height:14px;margin:0;accent-color:var(--accent)">
+            记住账号和密码
+          </label>
+          <div id="loginError" class="login-note" style="color:#b42318;margin-top:8px" hidden></div>
+          <div class="login-note" style="margin-top:10px">新账号初始密码：姓名全拼@123（首字母大写），首次登录后必须修改；已有正式密码的账号请直接使用正式密码。记住密码保存在本机浏览器。</div>
+          <button class="btn primary login-go" id="loginGo" style="width:100%;margin-top:14px">进入 九规智能中枢</button>
+          <div class="login-foot">登录后只下发本域的模型、工具与资源目录</div>
         </div>
-        <div style="margin-top:18px;display:flex;align-items:center;gap:10px">
-          <button class="btn primary" id="loginGo" ${roleId ? '' : 'disabled'}>进入 九规智能中枢</button>
-          <span style="font-size:var(--fs-micro);color:var(--muted);line-height:1.5">先选安全域、再选账号；登录后只下发本域的模型、工具与资源目录</span>
-        </div>
-      </div>
+      </main>
     </div>`
   el.querySelectorAll('[data-lnet]').forEach((b) => b.addEventListener('click', () => {
+    state.loginUsername = el.querySelector('#loginUsername')?.value || ''
+    state.loginPasswordDraft = el.querySelector('#loginPassword')?.value || ''
+    state.loginCaptchaAnswerDraft = el.querySelector('#loginCaptcha')?.value || ''
+    state.loginRemember = !!el.querySelector('#loginRemember')?.checked
     state.loginNet = b.dataset.lnet
     renderLogin(el)
   }))
-  el.querySelectorAll('[data-lrole]').forEach((b) => b.addEventListener('click', () => {
-    state.loginRole = b.dataset.lrole
-    renderLogin(el)
-    el.querySelector('#loginGo').disabled = false
-  }))
+  const usernameInput = el.querySelector('#loginUsername')
+  if (usernameInput) {
+    usernameInput.addEventListener('input', () => {
+      const nextName = usernameInput.value.trim().toLowerCase()
+      const savedName = (saved.username || (savedAccount && savedAccount.username) || '').toLowerCase()
+      if (nextName && savedName && nextName !== savedName) {
+        state.loginPasswordDraft = ''
+        const passwordField = el.querySelector('#loginPassword')
+        if (passwordField) passwordField.value = ''
+      }
+      state.loginUsername = usernameInput.value
+    })
+    usernameInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') el.querySelector('#loginPassword')?.focus() })
+  }
+  const pwd = el.querySelector('#loginPassword')
+  if (pwd) {
+    pwd.addEventListener('input', () => { state.loginPasswordDraft = pwd.value })
+    pwd.addEventListener('keydown', (e) => { if (e.key === 'Enter') el.querySelector('#loginCaptcha')?.focus() })
+  }
+  const pwdToggle = el.querySelector('#loginPwdToggle')
+  if (pwd && pwdToggle) pwdToggle.addEventListener('click', () => {
+    const visible = pwd.type === 'password'
+    pwd.type = visible ? 'text' : 'password'
+    pwdToggle.innerHTML = loginEyeSvg(visible)
+    pwdToggle.setAttribute('aria-label', visible ? '隐藏密码' : '显示密码')
+    pwdToggle.title = visible ? '隐藏密码' : '显示密码'
+    pwdToggle.setAttribute('aria-pressed', visible ? 'true' : 'false')
+    pwd.focus()
+  })
+  const captchaInput = el.querySelector('#loginCaptcha')
+  if (captchaInput) {
+    captchaInput.addEventListener('input', () => { state.loginCaptchaAnswerDraft = captchaInput.value })
+    captchaInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') el.querySelector('#loginGo')?.click() })
+  }
+  const rememberInput = el.querySelector('#loginRemember')
+  if (rememberInput) rememberInput.addEventListener('change', () => {
+    state.loginRemember = rememberInput.checked
+    if (!rememberInput.checked) persistLogin('', '', false)
+  })
+  el.querySelector('#loginCaptchaRefresh')?.addEventListener('click', () => loadLoginCaptcha(el, true))
+  if (!captcha) loadLoginCaptcha(el, false)
   const go = el.querySelector('#loginGo')
   if (go) go.addEventListener('click', async () => {
-    if (!state.loginRole) return
-    const role = state.loginRole
+    const usernameValue = (el.querySelector('#loginUsername')?.value || '').trim()
+    const passwordValue = (el.querySelector('#loginPassword')?.value || '')
+    const captchaAnswer = (el.querySelector('#loginCaptcha')?.value || '').trim()
+    if (!usernameValue) return loginError('请输入用户名（姓名全拼）')
+    if (!passwordValue) return loginError('请输入登录密码')
+    if (!state.loginCaptcha || !state.loginCaptcha.captchaId) return loginError('验证码未加载，请点「换一个」重试')
+    if (!captchaAnswer) return loginError('请填写验证码')
     const net = state.loginNet || netId
-    await Promise.all([
-      api('/api/network', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: net }) }),
-      api('/api/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ role }) }),
-    ])
-    state.loginRole = ''
-    document.body.classList.remove('login-mode')
+    const rememberValue = !!el.querySelector('#loginRemember')?.checked
+    state.loginUsername = usernameValue
+    state.loginPasswordDraft = passwordValue
+    state.loginRemember = rememberValue
+    go.disabled = true
+    go.textContent = '正在登录…'
+    const netRes = await api('/api/network', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: net }) })
+    if (!netRes.ok) {
+      go.disabled = false
+      go.textContent = '进入 九规智能中枢'
+      return loginError(netRes.body.error || '安全域切换失败')
+    }
+    const res = await api('/api/login', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        username: usernameValue,
+        password: passwordValue,
+        captchaId: state.loginCaptcha.captchaId,
+        captchaAnswer,
+      }),
+    })
+    if (!res.ok) {
+      go.disabled = false
+      go.textContent = '进入 九规智能中枢'
+      loginError(res.body.code === 'BAD_CAPTCHA' ? '验证码不正确，已换一个，请重新填写' : (res.body.error || '登录失败'))
+      await loadLoginCaptcha(el, true)
+      return
+    }
+    persistLogin(usernameValue, passwordValue, rememberValue, res.body.accountId || '')
+    state.loginUsername = ''
+    state.loginPasswordDraft = undefined
+    state.loginRemember = undefined
+    state.loginCaptcha = null
+    state.loginCaptchaAnswerDraft = ''
+    state.loginCaptchaSeq = (state.loginCaptchaSeq || 0) + 1
+    setLoginChrome(false)
+    await loadBoot()
+    if (state.boot.mustChangePassword) { render(); return }
+    state.view = 'home'
+    render()
+    toast(`已以「${(state.boot.user || {}).name || usernameValue}」身份登录 · ${(state.boot.network || {}).label || net}`)
+  })
+  bindLoginClose(el)
+}
+
+function renderPasswordSetup(el) {
+  setLoginChrome(true)
+  const name = state.boot?.user?.name || '当前账号'
+  el.innerHTML = `
+    <div class="login-wrap">
+      <div class="login-card" style="position:relative;width:440px;max-width:calc(100vw - 32px);background:transparent;border:0;box-shadow:none">
+        ${loginCloseButton()}
+        <div class="login-brand">首次登录 · 设置密码</div>
+        <div class="login-sub">${esc(name)}，请先修改初始密码后继续使用九规智能中枢</div>
+        <div class="login-note" style="margin-top:16px">初始密码为姓名全拼@123（首字母大写）。新密码需 8–64 位，至少包含字母和数字。</div>
+        <div class="login-section">当前密码</div>
+        <input id="pwdCurrent" class="mini-input" type="password" autocomplete="current-password" style="width:100%!important;max-width:100%!important;box-sizing:border-box;height:38px;margin-top:8px;padding:0 11px;border:1px solid var(--line);border-radius:8px;background:#fff;font-size:var(--fs-sub);outline:none">
+        <div class="login-section">新密码</div>
+        <input id="pwdNext" class="mini-input" type="password" autocomplete="new-password" style="width:100%!important;max-width:100%!important;box-sizing:border-box;height:38px;margin-top:8px;padding:0 11px;border:1px solid var(--line);border-radius:8px;background:#fff;font-size:var(--fs-sub);outline:none">
+        <div class="login-section">确认新密码</div>
+        <input id="pwdConfirm" class="mini-input" type="password" autocomplete="new-password" style="width:100%!important;max-width:100%!important;box-sizing:border-box;height:38px;margin-top:8px;padding:0 11px;border:1px solid var(--line);border-radius:8px;background:#fff;font-size:var(--fs-sub);outline:none">
+        <div id="pwdError" class="login-note" style="color:#b42318;margin-top:8px" hidden></div>
+        <button class="btn primary login-go" id="pwdSave">保存新密码并进入</button>
+        <div class="login-foot">修改后立即生效；下次登录请使用新密码。</div>
+      </div>
+    </div>`
+  const err = (message) => {
+    const box = el.querySelector('#pwdError')
+    box.textContent = message
+    box.hidden = false
+  }
+  const save = el.querySelector('#pwdSave')
+  save.addEventListener('click', async () => {
+    const currentPassword = el.querySelector('#pwdCurrent').value
+    const nextPassword = el.querySelector('#pwdNext').value
+    const confirmPassword = el.querySelector('#pwdConfirm').value
+    if (!currentPassword) return err('请输入当前密码')
+    if (nextPassword.length < 8 || nextPassword.length > 64 || !/[A-Za-z]/.test(nextPassword) || !/\d/.test(nextPassword)) return err('新密码需 8–64 位，且至少包含字母和数字')
+    if (nextPassword !== confirmPassword) return err('两次输入的新密码不一致')
+    save.disabled = true
+    save.textContent = '正在保存…'
+    const { ok, body } = await api('/api/account/password', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ currentPassword, nextPassword }),
+    })
+    if (!ok) {
+      save.disabled = false
+      save.textContent = '保存新密码并进入'
+      return err(body.error || '密码修改失败')
+    }
+    updateSavedLoginPassword(state.boot.user?.accountId || '', nextPassword)
+    state.boot.mustChangePassword = false
+    setLoginChrome(false)
     await loadBoot()
     state.view = 'home'
     render()
-    toast(`已以「${(state.boot.user || {}).name || role}」身份登录 · ${(state.boot.network || {}).label || net}`)
+    toast('密码已更新，已进入九规智能中枢')
+  })
+  bindLoginClose(el)
+}
+
+function openChangePassword() {
+  const mask = openModal('修改登录密码', `
+    <div class="set-desc" style="margin-bottom:10px">用于账号密码登录；修改后立即生效。新密码需 8–64 位，至少包含字母和数字。</div>
+    <div style="display:grid;gap:10px">
+      <input id="pwdCurrent" class="text-input" type="password" autocomplete="current-password" placeholder="当前密码">
+      <input id="pwdNext" class="text-input" type="password" autocomplete="new-password" placeholder="新密码">
+      <input id="pwdConfirm" class="text-input" type="password" autocomplete="new-password" placeholder="确认新密码">
+    </div>
+    <div id="pwdError" style="display:none;margin-top:8px;color:#b42318;font-size:var(--fs-meta)"></div>
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px">
+      <button class="btn" data-pwd-cancel>取消</button>
+      <button class="btn primary" data-pwd-save>保存新密码</button>
+    </div>`, { width: 430 })
+  const err = (message) => {
+    const box = mask.querySelector('#pwdError')
+    box.textContent = message
+    box.style.display = 'block'
+  }
+  mask.querySelector('[data-pwd-cancel]').addEventListener('click', () => mask.remove())
+  mask.querySelector('[data-pwd-save]').addEventListener('click', async () => {
+    const currentPassword = mask.querySelector('#pwdCurrent').value
+    const nextPassword = mask.querySelector('#pwdNext').value
+    const confirmPassword = mask.querySelector('#pwdConfirm').value
+    if (!currentPassword) return err('请输入当前密码')
+    if (nextPassword.length < 8 || nextPassword.length > 64 || !/[A-Za-z]/.test(nextPassword) || !/\d/.test(nextPassword)) return err('新密码需 8–64 位，且至少包含字母和数字')
+    if (nextPassword !== confirmPassword) return err('两次输入的新密码不一致')
+    const btn = mask.querySelector('[data-pwd-save]')
+    btn.disabled = true
+    btn.textContent = '正在保存…'
+    const { ok, body } = await api('/api/account/password', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ currentPassword, nextPassword }),
+    })
+    if (!ok) {
+      btn.disabled = false
+      btn.textContent = '保存新密码'
+      return err(body.error || '密码修改失败')
+    }
+    updateSavedLoginPassword(state.boot.user?.accountId || '', nextPassword)
+    mask.remove()
+    toast('登录密码已更新')
   })
 }
+
 
 async function logout() {
   try { await api('/api/logout', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }) } catch (e) { /* 会话可能已过期 */ }
   state.boot = null
   state.conversation = null
-  document.body.classList.remove('login-mode')
+  state.loginUsername = undefined
+  state.loginRole = ''
+  state.loginPasswordDraft = undefined
+  state.loginRemember = undefined
+  state.loginCaptcha = null
+  state.loginCaptchaAnswerDraft = ''
+  state.loginCaptchaSeq = (state.loginCaptchaSeq || 0) + 1
   document.getElementById('railbar').innerHTML = ''
   document.getElementById('sidebar').innerHTML = ''
   document.getElementById('topbar').innerHTML = ''
   await loadBoot()
-  document.body.classList.add('login-mode')
+  setLoginChrome(true)
   render()
 }
 
