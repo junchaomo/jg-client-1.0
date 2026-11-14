@@ -74,8 +74,8 @@ export const networks = {
     badge: '互联网',
     desc: '统一模型与获准个人模型；按数据级别执行外发控制',
     models: [
-      { id: 'jg-cloud', label: '默认云模型', network: '互联网', note: '企业统一云模型，服务端持有 Key', image: true, imageNote: '已开通文生图端点（jg-image/v2）' },
-      { id: 'personal-key', label: '个人 API Key', network: '互联网', note: '按数据级别执行外发控制', image: false, imageNote: '当前绑定的服务商未声明生图能力，需更换支持生图的模型 API' },
+      { id: 'jg-cloud', label: '默认云模型', network: '互联网', note: '企业统一云模型，服务端持有 Key', image: false, imageNote: '聊天模型本身不生图；图像工作台走服务端真实图像通道' },
+      { id: 'personal-key', label: '个人 API Key', network: '互联网', note: '按数据级别执行外发控制', image: false, imageNote: '聊天模型本身不生图；图像工作台走服务端真实图像通道' },
     ],
     tools: [
       { id: 'T-DATA', label: '数据中心检索', enabled: true },
@@ -1119,6 +1119,11 @@ export const aiTools = [
   { name: 'format_extract', label: '读取数据内容', target: '平台', args: '{"fileId":"ATT-..."}', desc: '读取 PDF 文本，或返回 GIS/CAD 要素、图层与范围摘要。' },
   { name: 'format_export', label: '输出数据格式', target: '平台', args: '{"format":"gis","op":"normalize","fileId":"ATT-..."}', desc: '把平台已持有的数据输出为 PDF 合并/拆分、规范化 GeoJSON 或 ASCII DXF 文件。' },
   { name: 'code_review', label: '代码审查服务', target: '平台', args: '{"projectId":"PRJ-...","scope":"all"}', desc: 'Harness 通用基础服务：对项目源码执行语法与静态规则扫描，返回带证据的审查报告。' },
+  { name: 'visual_create', label: '创建可视化', target: '平台', args: '{"type":"mermaid","title":"数据登记流程","source":"flowchart TD\\n..."}', desc: 'Visual Engine 创建可视化对象。流程/关系/结构用 mermaid；统计图表用 echarts + config；自定义信息图用 svg + source；可调参数的交互计算器用 interactive + config（loan-calculator）。用户要求画图、架构图、流程图、统计图、信息图、交互计算器时必须调用，不要把源码直接写进回答。' },
+  { name: 'visual_update', label: '修改可视化', target: '平台', args: '{"id":"VIS-...","type":"echarts","config":{...}}', desc: 'Visual Engine 更新已有对象并生成新版本；连续修改时优先复用已有 id，保留未被要求修改的节点与数据。' },
+  { name: 'visual_get', label: '读取可视化', target: '平台', args: '{"id":"VIS-..."}', desc: '读取可视化对象当前源码、版本、类型、状态，供后续修改或查看。' },
+  { name: 'visual_export', label: '导出可视化', target: '平台', args: '{"id":"VIS-...","format":"svg"}', desc: '登记可视化导出请求；前端按 SVG/PNG 实际导出，不依赖外部渲染服务。' },
+  { name: 'visual_save', label: '保存可视化成果', target: '平台', args: '{"id":"VIS-...","name":"成果名称"}', desc: '把会话内临时可视化保存为长期成果，可自定义名称并保留版本历史。' },
   { name: 'task_create', label: '创建任务', target: '任务', args: '{"title":"...","prompt":"..."}', desc: '把一段需求登记为任务并分配执行，返回任务编号与初始状态。' },
 ]
 

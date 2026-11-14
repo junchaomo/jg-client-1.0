@@ -97,6 +97,7 @@ async function getHarness(cfg, handlers = null, cwd = '', runtimeScope = '') {
   if (!env.JG_MCP_URL && env.PORT) env.JG_MCP_URL = `http://127.0.0.1:${env.PORT}`
   if (!env.JG_MCP_SCRIPT) env.JG_MCP_SCRIPT = join(root, 'mcp-jg.mjs')
   if (!env.JG_DSH_NODE) env.JG_DSH_NODE = process.execPath
+  if (cfg.conversationId) env.JG_MCP_CONVERSATION = String(cfg.conversationId)
   if (cfg.agentsHome) {
     // 每个账号独立的 agent 配置根，skill-filesystem 会扫描其 skills 子目录；
     // 这样市场里按账号安装的技能只对该账号的运行时可见。
@@ -109,7 +110,7 @@ async function getHarness(cfg, handlers = null, cwd = '', runtimeScope = '') {
     dshHome: userHome,
     cwd: sandboxRoot,
     provider: 'deepseek-official',
-    model: cfg.model || 'deepseek-chat',
+    model: cfg.model || 'deepseek-flash',
     ...(cfg.reasoningEffort ? { reasoningEffort: cfg.reasoningEffort } : {}),
     maxTokens: 8192,
     initializeTimeoutMs: 90000,
@@ -155,7 +156,10 @@ async function getHarness(cfg, handlers = null, cwd = '', runtimeScope = '') {
           } else if (event.type === 'turn/end') {
             entry.toolCalls.clear()
           }
-        }
+          // 把本轮真实事件交给产品层，用于“正在执行”实时状态；不改变 DSH 行为。
+          if (typeof entry.handlers?.onEvent === 'function') {
+            try { entry.handlers.onEvent(event, String(notification?.params?.sessionId || '')) } catch {}
+          }        }
       } catch {}
     })()
   }
@@ -291,6 +295,47 @@ function deliverablesOf(events) {
     }
   }
   return files
+}
+
+function parseToolPayload(text) {
+  const value = String(text || '').trim()
+  if (!value) return null
+  try { return JSON.parse(value) } catch {}
+  const start = value.indexOf('{')
+  const end = value.lastIndexOf('}')
+  if (start < 0 || end <= start) return null
+  try { return JSON.parse(value.slice(start, end + 1)) } catch { return null }
+}
+
+/** 从 Visual Engine 工具的 MCP 结果里取出可视化对象，交给产品消息层。 */
+function visualsOf(events) {
+  const rows = []
+  const seen = new Set()
+  const add = (visual) => {
+    if (!visual || !visual.id) return
+    const key = `${visual.id}:${visual.version || 1}`
+    if (seen.has(key)) return
+    seen.add(key)
+    rows.push(visual)
+  }
+  for (const event of (events || [])) {
+    if (event?.type === 'tool/ptc-dispatch') {
+      if (event.data?.isError) continue
+      const payload = parseToolPayload(blocksText(event.data?.content) || String(event.data?.content || ''))
+      if (!payload || payload.ok === false) continue
+      const result = payload.result && typeof payload.result === 'object' ? payload.result : payload
+      if (result.visual) add(result.visual)
+      if (Array.isArray(result.visuals)) result.visuals.forEach(add)
+      continue
+    }
+    if (event?.type !== 'tool/result' || event.data?.error) continue
+    const payload = parseToolPayload(textOf(event.data?.message))
+    if (!payload || payload.ok === false) continue
+    const result = payload.result && typeof payload.result === 'object' ? payload.result : payload
+    if (result.visual) add(result.visual)
+    if (Array.isArray(result.visuals)) result.visuals.forEach(add)
+  }
+  return rows
 }
 
 function usageOf(events) {
@@ -523,7 +568,7 @@ export async function runtimeRequest(method, params = {}, cfg = {}) {
   const harness = await getHarness({
     apiKey: cfg.apiKey || 'runtime-admin',
     baseUrl: cfg.baseUrl || '',
-    model: cfg.model || 'deepseek-chat',
+    model: cfg.model || 'deepseek-flash',
     reasoningEffort: '',
   }, null, cfg.cwd || '')
   return harness.client.request(method, params)
@@ -533,11 +578,27 @@ export async function runtimeRequest(method, params = {}, cfg = {}) {
  * 在 DSH 会话中运行一轮 agent。已存在 dshSessionId 时续用同一会话，
  * 不存在时自动创建新会话并返回 id。
  */
-export async function runAgent({ apiKey, baseUrl, model, text, sessionId, context, images, handlers, reasoningEffort, cwd, agentsHome = '', dshHome = '', executionPolicy = 'auto', permissionPreset = '', runKey = '', runtimeScope = '', onStart = null, shouldCancel = null }) {
+export async function runAgent({ apiKey, baseUrl, model, text, sessionId, context, images, handlers, reasoningEffort, cwd, agentsHome = '', dshHome = '', executionPolicy = 'auto', permissionPreset = '', runKey = '', runtimeScope = '', maxToolCalls = 0, onStart = null, shouldCancel = null }) {
   if (!apiKey) throw new HarnessError('没有可用的模型密钥', { code: 'MODEL_KEY_MISSING', status: 503 })
   const effort = ['off', 'low', 'medium', 'high', 'max'].includes(String(reasoningEffort || '')) ? String(reasoningEffort) : ''
-  const cfg = { apiKey, baseUrl, model, reasoningEffort: effort, agentsHome, dshHome }
-  const harness = await getHarness(cfg, handlers, cwd, runtimeScope)
+  const cfg = { apiKey, baseUrl, model, reasoningEffort: effort, agentsHome, dshHome, conversationId: String(runKey || '') }
+  const budget = { limit: Math.max(0, Number(maxToolCalls) || 0), count: 0, exceeded: false }
+  let harnessRef = null
+  const guardedHandlers = handlers && budget.limit
+    ? {
+        ...handlers,
+        onEvent: (event, sid) => {
+          if (event?.type === 'tool/call') budget.count += 1
+          if (!budget.exceeded && budget.count > budget.limit) {
+            budget.exceeded = true
+            try { harnessRef?.client?.request('session/cancel', { sessionId: String(sid || '') }) } catch {}
+          }
+          try { handlers.onEvent?.(event, sid) } catch {}
+        },
+      }
+    : handlers
+  const harness = await getHarness(cfg, guardedHandlers, cwd, runtimeScope)
+  harnessRef = harness
   const entryKey = runtimeEntryKey(cfg, cwd, runtimeScope)
   const entry = active.get(entryKey)
   const release = entry ? await acquire(entry) : () => {}
@@ -614,6 +675,7 @@ export async function runAgent({ apiKey, baseUrl, model, text, sessionId, contex
     result = await session.run(input)
     await settleSubagents()
   } catch (error) {
+    if (budget.exceeded) throw new HarnessError(`本轮工具调用超过预算 ${budget.limit} 步，已停止执行。请缩小任务范围或提高预算后重试。`, { code: 'STEP_BUDGET_EXCEEDED', status: 409 })
     // 用户已停止本轮：不再因为“会话不存在”之类的错误自动新建会话重试。
     if (error?.code === 'RUN_CANCELLED' || (typeof shouldCancel === 'function' && shouldCancel())) {
       throw error?.code === 'RUN_CANCELLED'
@@ -644,6 +706,7 @@ export async function runAgent({ apiKey, baseUrl, model, text, sessionId, contex
     release()
   }
   const latencyMs = Date.now() - started
+  if (budget.exceeded) throw new HarnessError(`本轮工具调用超过预算 ${budget.limit} 步，已停止执行。请缩小任务范围或提高预算后重试。`, { code: 'STEP_BUDGET_EXCEEDED', status: 409 })
   const actualModel = modelOf(result.events || [], model)
   const reply = (result.finalResponse || '').trim() || '任务已完成。'
   const subagentNotifs = relevantSubagentNotifications(String(result.sessionId || ''), [...backgroundNotifications, ...(result.notifications || [])])
@@ -661,6 +724,7 @@ export async function runAgent({ apiKey, baseUrl, model, text, sessionId, contex
     title: titleOf(result.events || []),
     jobs: jobsOf(result.events || []),
     deliverables: deliverablesOf(result.events || []),
+    visuals: visualsOf(result.events || []),
     toolAudit: audit,
     finishReason: result.finishReason,
     events: result.events || [],

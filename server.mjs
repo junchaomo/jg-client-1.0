@@ -3,10 +3,11 @@
  * 用 Node 原生 http 提供静态资源与 API；服务端做角色、网络与会话判定，前端隐藏不是唯一防线。
  * 1.0 阶段使用 node:sqlite 做单机持久化，不改变任何页面与接口契约。
  */
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
+import { createRequire } from 'node:module'
 import { createServer } from 'node:http'
-import { createHmac, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto'
-import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { createHash, createHmac, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto'
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { basename, dirname, extname, isAbsolute, join, normalize, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -15,7 +16,10 @@ import {
   dataDirPath, deleteSession, expirePendingApprovalDecisions, getAccount, getAccountByRole, getAccountByUsername, getFile, getSession, latestApprovalDecisions, latestAudit,
   listAccounts, listFiles, loadState, putFile, readFileBuffer, saveState, touchSession,
   updateAccountSecret, updateApprovalDecision, updateSessionNet, upsertAccount, setAccountPassword, setAccountUsername,
+  attachVisualMessage, createVisualArtifact, getVisualArtifact, listVisualArtifacts, listVisualVersions,
+  saveVisualArtifact, updateVisualArtifact, restoreVisualVersion,
 } from './db.mjs'
+import { normalizeVisualInput, parseStoredVisual, VISUAL_TYPE_LABELS, visualError } from './visuals.mjs'
 import { describeToolCall, summarizeToolCall } from './approval-rules.mjs'
 import {
   academy, academyStats, accessAnomalies, aiTools,
@@ -31,9 +35,10 @@ import { buildDocument, supportedFormats } from './docs.mjs'
 import { extractText as extractPdfText, inspectPdf, mergePdfs, splitPdf } from './pdf.mjs'
 import { inspectSpatial } from './geo.mjs'
 import { FORMAT_REGISTRY, detectDataFormat, exportDataFormat, extractDataFormat, inspectDataFormat } from './formats.mjs'
+import { checkProjectDeliverables } from './deliverable-check.mjs'
 import { inspectGeoFiles } from './gis-datasets.mjs'
 import { HARNESS_BASE_SERVICES, runHarnessService } from './harness-services.mjs'
-import { ModelError, chatCompletion, resolveModelConfig } from './model.mjs'
+import { ModelError, chatCompletion, resolveModelConfig, routeModel } from './model.mjs'
 import { prepareSpeech, modelStatus, transcribeSpeech } from './speech.mjs'
 import { pinyin } from 'pinyin-pro'
 import { HarnessError, cancelRun, closeHarness, closeHarnessForHome, dshBin, runAgent, stopBackgroundRuntime } from './harness.mjs'
@@ -66,8 +71,240 @@ const frontendVersion = (() => {
 if (!process.env.JG_MCP_TOKEN) process.env.JG_MCP_TOKEN = randomBytes(24).toString('hex')
 if (!process.env.JG_MCP_ACCOUNT) process.env.JG_MCP_ACCOUNT = 'A-7788-01'
 const port = Number(process.env.PORT || 4173)
+// 运维/回归可用一个统一上限覆盖默认预算；不设置时按会话类型分配。
+const forcedMaxToolCalls = Number(process.env.JG_MAX_TOOL_CALLS || 0) > 0 ? Number(process.env.JG_MAX_TOOL_CALLS) : 0
 const downloadSecret = process.env.JG_DOWNLOAD_SECRET || randomBytes(32).toString('hex')
 const UPLOAD_LIMIT_BYTES = Math.max(1024 * 1024, Number(process.env.JG_UPLOAD_LIMIT_MB || 200) * 1024 * 1024)
+// 真实文生图：默认走互联网外部生图服务；政务网/涉密网不启用，避免把提示词外发。
+const IMAGE_GENERATION = {
+  provider: process.env.JG_IMAGE_PROVIDER || 'Pollinations',
+  model: process.env.JG_IMAGE_MODEL || 'flux',
+  endpoint: process.env.JG_IMAGE_ENDPOINT || 'https://image.pollinations.ai/prompt',
+  timeoutMs: Math.max(10_000, Number(process.env.JG_IMAGE_TIMEOUT_MS || 90_000)),
+}
+const IMAGE_RATIOS = {
+  '1:1': [1024, 1024],
+  '4:3': [1024, 768],
+  '3:4': [768, 1024],
+  '4:5': [800, 1000],
+  '16:9': [1280, 720],
+  '9:16': [720, 1280],
+  '3:2': [1080, 720],
+}
+const IMAGE_STYLE_PROMPTS = {
+  写实: 'photorealistic, natural light, high detail',
+  线稿: 'clean architectural line drawing, black ink lines on white paper',
+  水墨: 'Chinese ink wash painting, monochrome, poetic composition',
+  效果图: 'architectural visualization, realistic render, professional lighting',
+  模型: 'white architectural concept model, soft studio lighting',
+  影像: 'aerial imagery, realistic urban texture, survey photography',
+  室内: 'interior design photography, warm natural light',
+  封面: 'magazine cover composition, clean negative space for typography',
+}
+function normalizeImagePrompt(raw) {
+  let text = String(raw || '').trim()
+  text = text
+    .replace(/^(请|麻烦|帮我|帮忙|给我|为我|能否|可以)?\s*(生成|画|绘制|制作|做|设计|创作|来|出)\s*(一张|一幅|一个|几张|一组)?\s*/i, '')
+    .replace(/^(一张|一幅|一个|一组)\s*/i, '')
+    .replace(/(图片|图像|照片|图)$/i, '')
+    .replace(/[，。！？!?；;]+$/g, '')
+    .trim()
+  return text || String(raw || '').trim()
+}
+async function translateImagePrompt(user, text) {
+  if (!/[\u4e00-\u9fff]/.test(text)) return text
+  try {
+    const cfg = resolveModelConfig({ userConfig: liveModelConfig.get(user.id) || {}, request: {} })
+    if (cfg.source === 'none') return ''
+    const result = await chatCompletion({
+      model: cfg.model,
+      apiKey: cfg.apiKey,
+      baseUrl: cfg.baseUrl,
+      timeoutMs: Math.min(cfg.timeoutMs, 15_000),
+      temperature: 0.1,
+      messages: [
+        {
+          role: 'system',
+          content: 'Translate the user image request into one concise English text-to-image prompt. Preserve subject, counts, colors, style, composition and any text requested. Do not add new subjects. Output only the English prompt, no quotes, no explanation.',
+        },
+        { role: 'user', content: text },
+      ],
+    })
+    const english = String(result.content || '').replace(/^["“']|["”']$/g, '').replace(/\s+/g, ' ').trim()
+    return /[A-Za-z]/.test(english) ? english.slice(0, 700) : ''
+  } catch {
+    return ''
+  }
+}
+function imageGenerationStatus(user, net) {
+  const enabled = net === 'inet' && user.id !== 'guest'
+  return {
+    enabled,
+    provider: IMAGE_GENERATION.provider,
+    model: IMAGE_GENERATION.model,
+    external: true,
+    reason: enabled
+      ? '提示词会发送到外部文本翻译与公共生图服务；政务网与涉密网不启用'
+      : net !== 'inet'
+        ? `当前为${networks[net]?.label || net}，外部生图服务不启用`
+        : '外部访客不能调用外部生图服务',
+  }
+}
+
+function newVisualId() {
+  return `VIS-${Date.now().toString(36).toUpperCase()}-${randomBytes(3).toString('hex').toUpperCase()}`
+}
+
+function visualPublic(visual) {
+  const item = parseStoredVisual(visual)
+  if (!item) return null
+  return {
+    ...item,
+    typeLabel: VISUAL_TYPE_LABELS[item.type] || item.type,
+  }
+}
+
+function visualRef(visual) {
+  const item = parseStoredVisual(visual)
+  if (!item) return null
+  return {
+    id: item.id,
+    sessionId: item.sessionId,
+    type: item.type,
+    typeLabel: VISUAL_TYPE_LABELS[item.type] || item.type,
+    title: item.title,
+    version: item.version,
+    status: item.status,
+    createdAt: item.createdAt,
+    updatedAt: item.updatedAt,
+  }
+}
+
+function visualContextForModel(user, conversationId) {
+  if (!conversationId) return ''
+  const items = listVisualArtifacts({ sessionId: conversationId, owner: user.id, limit: 20 })
+  if (!items.length) return ''
+  return [
+    '当前会话已有可视化对象（修改时优先使用 visual_update，保留用户未要求修改的节点与数据；不要重复创建）：',
+    ...items.map((v) => `- ${v.id} · ${VISUAL_TYPE_LABELS[v.type] || v.type} · ${v.title} · v${v.version} · ${v.status === 'saved' ? '长期成果' : '会话临时'}`),
+  ].join('\n')
+}
+
+function assertVisualOwner(visual, user) {
+  if (!visual) throw visualError('可视化对象不存在', 'VISUAL_NOT_FOUND')
+  if (String(visual.owner || '') !== String(user.id || '')) throw visualError('无权访问该可视化对象', 'VISUAL_FORBIDDEN')
+  return visual
+}
+
+function invokeVisualTool(name, args, user, sessionId = '') {
+  if (name === 'visual_create') {
+    const normalized = normalizeVisualInput(args)
+    let sid = String(args.sessionId || sessionId || '')
+    if (sid) {
+      const conv = conversations.find((c) => c.id === sid)
+      if (!conv || !conversationAllowed(user, conv)) throw visualError('当前会话不可用，不能创建可视化', 'VISUAL_SESSION_FORBIDDEN')
+    }
+    const visual = createVisualArtifact({
+      id: newVisualId(),
+      sessionId: sid,
+      type: normalized.type,
+      title: normalized.title,
+      source: normalized.source,
+      caption: normalized.caption,
+      owner: user.id,
+      status: 'temporary',
+    })
+    return { visual: visualPublic(visual) }
+  }
+  const id = String(args.id || '').trim()
+  if (!id) throw visualError('缺少可视化对象 id', 'VISUAL_ID_REQUIRED')
+  const current = assertVisualOwner(getVisualArtifact(id), user)
+  if (name === 'visual_get') {
+    return { visual: visualPublic(current), versions: listVisualVersions(id).map((v) => ({ version: v.version, title: v.title, note: v.note, createdAt: v.createdAt })) }
+  }
+  if (name === 'visual_update') {
+    const nextType = String(args.type || current.type)
+    let nextSource = args.source
+    if ((nextType === 'echarts' || nextType === 'interactive') && args.config !== undefined) nextSource = args.config
+    if (nextSource === undefined) nextSource = current.source
+    const normalized = normalizeVisualInput({
+      type: nextType,
+      title: args.title || current.title,
+      source: nextSource,
+      config: args.config,
+      caption: args.caption == null ? current.caption : args.caption,
+    })
+    const visual = updateVisualArtifact(id, {
+      type: normalized.type,
+      title: normalized.title,
+      source: normalized.source,
+      caption: normalized.caption,
+    }, user.id, String(args.changeNote || args.note || 'AI 修改'))
+    return { visual: visualPublic(visual), previousVersion: current.version }
+  }
+  if (name === 'visual_export') {
+    const format = String(args.format || 'svg').toLowerCase()
+    if (!['svg', 'png'].includes(format)) throw visualError('导出格式只能是 svg 或 png', 'VISUAL_EXPORT_FORMAT')
+    return {
+      visual: visualRef(current),
+      format,
+      filename: `${String(current.title || 'visual').replace(/[\\/:*?"<>|]/g, '_').slice(0, 60)}.${format}`,
+      note: '导出由前端使用浏览器内实际渲染结果生成，不依赖外部服务。',
+    }
+  }
+  if (name === 'visual_save') {
+    const visual = saveVisualArtifact(id, { title: String(args.name || args.title || current.title).slice(0, 120), actor: user.id })
+    return { visual: visualPublic(visual), saved: true }
+  }
+  throw visualError(`未知可视化工具：${name}`, 'VISUAL_TOOL_UNKNOWN')
+}
+
+/** 从消息里只保留引用，完整源码由 /api/visuals 或 /api/conversation 从资源表恢复。 */
+function hydrateConversationVisuals(conv) {
+  if (!conv || !Array.isArray(conv.messages)) return conv
+  for (const message of conv.messages) {
+    if (!Array.isArray(message?.visuals) || !message.visuals.length) continue
+    message.visuals = message.visuals
+      .map((ref) => visualRef(getVisualArtifact(typeof ref === 'string' ? ref : ref?.id)) || ref)
+      .filter(Boolean)
+  }
+  return conv
+}
+
+/**
+ * 兜底：模型没有调用 visual_create、而是把 Mermaid/ECharts/SVG 围栏代码写进回答时，
+ * 仍把可安全渲染的部分转成可视化对象，并从正文移除源码，避免用户看到代码块。
+ */
+function visualsFromReply(reply, user, sessionId) {
+  const text = String(reply || '')
+  const pattern = /```(mermaid|echarts|svg)\s*\n([\s\S]*?)```/gi
+  const visuals = []
+  let count = 0
+  const cleaned = text.replace(pattern, (whole, type, body) => {
+    if (count >= 5) return whole
+    try {
+      const normalized = normalizeVisualInput({ type: type.toLowerCase(), title: `${VISUAL_TYPE_LABELS[type.toLowerCase()] || type} ${count + 1}`, source: type.toLowerCase() === 'echarts' ? body : body })
+      const visual = createVisualArtifact({
+        id: newVisualId(),
+        sessionId,
+        type: normalized.type,
+        title: normalized.title,
+        source: normalized.source,
+        caption: '',
+        owner: user.id,
+        status: 'temporary',
+      })
+      visuals.push(visual)
+      count += 1
+      return ''
+    } catch {
+      return whole
+    }
+  })
+  return { text: cleaned, visuals }
+}
+
+
 
 const audit = [...auditSeed]
 const readNotifications = new Map()  // 各账号分别记录已读，避免串号
@@ -153,6 +390,28 @@ const MARKET_BUILTIN = [
   { id: 'D-04', section: '官方与内置', name: 'Agent 预设编辑', desc: '创建、修改和校验 Agent 预设与其他 Cordis 组合，判断 Host 与预设的正确放置位置', publisher: '平台开发运维', scope: '企业公开', kind: 'skill', version: '0.2.2-rc.1' },
 ]
 const liveMarket = MARKET_BUILTIN.map((m, i) => ({ ...m, order: i }))
+/* 产品内置插件：由平台能力直接承载，不进入账号安装目录，也不出现在输入框“添加工具”菜单。 */
+const PRODUCT_MARKET_PLUGINS = [
+  {
+    id: 'M-CODEREVIEW',
+    section: '官方与内置',
+    name: '代码审查',
+    desc: '对已绑定本地目录的项目执行只读源码扫描、语法检查、JSON 校验与静态规则提示；输出可定位的审查报告，不自动修改文件。',
+    publisher: '平台开发运维',
+    scope: '企业公开',
+    kind: 'plugin',
+    type: 'plugin',
+    version: '1.0.0',
+    origin: 'builtin',
+    installed: true,
+    locked: true,
+    available: true,
+    listed: true,
+    installScope: '产品内置，无需安装',
+    product: 'code-review',
+  },
+]
+
 /* 市场安装台账：按市场条目记录“哪个账号、装到哪个范围”，用于隔离与后台查看。 */
 const liveMarketInstalls = new Map()
 function marketInstallRecords(id) {
@@ -429,6 +688,37 @@ function installedUserSkillPlugins(userId) {
     })
   }
   return list
+}
+
+/**
+ * 已安装到当前账号 DSH 运行时的市场 Bundle。
+ * 这些包没有 SKILL.md，不能混进“账号技能目录”；但对用户来说它们就是已安装插件，
+ * 需要出现在输入框的插件选择器和 @ 快速调用里。
+ */
+function installedMarketBundlePlugins(userId) {
+  return liveMarket
+    .filter((item) => item.kind === 'bundle')
+    .map((item) => marketItemState(item, { userId }))
+    .filter((item) => item.installed)
+    .map((item) => ({
+      id: item.id,
+      marketId: item.id,
+      name: item.name,
+      kind: 'enterprise',
+      status: 'enabled',
+      publisher: item.publisher || item.submittedBy || '插件市场',
+      version: item.version || '1.0.0',
+      scope: item.installScope || '当前账号的 DSH 运行时',
+      risk: '按插件权限执行',
+      desc: item.desc || '',
+      source: 'market-bundle',
+      installed: true,
+      bundle: true,
+    }))
+}
+
+function installedPluginsForUser(userId) {
+  return [...installedSkillPlugins(), ...installedUserSkillPlugins(userId), ...installedMarketBundlePlugins(userId)]
 }
 
 /*
@@ -973,6 +1263,7 @@ clearDemoData()
 // 避免审计列表长期显示“待审批”。
 expirePendingApprovalDecisions('system-restart')
 recoverChatRunTasks()
+recoverPersistedConversations()
 for (const a of liveAutomations) if (a && a.status === 'active' && !a.nextRunAt) scheduleAutomationNext(a, Date.now())
 setInterval(automationTick, 30_000).unref()
 
@@ -1034,7 +1325,7 @@ function seedLocalAccounts() {
       duty: '系统管理员',
       apiProvider: 'DeepSeek',
       apiEndpoint: 'https://api.deepseek.com',
-      apiModel: 'deepseek-chat',
+      apiModel: 'deepseek-flash',
     })
   }
   // 账号表里的个人密钥是账号级来源；进程内配置优先，启动时把账号表补齐到进程内。
@@ -1046,7 +1337,7 @@ function seedLocalAccounts() {
         endpoint: account.apiEndpoint || 'https://api.deepseek.com',
         apiKey: raw,
         key: `${raw.slice(0, 3)}••••••••${raw.slice(-4)}`,
-        defaultModel: account.apiModel || 'deepseek-chat',
+        defaultModel: account.apiModel || 'deepseek-flash',
       })
     }
   }
@@ -1597,6 +1888,8 @@ const GUEST_GUARD = {
   'POST /api/tasks/retry': 'tasks',
   'GET /api/projects': 'projects',
   'POST /api/settings': 'home',
+  'POST /api/images/generate': 'home',
+  'GET /api/images/file': 'home',
   'GET /api/agent-presets': 'home',
   'POST /api/agent-presets': 'home',
   'DELETE /api/agent-presets': 'home',
@@ -1609,12 +1902,17 @@ const GUEST_GUARD = {
   'GET /api/mcp/resources': 'home',
   'GET /api/mcp/resource': 'home',
   'POST /api/projects/create': 'projects',
+  'POST /api/projects/verify': 'projects',
   'GET /api/conversations': 'home',
   'GET /api/conversation': 'home',
   'GET /api/conversation/export': 'home',
   'GET /api/conversation/trace': 'home',
   'GET /api/conversation/session-log': 'home',
   'POST /api/conversation/fork': 'home',
+  'GET /api/visuals': 'home',
+  'GET /api/visuals/versions': 'home',
+  'POST /api/visuals/save': 'home',
+  'POST /api/visuals/restore': 'home',
   'POST /api/terminal/exec': 'admin',
   'GET /api/terminal': 'admin',
   'POST /api/terminal/reset': 'admin',
@@ -1624,6 +1922,8 @@ const GUEST_GUARD = {
   'GET /api/speech/catalog': 'home',
   'POST /api/speech/prepare': 'admin',
   'POST /api/speech/transcribe': 'home',
+  'POST /api/tts': 'home',
+  'GET /api/tts/audio': 'home',
   'POST /api/conversation/job/kill': 'home',
   'POST /api/conversation/policy': 'home',
   'POST /api/conversation/feedback': 'home',
@@ -1718,7 +2018,19 @@ function projectStatus(item) {
 
 function decorateProject(item) {
   const status = projectStatus(item)
-  return { ...item, status, folderName: item.folderName || (item.cwd ? basename(item.cwd) : '') }
+  let rootFiles = 0
+  if (item.cwd) {
+    try {
+      rootFiles = readdirSync(item.cwd, { withFileTypes: true }).filter((entry) => entry.isFile()).length
+    } catch {}
+  }
+  return {
+    ...item,
+    status,
+    folderName: item.folderName || (item.cwd ? basename(item.cwd) : ''),
+    convs: conversations.filter((conv) => conv.projectId === item.id).length,
+    files: rootFiles,
+  }
 }
 
 function findProjectByDir(user, dir, excludeId = '') {
@@ -2037,6 +2349,7 @@ const WORK_INTENT_PATTERNS = [
   /(运行|执行|跑一下|编译|构建|安装|部署|测试)[^。\n]{0,24}(命令|脚本|代码|程序|项目|服务|测试|构建)/i,
   /(分析|处理|整理|统计|汇总|清洗|合并|拆分)[^。\n]{0,24}(数据|表格|文件|日志|CSV|Excel)/i,
   /(批量|遍历|扫描|自动化|多步骤|工作流)/i,
+  /(打包|压缩|构建|编译|部署|安装|发布|上传|下载|迁移|备份|恢复|做成[^。\n]{0,12}插件|插件[^。\n]{0,12}上传)/i,
   /\b(?:npm|pnpm|node|python|pip|git|pwsh|powershell|bash|apply_patch)\b/i,
   /```/,
 ]
@@ -2045,6 +2358,9 @@ function resolveTaskMode(text, requested, projectId) {
   const mode = ['auto', 'chat', 'work'].includes(String(requested || '')) ? String(requested) : 'auto'
   if (mode === 'chat') return { requested: 'chat', mode: 'chat', reason: '用户手动指定对话模式' }
   if (mode === 'work') return { requested: 'work', mode: 'work', reason: '用户手动指定工作模式' }
+  // 项目会话本身绑定了一个真实工作区；Auto 不应把它降格为只读问答，
+  // 否则打包、构建、写文件会在执行中被只读沙箱静默拒绝。
+  if (projectId) return { requested: 'auto', mode: 'work', reason: '已绑定项目工作区，按工作模式执行' }
   const hits = WORK_INTENT_PATTERNS.filter((pattern) => pattern.test(String(text || ''))).length
   if (hits > 0) {
     return {
@@ -2863,6 +3179,8 @@ function startChatRunTask({ conv, user, text, mode, taskMode, target, idempotenc
     title: text.length > 40 ? `${text.slice(0, 40)}…` : text,
     state: 'queued',
     progress: 0,
+    progressText: '正在建立任务上下文',
+    activityDetail: '准备读取项目与工具状态',
     target: `${mode === 'work' ? '工作' : mode === 'chat' ? '对话' : '自动'} · ${target || '对话工作区'}`,
     started: '',
     createdAt: Date.now(),
@@ -2897,11 +3215,74 @@ function markChatRunStarted(task, sessionId = '') {
   if (!task) return
   task.state = 'running'
   task.progress = 20
+  task.progressText = '正在分析请求与工作区'
+  task.activityDetail = 'DSH 会话已启动，正在读取上下文'
   task.started = new Date().toLocaleTimeString('zh-CN', { hour12: false }).slice(0, 5)
   task.dshSessionId = sessionId || task.dshSessionId || ''
   task.queuePosition = 0
   task.checkpoint = { ...(task.checkpoint || {}), phase: 'running', dshSessionId: task.dshSessionId, updatedAt: Date.now() }
   persistPersistentState()
+}
+
+/** 工具名转成用户能看懂的动作标签，不把内部名称直接抛到前台。 */
+function chatToolLabel(name) {
+  const key = String(name || '').replace(/^mcp__[^_]+__/, '')
+  return {
+    run_code: '运行代码',
+    bash: '执行命令',
+    shell: '执行命令',
+    exec: '执行命令',
+    read: '读取文件',
+    read_file: '读取文件',
+    write: '写入文件',
+    write_file: '写入文件',
+    edit: '修改文件',
+    apply_patch: '应用修改',
+    glob: '查找文件',
+    grep: '检索内容',
+    web_search: '搜索网页',
+    web_fetch: '读取网页',
+    present_files: '整理交付物',
+    task: '处理任务',
+  }[key] || key || '工具调用'
+}
+
+/** 把 DSH 的真实 session.event 映射成聊天中的“最近动态”，仅供前端展示。 */
+function recordChatRunActivity(task, event) {
+  if (!task || task.state !== 'running' || !event?.type) return
+  const now = Date.now()
+  let activity = ''
+  let detail = ''
+  if (event.type === 'tool/call') {
+    const tool = String(event.data?.name || '')
+    const args = String(event.data?.arguments || '')
+    const described = describeToolCall({ tool, args, isExternalSideEffect: isExternalSideEffectTool(tool) })
+    const action = chatToolLabel(tool)
+    const rawSummary = String(described.summary || '')
+    const target = rawSummary.replace(/^目标：/, '').split('；')[0].slice(0, 70)
+    activity = `正在${action}${target && !/未提供可展示参数/.test(target) ? ` · ${target}` : ''}`
+    detail = '工具调用已开始，等待返回结果'
+    task.toolCallsSeen = (task.toolCallsSeen || 0) + 1
+    task.progress = Math.min(90, Math.max(task.progress || 20, 30 + task.toolCallsSeen * 8))
+  } else if (event.type === 'tool/result') {
+    activity = '正在整理工具结果'
+    detail = event.data?.error ? '工具返回异常，正在处理并准备下一步' : '已收到工具返回，继续下一步'
+  } else if (event.type === 'turn/end') {
+    activity = '正在整理最终答复'
+    detail = '本轮执行结束，正在生成可读结果'
+    task.progress = Math.max(task.progress || 20, 85)
+  } else if (event.type === 'compaction/start') {
+    activity = '正在压缩上下文'
+    detail = '历史上下文较长，先压缩再继续'
+  } else if (event.type === 'plan/mode') {
+    activity = event.data?.active ? '正在进入计划模式' : '正在退出计划模式'
+    detail = '计划模式状态已更新'
+  }
+  if (!activity) return
+  task.progressText = activity.slice(0, 160)
+  task.activityDetail = detail.slice(0, 200)
+  task.activityAt = now
+  task.recentActivities = [...(task.recentActivities || []), { text: task.progressText, at: now }].slice(-6)
 }
 
 function cancelChatRunTask(task, reason = '用户停止执行') {
@@ -3037,6 +3418,7 @@ async function runAutomation(a, trigger = 'manual') {
   const account = getAccount(a.userId) || getAccountByRole('admin')
   if (!account) return { ok: false, error: '任务归属账号不存在' }
   const user = userOfAccount(account)
+  const permission = a.permission === 'read-only' ? 'read-only' : 'workspace-write'
   const task = {
     id: `T-${Date.now()}-${Math.floor(Math.random() * 900 + 100)}`,
     kind: 'automation-run',
@@ -3050,6 +3432,7 @@ async function runAutomation(a, trigger = 'manual') {
     automationId: a.id,
     userId: user.id,
     prompt: a.prompt || '',
+    permission,
     steps: 0,
     artifacts: 0,
     reason: '',
@@ -3095,7 +3478,7 @@ async function runAutomation(a, trigger = 'manual') {
     messages: [],
     status: 'running',
     projectId: a.projectId || null,
-    executionPolicy: 'auto',
+    executionPolicy: permission === 'read-only' ? 'manual' : 'auto',
     userId: user.id,
     owner: user.name,
     createdAt: Date.now(),
@@ -3112,7 +3495,8 @@ async function runAutomation(a, trigger = 'manual') {
 
   const context = [
     `当前用户：${user.name}（${user.label}，${user.unit || '—'}）`,
-    '当前任务模式：定时任务（无人值守自动执行；工作目录内常规读写自动批准，越界和高风险动作拒绝）',
+    `当前任务模式：定时任务（无人值守，创建时已声明权限：${permission === 'read-only' ? '只读' : '工作区可写'}）`,
+    `任务权限：${permission === 'read-only' ? '只读，只允许查询/读取，不写文件、不执行命令' : '仅任务工作目录内可读写/构建/测试，禁止外部副作用'}；超出范围立即停止，不自动扩权。`,
     `定时任务名称：${a.name}`,
     `投递目标：${a.deliver || '工作台'}（当前仅记录结果，不自动发送到外部系统）`,
     '执行要求：按指令完成可验证的工作；先检查已有文件与结果，不重复已完成步骤；结果写入当前工作目录并返回摘要。',
@@ -3130,15 +3514,17 @@ async function runAutomation(a, trigger = 'manual') {
         cwd: conv.agentCwd,
         agentsHome: userAgentHome(user.id),
         dshHome: ensureUserDshHome(user.id),
-        executionPolicy: 'auto',
+        executionPolicy: permission === 'read-only' ? 'manual' : 'auto',
+        maxToolCalls: forcedMaxToolCalls || 60,
         runKey: conv.id,
         runtimeScope: conv.id,
         shouldCancel: () => false,
         handlers: {
           onApproval: (params) => {
             const evaluation = describeToolApproval(params)
-            // 定时任务无人值守：Auto 的 workspace-write 沙箱内操作不会走到这里；
-            // 一旦 DSH 发起升级请求，因为没有审批人，按拒绝处理。
+            // 无人值守任务没有审批人；任何升级都说明超出创建任务时声明的权限范围。
+            // 这里不是 AI 自行决定，而是执行用户预先设定的边界，并明确记录停止原因。
+            const rule = permission === 'read-only' ? 'scheduled-read-only-scope' : 'scheduled-scope-exceeded'
             recordApprovalDecision({
               conversationId: conv.id,
               callId: params?.callId || '',
@@ -3146,10 +3532,10 @@ async function runAutomation(a, trigger = 'manual') {
               operation: evaluation.operation,
               summary: evaluation.summary,
               decision: 'deny',
-              rule: 'dsh-scheduled-escalation-unavailable',
+              rule,
               risk: evaluation.risk,
               actor: user.name,
-              approver: 'system-scheduled',
+              approver: 'policy:task-scope',
               net: 'inet',
             })
             return { outcome: 'rejected' }
@@ -3294,7 +3680,7 @@ async function refContextForModel(user, net, refs) {
     if (ref.kind === 'library') {
       const r = liveResources.find((x) => x.id === ref.id)
       if (r && canSee(user, r, net)) {
-        out.push(`资料库资源：${r.id} · ${r.name}（${r.type}，${r.source || '—'}）\n简介：${String(r.desc || '').slice(0, 600)}`)
+        out.push(`资料库资源：${r.id} · ${r.name}（${r.type}，${r.source || '—'}）\n简介：${String(r.desc || '').slice(0, 400)}`)
       }
     } else if (ref.kind === 'project') {
       const p = liveProjects.find((x) => x.id === ref.id)
@@ -3306,7 +3692,7 @@ async function refContextForModel(user, net, refs) {
         if (/\.(txt|md|csv|json|geojson|xml|html|log|yml|yaml)$/i.test(meta.name || '') && meta.size <= 1024 * 1024) {
           try {
             const buffer = readFileBuffer(ref.id)
-            excerpt = Buffer.from(buffer).toString('utf8').slice(0, 3000)
+            excerpt = Buffer.from(buffer).toString('utf8').slice(0, 1200)
           } catch { excerpt = '' }
         }
         out.push(`会话附件：${meta.name}（${meta.size} 字节，${meta.mime || '未知类型'}）\n${excerpt ? `正文摘录：\n${excerpt}` : '（二进制文件，正文未展开）'}`)
@@ -3315,10 +3701,50 @@ async function refContextForModel(user, net, refs) {
       out.push(`已选工具：${ref.label || ref.id}`)
     }
   }
-  return out.join('\n\n')
+  const rendered = out.join('\n\n')
+  return rendered.length > 8000 ? `${rendered.slice(0, 8000)}\n…（会话附件上下文已截断，需要更多内容请读取对应附件）` : rendered
 }
 
-function imageBlocksForAgent(user, net, refs) {
+let sharpLib
+function getSharp() {
+  if (sharpLib !== undefined) return sharpLib
+  try { sharpLib = createRequire(import.meta.url)('./dsh-runtime/node_modules/sharp') } catch { sharpLib = null }
+  return sharpLib
+}
+
+/**
+ * 图片进入模型前先做尺寸/体积治理：长边不超过 1568，截图统一转 JPEG。
+ * 只压缩不上采样；sharp 不可用时保留原图，避免把主链路拖死。
+ */
+async function prepareImageForModel(buffer, mime, name) {
+  const original = {
+    data: Buffer.from(buffer).toString('base64'),
+    mimeType: mime,
+    name: name || 'image',
+  }
+  const sharp = getSharp()
+  if (!sharp) return original
+  try {
+    const meta = await sharp(buffer).metadata()
+    const longEdge = Math.max(Number(meta.width || 0), Number(meta.height || 0))
+    if (longEdge <= 1568 && buffer.length <= 2 * 1024 * 1024) return original
+    const resized = await sharp(buffer)
+      .rotate()
+      .resize({ width: 1568, height: 1568, fit: 'inside', withoutEnlargement: true })
+      .jpeg({ quality: 85, mozjpeg: true })
+      .toBuffer()
+    if (!resized.length) return original
+    return {
+      data: resized.toString('base64'),
+      mimeType: 'image/jpeg',
+      name: `${String(name || 'image').replace(/\.[^.]+$/, '')}.jpg`,
+    }
+  } catch {
+    return original
+  }
+}
+
+async function imageBlocksForAgent(user, net, refs) {
   const blocks = []
   for (const ref of (Array.isArray(refs) ? refs : [])) {
     if (blocks.length >= 4) break
@@ -3330,20 +3756,27 @@ function imageBlocksForAgent(user, net, refs) {
     if (Number(meta.size || 0) > 8 * 1024 * 1024) continue
     try {
       const buffer = readFileBuffer(ref.id)
-      blocks.push({
-        type: 'image',
-        data: Buffer.from(buffer).toString('base64'),
-        mimeType: mime,
-        name: meta.name || ref.label || 'image',
-      })
+      const prepared = await prepareImageForModel(buffer, mime, meta.name || ref.label || 'image')
+      blocks.push({ type: 'image', ...prepared })
     } catch {}
   }
   return blocks
 }
 
-function resourcePromptContext(user, net) {
-  const visible = liveResources.filter((r) => canSee(user, r, net)).slice(0, 40)
-  return visible.map((r) => `- ${r.id}｜${r.name}｜${r.type}｜${r.source || '—'}｜${String(r.desc || '').slice(0, 120)}`).join('\n')
+const RESOURCE_CONTEXT_LIMIT = 12
+
+function resourcePromptContext(user, net, query = '', limit = RESOURCE_CONTEXT_LIMIT) {
+  const visible = liveResources.filter((r) => canSee(user, r, net))
+  const terms = String(query || '').toLowerCase().split(/[\s,，。；;、/]+/).filter((t) => t.length >= 2)
+  const ranked = visible.map((r, index) => {
+    const haystack = `${r.id} ${r.name} ${r.type} ${r.source || ''} ${r.desc || ''}`.toLowerCase()
+    const score = terms.reduce((sum, term) => sum + (haystack.includes(term) ? 1 : 0), 0)
+    return { r, index, score }
+  })
+  const chosen = (terms.length ? ranked.sort((a, b) => b.score - a.score || a.index - b.index) : ranked)
+    .slice(0, Math.max(1, limit))
+    .map((item) => item.r)
+  return chosen.map((r) => `- ${r.id}｜${r.name}｜${r.type}｜${r.source || '—'}｜${String(r.desc || '').slice(0, 60)}`).join('\n')
 }
 
 async function buildModelMessages({ user, net, text, conv, refs }) {
@@ -3360,7 +3793,7 @@ async function buildModelMessages({ user, net, text, conv, refs }) {
     '3. 引用资源时保留资源 ID（如 R-2026-Q3-IMG），便于系统生成引用。',
     '4. 用简体中文回答，先给结论，再给依据和下一步；不要输出 JSON 或代码块套话。',
     '',
-    `当前网络与角色可见资源目录（最多 40 项）：`,
+    `当前网络与角色可见资源目录（摘要，最多 ${RESOURCE_CONTEXT_LIMIT} 项；需要更多请调用 drive_search）：`,
     contextResources || '（当前无可见资源）',
     refContext ? `\n会话上下文：\n${refContext}` : '',
   ].filter(Boolean).join('\n')
@@ -3758,6 +4191,69 @@ function jsonError(status, error, extra = {}) {
   return { status, body: { error, ...extra } }
 }
 
+// 本地开源语音合成：Piper（MIT）中文神经语音模型，离线生成 WAV，不把回复文本外发给第三方。
+const PIPER_DIR = join(root, 'data', 'tts', 'piper', 'piper')
+const PIPER_EXE = join(PIPER_DIR, process.platform === 'win32' ? 'piper.exe' : 'piper')
+const PIPER_MODEL = join(PIPER_DIR, 'zh_CN-huayan-medium.onnx')
+const PIPER_MODEL_JSON = join(PIPER_DIR, 'zh_CN-huayan-medium.onnx.json')
+const PIPER_CACHE_DIR = join(dataDirPath(), 'tts-cache')
+
+function piperReady() {
+  return existsSync(PIPER_EXE) && existsSync(PIPER_MODEL) && existsSync(PIPER_MODEL_JSON)
+}
+
+function synthesizeWithPiper(text, outputPath) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(PIPER_EXE, [
+      '--model', PIPER_MODEL,
+      '--output_file', outputPath,
+      '--length_scale', '1.0',
+    ], { cwd: PIPER_DIR, windowsHide: true })
+    let stderr = ''
+    const timer = setTimeout(() => {
+      try { child.kill() } catch {}
+      reject(new Error('语音合成超时'))
+    }, 60000)
+    child.on('error', (error) => {
+      clearTimeout(timer)
+      reject(error)
+    })
+    child.stderr.on('data', (chunk) => { stderr = `${stderr}${String(chunk)}`.slice(-800) })
+    child.on('close', (code) => {
+      clearTimeout(timer)
+      if (code === 0 && existsSync(outputPath) && statSync(outputPath).size > 0) return resolve(outputPath)
+      reject(new Error(`本地语音合成失败（${code}）：${stderr.trim()}`))
+    })
+    child.stdin.end(String(text || ''), 'utf8')
+  })
+}
+
+async function localTtsFile(text) {
+  if (!piperReady()) {
+    const error = new Error('本地语音模型未安装')
+    error.code = 'TTS_NOT_READY'
+    throw error
+  }
+  mkdirSync(PIPER_CACHE_DIR, { recursive: true })
+  const hash = createHash('sha256').update(text).digest('hex').slice(0, 24)
+  const finalPath = join(PIPER_CACHE_DIR, `${hash}.wav`)
+  if (existsSync(finalPath) && statSync(finalPath).size > 0) return { file: finalPath, name: `${hash}.wav`, cached: true }
+  const tmpPath = join(PIPER_CACHE_DIR, `${hash}.${process.pid}.${randomBytes(4).toString('hex')}.tmp.wav`)
+  try {
+    await synthesizeWithPiper(text, tmpPath)
+    try {
+      renameSync(tmpPath, finalPath)
+    } catch {
+      if (!(existsSync(finalPath) && statSync(finalPath).size > 0)) throw new Error('语音文件写入失败')
+      try { rmSync(tmpPath, { force: true }) } catch {}
+    }
+    return { file: finalPath, name: `${hash}.wav`, cached: false }
+  } catch (error) {
+    try { rmSync(tmpPath, { force: true }) } catch {}
+    throw error
+  }
+}
+
 const api = {
   'GET /api/harness/services': (req, res) => {
     json(res, 200, { items: HARNESS_BASE_SERVICES })
@@ -3878,6 +4374,7 @@ const api = {
       tasks: user.id === 'guest' ? [] : liveTasks,
       tools: conf.tools,
       models: user.id === 'guest' ? [] : conf.models,
+      imageGeneration: imageGenerationStatus(user, net),
       groupModels: conf.models,
       ownApiRequired: user.id === 'guest',
       agentPresets: agentPresets.map((p) => ({ ...p })),
@@ -4654,7 +5151,7 @@ const api = {
   'GET /api/plugins': (req, res) => {
     const user = roleOf(req)
     const net = netOf(req)
-    const list = [...installedSkillPlugins(), ...installedUserSkillPlugins(user.id)]
+    const list = installedPluginsForUser(user.id)
       .filter((p) => (p.nets || ['inet']).includes(net))
       .map((p) => ({ ...p, status: pluginEnabledFor(user.id, p) }))
     json(res, 200, { items: list, canManage: canManage(user) })
@@ -4817,6 +5314,7 @@ const api = {
       .filter((m) => m.listed !== false)
       .sort((a, b) => Number(a.order || 0) - Number(b.order || 0))
       .map((m) => marketItemState(m, { userId: user.id }))
+      .concat(PRODUCT_MARKET_PLUGINS.map((m) => ({ ...m, origin: 'builtin', installed: true, locked: true, available: true, type: 'plugin' })))
     json(res, 200, { items, network: networks[net]?.label || '', installScope: '当前账号或项目技能目录；Bundle 按账号独立 DSH_HOME' })
   },
   'GET /api/plugin-market/download': (req, res, url) => {
@@ -5191,6 +5689,27 @@ const api = {
     logAudit(user, 'project.remove', item.id, 'record-only', netOf(req))
     json(res, 200, { ok: true, id: item.id, note: '已移除项目记录；本地文件夹与会话历史均未删除。' })
   },
+  'POST /api/projects/verify': (req, res) => {
+    const user = roleOf(req)
+    const body = JSON.parse(req.__body || '{}')
+    const item = liveProjects.find((p) => p.id === body.projectId && !p.removed)
+    if (!item) return json(res, 404, { error: '项目不存在' })
+    if (item.owner !== user.name && !canManage(user)) return json(res, 403, { error: '无权检查该项目' })
+    if (!item.cwd) return json(res, 409, { error: '项目未绑定本地文件夹，无法检查成果', code: 'PROJECT_DIR_UNBOUND' })
+    if (projectStatus(item) !== 'online') {
+      return json(res, 409, { error: '项目文件夹当前不可用（可能在其他设备或已被移动）', code: 'PROJECT_DIR_UNAVAILABLE' })
+    }
+    try {
+      const result = checkProjectDeliverables({ cwd: item.cwd, projectName: item.name })
+      logAudit(user, 'project.verify', item.id, `files=${result.summary.files};conflicts=${result.summary.conflicts}`, netOf(req))
+      return json(res, 200, result)
+    } catch (error) {
+      return json(res, error?.status || 500, {
+        error: error?.message || '成果检查失败',
+        code: error?.code || 'PROJECT_VERIFY_FAILED',
+      })
+    }
+  },
   'GET /api/apps': (req, res) => {
     const user = roleOf(req)
     const net = netOf(req)
@@ -5295,7 +5814,62 @@ const api = {
     const c = conversations.find((x) => x.id === id)
     if (!c) return json(res, 404, { error: '会话不存在' })
     if (!conversationAllowed(user, c)) return json(res, 403, { error: '无权访问该会话', code: 'CONVERSATION_FORBIDDEN' })
-    json(res, 200, { item: c })
+    if (recoverConversationFromTrace(user, c)) persistPersistentState()
+    json(res, 200, { item: hydrateConversationVisuals(c) })
+  },
+  'GET /api/visuals': (req, res, url) => {
+    const user = roleOf(req)
+    const id = String(url.searchParams.get('id') || '').trim()
+    if (id) {
+      const visual = getVisualArtifact(id)
+      if (!visual) return json(res, 404, { error: '可视化对象不存在', code: 'VISUAL_NOT_FOUND' })
+      if (String(visual.owner || '') !== user.id) return json(res, 403, { error: '无权访问该可视化对象', code: 'VISUAL_FORBIDDEN' })
+      return json(res, 200, { ok: true, visual: visualPublic(visual), versions: listVisualVersions(id) })
+    }
+    const sessionId = String(url.searchParams.get('sessionId') || '').trim()
+    if (sessionId) {
+      const conv = conversations.find((x) => x.id === sessionId)
+      if (!conv) return json(res, 404, { error: '会话不存在' })
+      if (!conversationAllowed(user, conv)) return json(res, 403, { error: '无权访问该会话', code: 'CONVERSATION_FORBIDDEN' })
+      const items = listVisualArtifacts({ sessionId, owner: user.id, limit: 200 })
+      return json(res, 200, { ok: true, items: items.map(visualPublic) })
+    }
+    const items = listVisualArtifacts({ owner: user.id, savedOnly: url.searchParams.get('saved') === '1', limit: 200 })
+    json(res, 200, { ok: true, items: items.map(visualPublic) })
+  },
+  'GET /api/visuals/versions': (req, res, url) => {
+    const user = roleOf(req)
+    const id = String(url.searchParams.get('id') || '').trim()
+    const visual = getVisualArtifact(id)
+    if (!visual) return json(res, 404, { error: '可视化对象不存在', code: 'VISUAL_NOT_FOUND' })
+    if (String(visual.owner || '') !== user.id) return json(res, 403, { error: '无权访问该可视化对象', code: 'VISUAL_FORBIDDEN' })
+    json(res, 200, { ok: true, visual: visualPublic(visual), items: listVisualVersions(id) })
+  },
+  'POST /api/visuals/save': (req, res) => {
+    const user = roleOf(req)
+    const body = JSON.parse(req.__body || '{}')
+    const id = String(body.id || '').trim()
+    const visual = getVisualArtifact(id)
+    if (!visual) return json(res, 404, { error: '可视化对象不存在', code: 'VISUAL_NOT_FOUND' })
+    if (String(visual.owner || '') !== user.id) return json(res, 403, { error: '无权访问该可视化对象', code: 'VISUAL_FORBIDDEN' })
+    const saved = saveVisualArtifact(id, { title: String(body.name || body.title || visual.title).slice(0, 120), actor: user.id })
+    logAudit(user, 'visual.save', id, `status=${saved.status}`, netOf(req))
+    json(res, 200, { ok: true, visual: visualPublic(saved) })
+  },
+  'POST /api/visuals/restore': (req, res) => {
+    const user = roleOf(req)
+    const body = JSON.parse(req.__body || '{}')
+    const id = String(body.id || '').trim()
+    const visual = getVisualArtifact(id)
+    if (!visual) return json(res, 404, { error: '可视化对象不存在', code: 'VISUAL_NOT_FOUND' })
+    if (String(visual.owner || '') !== user.id) return json(res, 403, { error: '无权访问该可视化对象', code: 'VISUAL_FORBIDDEN' })
+    try {
+      const restored = restoreVisualVersion(id, body.version, user.id, `恢复 v${body.version}`)
+      logAudit(user, 'visual.restore', id, `version=${body.version}`, netOf(req))
+      json(res, 200, { ok: true, visual: visualPublic(restored) })
+    } catch (error) {
+      json(res, 422, { error: String(error?.message || error), code: 'VISUAL_RESTORE_FAILED' })
+    }
   },
   'GET /api/conversation/export': (req, res, url) => {
     const user = roleOf(req)
@@ -5506,6 +6080,50 @@ const api = {
     logAudit(user, 'conversation.delete', id, `turns=${conv.turns || 0}`, net)
     json(res, 200, { ok: true, id, note: '仅移除产品会话记录；Harness 历史文件按会话策略保留。' })
   },
+  'POST /api/conversation/clear': (req, res) => {
+    const user = roleOf(req)
+    const net = netOf(req)
+    const body = JSON.parse(req.__body || '{}')
+    if (!body.confirm) return json(res, 400, { error: '清空最近对话需要明确确认' })
+    const ids = Array.isArray(body.ids)
+      ? [...new Set(body.ids.map((id) => String(id || '')).filter(Boolean))]
+      : []
+    if (!ids.length) return json(res, 400, { error: '没有指定要清空的最近对话' })
+    const targets = conversations.filter((conv) => ids.includes(conv.id) && conversationAllowed(user, conv) && !conv.projectId)
+    if (!targets.length) return json(res, 400, { error: '没有可清空的最近对话；项目下的对话会始终保留' })
+    const running = targets.filter((conv) => conv.status === 'running')
+    if (running.length) return json(res, 409, { error: `还有 ${running.length} 条对话正在生成，请先停止后再清空` })
+    let removed = 0
+    for (let i = conversations.length - 1; i >= 0; i -= 1) {
+      const conv = conversations[i]
+      // 项目会话即使被误传 ID 也不会删除；项目入口与线程始终保留。
+      if (!conversationAllowed(user, conv) || conv.projectId) continue
+      if (!ids.includes(conv.id)) continue
+      conversations.splice(i, 1)
+      removed += 1
+    }
+    persistPersistentState()
+    const preservedProjects = conversations.filter((conv) => conversationAllowed(user, conv) && conv.projectId).length
+    logAudit(user, 'conversation.clear', 'recent', `count=${removed};projects=${preservedProjects}`, net)
+    json(res, 200, { ok: true, removed, preservedProjects, note: '仅清空最近对话；项目下的对话、项目文件、项目目录与审计记录保留。' })
+  },
+  'POST /api/conversation/message/delete': (req, res) => {
+    const user = roleOf(req)
+    const net = netOf(req)
+    const body = JSON.parse(req.__body || '{}')
+    const id = String(body.conversationId || body.id || '')
+    const index = Number(body.index)
+    const conv = conversations.find((c) => c.id === id)
+    if (!conv) return json(res, 404, { error: '会话不存在' })
+    if (!conversationAllowed(user, conv)) return json(res, 403, { error: '无权修改该会话', code: 'CONVERSATION_FORBIDDEN' })
+    if (conv.status === 'running') return json(res, 409, { error: '对话正在生成，暂不能删除消息' })
+    if (!Number.isInteger(index) || index < 0 || index >= conv.messages.length) return json(res, 400, { error: '消息位置无效' })
+    if (conv.messages[index]?.role !== 'user') return json(res, 400, { error: '这里只能删除用户消息' })
+    const [removed] = conv.messages.splice(index, 1)
+    persistPersistentState()
+    logAudit(user, 'conversation.message.delete', id, `#${index}:${String(removed?.text || '').slice(0, 80)}`, net)
+    json(res, 200, { ok: true, index })
+  },
   'POST /api/terminal/exec': async (req, res) => {
     const user = roleOf(req)
     if (!canManage(user)) return json(res, 403, { error: '仅管理员可使用平台终端' })
@@ -5690,6 +6308,8 @@ const api = {
     const body = JSON.parse(req.__body || '{}')
     const text = (body.text || '').trim()
     if (!text) return json(res, 400, { error: '请输入任务描述' })
+    const regenerate = body.regenerate === true
+    const regenerateIndex = Number(body.messageIndex)
     const projectId = String(body.projectId || '')
     const project = projectId ? liveProjects.find((p) => p.id === projectId && !p.removed) : null
     if (projectId && !project) return json(res, 404, { error: '项目不存在' })
@@ -5749,6 +6369,7 @@ const api = {
     let executionPolicy
     let activePreset = requestedPreset
     if (!conv) {
+      if (regenerate) return json(res, 404, { error: '要重新生成的会话不存在' })
       // 允许客户端先分配会话 ID，便于首轮执行期间就能按会话轮询审批/提问。
       const requestedId = /^C-\d{6,}$/.test(String(body.conversationId || '')) ? String(body.conversationId) : ''
       executionPolicy = requestedPolicy
@@ -5762,6 +6383,15 @@ const api = {
       conversations.unshift(conv)
     } else {
       if (!conversationAllowed(user, conv)) return json(res, 403, { error: '无权访问该会话', code: 'CONVERSATION_FORBIDDEN' })
+      if (regenerate) {
+        if (!Number.isInteger(regenerateIndex) || regenerateIndex < 0 || regenerateIndex >= conv.messages.length) {
+          return json(res, 400, { error: '要重新生成的消息位置无效' })
+        }
+        if (conv.messages[regenerateIndex]?.role !== 'assistant') {
+          return json(res, 400, { error: '只能重新生成助手回复' })
+        }
+        if (conv.status === 'running') return json(res, 409, { error: '当前会话正在生成，请完成或停止后再重新生成' })
+      }
       if (!conv.userId) conv.userId = 'admin'
       // 已有会话的策略以服务端存储为准；请求体只作为首次创建时的初始值。
       executionPolicy = conv.executionPolicy === 'manual' ? 'manual' : 'auto'
@@ -5790,7 +6420,7 @@ const api = {
     }
     conv.agentCwd = project?.cwd || chatWorkspaceDir(user, conv.id)
     conv.cancelRequested = false
-    conv.messages.push({ role: 'user', text, time: new Date().toLocaleTimeString('zh-CN', { hour12: false }).slice(0, 5) })
+    if (!regenerate) conv.messages.push({ role: 'user', text, time: new Date().toLocaleTimeString('zh-CN', { hour12: false }).slice(0, 5) })
     conv.status = 'running'
     activeRuns.add(conv.id)
     let modelCfg = resolveModelConfig({
@@ -5832,16 +6462,16 @@ const api = {
       }
       const refContext = await refContextForModel(user, net, body.refs)
       const selectedPlugins = (Array.isArray(body.tools) ? body.tools : [])
-        .map((id) => installedSkillPlugins().find((p) => p.id === id))
+        .map((id) => installedPluginsForUser(user.id).find((p) => p.id === id))
         .filter((p) => p)
       const pluginContext = selectedPlugins.length
         ? `本次已启用的插件与技能（可选择使用）：\n${selectedPlugins.map((p) => `- ${p.name}（${p.kind === 'personal' ? '个人技能' : '企业插件'}）：${p.desc}`).join('\n')}`
         : ''
       const context = [
-        `当前用户：${user.name}（${user.label}，${user.unit || '—'}）`,        `当前任务模式：${taskMode === 'auto' ? `自动（本轮判定为${mode === 'work' ? '工作' : '对话'}模式：${route.reason}）` : taskMode === 'chat' ? '对话模式（优先直接回答；不要主动修改文件、运行命令或产生外部副作用。用户明确要求创建或修改文件、执行命令时，不要发起工具调用或申请权限，直接说明当前是对话模式并建议切换到工作模式）' : '工作模式（可以调用文件、命令、代码与技能工具执行任务）'}`,
+        `当前用户：${user.name}（${user.label}，${user.unit || '—'}）`,        `当前任务模式：${taskMode === 'auto' ? `自动（本轮判定为${mode === 'work' ? '工作' : '对话'}模式：${route.reason}）` : taskMode === 'chat' ? '对话模式（默认只读；用户明确要求创建或修改文件、执行命令时，按权限流程申请审批，由用户逐次决定是否授权，不要自行拒绝或绕过审批）' : '工作模式（可以调用文件、命令、代码与技能工具执行任务）'}`,
         project ? `当前工作项目：${project.name}；授权目录：${project.cwd}。所有文件读写与命令执行必须限制在该目录内。` : '',
         project?.instructions
-          ? `项目专属指令（由项目创建者填写，优先级高于一般习惯，但不得覆盖系统安全规则）：\n${String(project.instructions).slice(0, 4000)}`
+          ? `项目专属指令（由项目创建者填写，优先级高于一般习惯，但不得覆盖系统安全规则）：\n${String(project.instructions).slice(0, 2000)}`
           : '',
         executionPolicy === 'manual'
           ? '当前审批方式：请求批准。只读操作可以直接进行；创建、修改、删除文件，运行有副作用的命令，或调用会改变外部状态的工具时，直接发起工具调用，需要写入时可按工具要求申请 workspace-write 升级，由 DSH 只读策略把升级动作转成产品审批卡。不要先用提问向用户申请授权；用户拒绝后停止该动作。'
@@ -5850,17 +6480,31 @@ const api = {
         webSearch
           ? '本轮已启用网页搜索：优先调用平台 Web 搜索与网页抓取工具获取外部信息，回答中标注真实来源 URL；不得把模型记忆当成网页检索结果，搜不到就明确说明。'
           : '',
-        '企业可见资源目录（最多 40 项）：',
-        resourcePromptContext(user, net) || '（当前无可见资源）',
+        `企业可见资源目录（摘要，最多 ${RESOURCE_CONTEXT_LIMIT} 项；需要更多请调用 drive_search）：`,
+        resourcePromptContext(user, net, text) || '（当前无可见资源）',
+        'Visual Engine：当用户明确要求画图，或流程、架构、关系、统计、信息图、可调参数计算器用图形表达更清楚时，必须调用 visual_create（流程/关系用 mermaid，统计用 echarts，自定义信息图用 svg，滑块/实时计算的贷款计算器用 interactive + loan-calculator 配置）；修改当前会话已有图形时必须优先调用 visual_update 并复用其 id，保留未要求修改的节点和数据。不要把 Mermaid/ECharts/SVG 源码直接写进回答，不要在回答里用代码块代替图形。创建/修改成功后用一两句话说明图形表达的重点即可。',
+        visualContextForModel(user, conv.id),
         refContext ? `会话上下文：\n${refContext}` : '',
         activePreset?.instructions
-          ? `Agent 预设「${activePreset.name}」的行为要求（必须遵守，但不得覆盖系统安全规则）：\n${String(activePreset.instructions).slice(0, 8000)}`
+          ? `Agent 预设「${activePreset.name}」的行为要求（必须遵守，但不得覆盖系统安全规则）：\n${String(activePreset.instructions).slice(0, 4000)}`
           : '',
         pluginContext,
-        conv.forkedFrom && conv.forkContext ? `分叉会话上下文（只读，来自用户选择的历史；不是 DSH 原生 fork）：\n${String(conv.forkContext).slice(0, 6000)}` : '',
+        conv.forkedFrom && conv.forkContext ? `分叉会话上下文（只读，来自用户选择的历史；不是 DSH 原生 fork）：\n${String(conv.forkContext).slice(0, 3000)}` : '',
       ].filter(Boolean).join('\n')
       const agentText = text
       const runStartedAt = Date.now()
+      const requestedModel = modelCfg.model
+      const imageBlocks = await imageBlocksForAgent(user, net, body.refs)
+      const modelRoute = routeModel({
+        baseModel: modelCfg.model,
+        text: agentText,
+        mode,
+        projectId: projectId || '',
+        images: imageBlocks,
+        deepThink,
+      })
+      if (modelRoute.imageFallback) modelCfg = { ...modelCfg, model: modelRoute.model }
+      else if (modelRoute.reason === 'deep-think') modelCfg = { ...modelCfg, model: modelRoute.model }
       // 本轮执行前先记录工作目录快照，执行后对比出真实新增/修改/删除。
       const treeBefore = runtimeSettings.workspaceChanges ? snapshotTree(conv.agentCwd) : null
       const result = await runAgent({
@@ -5874,33 +6518,35 @@ const api = {
         agentsHome: userAgentHome(user.id),
         dshHome: ensureUserDshHome(user.id),
         executionPolicy,
-        // Chat 只做问答/分析：无论审批方式如何，都不允许 DSH 在工作区写文件或执行有副作用的命令。
+        // 显式 Chat 固定只读；Auto 误路由为 chat 时，只允许通过审批卡单次放行。
         permissionPreset: mode === 'chat' ? 'read-only' : '',
+        maxToolCalls: forcedMaxToolCalls || (taskMode === 'chat' ? 30 : projectId ? 100 : 60),
         runKey: conv.id,
         runtimeScope: conv.id,
         onStart: (dshSessionId) => markChatRunStarted(chatTask, dshSessionId),
         shouldCancel: () => Boolean(conv.cancelRequested),
-        images: imageBlocksForAgent(user, net, body.refs),
+        images: imageBlocks,
         reasoningEffort,
         handlers: {
           onApproval: (params) => {
             const evaluation = describeToolApproval(params)
-            // Chat 模式不升级权限：任何需要审批的文件/命令操作一律拒绝，提示用户切换到 Work。
+            // 对话模式默认只读；一旦越界，不在系统侧替用户拒绝，而是发审批卡让用户决定。
             if (mode === 'chat') {
-              recordApprovalDecision({
+              const rule = taskMode === 'chat' ? 'chat-mode-approval' : 'auto-chat-runtime-approval'
+              const decisionId = recordApprovalDecision({
                 conversationId: conv.id,
                 callId: params?.callId || '',
                 tool: params?.toolNameResolved || params?.toolName || '',
                 operation: evaluation.operation,
                 summary: evaluation.summary,
-                decision: 'deny',
-                rule: 'chat-mode-no-escalation',
+                decision: 'pending',
+                rule,
                 risk: evaluation.risk,
                 actor: user.name,
-                approver: 'policy:chat-mode',
+                approver: 'pending',
                 net,
               })
-              return { outcome: 'rejected' }
+              return createPendingInteraction('approval', conv.id, approvalDetails(params, { ...evaluation, rule, decisionId }))
             }
             // 是否自动放行由 DSH 权限预设决定：
             // Auto 使用 workspace-write，工作区内操作不会走到这里；能走到这里的都是沙箱升级请求。
@@ -5937,16 +6583,33 @@ const api = {
                 label: String(o.label || ''),
                 description: o.description ? String(o.description) : '',
               })),
-            })),
+            })), 
           }),
+          onEvent: (event) => recordChatRunActivity(chatTask, event),
         },
       })
-      const reply = result.reply
+      let reply = result.reply
       if (conv.cancelRequested) {
         conv.status = 'done'
         activeRuns.delete(conv.id)
         cancelChatRunTask(chatTask, '用户停止本轮执行')
         return json(res, 200, { ok: true, cancelled: true, conversation: conv })
+      }
+      const messageId = `M-${Date.now().toString(36).toUpperCase()}-${randomBytes(3).toString('hex').toUpperCase()}`
+      const fromReply = visualsFromReply(reply, user, conv.id)
+      if (fromReply.visuals.length) {
+        reply = fromReply.text.trim() || '已生成可视化，可在消息中查看、放大或导出。'
+      }
+      const seenVisuals = new Set()
+      const visuals = []
+      for (const visual of [...(Array.isArray(result.visuals) ? result.visuals : []), ...fromReply.visuals]) {
+        const row = visual?.id ? (getVisualArtifact(visual.id) || visual) : null
+        if (!row || !row.id) continue
+        const key = `${row.id}:${row.version || 1}`
+        if (seenVisuals.has(key)) continue
+        seenVisuals.add(key)
+        attachVisualMessage(row.id, messageId)
+        visuals.push(visualRef(row))
       }
       const visible = liveResources.filter((r) => canSee(user, r, net))
       const citationIds = [...new Set((reply.match(/R-[A-Z0-9-]+/g) || []).filter((id) => visible.some((r) => r.id === id)))]
@@ -5965,8 +6628,14 @@ const api = {
         steps,
         usage: result.usage,
         events: result.events,
+        taskClass: modelRoute.taskClass,
+        imageCount: imageBlocks.length,
+        modelReason: modelRoute.reason,
+        replyChars: reply.length,
+        finishReason: result.finishReason,
       })
       const assistantMsg = {
+        id: messageId,
         role: 'assistant', text: reply,
         time: new Date().toLocaleTimeString('zh-CN', { hour12: false }).slice(0, 5),
         steps,
@@ -5975,6 +6644,7 @@ const api = {
         todos: Array.isArray(result.todos) ? result.todos : [],
         jobs: Array.isArray(result.jobs) ? result.jobs : [],
         deliverables: Array.isArray(result.deliverables) ? result.deliverables : [],
+        visuals,
         workspaceChanges,
         citations: citations.map((c) => c.id),
         model: result.model,
@@ -5982,8 +6652,25 @@ const api = {
         usageAt: Date.now(),
         traceId,
         runStats,
+        taskClass: modelRoute.taskClass,
       }
-      // 原始事件流单独落盘：既不放大会话快照，也让「轨迹 / 回放 / 统计」可回溯。
+      // 先把回答落到会话快照，再写轨迹文件：避免进程在“轨迹已写、会话未落库”的窗口内退出，
+      // 导致本地只剩用户提问而回答丢失。轨迹失败不影响回答已保存。
+      const aiTitle = String(result.title || '').trim()
+      const titleLooksUsable = aiTitle
+        && aiTitle.length <= 48
+        && !/当前用户|管理员|项目上下文|工作目录|系统提示/i.test(aiTitle)
+        && !/^(用户|系统|项目|助手|Context|Session|System)/i.test(aiTitle)
+      if (titleLooksUsable) conv.title = aiTitle.slice(0, 80)
+      if (regenerate) conv.messages[regenerateIndex] = assistantMsg
+      else conv.messages.push(assistantMsg)
+      conv.turns = Math.ceil(conv.messages.length / 2)
+      conv.status = 'done'
+      conv.model = result.model
+      conv.deepThink = deepThink
+      if (reasoningEffort) conv.reasoningEffort = deepThink ? 'high' : effortLevel
+      conv.dshSessionId = result.sessionId || conv.dshSessionId || ''
+      persistPersistentState()
       try {
         writeTrace(userAgentHome(user.id), {
           traceId,
@@ -5993,8 +6680,14 @@ const api = {
           startedAt: runStartedAt,
           endedAt: Date.now(),
           model: result.model,
+          requestedModel,
+          modelRoute,
           input: text,
+          reply,
           context,
+          taskClass: modelRoute.taskClass,
+          images: imageBlocks.map((block) => ({ name: block.name, mimeType: block.mimeType })),
+          finishReason: result.finishReason,
           stats: runStats,
           steps: Array.isArray(steps) ? steps : [],
           usage: result.usage || null,
@@ -6007,21 +6700,7 @@ const api = {
       } catch (traceError) {
         console.error('[jg-server] trace persist failed:', traceError?.message || traceError)
       }
-      const aiTitle = String(result.title || '').trim()
-      const titleLooksUsable = aiTitle
-        && aiTitle.length <= 48
-        && !/当前用户|管理员|项目上下文|工作目录|系统提示/i.test(aiTitle)
-        && !/^(用户|系统|项目|助手|Context|Session|System)/i.test(aiTitle)
-      if (titleLooksUsable) conv.title = aiTitle.slice(0, 80)
-      conv.messages.push(assistantMsg)
-      persistPersistentState()
-      conv.turns = Math.ceil(conv.messages.length / 2)
-      conv.status = 'done'
       activeRuns.delete(conv.id)
-      conv.model = result.model
-      conv.deepThink = deepThink
-      if (reasoningEffort) conv.reasoningEffort = deepThink ? 'high' : effortLevel
-      conv.dshSessionId = result.sessionId
       finishChatRunTask(chatTask, {
         steps: Array.isArray(steps) ? steps.length : 0,
         artifacts: workspaceChanges.length + (Array.isArray(result.deliverables) ? result.deliverables.length : 0),
@@ -6068,6 +6747,26 @@ const api = {
     if (!item) return json(res, 200, { item: null })
     json(res, 200, {
       item: { id: item.id, kind: item.kind, createdAt: item.createdAt, ...item.payload },
+    })
+  },
+  'GET /api/chat/task': (req, res) => {
+    const user = roleOf(req)
+    const conversationId = new URL(req.url, 'http://127.0.0.1').searchParams.get('conversationId') || ''
+    const conv = conversations.find((c) => c.id === conversationId)
+    if (conv && !conversationAllowed(user, conv)) return json(res, 403, { error: '无权访问该会话', code: 'CONVERSATION_FORBIDDEN' })
+    const task = liveTasks.find((t) => t.kind === 'chat-run' && t.conversationId === conversationId)
+    if (!task) return json(res, 200, { task: null })
+    json(res, 200, {
+      task: {
+        id: task.id,
+        state: task.state,
+        progress: task.progress,
+        progressText: task.progressText || '',
+        activityDetail: task.activityDetail || '',
+        activityAt: task.activityAt || 0,
+        recentActivities: (task.recentActivities || []).slice(-6),
+        createdAt: task.createdAt,
+      },
     })
   },
   'POST /api/chat/approval': (req, res) => {
@@ -6181,6 +6880,11 @@ const api = {
     const prompt = String(body.prompt || '').trim()
     if (!prompt) return json(res, 400, { error: '执行内容不能为空' })
     const schedule = String(body.schedule || '每天 08:30').trim()
+    // 无人值守任务在创建时就必须声明权限范围；运行时只执行这个范围，超出即停止。
+    const permission = String(body.permission || '')
+    if (!['read-only', 'workspace-write'].includes(permission)) {
+      return json(res, 400, { error: '请先选择任务权限：只读或工作区可写' })
+    }
     const item = {
       id: `AU-${Date.now().toString().slice(-6)}${Math.floor(Math.random() * 90 + 10)}`,
       name: String(body.name || '未命名定时任务').trim() || '未命名定时任务',
@@ -6192,6 +6896,8 @@ const api = {
       owner: user.name,
       userId: String(user.id || ''),
       prompt,
+      permission,
+      permissionDeclaredAt: Date.now(),
       deliver: String(body.deliver || '工作台 · 定时任务结果'),
       model: '系统默认模型',
       createdAt: Date.now(),
@@ -7115,6 +7821,90 @@ const api = {
       return json(res, 500, { error: `文件写入失败：${error?.message || error}` })
     }
   },
+  'POST /api/images/generate': async (req, res) => {
+    const user = roleOf(req)
+    const net = netOf(req)
+    const status = imageGenerationStatus(user, net)
+    if (!status.enabled) return json(res, 403, { error: status.reason, code: 'IMAGE_DISABLED' })
+    const body = JSON.parse(req.__body || '{}')
+    const prompt = String(body.prompt || '').trim()
+    if (!prompt) return json(res, 400, { error: '请先描述要生成的图像', code: 'IMAGE_PROMPT_REQUIRED' })
+    if (prompt.length > 1200) return json(res, 400, { error: '提示词不能超过 1200 个字符', code: 'IMAGE_PROMPT_TOO_LONG' })
+    const style = String(body.style || '写实').slice(0, 20)
+    const ratio = IMAGE_RATIOS[String(body.ratio || '')] ? String(body.ratio) : '1:1'
+    const [width, height] = IMAGE_RATIOS[ratio]
+    const seed = Number.isInteger(Number(body.seed)) && Number(body.seed) > 0 ? Number(body.seed) : Math.floor(Math.random() * 2_147_483_647)
+    const styleHint = IMAGE_STYLE_PROMPTS[style] || ''
+    const cleanPrompt = normalizeImagePrompt(prompt)
+    const translatedPrompt = await translateImagePrompt(user, cleanPrompt)
+    const promptForService = translatedPrompt || cleanPrompt
+    const fullPrompt = styleHint ? `${promptForService}, ${styleHint}` : promptForService
+    const endpoint = IMAGE_GENERATION.endpoint.replace(/\/$/, '')
+    const remote = new URL(`${endpoint}/${encodeURIComponent(fullPrompt)}`)
+    remote.searchParams.set('width', String(width))
+    remote.searchParams.set('height', String(height))
+    remote.searchParams.set('model', IMAGE_GENERATION.model)
+    remote.searchParams.set('seed', String(seed))
+    remote.searchParams.set('nologo', 'true')
+    remote.searchParams.set('safe', 'true')
+    remote.searchParams.set('enhance', 'true')
+    try {
+      const response = await fetch(remote, { signal: AbortSignal.timeout(IMAGE_GENERATION.timeoutMs), redirect: 'follow' })
+      if (!response.ok) throw new Error(`外部生图服务返回 HTTP ${response.status}`)
+      const mime = String(response.headers.get('content-type') || '').split(';')[0].trim()
+      if (!mime.startsWith('image/')) throw new Error(`外部生图服务返回了非图片内容：${mime || '未知类型'}`)
+      const buffer = Buffer.from(await response.arrayBuffer())
+      if (buffer.length < 8 * 1024) throw new Error('外部生图服务返回的图片过小，可能生成失败')
+      if (buffer.length > 24 * 1024 * 1024) throw new Error('外部生图服务返回的图片超过 24 MB')
+      const ext = mime === 'image/png' ? 'png' : mime === 'image/webp' ? 'webp' : 'jpg'
+      const id = newFileId('IMG')
+      const name = `AI-${new Date().toISOString().slice(0, 19).replace(/[T:]/g, '')}-${seed}.${ext}`
+      const meta = putFile({
+        id, name, mime, buffer, owner: user.name, net,
+        note: `imagegen:${IMAGE_GENERATION.provider}/${IMAGE_GENERATION.model};ratio=${ratio};style=${style};seed=${seed}`,
+      })
+      logAudit(user, 'image.generate', `${id}:${ratio}:${seed}`, `allow(${meta.size})`, net)
+      return json(res, 200, {
+        ok: true,
+        image: {
+          id: meta.id,
+          name: meta.name,
+          mime: meta.mime,
+          size: meta.size,
+          width,
+          height,
+          ratio,
+          style,
+          seed,
+          prompt,
+          provider: IMAGE_GENERATION.provider,
+          model: IMAGE_GENERATION.model,
+          url: `/api/images/file?id=${encodeURIComponent(meta.id)}`,
+        },
+      })
+    } catch (error) {
+      const timedOut = error?.name === 'TimeoutError' || error?.name === 'AbortError'
+      const message = timedOut ? '外部生图服务超时，请稍后重试' : String(error?.message || error)
+      logAudit(user, 'image.generate', `${ratio}:${seed}`, 'deny', net)
+      return json(res, 502, { ok: false, error: `真实生图失败：${message}`, code: 'IMAGE_PROVIDER_ERROR' })
+    }
+  },
+  'GET /api/images/file': (req, res, url) => {
+    const user = roleOf(req)
+    const net = netOf(req)
+    const id = url.searchParams.get('id')
+    if (!fileVisibleToUser(user, net, id)) return json(res, 403, { error: '该图像不在当前用户的授权范围内' })
+    const meta = getFile(id)
+    const buffer = readFileBuffer(id)
+    if (!meta || !buffer) return json(res, 404, { error: '图像不存在或已失效' })
+    res.writeHead(200, {
+      'content-type': meta.mime || 'image/jpeg',
+      'content-length': buffer.length,
+      'content-disposition': `inline; filename="${encodeURIComponent(meta.name || 'image.jpg')}"`,
+      'cache-control': 'private, max-age=3600',
+    })
+    res.end(buffer)
+  },
   'GET /api/harness/file': (req, res, url) => {
     const user = roleOf(req)
     const requested = String(url.searchParams.get('path') || '')
@@ -7646,13 +8436,21 @@ const api = {
     if (!tool) return json(res, 404, { error: '工具不存在', hint: '先调用 GET /api/ai/tools 获取可用工具' })
     const TOOL_MODULE = { 云空间: 'drive', 通知公告: 'notice', 教学园地: 'academy', 通讯录: 'contacts', 即时通讯: 'im', 任务: 'tasks', 智能笔记本: 'knowledge', 数据中心: 'datacenter' }
     // 平台基础服务不属于任何业务模块：只要当前账号已登录，就按服务自身的资源边界校验。
-    const PLATFORM_BASE_TOOLS = new Set(['format_capabilities', 'format_inspect', 'format_extract', 'format_export', 'code_review'])
+    const PLATFORM_BASE_TOOLS = new Set(['format_capabilities', 'format_inspect', 'format_extract', 'format_export', 'code_review', 'visual_create', 'visual_update', 'visual_get', 'visual_export', 'visual_save'])
     if (!PLATFORM_BASE_TOOLS.has(name) && !user.visibleModules.includes(TOOL_MODULE[tool.target] || 'tasks')) {
       logAudit(user, 'ai.invoke', name, 'deny(403)', netOf(req))
       return json(res, 403, { error: `当前角色无权调用「${tool.label}」` })
     }
     let result = null
-    if (name === 'drive_search') {
+    if (name.startsWith('visual_')) {
+      try {
+        const sessionId = String(req.headers['x-jg-conversation'] || body.conversationId || args.sessionId || '')
+        result = invokeVisualTool(name, args, user, sessionId)
+      } catch (error) {
+        logAudit(user, 'ai.invoke', name, `deny(${error?.code || 'VISUAL_ERROR'})`, netOf(req))
+        return json(res, Number(error?.status) || 422, { error: String(error?.message || error), code: error?.code || 'VISUAL_ERROR' })
+      }
+    } else if (name === 'drive_search') {
       const q = String(args.q || '').trim()
       const type = String(args.type || '').trim()
       const list = liveDrive
@@ -8002,6 +8800,105 @@ const api = {
       },
     })
   },
+  'POST /api/tts': async (req, res) => {
+    const body = JSON.parse(req.__body || '{}')
+    const text = String(body.text || '').trim()
+    if (!text) return json(res, 400, { error: '没有可朗读的文本' })
+    if (text.length > 6000) return json(res, 400, { error: '单次朗读文本不能超过 6000 字' })
+    try {
+      const result = await localTtsFile(text)
+      return json(res, 200, {
+        ok: true,
+        engine: 'piper',
+        voice: 'zh_CN-huayan-medium',
+        cached: result.cached,
+        chars: text.length,
+        url: `/api/tts/audio?name=${encodeURIComponent(result.name)}`,
+      })
+    } catch (error) {
+      if (error?.code === 'TTS_NOT_READY') {
+        return json(res, 503, { error: error.message, code: 'TTS_NOT_READY' })
+      }
+      return json(res, 500, { error: String(error?.message || error), code: 'TTS_FAILED' })
+    }
+  },
+  'GET /api/tts/audio': async (req, res, url) => {
+    const name = String(url?.searchParams?.get('name') || '')
+    if (!/^[a-f0-9]{24}\.wav$/.test(name)) return json(res, 400, { error: '语音文件名无效' })
+    const file = join(PIPER_CACHE_DIR, name)
+    try {
+      const data = await readFile(file)
+      res.writeHead(200, {
+        'content-type': 'audio/wav',
+        'content-length': data.length,
+        'cache-control': 'private, max-age=3600',
+      })
+      return res.end(data)
+    } catch {
+      return json(res, 404, { error: '语音文件不存在或已过期' })
+    }
+  },
+}
+
+function recoverConversationFromTrace(user, c) {
+  const messages = c.messages || []
+  if (messages.length !== 1 || messages[0].role !== 'user' || c.status === 'running') return false
+  const home = typeof user === 'string' ? userAgentHome(user) : userAgentHome(user.id)
+  const traces = listTraces(home, c.id)
+  const latest = traces[0]
+  if (!latest) return false
+  const trace = readTrace(home, c.id, latest.id)
+  if (!trace) return false
+  // 轨迹必须对应本轮用户输入；否则可能把上一轮的旧回答误贴到新提问上。
+  const traceInput = String(trace.input || '').trim()
+  const userText = String(messages[0].text || '').trim()
+  if (!traceInput || traceInput !== userText) return false
+  const finalEvent = [...(trace.events || [])].reverse().find((e) => {
+    if (e.type !== 'assistant/message') return false
+    const content = e.data?.message?.content || []
+    return content.some((part) => part.type === 'text' && String(part.text || '').trim())
+  })
+  if (!finalEvent) return false
+  const text = (finalEvent.data.message.content || [])
+    .filter((part) => part.type === 'text')
+    .map((part) => String(part.text || ''))
+    .join('')
+    .trim()
+  if (!text) return false
+  const titleEvent = [...(trace.events || [])].reverse().find((e) => {
+    const title = String(e.data?.title || '').trim()
+    return e.type === 'session/title' && title && !title.startsWith('当前用户')
+  })
+  const title = String(titleEvent?.data?.title || '').trim()
+  const ended = Number(trace.endedAt || latest.at || Date.now())
+  const time = new Date(ended).toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit' })
+  c.messages.push({
+    role: 'assistant',
+    text,
+    time,
+    steps: (trace.steps || []).map((s) => ({ tool: s.tool, detail: s.detail, status: s.status, ms: s.ms })),
+    traceId: trace.traceId,
+  })
+  c.title = title || c.title
+  c.time = time || c.time
+  c.status = 'done'
+  c.turns = Math.max(1, Number(c.turns) || 1)
+  c.dshSessionId = trace.dshSessionId || c.dshSessionId || ''
+  return true
+}
+
+function recoverPersistedConversations() {
+  let changed = false
+  for (const c of conversations) {
+    if (!c || !Array.isArray(c.messages)) continue
+    if (c.status === 'running') {
+      // 新进程启动后不可能还有真正在跑的会话；若回答已先落库就收口为完成，否则标为失败。
+      c.status = c.messages.some((m) => m.role === 'assistant' && String(m.text || '').trim()) ? 'done' : 'failed'
+      changed = true
+    }
+    if (c.userId && recoverConversationFromTrace(String(c.userId), c)) changed = true
+  }
+  if (changed) persistPersistentState()
 }
 
 const server = createServer(async (req, res) => {

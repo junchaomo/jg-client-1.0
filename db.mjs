@@ -135,6 +135,36 @@ db.exec(`
     note TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (file_id, version)
   );
+
+  CREATE TABLE IF NOT EXISTS visual_artifacts (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL DEFAULT '',
+    message_id TEXT NOT NULL DEFAULT '',
+    type TEXT NOT NULL,
+    title TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL,
+    caption TEXT NOT NULL DEFAULT '',
+    version INTEGER NOT NULL DEFAULT 1,
+    status TEXT NOT NULL DEFAULT 'temporary',
+    owner TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_visual_session ON visual_artifacts(session_id, created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_visual_owner ON visual_artifacts(owner, updated_at DESC);
+
+  CREATE TABLE IF NOT EXISTS visual_versions (
+    visual_id TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    type TEXT NOT NULL,
+    title TEXT NOT NULL,
+    source TEXT NOT NULL,
+    caption TEXT NOT NULL DEFAULT '',
+    note TEXT NOT NULL DEFAULT '',
+    created_by TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (visual_id, version)
+  );
 `)
 
 // 兼容 P0-2 之前已经建好的 sessions 表：补 account_id 列。
@@ -515,6 +545,145 @@ export function loadState(key) {
   } catch {
     return null
   }
+}
+
+/* ---------------------------- visual artifacts ---------------------------- */
+
+function visualMeta(row) {
+  if (!row) return null
+  return {
+    id: row.id,
+    sessionId: row.session_id,
+    messageId: row.message_id,
+    type: row.type,
+    title: row.title,
+    source: row.source,
+    caption: row.caption || '',
+    version: Number(row.version),
+    status: row.status,
+    owner: row.owner,
+    createdAt: Number(row.created_at),
+    updatedAt: Number(row.updated_at),
+  }
+}
+
+const visualSql = {
+  get: db.prepare('SELECT * FROM visual_artifacts WHERE id = ?'),
+  insert: db.prepare(`
+    INSERT INTO visual_artifacts (id, session_id, message_id, type, title, source, caption, version, status, owner, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `),
+  update: db.prepare(`
+    UPDATE visual_artifacts SET type = ?, title = ?, source = ?, caption = ?, version = ?, updated_at = ? WHERE id = ?
+  `),
+  save: db.prepare('UPDATE visual_artifacts SET title = ?, status = ?, updated_at = ? WHERE id = ?'),
+  attach: db.prepare('UPDATE visual_artifacts SET message_id = ?, updated_at = ? WHERE id = ?'),
+  listBySession: db.prepare('SELECT * FROM visual_artifacts WHERE session_id = ? ORDER BY created_at ASC'),
+  listByOwner: db.prepare('SELECT * FROM visual_artifacts WHERE owner = ? ORDER BY updated_at DESC LIMIT ?'),
+  listSaved: db.prepare("SELECT * FROM visual_artifacts WHERE owner = ? AND status = 'saved' ORDER BY updated_at DESC LIMIT ?"),
+  insertVersion: db.prepare(`
+    INSERT INTO visual_versions (visual_id, version, type, title, source, caption, note, created_by, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `),
+  listVersions: db.prepare('SELECT * FROM visual_versions WHERE visual_id = ? ORDER BY version ASC'),
+  count: db.prepare('SELECT COUNT(*) AS count FROM visual_artifacts'),
+}
+
+export function createVisualArtifact(input = {}) {
+  const id = String(input.id || '').replace(/[^\w.-]/g, '_').slice(0, 96)
+  if (!id) throw new Error('visual id required')
+  if (visualSql.get.get(id)) throw new Error('visual already exists')
+  const now = Date.now()
+  const version = 1
+  visualSql.insert.run(
+    id,
+    String(input.sessionId || ''),
+    String(input.messageId || ''),
+    String(input.type || ''),
+    String(input.title || ''),
+    String(input.source || ''),
+    String(input.caption || ''),
+    version,
+    String(input.status || 'temporary'),
+    String(input.owner || ''),
+    now,
+    now
+  )
+  visualSql.insertVersion.run(id, version, String(input.type || ''), String(input.title || ''), String(input.source || ''), String(input.caption || ''), '创建', String(input.owner || ''), now)
+  return visualMeta(visualSql.get.get(id))
+}
+
+export function getVisualArtifact(id) {
+  return visualMeta(visualSql.get.get(String(id || '')))
+}
+
+export function listVisualArtifacts({ sessionId = '', owner = '', savedOnly = false, limit = 200 } = {}) {
+  const rows = sessionId
+    ? visualSql.listBySession.all(String(sessionId))
+    : savedOnly
+      ? visualSql.listSaved.all(String(owner), Math.max(1, Math.min(500, Number(limit) || 200)))
+      : visualSql.listByOwner.all(String(owner), Math.max(1, Math.min(500, Number(limit) || 200)))
+  return rows.map(visualMeta)
+}
+
+export function updateVisualArtifact(id, patch = {}, actor = '', note = '') {
+  const current = getVisualArtifact(id)
+  if (!current) throw new Error('visual not found')
+  const nextVersion = current.version + 1
+  const nextType = String(patch.type || current.type)
+  const nextTitle = String(patch.title || current.title)
+  const nextSource = String(patch.source == null ? current.source : patch.source)
+  const nextCaption = String(patch.caption == null ? current.caption : patch.caption)
+  const now = Date.now()
+  visualSql.update.run(nextType, nextTitle, nextSource, nextCaption, nextVersion, now, current.id)
+  visualSql.insertVersion.run(current.id, nextVersion, nextType, nextTitle, nextSource, nextCaption, String(note || '更新'), String(actor || ''), now)
+  return visualMeta(visualSql.get.get(current.id))
+}
+
+export function saveVisualArtifact(id, { title = '', actor = '' } = {}) {
+  const current = getVisualArtifact(id)
+  if (!current) throw new Error('visual not found')
+  const now = Date.now()
+  visualSql.save.run(String(title || current.title), 'saved', now, current.id)
+  return visualMeta(visualSql.get.get(current.id))
+}
+
+export function attachVisualMessage(id, messageId) {
+  const current = getVisualArtifact(id)
+  if (!current) return null
+  visualSql.attach.run(String(messageId || ''), Date.now(), current.id)
+  return visualMeta(visualSql.get.get(current.id))
+}
+
+export function listVisualVersions(id) {
+  return visualSql.listVersions.all(String(id || '')).map((row) => ({
+    visualId: row.visual_id,
+    version: Number(row.version),
+    type: row.type,
+    title: row.title,
+    source: row.source,
+    caption: row.caption || '',
+    note: row.note || '',
+    createdBy: row.created_by || '',
+    createdAt: Number(row.created_at),
+  }))
+}
+
+export function restoreVisualVersion(id, version, actor = '', note = '') {
+  const current = getVisualArtifact(id)
+  if (!current) throw new Error('visual not found')
+  const row = visualSql.listVersions.all(String(id || '')).find((item) => Number(item.version) === Number(version))
+  if (!row) throw new Error('visual version not found')
+  const nextVersion = current.version + 1
+  const now = Date.now()
+  const keepSavedTitle = current.status === 'saved' && current.title ? current.title : row.title
+  visualSql.update.run(row.type, keepSavedTitle, row.source, row.caption || '', nextVersion, now, current.id)
+  visualSql.insertVersion.run(current.id, nextVersion, row.type, keepSavedTitle, row.source, row.caption || '', String(note || `恢复 v${version}`), String(actor || ''), now)
+  return visualMeta(visualSql.get.get(current.id))
+}
+
+export function visualCount() {
+  return Number(visualSql.count.get().count || 0)
 }
 
 /* ----------------------------- object files ----------------------------- */

@@ -13,6 +13,7 @@ const baseUrl = (process.env.JG_MCP_URL || 'http://127.0.0.1:4173').replace(/\/$
 const endpoint = `${baseUrl}/api/ai/invoke`
 const token = process.env.JG_MCP_TOKEN || ''
 const account = process.env.JG_MCP_ACCOUNT || 'A-7788-01'
+const conversation = process.env.JG_MCP_CONVERSATION || ''
 
 const tools = [
   {
@@ -97,6 +98,62 @@ const tools = [
     inputSchema: { type: 'object', properties: { projectId: { type: 'string' }, scope: { type: 'string', enum: ['all', 'changed'] }, maxFiles: { type: 'number' } }, required: ['projectId'] },
   },
   {
+    name: 'visual_create',
+    description: 'Visual Engine：在聊天中创建可视化对象并返回对象 id/版本。用户要求流程图、架构图、统计图、信息图、可调参数的交互计算器时优先调用。type=mermaid 时 source 填 Mermaid；type=echarts 时 config 填声明式 ECharts option（不要函数）；type=svg 时 source 填完整 SVG；type=interactive 时 config 填 {kind:"loan-calculator", fields:[{key:"principal"},{key:"rate"},{key:"years"}]}。调用后不要重复把源码贴进回答。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        type: { type: 'string', enum: ['mermaid', 'echarts', 'svg', 'interactive'], description: '渲染类型：流程/关系用 mermaid，统计图表用 echarts，自定义信息图用 svg，滑块/实时计算的交互组件用 interactive' },
+        title: { type: 'string', description: '图形标题，中文，简短' },
+        source: { type: 'string', description: 'mermaid、svg 或 interactive 的源码/JSON 字符串；echarts 也可传 JSON 字符串' },
+        config: { type: 'object', description: 'echarts 的声明式 option 对象；interactive 的 {kind:"loan-calculator",fields:[...]} 配置；禁止函数、外部 URL 和 custom/renderItem' },
+        caption: { type: 'string', description: '可选的一句说明' },
+        sessionId: { type: 'string', description: '当前会话 ID；通常由运行时自动补齐，模型可不填' },
+      },
+      required: ['type', 'title'],
+    },
+  },
+  {
+    name: 'visual_update',
+    description: 'Visual Engine：更新已有可视化对象并生成新版本。用户说“把刚才的图改成…/增加…/调整颜色”时，先用 visual_get 或根据会话上下文定位 id，再调用本工具；不要重新创建无关图形。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: '可视化对象 id，例如 VIS-...' },
+        type: { type: 'string', enum: ['mermaid', 'echarts', 'svg', 'interactive'] },
+        title: { type: 'string' },
+        source: { type: 'string' },
+        config: { type: 'object', description: 'echarts 的新 option；只需传新配置' },
+        caption: { type: 'string' },
+        changeNote: { type: 'string', description: '本次修改说明，会写入版本记录' },
+      },
+      required: ['id'],
+    },
+  },
+  {
+    name: 'visual_get',
+    description: 'Visual Engine：读取一个可视化对象的类型、标题、源码、版本与状态，用于连续修改或查看。',
+    inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
+  },
+  {
+    name: 'visual_export',
+    description: 'Visual Engine：登记并返回可视化导出信息；实际 SVG/PNG 导出在聊天卡片或放大窗口中完成。',
+    inputSchema: {
+      type: 'object',
+      properties: { id: { type: 'string' }, format: { type: 'string', enum: ['svg', 'png'] } },
+      required: ['id'],
+    },
+  },
+  {
+    name: 'visual_save',
+    description: 'Visual Engine：把会话内可视化保存为长期成果，可自定义名称；保存后仍可继续修改并查看版本历史。',
+    inputSchema: {
+      type: 'object',
+      properties: { id: { type: 'string' }, name: { type: 'string' } },
+      required: ['id'],
+    },
+  },
+  {
     name: 'task_create',
     description: '创建一个待办任务（当前为产品任务接口登记）。',
     inputSchema: { type: 'object', properties: { title: { type: 'string' } } },
@@ -120,6 +177,7 @@ async function requestApproval(name, args) {
       'content-type': 'application/json',
       'x-jg-mcp-token': token,
       'x-jg-mcp-account': account,
+      ...(conversation ? { 'x-jg-conversation': conversation } : {}),
     },
     body: JSON.stringify({ tool: name, args: args || {} }),
     signal: AbortSignal.timeout(9 * 60 * 1000),
@@ -138,6 +196,7 @@ async function callTool(name, args) {
       'content-type': 'application/json',
       'x-jg-mcp-token': token,
       'x-jg-mcp-account': account,
+      ...(conversation ? { 'x-jg-conversation': conversation } : {}),
     },
     body: JSON.stringify({ tool: name, args: args || {} }),
   })

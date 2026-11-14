@@ -61,15 +61,27 @@ const state = {
   conversations: [],
   pinnedConvs: (() => { try { return JSON.parse(localStorage.getItem('jg.pinnedConvs') || '[]') } catch (e) { return [] } })(),
   archivedConvs: (() => { try { return JSON.parse(localStorage.getItem('jg.archivedConvs') || '[]') } catch (e) { return [] } })(),
+  lockedConvs: (() => { try { return JSON.parse(localStorage.getItem('jg.lockedConvs') || '[]') } catch (e) { return [] } })(),
+  convSections: (() => { try { return JSON.parse(localStorage.getItem('jg.convSections') || '{}') } catch (e) { return {} } })(),
   recentFilter: 'all',
   recentSort: 'recent',
   showProjects: true,
   projFolds: {},
-  sidebarSections: [],
+  sidebarSections: (() => { try { return JSON.parse(localStorage.getItem('jg.sidebarSections') || '[]') } catch (e) { return [] } })(),
   projectSections: (() => { try { return JSON.parse(localStorage.getItem('jg.projectSections') || '[]') } catch (e) { return [] } })(),
   projectSectionMap: (() => { try { return JSON.parse(localStorage.getItem('jg.projectSectionMap') || '{}') } catch (e) { return {} } })(),
   conversation: null,
   chatBusy: false,
+  chatStartedAt: 0,
+  chatTicker: null,
+  chatTask: null,
+  speakingIndex: null,
+  speechPaused: false,
+  speechLoading: false,
+  speechEngine: '',
+  speechAudio: null,
+  speechAbort: null,
+  speechRun: 0,
   chatAbort: false,
   chatRunId: 0,
   pendingInteraction: null,
@@ -187,6 +199,13 @@ const paths = {
   pause: '<path d="M9 5.5v13M15 5.5v13"/>',
   stop: '<rect x="6.5" y="6.5" width="11" height="11" rx="2.5" fill="currentColor" stroke="none"/>',
   star: '<path d="M12 4.5l2.3 4.7 5.2.8-3.8 3.7.9 5.2-4.6-2.4-4.6 2.4.9-5.2-3.8-3.7 5.2-.8z"/>',
+  copy: '<rect x="8" y="8" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/>',
+  volume: '<path d="M4 9v6h4l5 4V5l-5 4z"/><path d="M16 9a4 4 0 0 1 0 6M18.5 6.5a7.5 7.5 0 0 1 0 11"/>',
+  thumbUp: '<path d="M7 10v10H4V10z"/><path d="M7 20h9a3 3 0 0 0 2.9-2.3l1.1-6A2 2 0 0 0 18 9h-4V5a2 2 0 0 0-2-2L7 10z"/>',
+  thumbDown: '<path d="M17 14V4h3v10z"/><path d="M17 4H8a3 3 0 0 0-2.9 2.3l-1.1 6A2 2 0 0 0 6 15h4v4a2 2 0 0 0 2 2l5-7z"/>',
+  share: '<path d="M15 4h5v5"/><path d="M20 4l-8 8"/><path d="M18 13v5a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h5"/>',
+  quote: '<path d="M7 7h4v4H8a3 3 0 0 0-3 3V9a2 2 0 0 1 2-2z"/><path d="M15 7h4v4h-3a3 3 0 0 0-3 3V9a2 2 0 0 1 2-2z"/>',
+  alert: '<path d="M12 4l9 16H3z"/><path d="M12 9v5M12 17h.01"/>',
 }
 
 const NET_LABEL = { inet: '互联网', gov: '政务网', secret: '涉密内网' }
@@ -250,7 +269,7 @@ function toast(message, bad = false) {
 }
 
 function closeRowMenu() {
-  document.querySelectorAll('.jg-row-menu').forEach((m) => m.remove())
+  document.querySelectorAll('.jg-row-menu, .msg-more-menu').forEach((m) => m.remove())
 }
 
 function openRowMenu(anchor, marketId, name = '') {
@@ -309,6 +328,134 @@ function richTextHTML(value = '') {
   out += esc(raw.slice(last))
   return out
 }
+
+const MD_TOKEN_OPEN = '\uE000'
+const MD_TOKEN_CLOSE = '\uE001'
+
+function inlineMarkdown(value = '') {
+  let text = esc(String(value))
+  const stash = []
+  const hold = (html) => {
+    stash.push(html)
+    return `${MD_TOKEN_OPEN}${stash.length - 1}${MD_TOKEN_CLOSE}`
+  }
+  text = text.replace(/`([^`\n]+)`/g, (_, code) => hold(`<code>${code}</code>`))
+  text = text.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, (_, label, url) => hold(
+    `<a href="${url}" data-weblink="${url}" title="在右侧自带浏览器打开">${label}</a>`,
+  ))
+  text = text.replace(/(^|[\s(（])(https?:\/\/[^\s<)"'）]+)/g, (_, lead, url) => {
+    let tail = ''
+    const match = url.match(/(?:[，。；！？、]|[.,;!])$/)
+    if (match) { tail = match[0]; url = url.slice(0, -1) }
+    return `${lead}${hold(`<a href="${url}" data-weblink="${url}" title="在右侧自带浏览器打开">${url}</a>`)}${tail}`
+  })
+  text = text.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
+  text = text.replace(/__([^_\n]+)__/g, '<strong>$1</strong>')
+  text = text.replace(/~~([^~\n]+)~~/g, '<del>$1</del>')
+  text = text.replace(/(^|[\s（(])\*([^*\n]+)\*/g, '$1<em>$2</em>')
+  text = text.replace(/(^|[\s（(])_([^_\n]+)_/g, '$1<em>$2</em>')
+  return text.replace(new RegExp(`${MD_TOKEN_OPEN}(\\d+)${MD_TOKEN_CLOSE}`, 'g'), (_, index) => stash[Number(index)] || '')
+}
+
+function tableCells(line = '') {
+  return String(line).trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map((cell) => cell.trim())
+}
+
+function isTableSeparator(line = '') {
+  return /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(String(line))
+}
+
+function isMarkdownBlockStart(lines, index) {
+  const raw = lines[index] || ''
+  const line = raw.trim()
+  if (!line) return true
+  return /^```/.test(line)
+    || /^#{1,6}\s+/.test(line)
+    || /^>\s?/.test(line)
+    || /^([-*+])\s+/.test(raw)
+    || /^\d+\.\s+/.test(raw)
+    || /^(-{3,}|\*{3,})$/.test(line)
+    || (line.includes('|') && isTableSeparator(lines[index + 1] || ''))
+}
+
+function codeBlockHTML(language, code) {
+  return `<div class="md-code"><div class="md-code-head"><span>${esc(language || '代码')}</span><button type="button" class="md-code-copy" data-copy-code>复制</button></div><pre><code>${esc(code)}</code></pre></div>`
+}
+
+function markdownHTML(value = '') {
+  const lines = String(value).replace(/\r\n?/g, '\n').split('\n')
+  let out = ''
+  let i = 0
+  while (i < lines.length) {
+    const raw = lines[i]
+    const line = raw.trim()
+    if (!line) { i += 1; continue }
+    if (/^```/.test(line)) {
+      const language = line.slice(3).trim()
+      const code = []
+      i += 1
+      while (i < lines.length && !/^```/.test(lines[i].trim())) { code.push(lines[i]); i += 1 }
+      if (i < lines.length) i += 1
+      out += codeBlockHTML(language, code.join('\n'))
+      continue
+    }
+    if (line.includes('|') && isTableSeparator(lines[i + 1] || '')) {
+      const headers = tableCells(line)
+      const rows = []
+      i += 2
+      while (i < lines.length && lines[i].trim() && lines[i].includes('|')) {
+        rows.push(tableCells(lines[i]))
+        i += 1
+      }
+      out += `<div class="md-table-wrap"><table><thead><tr>${headers.map((cell) => `<th>${inlineMarkdown(cell)}</th>`).join('')}</tr></thead><tbody>${rows.map((row) => `<tr>${headers.map((_, idx) => `<td>${inlineMarkdown(row[idx] || '')}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`
+      continue
+    }
+    const heading = /^(#{1,6})\s+(.*)$/.exec(line)
+    if (heading) {
+      const level = Math.min(6, heading[1].length)
+      out += `<h${level}>${inlineMarkdown(heading[2])}</h${level}>`
+      i += 1
+      continue
+    }
+    if (/^>\s?/.test(line)) {
+      const quoted = []
+      while (i < lines.length && /^>\s?/.test(lines[i].trim())) {
+        quoted.push(lines[i].trim().replace(/^>\s?/, ''))
+        i += 1
+      }
+      out += `<blockquote>${quoted.map(inlineMarkdown).join('<br>')}</blockquote>`
+      continue
+    }
+    if (/^([-*+])\s+/.test(raw) || /^\d+\.\s+/.test(raw)) {
+      const ordered = /^\d+\.\s+/.test(raw)
+      const items = []
+      const pattern = ordered ? /^\d+\.\s+(.*)$/ : /^[-*+]\s+(.*)$/
+      while (i < lines.length) {
+        const item = pattern.exec(lines[i].trim())
+        if (!item) break
+        items.push(item[1])
+        i += 1
+      }
+      const tag = ordered ? 'ol' : 'ul'
+      out += `<${tag}>${items.map((item) => `<li>${inlineMarkdown(item)}</li>`).join('')}</${tag}>`
+      continue
+    }
+    if (/^(-{3,}|\*{3,})$/.test(line)) {
+      out += '<hr>'
+      i += 1
+      continue
+    }
+    const paragraph = [line]
+    i += 1
+    while (i < lines.length && !isMarkdownBlockStart(lines, i)) {
+      paragraph.push(lines[i].trim())
+      i += 1
+    }
+    out += `<p>${paragraph.map(inlineMarkdown).join('<br>')}</p>`
+  }
+  return `<div class="md-body">${out || '<p></p>'}</div>`
+}
+
 
 /* ------------------------------- boot ------------------------------- */
 
@@ -372,8 +519,8 @@ function renderRail() {
   const btn = (id) => {
     if (!visible(id)) return ''
     const meta = modules[id] || { label: id }
-    const off = id === 'imagegen'
-    return `<button class="rail-btn${state.view === id ? ' on' : ''}" data-nav="${id}"${off ? ' disabled style="opacity:.45;cursor:not-allowed"' : ''} title="${esc(off ? '图像生成尚未接入' : meta.label)}${badge(id) ? ` · ${state.notifications.filter((x) => x.unread && notifModule(x) === id).length} 条未读` : ''}"><span class="ico">${icon(navIcon(id))}</span>${badge(id)}</button>`
+    const off = id === 'imagegen' && !imagegenReady()
+    return `<button class="rail-btn${state.view === id ? ' on' : ''}" data-nav="${id}"${off ? ' disabled style="opacity:.45;cursor:not-allowed"' : ''} title="${esc(off ? (state.boot?.imageGeneration?.reason || '当前环境未启用真实生图') : meta.label)}${badge(id) ? ` · ${state.notifications.filter((x) => x.unread && notifModule(x) === id).length} 条未读` : ''}"><span class="ico">${icon(navIcon(id))}</span>${badge(id)}</button>`
   }
   const railbar = document.getElementById('railbar')
   railbar.innerHTML = `
@@ -399,7 +546,7 @@ function renderRail() {
         openMoreMenu(btn)
         return
       }
-      if (btn.dataset.nav === 'imagegen' && !imageModel().image) { showImageGate(); return }
+      if (btn.dataset.nav === 'imagegen' && !imagegenReady()) { showImageGate(); return }
       state.view = btn.dataset.nav
       markModuleRead(btn.dataset.nav)
       render()
@@ -449,19 +596,20 @@ function openProjectMenu(anchor, id) {
   </button>`
   pop.innerHTML = [
     item('pin', 'pin', p.pinned ? '取消置顶' : '置顶'),
-    item('edit', 'gear', '编辑'),
+    item('edit', 'gear', '编辑工作区'),
     '<div class="cm-sep"></div>',
     item('section', 'grid', '分区', true),
     item('reveal', 'folder', '在资源管理器中打开'),
     '<div class="cm-sep"></div>',
-    item('archive', 'inbox', '归档聊天'),
+    item('archive', 'inbox', '归档线程'),
     '<div class="cm-sep"></div>',
-    item('remove', 'close', '移除项目'),
+    item('remove', 'close', '移除工作区'),
   ].join('')
   document.body.appendChild(pop)
   const r = anchor.getBoundingClientRect()
-  pop.style.left = `${Math.max(64, Math.min(window.innerWidth - 236, r.right + 8))}px`
-  pop.style.top = `${Math.max(46, Math.min(window.innerHeight - 360, r.top - 8))}px`
+  pop.style.left = `${Math.max(8, Math.min(window.innerWidth - 236, r.right + 8))}px`
+  const ph = pop.offsetHeight
+  pop.style.top = `${Math.max(8, Math.min(window.innerHeight - ph - 8, r.top - 8))}px`
   pop.querySelectorAll('[data-pjm]').forEach((button) => button.addEventListener('click', async (ev) => {
     ev.stopPropagation()
     const act = button.dataset.pjm
@@ -499,11 +647,12 @@ function openProjectRowMenu(anchor, id) {
   menu.className = 'prj-row-menu'
   const item = (act, ic, label) => `<button class="prj-row-menu-item" data-prjm="${act}"><span class="ico">${icon(ic)}</span><span>${label}</span></button>`
   menu.innerHTML = [
-    item('new', 'compose', '新聊天'),
+    item('new', 'compose', '新建线程'),
+    item('check', 'shield', '成果检查'),
     item('pin', 'pin', p.pinned ? '取消置顶项目' : '置顶项目'),
-    item('edit', 'gear', '编辑项目'),
-    item('archive', 'inbox', '归档聊天'),
-    item('remove', 'close', '移除项目'),
+    item('edit', 'gear', '编辑工作区'),
+    item('archive', 'inbox', '归档线程'),
+    item('remove', 'close', '移除工作区'),
   ].join('')
   document.body.appendChild(menu)
   const r = anchor.getBoundingClientRect()
@@ -516,6 +665,7 @@ function openProjectRowMenu(anchor, id) {
     const act = button.dataset.prjm
     menu.remove()
     if (act === 'new') return startProjectChat(p)
+    if (act === 'check') return openDeliverableCheck(p)
     if (act === 'pin') {
       await setProjectPinned(p, !p.pinned)
       return renderView()
@@ -558,8 +708,9 @@ function openProjectSectionPicker(anchor, p) {
     `<div class="cm-sep"></div><button class="cm-item" data-pjs-new><span class="ico">${icon('plus')}</span><span class="cm-label">新建分区</span></button>`
   document.body.appendChild(pop)
   const r = anchor.getBoundingClientRect()
-  pop.style.left = `${Math.max(64, Math.min(window.innerWidth - 236, r.right + 8))}px`
-  pop.style.top = `${Math.max(46, Math.min(window.innerHeight - 280, r.top - 4))}px`
+  pop.style.left = `${Math.max(8, Math.min(window.innerWidth - 236, r.right + 8))}px`
+  const ph = pop.offsetHeight
+  pop.style.top = `${Math.max(8, Math.min(window.innerHeight - ph - 8, r.top - 4))}px`
   const persist = () => {
     try {
       localStorage.setItem('jg.projectSections', JSON.stringify(state.projectSections || []))
@@ -615,6 +766,84 @@ function persistArchivedConvs() {
   try { localStorage.setItem('jg.archivedConvs', JSON.stringify(state.archivedConvs || [])) } catch (e) { /* 本地不可写时只保留进程内状态 */ }
 }
 
+function persistSidebarMeta() {
+  try {
+    localStorage.setItem('jg.pinnedConvs', JSON.stringify(state.pinnedConvs || []))
+    localStorage.setItem('jg.archivedConvs', JSON.stringify(state.archivedConvs || []))
+    localStorage.setItem('jg.lockedConvs', JSON.stringify(state.lockedConvs || []))
+    localStorage.setItem('jg.convSections', JSON.stringify(state.convSections || {}))
+    localStorage.setItem('jg.sidebarSections', JSON.stringify(state.sidebarSections || []))
+  } catch (e) { /* 本地不可写时只保留进程内状态 */ }
+}
+
+function toggleLockedConversation(id) {
+  const conv = (state.conversations || []).find((c) => c.id === id)
+  if (!conv) return
+  const set = new Set(state.lockedConvs || [])
+  const wasLocked = set.has(id)
+  if (wasLocked) set.delete(id)
+  else set.add(id)
+  state.lockedConvs = [...set]
+  persistSidebarMeta()
+  renderSidebar()
+  toast(wasLocked ? `已取消锁定「${conv.title}」` : `已锁定「${conv.title}」，删除前需要先解锁`)
+}
+
+function archiveConversation(id) {
+  const conv = (state.conversations || []).find((c) => c.id === id)
+  if (!conv) return
+  state.archivedConvs = [...new Set([...(state.archivedConvs || []), id])]
+  persistSidebarMeta()
+  if (state.conversation?.id === id) {
+    state.conversation = null
+    state.chatSteps = []
+  }
+  renderSidebar()
+  toast(`已归档「${conv.title}」`)
+}
+
+function openConversationSectionPicker(anchor, id) {
+  document.querySelectorAll('.conv-menu').forEach((p) => p.remove())
+  const conv = (state.conversations || []).find((c) => c.id === id)
+  if (!conv) return
+  const current = (state.convSections || {})[id] || ''
+  const pop = document.createElement('div')
+  pop.className = 'conv-menu recent-pop'
+  pop.innerHTML = `<div class="cm-head">把会话归入分区</div>
+    <button class="cm-item" data-cs=""><span class="ico">${icon('list')}</span><span class="cm-label">无分区</span>${current ? '' : '<span class="cm-key">✓</span>'}</button>` +
+    (state.sidebarSections || []).map((sec) => `<button class="cm-item" data-cs="${esc(sec.id)}"><span class="ico">${icon('grid')}</span><span class="cm-label">${esc(sec.name)}</span>${current === sec.id ? '<span class="cm-key">✓</span>' : ''}</button>`).join('') +
+    `<div class="cm-sep"></div><button class="cm-item" data-cs-new><span class="ico">${icon('plus')}</span><span class="cm-label">新建分区</span></button>`
+  document.body.appendChild(pop)
+  const r = anchor.getBoundingClientRect()
+  pop.style.left = `${Math.max(64, Math.min(window.innerWidth - 236, r.right + 8))}px`
+  const ph = pop.offsetHeight
+  const top = r.bottom + 6 + ph > window.innerHeight - 8 ? Math.max(8, r.top - 6 - ph) : r.bottom + 6
+  pop.style.top = `${Math.max(8, Math.min(window.innerHeight - ph - 8, top))}px`
+  const assign = (sectionId) => {
+    state.convSections = { ...(state.convSections || {}) }
+    if (sectionId) state.convSections[id] = sectionId
+    else delete state.convSections[id]
+    persistSidebarMeta()
+    pop.remove()
+    renderSidebar()
+    toast(sectionId ? `已把「${conv.title}」放入分区` : `已把「${conv.title}」移出分区`)
+  }
+  pop.querySelectorAll('[data-cs]').forEach((b) => b.addEventListener('click', (ev) => {
+    ev.stopPropagation()
+    assign(b.dataset.cs)
+  }))
+  pop.querySelector('[data-cs-new]')?.addEventListener('click', (ev) => {
+    ev.stopPropagation()
+    pop.remove()
+    openSectionForm((newId) => {
+      if (newId) assign(newId)
+    })
+  })
+  setTimeout(() => document.addEventListener('click', function close(e) {
+    if (!pop.contains(e.target)) { pop.remove(); document.removeEventListener('click', close) }
+  }), 0)
+}
+
 function archiveProjectChats(p) {
   const ids = (state.conversations || []).filter((c) => c.projectId === p.id).map((c) => c.id)
   if (!ids.length) return toast('该项目暂无聊天记录', true)
@@ -625,10 +854,10 @@ function archiveProjectChats(p) {
 }
 
 function confirmRemoveProject(p) {
-  const mask = openModal('移除项目', `
-    <div class="notice">只移除平台记录，不会删除本地文件夹、文件或会话历史。项目下的会话会转为普通聊天。</div>
+  const mask = openModal('移除工作区', `
+    <div class="notice">只移除平台记录，不会删除本地文件夹、文件或线程历史。工作区下的线程会转为普通聊天。</div>
     <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">
-      <button class="btn" data-cancel>取消</button><button class="btn" style="color:var(--danger)" data-ok>移除项目</button>
+      <button class="btn" data-cancel>取消</button><button class="btn" style="color:var(--danger)" data-ok>移除工作区</button>
     </div>`)
   mask.querySelector('[data-cancel]')?.addEventListener('click', () => mask.remove())
   mask.querySelector('[data-ok]')?.addEventListener('click', async () => {
@@ -649,7 +878,7 @@ function confirmRemoveProject(p) {
     try { localStorage.setItem('jg.projectSectionMap', JSON.stringify(state.projectSectionMap || {})) } catch (e) { /* 本地不可写时只保留进程内状态 */ }
     render()
     renderSidebar()
-    toast('项目记录已移除，本地文件未删除')
+    toast('工作区记录已移除，本地文件未删除')
   })
 }
 
@@ -733,15 +962,15 @@ function openProjectEditCard(anchor, id) {
     if (path === p.cwd && p.folderName) return p.folderName
     return String(path).replace(/[\\/]+$/, '').split(/[\\/]/).pop()
   }
-  const mask = openModal('编辑项目', `
+  const mask = openModal('编辑工作区', `
     <div style="padding:2px 4px 0">
       <div style="display:flex;align-items:center;height:54px;border:1.5px solid var(--accent);border-radius:13px;background:#fff;overflow:hidden">
         <span style="width:52px;display:grid;place-items:center;color:var(--text)"><span class="ico" style="width:22px;height:22px">${icon('folder')}</span></span>
         <span style="width:1px;height:24px;background:#dcdfe4"></span>
-        <input id="pceName" value="${esc(p.name)}" placeholder="项目名称" style="flex:1;min-width:0;border:0;outline:0;background:transparent;height:52px;padding:0 16px;font:inherit;font-size:var(--fs-sub);color:var(--text)" />
+        <input id="pceName" value="${esc(p.name)}" placeholder="工作区名称" style="flex:1;min-width:0;border:0;outline:0;background:transparent;height:52px;padding:0 16px;font:inherit;font-size:var(--fs-sub);color:var(--text)" />
       </div>
 
-      <div style="margin:22px 0 10px;font-size:var(--fs-sub);font-weight:var(--fw-semi);color:var(--text)">源文件夹</div>
+      <div style="margin:22px 0 10px;font-size:var(--fs-sub);font-weight:var(--fw-semi);color:var(--text)">本地文件夹</div>
       <div style="border:1px solid #e6e8ec;border-radius:14px;background:#fff;overflow:hidden">
         <div id="pceFolders"></div>
         <div id="pceAddWrap" style="display:none;padding:10px 16px 12px;border-top:1px solid #eceef1">
@@ -753,7 +982,7 @@ function openProjectEditCard(anchor, id) {
       </div>
 
       <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:26px;padding-bottom:2px">
-        <button id="pceRemove" type="button" style="border:0;border-radius:10px;background:#fdeaea;color:#c0392b;padding:12px 18px;font:inherit;font-size:var(--fs-sub);cursor:pointer">移除本地项目</button>
+        <button id="pceRemove" type="button" style="border:0;border-radius:10px;background:#fdeaea;color:#c0392b;padding:12px 18px;font:inherit;font-size:var(--fs-sub);cursor:pointer">移除工作区</button>
         <div style="display:flex;align-items:center;gap:8px">
           <button class="btn" id="pceCancel" style="border:0;background:transparent;color:var(--muted)">取消</button>
           <button class="btn primary" id="pceSave" style="min-width:96px">保存</button>
@@ -789,7 +1018,7 @@ function openProjectEditCard(anchor, id) {
           <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:var(--fs-sub);color:var(--text)">${esc(nameOf(draftCwd))}</span>
           <button data-fdel type="button" title="移除文件夹" style="border:0;background:transparent;display:grid;place-items:center;width:26px;height:26px;color:var(--muted);cursor:pointer"><span class="ico" style="width:18px;height:18px">${icon('close')}</span></button>
         </div>`
-      : `<div style="padding:16px 18px;font-size:var(--fs-meta);color:var(--muted)">尚未选择源文件夹</div>`
+      : `<div style="padding:16px 18px;font-size:var(--fs-meta);color:var(--muted)">尚未选择本地文件夹</div>`
     foldersBox.querySelector('[data-fdel]')?.addEventListener('click', () => {
       draftCwd = ''
       renderFolders()
@@ -829,7 +1058,7 @@ function openProjectEditCard(anchor, id) {
   mask.querySelector('#pceCancel')?.addEventListener('click', () => mask.remove())
   mask.querySelector('#pceSave')?.addEventListener('click', async () => {
     const name = mask.querySelector('#pceName').value.trim()
-    if (!name) return toast('项目名称不能为空', true)
+    if (!name) return toast('工作区名称不能为空', true)
     const payload = { id: p.id, name, desc: p.desc || '', instructions: p.instructions || '' }
     if (draftCwd !== (p.cwd || '')) payload.cwd = draftCwd
     const saveBtn = mask.querySelector('#pceSave')
@@ -849,7 +1078,7 @@ function openProjectEditCard(anchor, id) {
     }
     mask.remove()
     render()
-    toast('项目已更新')
+    toast('工作区已更新')
   })
 
   let removeArmed = false
@@ -859,7 +1088,7 @@ function openProjectEditCard(anchor, id) {
       removeArmed = true
       removeBtn.textContent = '再次点击确认移除'
       removeBtn.style.background = '#f8d7d7'
-      toast('仅移除项目记录，不删除本地文件与会话历史')
+      toast('仅移除工作区记录，不删除本地文件与线程历史')
       return
     }
     removeBtn.disabled = true
@@ -878,7 +1107,7 @@ function openProjectEditCard(anchor, id) {
     state.projects = (state.projects || []).filter((x) => x.id !== p.id)
     state.sidebarProjects = (state.sidebarProjects || []).filter((x) => x.id !== p.id)
     render()
-    toast('项目记录已移除，本地文件未删除')
+    toast('工作区记录已移除，本地文件未删除')
   })
 
   setTimeout(() => mask.querySelector('#pceName')?.focus(), 30)
@@ -889,20 +1118,23 @@ function openProjectDisplayMenu(anchor) {
   const pop = document.createElement('div')
   pop.className = 'conv-menu proj-menu'
   pop.innerHTML = `
-    <button class="cm-item" data-pm="arrange" disabled style="opacity:.45;cursor:not-allowed"><span class="ico">${icon('layers')}</span><span class="cm-label">整理侧边栏</span><span class="cm-arrow">›</span></button>
-    <button class="cm-item" data-pm="order" disabled style="opacity:.45;cursor:not-allowed"><span class="ico">${icon('sort')}</span><span class="cm-label">聊天排序方式</span><span class="cm-arrow">›</span></button>
+    <button class="cm-item" data-pm="arrange"><span class="ico">${icon('layers')}</span><span class="cm-label">整理侧边栏</span><span class="cm-arrow">›</span></button>
+    <button class="cm-item" data-pm="order"><span class="ico">${icon('sort')}</span><span class="cm-label">聊天排序方式</span><span class="cm-arrow">›</span></button>
     <div class="cm-sep"></div>
     <button class="cm-item" data-pm="split"><span class="ico">${icon('folder')}</span><span class="cm-label">分项目显示</span>${state.projMerge ? '' : '<span class="cm-key">✓</span>'}</button>
     <button class="cm-item" data-pm="merge"><span class="ico">${icon('list')}</span><span class="cm-label">合并显示</span>${state.projMerge ? '<span class="cm-key">✓</span>' : ''}</button>`
   document.body.appendChild(pop)
   const r = anchor.getBoundingClientRect()
-  pop.style.left = `${Math.max(64, Math.min(window.innerWidth - 240, r.right - 210))}px`
-  pop.style.top = `${Math.max(46, r.bottom + 6)}px`
+  pop.style.left = `${Math.max(8, Math.min(window.innerWidth - 240, r.right - 210))}px`
+  const ph = pop.offsetHeight
+  pop.style.top = `${Math.max(8, Math.min(window.innerHeight - ph - 8, r.bottom + 6))}px`
   pop.querySelectorAll('[data-pm]').forEach((b) => b.addEventListener('click', (e) => {
     e.stopPropagation()
     if (b.disabled) return
     const act = b.dataset.pm
     pop.remove()
+    if (act === 'arrange') return openArrangeSidebar()
+    if (act === 'order') return openRecentSortMenu(anchor)
     if (act === 'split') { state.projMerge = false; renderSidebar() }
     else if (act === 'merge') { state.projMerge = true; renderSidebar() }
   }))
@@ -926,7 +1158,9 @@ function openRecentHeadMenu(anchor) {
     <div class="cm-label-dim">显示</div>
     <button class="cm-item" data-rh="projects"><span class="ico">${icon('folder')}</span><span class="cm-label">项目</span>${state.showProjects ? '<span class="cm-key">✓</span>' : ''}</button>
     <div class="cm-sep"></div>
-    <button class="cm-item" data-rh="section"><span class="ico">${icon('plus')}</span><span class="cm-label">新建分区</span></button>`
+    <button class="cm-item" data-rh="section"><span class="ico">${icon('plus')}</span><span class="cm-label">新建分区</span></button>
+    <div class="cm-sep"></div>
+    <button class="cm-item" data-rh="clear" style="color:#b3282d"><span class="ico" style="color:#b3282d">${icon('trash')}</span><span class="cm-label">清空最近对话</span></button>`
   document.body.appendChild(pop)
   const r = anchor.getBoundingClientRect()
   pop.style.left = `${Math.max(64, Math.min(window.innerWidth - 240, r.right - 208))}px`
@@ -941,6 +1175,7 @@ function openRecentHeadMenu(anchor) {
     else if (act === 'order') openRecentSortMenu(anchor)
     else if (act === 'projects') { state.showProjects = !state.showProjects; renderSidebar() }
     else if (act === 'section') openSectionForm()
+    else if (act === 'clear') openClearRecentConversations()
   }))
   setTimeout(() => document.addEventListener('click', function close(e) {
     if (!pop.contains(e.target)) { pop.remove(); document.removeEventListener('click', close) }
@@ -999,7 +1234,7 @@ function openArrangeSidebar() {
   const mask = openModal('整理侧边栏', `
     <div class="form-note">逐条确认要保留的会话，取消勾选的会被收进归档；归档后不再出现在「最近」。</div>
     <div class="arr-list">
-      ${convs.slice(0, 16).map((c) => `<label class="arr-row"><input type="checkbox" data-keep="${c.id}" checked /><span class="arr-txt">${esc(c.title)}</span><span class="mono arr-time">${esc(c.time || '')}</span></label>`).join('')}
+      ${convs.map((c) => `<label class="arr-row"><input type="checkbox" data-keep="${c.id}" checked /><span class="arr-txt">${esc(c.title)}</span><span class="mono arr-time">${esc(c.time || '')}</span></label>`).join('')}
     </div>
     <div class="form-foot"><span class="mono">共 ${convs.length} 条会话</span><span class="spacer"></span><button class="btn" data-mclose>取消</button><button class="btn primary" id="arrOk">完成整理</button></div>`)
   mask.querySelector('[data-mclose]').addEventListener('click', () => mask.remove())
@@ -1014,7 +1249,46 @@ function openArrangeSidebar() {
   })
 }
 
-function openSectionForm() {
+function openClearRecentConversations() {
+  if (state.chatBusy) return toast('当前有对话正在生成，请先停止后再清空', true)
+  const clearList = recentConversations().filter((c) => !c.projectId && !(state.lockedConvs || []).includes(c.id))
+  if (!clearList.length) return toast('最近没有可清空的对话；项目下的对话会始终保留')
+  const ids = clearList.map((c) => c.id)
+  const mask = openModal('清空最近对话', `
+    <div class="form-note">将删除最近列表中的 <b>${ids.length}</b> 条对话。项目下的对话、项目文件、项目目录和审计记录不受影响；此操作不可撤销。</div>
+    <div class="form-foot"><span class="spacer"></span><button class="btn danger" id="clearAllOk">确认清空</button></div>`)
+  const okBtn = mask.querySelector('#clearAllOk')
+  okBtn.addEventListener('click', async () => {
+    if (okBtn.disabled) return
+    okBtn.disabled = true
+    const { ok, body } = await api('/api/conversation/clear', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ confirm: true, ids }),
+    })
+    if (!ok) {
+      okBtn.disabled = false
+      return toast(body?.error || '清空失败', true)
+    }
+    const idSet = new Set(ids)
+    const activeCleared = Boolean(state.conversation && idSet.has(state.conversation.id))
+    state.conversations = (state.conversations || []).filter((c) => !idSet.has(c.id))
+    if (activeCleared) {
+      state.conversation = null
+      state.chatSteps = []
+      state.chatError = ''
+      state.pendingConfirm = null
+      state.pendingInteraction = null
+      state.view = 'home'
+    }
+    // 置顶、分区、归档与锁定元数据不因“清空最近”而整体重置；它们可能仍有会话保留。
+    mask.remove()
+    render()
+    toast(`已清空 ${body?.removed ?? ids.length} 条最近对话，项目对话已保留`)
+  })
+}
+
+function openSectionForm(onCreated) {
   const mask = openModal('新建分区', `
     <div class="form-note">分区用于把同一类会话归在一起，例如“投标”“城市体检”。分区内可再拖入或移入会话。</div>
     <div class="form-label">分区名称</div>
@@ -1025,8 +1299,11 @@ function openSectionForm() {
   mask.querySelector('#secOk').addEventListener('click', () => {
     const name = mask.querySelector('#secName').value.trim()
     if (!name) return toast('请填写分区名称', true)
-    state.sidebarSections = [...(state.sidebarSections || []), { id: 'SEC-' + Date.now(), name }]
+    const sec = { id: 'SEC-' + Date.now(), name }
+    state.sidebarSections = [...(state.sidebarSections || []), sec]
+    persistSidebarMeta()
     mask.remove()
+    if (onCreated) onCreated(sec.id)
     renderSidebar()
     toast(`已新建分区「${name}」`)
   })
@@ -1051,6 +1328,8 @@ function openSectionMenu(anchor, id) {
     pop.remove()
     if (act === 'del') {
       state.sidebarSections = state.sidebarSections.filter((x) => x.id !== id)
+      state.convSections = Object.fromEntries(Object.entries(state.convSections || {}).filter(([, sid]) => sid !== id))
+      persistSidebarMeta()
       renderSidebar(); toast('已删除分区')
     } else {
       const mask = openModal('重命名分区', `<div class="form-label">分区名称</div><input class="text-input" id="secRename" value="${esc(sec.name)}" />
@@ -1060,6 +1339,7 @@ function openSectionMenu(anchor, id) {
         const v = mask.querySelector('#secRename').value.trim()
         if (!v) return toast('请填写名称', true)
         sec.name = v
+        persistSidebarMeta()
         mask.remove(); renderSidebar(); toast('已重命名')
       })
     }
@@ -1067,6 +1347,24 @@ function openSectionMenu(anchor, id) {
   setTimeout(() => document.addEventListener('click', function close(e) {
     if (!pop.contains(e.target)) { pop.remove(); document.removeEventListener('click', close) }
   }), 0)
+}
+
+function recentConversations() {
+  const convs = (state.conversations || []).filter((c) => !(state.archivedConvs || []).includes(c.id))
+  const pinnedIds = state.pinnedConvs || []
+  const sectionOf = state.convSections || {}
+  const projects = state.sidebarProjects || []
+  const projIds = new Set(projects.map((p) => p.id))
+  let recent = convs.filter((c) => !pinnedIds.includes(c.id))
+  // 已挂在项目列表里的会话不在「最近」重复出现；项目行收起时仍保留入口。
+  if (!state.projMerge) recent = recent.filter((c) => !projIds.has(c.projectId))
+  // 已归入分区的会话只显示在分区里，不再在「最近」重复出现。
+  recent = recent.filter((c) => !sectionOf[c.id])
+  if (state.recentFilter === 'work') recent = recent.filter((c) => c.kind === 'work' || (!c.kind && c.workspace))
+  if (state.recentFilter === 'chat') recent = recent.filter((c) => c.kind === 'chat')
+  if (state.recentSort === 'old') recent = recent.slice().reverse()
+  else if (state.recentSort === 'name') recent = recent.slice().sort((x, y) => String(x.title).localeCompare(String(y.title), 'zh'))
+  return recent
 }
 
 let homeSidebarCacheHtml = ''
@@ -1089,30 +1387,27 @@ function renderSidebar() {
 
   const convs = (state.conversations || []).filter((c) => !(state.archivedConvs || []).includes(c.id))
   const pinnedIds = state.pinnedConvs || []
+  const sectionOf = state.convSections || {}
   const pins = convs.filter((c) => pinnedIds.includes(c.id))
   const projects = state.sidebarProjects || []
   const projIds = new Set(projects.map((p) => p.id))
-  let recent = convs.filter((c) => !pins.includes(c))
-  // 已挂在项目列表里的会话不在「最近」重复出现；项目行收起时仍保留入口。
-  if (!state.projMerge) recent = recent.filter((c) => !projIds.has(c.projectId))
-  if (state.recentFilter === 'work') recent = recent.filter((c) => c.kind === 'work' || (!c.kind && c.workspace))
-  if (state.recentFilter === 'chat') recent = recent.filter((c) => c.kind === 'chat')
-  if (state.recentSort === 'old') recent = recent.slice().reverse()
-  else if (state.recentSort === 'name') recent = recent.slice().sort((x, y) => String(x.title).localeCompare(String(y.title), 'zh'))
-  recent = recent.slice(0, 14)
+  const recent = recentConversations()
 
-  const convRow = (c, pin, extra = '') => `<div class="sb-item${pin ? ' has-pin' : ''}${extra}">
-      <button class="sb-row${pin ? ' pin' : ''}" data-conv="${c.id}">
+  const convRow = (c, pin, extra = '') => {
+    const locked = (state.lockedConvs || []).includes(c.id)
+    return `<div class="sb-item${pin ? ' has-pin' : ''}${locked ? ' locked' : ''}${extra}" data-conv="${c.id}">
+      <button class="sb-row${pin ? ' pin' : ''}" title="${esc(c.title)}${locked ? '（已锁定）' : ''}">
         <span class="sb-row-txt">${esc(c.title)}</span>
       </button>
       ${pin ? `<button class="sb-pin" data-unpin="${c.id}" title="取消置顶"><span class="ico">${icon('pin')}</span></button>` : ''}
       <button class="sb-morebtn" data-convmenu="${c.id}" title="更多操作"><span class="ico">${icon('dots')}</span></button>
     </div>`
+  }
 
   const projConvs = (p) => convs.filter((c) => c.projectId === p.id)
 
   const projRow = (p) => `<div class="sb-projrow">
-      <button class="sb-row sb-proj" data-project="${p.id}" title="${state.projFolds?.[p.id] ? '展开项目会话' : '收起项目会话'}">
+      <button class="sb-row sb-proj" data-project="${p.id}" title="${esc(p.cwd || p.name)}">
         <span class="ico sb-row-ico">${icon('folder')}</span><span class="sb-row-txt">${esc(p.name)}</span>
       </button>
       <div class="sb-projacts">
@@ -1135,9 +1430,9 @@ function renderSidebar() {
     <div class="sidebar-scroll">
       <div class="sb-label sb-section-head">置顶</div>
       ${pins.map((c) => convRow(c, true)).join('') || '<div class="sb-empty">暂无置顶会话</div>'}
-      ${state.showProjects ? `<div class="sb-label sb-label-row"><span>项目</span>
-        <button class="sb-collapse" id="projNew" title="新建项目"><span class="ico">${icon('plus')}</span></button>
-        <button class="sb-collapse" id="projMore" title="项目显示设置"><span class="ico">${icon('dots')}</span></button>
+      ${state.showProjects ? `<div class="sb-label sb-label-row"><span>工作区</span>
+        <button class="sb-collapse" id="projNew" title="新建工作区"><span class="ico">${icon('plus')}</span></button>
+        <button class="sb-collapse" id="projMore" title="工作区显示设置"><span class="ico">${icon('dots')}</span></button>
       </div>
       <div class="sb-projects${state.projMerge ? ' merged' : ''}">
         ${projects.map((p) => {
@@ -1149,9 +1444,12 @@ function renderSidebar() {
             </div>`
         }).join('') || '<div class="sb-empty">暂无项目</div>'}
       </div>` : ''}
-      ${(state.sidebarSections || []).map((sec) => `<div class="sb-label sb-label-row sb-sec-head"><span>${esc(sec.name)}</span>
+      ${(state.sidebarSections || []).map((sec) => {
+        const kids = convs.filter((c) => sectionOf[c.id] === sec.id && !pins.includes(c))
+        return `<div class="sb-label sb-label-row sb-sec-head"><span>${esc(sec.name)}</span>
         <button class="sb-collapse" data-secmenu="${sec.id}" title="分区菜单"><span class="ico">${icon('dots')}</span></button></div>
-        <div class="sb-recent"><div class="sb-empty sub">暂无聊天</div></div>`).join('')}
+        <div class="sb-recent">${kids.length ? kids.map((c) => convRow(c, false, ' sub')).join('') : '<div class="sb-empty sub">暂无聊天</div>'}</div>`
+      }).join('')}
       <div class="sb-label sb-label-row sb-recent-head"><span>最近</span>
         <button class="sb-collapse" id="recentToggle" title="收起最近"><span class="ico">${icon('chevron')}</span></button>
         <div class="sb-head-acts">
@@ -1409,12 +1707,13 @@ function openConversationMenu(anchor, id) {
   document.querySelectorAll('.conv-menu').forEach((p) => p.remove())
   const conv = (state.conversations || []).find((c) => c.id === id)
   if (!conv) return
+  const locked = (state.lockedConvs || []).includes(id)
   const items = [
     ['rename', 'pen', '重命名', 'Ctrl+Alt+R'],
     ['pin', 'pin', (state.pinnedConvs || []).includes(id) ? '取消置顶' : '置顶', 'Ctrl+Alt+P'],
-    ['section', 'grid', '分区', '', true],
-    ['lock', 'shield', '锁定聊天', '', true],
-    ['share', 'send', '分享', '', true],
+    ['section', 'grid', '分区', ''],
+    ['lock', 'shield', locked ? '取消锁定' : '锁定聊天', ''],
+    ['share', 'send', '分享', ''],
     ['—', '', '', ''],
     ['open', 'globe', '打开会话', ''],
     ['fork', 'layers', '分叉会话', ''],
@@ -1423,7 +1722,7 @@ function openConversationMenu(anchor, id) {
     ['sessionlog', 'inbox', '导出完整会话日志（ZIP）', ''],
     ...(conv.projectId ? [['—', '', '', ''], ['files', 'folder', '浏览项目文件', '']] : []),
     ['—', '', '', ''],
-    ['archive', 'inbox', '归档', 'Ctrl+Shift+A', true],
+    ['archive', 'inbox', '归档', 'Ctrl+Shift+A'],
     ['delete', 'close', '删除', ''],
     ['—', '', '', ''],
     ['move', 'folder', '移至项目', ''],
@@ -1439,13 +1738,15 @@ function openConversationMenu(anchor, id) {
       </button>`).join('')
   document.body.appendChild(pop)
   const r = anchor.getBoundingClientRect()
-  pop.style.left = `${Math.max(64, Math.min(window.innerWidth - 230, r.right + 8))}px`
-  pop.style.top = `${Math.max(46, Math.min(window.innerHeight - 430, r.top - 6))}px`
+  pop.style.left = `${Math.max(8, Math.min(window.innerWidth - 230, r.right + 8))}px`
+  const ph = pop.offsetHeight
+  pop.style.top = `${Math.max(8, Math.min(window.innerHeight - ph - 8, r.top - 6))}px`
   pop.querySelectorAll('[data-cm]').forEach((it) => it.addEventListener('click', (ev) => {
     ev.stopPropagation()
     if (it.disabled) return
     const act = it.dataset.cm
     if (act === 'move') { pop.remove(); openMoveToProject(anchor, id); return }
+    if (act === 'section') { pop.remove(); openConversationSectionPicker(anchor, id); return }
     pop.remove()
     runConversationAction(act, id)
   }))
@@ -1463,8 +1764,9 @@ function openMoveToProject(anchor, id) {
     <button class="cm-item" data-mp="${p.id}"><span class="ico">${icon('folder')}</span><span class="cm-label">${esc(p.name)}</span></button>`).join('')
   document.body.appendChild(pop)
   const r = anchor.getBoundingClientRect()
-  pop.style.left = `${Math.max(64, Math.min(window.innerWidth - 230, r.right + 8))}px`
-  pop.style.top = `${Math.min(window.innerHeight - 260, r.top)}px`
+  pop.style.left = `${Math.max(8, Math.min(window.innerWidth - 230, r.right + 8))}px`
+  const ph = pop.offsetHeight
+  pop.style.top = `${Math.max(8, Math.min(window.innerHeight - ph - 8, r.top))}px`
   pop.querySelectorAll('[data-mp]').forEach((b) => b.addEventListener('click', async () => {
     pop.remove()
     const projectId = b.dataset.mp
@@ -1487,6 +1789,9 @@ function runConversationAction(act, id) {
   const conv = (state.conversations || []).find((c) => c.id === id)
   if (!conv) return
   if (act === 'open') { openConversation(id); return }
+  if (act === 'share') { shareConversationById(id); return }
+  if (act === 'lock') { toggleLockedConversation(id); return }
+  if (act === 'archive') { archiveConversation(id); return }
   if (act === 'export') {
     const a = document.createElement('a')
     a.href = `/api/conversation/export?id=${encodeURIComponent(id)}`
@@ -1550,10 +1855,10 @@ function runConversationAction(act, id) {
     togglePinnedConversation(id)
     return
   }
-  if (act === 'archive') {
-    return
-  }
   if (act === 'delete') {
+    if ((state.lockedConvs || []).includes(id)) {
+      return toast('该会话已锁定，请先在更多菜单中取消锁定', true)
+    }
     const mask = openModal('删除会话', `
       <div class="form-note">删除后该会话从「最近」移除，项目内的成果与审计记录不受影响。</div>
       <div class="form-foot"><span class="spacer"></span><button class="btn" data-mclose>取消</button><button class="btn danger" data-del>删除</button></div>`)
@@ -1654,8 +1959,9 @@ function renderMenubar() {
       : `<button class="mb-item" data-act="${act}"${off ? ' disabled style="opacity:.45;cursor:not-allowed"' : ''}><span>${text}</span>${key ? `<span class="mb-key">${key}</span>` : ''}</button>`).join('')
     document.body.appendChild(pop)
     const r = btn.getBoundingClientRect()
-    pop.style.left = `${r.left}px`
-    pop.style.top = `${r.bottom + 4}px`
+    pop.style.left = `${Math.max(8, Math.min(window.innerWidth - pop.offsetWidth - 8, r.left))}px`
+    const ph = pop.offsetHeight
+    pop.style.top = `${Math.max(8, Math.min(window.innerHeight - ph - 8, r.bottom + 4))}px`
     pop.querySelectorAll('[data-act]').forEach((it) => it.addEventListener('click', () => {
       if (it.disabled) return
       pop.remove()
@@ -2108,8 +2414,9 @@ function openNotifications(anchor) {
 
   document.body.appendChild(pop)
   const rect = anchor.getBoundingClientRect()
-  pop.style.left = `${Math.min(rect.left, window.innerWidth - 330)}px`
-  pop.style.top = `${rect.bottom + 8}px`
+  pop.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - 338))}px`
+  const ph = pop.offsetHeight
+  pop.style.top = `${Math.max(8, Math.min(window.innerHeight - ph - 8, rect.bottom + 8))}px`
 
   pop.querySelector('#readAll').addEventListener('click', async () => {
     await api('/api/notifications/read', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: 'all' }) })
@@ -2623,17 +2930,17 @@ function composerPlusItems() {
     { act: 'attach', ic: 'plus', label: '添加照片和文件', desc: '从计算机上传' },
     { act: 'deepThink', ic: 'spark', label: `${state.deepThink ? '✓ ' : ''}深度思索`, desc: state.deepThink ? '已开启 · 当前会话使用推理模型' : 'DeepSeek Reasoner · 更深层推理' },
     { act: 'library', ic: 'database', label: '从资料库添加', desc: '浏览数据中心的资源' },
-    { act: 'image', ic: 'image', label: '创建图像', desc: '尚未接入', off: true },
+    { act: 'image', ic: 'image', label: '创建图像', desc: imagegenReady() ? `真实生图 · ${state.boot?.imageGeneration?.provider || '图像服务'} ${state.boot?.imageGeneration?.model || ''}` : (state.boot?.imageGeneration?.reason || '当前环境未启用真实生图'), off: !imagegenReady() },
     { act: 'web', ic: 'globe', label: '网页搜索', desc: state.webSearch ? '已启用 · 本轮会检索网页' : '使用平台 Web 搜索与抓取' },
     { act: 'project', ic: 'folder', label: '在项目中工作', desc: '在项目里开始对话' },
     { act: 'skillPicker', ic: 'layers', label: '技能', desc: skills.length ? `${skills.length} 项已启用 ›` : '暂无已启用技能 ›' },
     { act: 'pluginPicker', ic: 'plugin', label: '插件', desc: plugins.length ? `${plugins.length} 项已启用 ›` : '暂无已启用插件 ›' },
     { act: 'presetPicker', ic: 'target', label: 'Agent 预设', desc: state.agentPresets.length ? `${state.agentPresetId ? (state.agentPresets.find((x) => x.id === state.agentPresetId)?.name || '已选择') : `${state.agentPresets.length} 个`} ›` : '未创建 ›' },
-    ...['agent-team', 'worktree', 'auto-review'].map((id) => {
-      const e = (state.agentEntries || []).find((x) => x.id === id) || { id, label: id === 'agent-team' ? 'Agent 团队' : id === 'worktree' ? '工作树' : '自动审查（权限层）', enabled: false, desc: '运行时未启用' }
-      return { act: 'agentEntry', entry: id, ic: id === 'worktree' ? 'folder' : id === 'auto-review' ? 'check' : 'spark', label: e.label, desc: e.enabled ? e.desc : (e.runtimeEnabled ? '实验权限层尚未接入' : '运行时未启用'), off: !e.enabled }
+    ...['agent-team', 'worktree'].map((id) => {
+      const e = (state.agentEntries || []).find((x) => x.id === id) || { id, label: id === 'agent-team' ? 'Agent 团队' : '工作树', enabled: false, desc: '运行时未启用' }
+      return { act: 'agentEntry', entry: id, ic: id === 'worktree' ? 'folder' : 'spark', label: e.label, desc: e.enabled ? e.desc : '运行时未启用', off: !e.enabled }
     }),
-    { act: 'draw', ic: 'pen', label: '绘图', desc: '暂未开放', off: true },
+    { act: 'draw', ic: 'pen', label: '绘图', desc: '全屏画布 · 画笔、形状、文字与导出 PNG' },
     { act: 'sep' },
     { act: 'docx', ic: 'doc', label: '新建文档', desc: '.docx' },
     { act: 'pdf', ic: 'doc', label: '新建 PDF', desc: '.pdf' },
@@ -2740,6 +3047,7 @@ function paintComposerPlus(pop, items, pickerKind) {
     if (act === 'attach') openChatAttachment()
     if (act === 'library') openLibraryPicker()
     if (act === 'image') { state.view = 'imagegen'; render() }
+    if (act === 'draw') openDrawingBoard()
     if (act === 'web') {
       state.webSearch = !state.webSearch
       renderView()
@@ -2839,11 +3147,174 @@ function updateSlashMenu(input) {
   else closeSlashMenu()
 }
 
+function updateMentionMenu(input) {
+  const value = String(state.draft || '')
+  const caret = typeof input?.selectionStart === 'number' ? input.selectionStart : value.length
+  const match = value.slice(0, caret).match(/@([^\s@]*)$/)
+  if (!match) return closeMentionMenu()
+  const query = match[1].toLowerCase()
+  const items = (state.plugins || [])
+    .filter((p) => p.status === 'enabled')
+    .filter((p) => !query || `${p.name} ${p.desc || ''}`.toLowerCase().includes(query))
+    .slice(0, 8)
+  if (!items.length) return closeMentionMenu()
+  return openMentionMenu(input, items, match[0], caret - match[0].length, caret)
+}
+
+function closeMentionMenu() {
+  if (window.__mentionPop) { window.__mentionPop.remove(); window.__mentionPop = null }
+}
+
+function openMentionMenu(input, items, token, start, end) {
+  closeMentionMenu()
+  const pop = document.createElement('div')
+  pop.className = 'plus-pop mention-pop'
+  pop.style.width = `${Math.max(280, Math.min(440, Math.round(input.getBoundingClientRect().width || 360)))}px`
+  pop.innerHTML = items.map((p) => `<button class="pp-row" data-mention="${esc(p.id)}">
+      <span class="ico pp-ico">${icon(p.kind === 'personal' ? 'spark' : 'plugin')}</span>
+      <span class="pp-label">${state.composerTools.includes(p.id) ? '✓ ' : ''}@${esc(p.name)}</span>
+      <span class="pp-desc">${esc(p.kind === 'personal' ? '个人技能' : '企业插件')}</span>
+    </button>`).join('')
+  document.body.appendChild(pop)
+  window.__mentionPop = pop
+  const r = input.getBoundingClientRect()
+  pop.style.left = `${Math.round(Math.max(12, Math.min(window.innerWidth - pop.offsetWidth - 12, r.left)))}px`
+  pop.style.top = `${Math.round(Math.max(8, r.top - pop.offsetHeight - 8))}px`
+  pop.querySelectorAll('[data-mention]').forEach((button) => button.addEventListener('click', (e) => {
+    e.stopPropagation()
+    const plugin = (state.plugins || []).find((p) => p.id === button.dataset.mention)
+    if (!plugin) return
+    if (!state.composerTools.includes(plugin.id)) state.composerTools = [...state.composerTools, plugin.id]
+    const value = String(state.draft || '')
+    const insert = `@${plugin.name} `
+    state.draft = `${value.slice(0, start)}${insert}${value.slice(end)}`
+    input.value = state.draft
+    const caret = start + insert.length
+    input.setSelectionRange(caret, caret)
+    input.focus()
+    closeMentionMenu()
+    toast(`已引用「${plugin.name}」，本次对话已启用`)
+  }))
+  setTimeout(() => document.addEventListener('click', function close(e) {
+    if (!pop.contains(e.target) && e.target !== input) { pop.remove(); document.removeEventListener('click', close); if (window.__mentionPop === pop) window.__mentionPop = null }
+  }), 0)
+}
+
 function composerRefLabel(r) {
   const image = /\.(png|jpe?g|webp|gif|bmp)$/i.test(String(r.label || ''))
-  const model = String(state.composerModel || '').toLowerCase()
-  if (image && (!model || model.includes('deepseek') || model === 'jg-cloud' || model === 'personal-key')) return `${r.label} · 当前模型不支持识图`
+  if (image) return `${r.label} · 图片`
   return r.label
+}
+
+function composerHasImage() {
+  return (state.composerRefs || []).some((r) => /\.(png|jpe?g|webp|gif|bmp)$/i.test(String(r.label || '')))
+}
+
+function composerPrompt(fallback) {
+  return String(state.draft || '').trim() || (composerHasImage() ? '请查看并分析这张图片' : fallback)
+}
+
+function imageMimeForName(name = '') {
+  const ext = (String(name).toLowerCase().match(/\.([a-z0-9]+)$/) || [])[1] || ''
+  return ({ png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif', bmp: 'image/bmp' })[ext] || ''
+}
+
+function imageFileForClipboard(file, index = 0, typeHint = '') {
+  if (!file) return null
+  const mime = String(file.type || '').toLowerCase().split(';')[0] || String(typeHint || '').toLowerCase().split(';')[0] || imageMimeForName(file.name || '')
+  if (!/^image\/(png|jpeg|webp|gif|bmp)$/i.test(mime)) return null
+  const ext = mime.split('/')[1].replace('jpeg', 'jpg')
+  const raw = String(file.name || '').trim()
+  const name = raw && /\.(png|jpe?g|webp|gif|bmp)$/i.test(raw) && !/^image\.(png|jpe?g|webp|gif)$/i.test(raw)
+    ? raw
+    : `剪贴板图片-${Date.now()}-${index + 1}.${ext}`
+  try { return new File([file], name, { type: mime }) } catch { return file }
+}
+
+function clipboardImageFiles(dataTransfer) {
+  const files = []
+  const add = (file, typeHint = '') => {
+    const normalized = imageFileForClipboard(file, files.length, typeHint)
+    if (normalized) files.push(normalized)
+  }
+  for (const item of Array.from(dataTransfer?.items || [])) {
+    if (item.kind !== 'file') continue
+    const file = item.getAsFile()
+    if (file) add(file, item.type)
+  }
+  if (!files.length) {
+    for (const file of Array.from(dataTransfer?.files || [])) add(file)
+  }
+  if (!files.length) {
+    // 某些应用复制图片时只写入 text/html；从 data URI 兜底恢复。
+    try {
+      const html = dataTransfer?.getData('text/html') || ''
+      const match = html.match(/<img[^>]+src=["'](data:image\/(png|jpeg|webp|gif|bmp);base64,([^"']+))["']/i)
+      const base64 = match?.[3]?.replace(/\s+/g, '') || ''
+      if (match && base64.length <= 12 * 1024 * 1024) {
+        const bytes = Uint8Array.from(atob(base64), (ch) => ch.charCodeAt(0))
+        const ext = match[2] === 'jpeg' ? 'jpg' : match[2]
+        files.push(new File([bytes], `剪贴板图片-${Date.now()}-1.${ext}`, { type: `image/${match[2]}` }))
+      }
+    } catch {}
+  }
+  return files
+}
+
+function insertDraftText(draft, text) {
+  if (!text) return
+  const value = String(state.draft || '')
+  const start = typeof draft?.selectionStart === 'number' ? draft.selectionStart : value.length
+  const end = typeof draft?.selectionEnd === 'number' ? draft.selectionEnd : start
+  state.draft = `${value.slice(0, start)}${text}${value.slice(end)}`
+}
+
+async function handleComposerPaste(ev, draft) {
+  const files = clipboardImageFiles(ev.clipboardData)
+  if (!files.length) return
+  ev.preventDefault()
+  const plainText = ev.clipboardData?.getData('text/plain') || ''
+  insertDraftText(draft, plainText)
+  if (draft && plainText) draft.value = state.draft
+  if (state.pastingImages) return toast('上一张剪贴板图片还在上传，请稍候', true)
+  state.pastingImages = true
+  toast(`正在上传剪贴板图片 ${files.length} 张…`)
+  try {
+    const results = []
+    for (let i = 0; i < files.length; i += 1) {
+      const file = files[i]
+      const name = file.name || `剪贴板图片-${Date.now()}-${i + 1}.png`
+      try {
+        const uploaded = await uploadBinaryFile(file, 'chat')
+        if (uploaded.ok && uploaded.file?.id) {
+          let preview = ''
+          try { preview = URL.createObjectURL(file) } catch {}
+          results.push({ id: uploaded.file.id, label: name, preview })
+        } else {
+          toast(uploaded.body?.error || '剪贴板图片上传失败', true)
+        }
+      } catch (error) {
+        toast(error?.message || '剪贴板图片上传失败', true)
+      }
+    }
+    for (const item of results) addComposerRef({ kind: 'file', id: item.id, label: item.label, preview: item.preview })
+    if (results.length) {
+      renderView()
+      toast(`已粘贴 ${results.length} 张图片为对话附件`)
+      setTimeout(() => document.querySelector('#draft')?.focus(), 30)
+    }
+  } finally {
+    state.pastingImages = false
+  }
+}
+
+function bindComposerPaste(draft) {
+  draft?.addEventListener('paste', (ev) => handleComposerPaste(ev, draft))
+  const composer = draft?.closest('.hh-composer, .chat-composer')
+  composer?.addEventListener('paste', (ev) => {
+    if (ev.defaultPrevented || ev.target === draft) return
+    handleComposerPaste(ev, draft)
+  })
 }
 
 function openComposerPlus(anchor) { if (window.__plusPop) { window.__plusPop.remove(); window.__plusPop = null; return }
@@ -2857,10 +3328,12 @@ function openComposerPlus(anchor) { if (window.__plusPop) { window.__plusPop.rem
   const cr = composer.getBoundingClientRect()
   pop.style.width = `${Math.max(360, Math.round(cr.width))}px`
   pop.style.left = `${Math.round(Math.max(12, cr.left))}px`
-  pop.style.top = `${Math.round(r.bottom + 10)}px`
-  const maxH = Math.min(window.innerHeight - r.bottom - 16, 560)
-  pop.style.maxHeight = `${Math.max(260, maxH)}px`
+  pop.style.maxHeight = `${Math.min(560, window.innerHeight - 16)}px`
   paintComposerPlus(pop, composerPlusItems(), null)
+  const ph = pop.offsetHeight
+  const wantTop = r.bottom + 10
+  const top = wantTop + ph <= window.innerHeight - 8 ? wantTop : Math.max(8, r.top - 10 - ph)
+  pop.style.top = `${Math.round(top)}px`
   setTimeout(() => document.addEventListener('click', function close(e) {
     if (!pop.contains(e.target)) { pop.remove(); document.removeEventListener('click', close) }
   }), 0)
@@ -2945,7 +3418,7 @@ async function openProjectPicker() {
       ${items.map((p) => `<button class="lib-row" data-proj="${esc(p.id)}">
         <span class="ico">${icon('folder')}</span>
         <span class="lib-name">${esc(p.name)}</span>
-        <span class="lib-meta">${p.personal ? '个人项目' : '团队项目'}</span>
+        <span class="lib-meta" style="max-width:46%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(p.cwd || '')}">${esc(p.cwd || '未绑定文件夹')}</span>
       </button>`).join('')}
     </div>`, { wide: true })
   mask.querySelectorAll('[data-proj]').forEach((b) => b.addEventListener('click', () => {
@@ -2957,8 +3430,29 @@ async function openProjectPicker() {
 }
 
 function addComposerRef(ref) {
+  const old = (state.composerRefs || []).find((x) => x.id === ref.id)
+  if (old?.preview) {
+    try { URL.revokeObjectURL(old.preview) } catch {}
+  }
   state.composerRefs = (state.composerRefs || []).filter((x) => x.id !== ref.id)
   state.composerRefs.push(ref)
+}
+
+function removeComposerRef(id) {
+  const ref = (state.composerRefs || []).find((x) => x.id === id)
+  if (ref?.preview) {
+    try { URL.revokeObjectURL(ref.preview) } catch {}
+  }
+  state.composerRefs = (state.composerRefs || []).filter((x) => x.id !== id)
+}
+
+function clearComposerRefs() {
+  for (const ref of (state.composerRefs || [])) {
+    if (ref?.preview) {
+      try { URL.revokeObjectURL(ref.preview) } catch {}
+    }
+  }
+  state.composerRefs = []
 }
 
 const ROLE_HOME = {
@@ -2997,11 +3491,16 @@ function taskModeLabel(id) {
   return { auto: '自动', chat: '对话', work: '工作' }[id] || '自动'
 }
 
+function automationPermissionLabel(item) {
+  if (item?.source === 'harness') return 'Harness 托管'
+  return item?.permission === 'read-only' ? '只读' : '工作区可写'
+}
+
 function taskModeControl() {
   const id = ['auto', 'chat', 'work'].includes(state.taskMode) ? state.taskMode : 'auto'
   const tips = {
-    auto: '自动判断任务类型：普通问答走对话，文件/命令/多步骤任务走工作',
-    chat: '仅对话：优先直接回答，不主动修改文件或运行命令',
+    auto: '自动判断任务类型：普通问答走对话，项目、文件/命令/多步骤任务走工作',
+    chat: '默认只读；越权写入或命令会先请你逐次授权，不替你做拒绝',
     work: '工作执行：允许文件、命令与成果生成',
   }
   return `<button class="quick" id="taskModeBtn" style="display:inline-flex;align-items:center;gap:6px;line-height:1.2" title="${tips[id]}">
@@ -3018,7 +3517,7 @@ function openTaskModeMenu(anchor) {
   pop.style.width = '260px'
   pop.innerHTML = [
     ['auto', '自动', '智能判断，按需执行'],
-    ['chat', '对话', '只对话，不改文件'],
+    ['chat', '对话', '默认只读，越权逐次授权'],
     ['work', '工作', '文件、代码、多步骤'],
   ].map(([id, label, desc]) => `<button class="pp-row" data-taskmode="${id}">
       <span class="ico pp-ico">${state.taskMode === id ? icon('check') : ''}</span>
@@ -3045,8 +3544,8 @@ function openTaskModeMenu(anchor) {
 
 function policyControl() {
   if (state.taskMode === 'chat') {
-    return `<button class="quick" id="policyToggle" disabled title="对话模式固定只读：不允许写文件或执行有副作用命令；切换到工作模式后可选择审批方式" style="display:inline-flex;align-items:center;gap:6px;line-height:1.2;background:#f1f2f4;border:0;border-radius:999px;height:32px;padding:0 12px;color:#8a8f96;box-shadow:none;white-space:nowrap;cursor:default;opacity:.75">
-      <span class="ico" style="display:inline-flex;align-items:center;justify-content:center">${icon('shield')}</span>只读
+    return `<button class="quick" id="policyToggle" disabled title="对话模式默认只读；越权写入或命令会先请你逐次确认，批准仅本次有效" style="display:inline-flex;align-items:center;gap:6px;line-height:1.2;background:#f1f2f4;border:0;border-radius:999px;height:32px;padding:0 12px;color:#8a8f96;box-shadow:none;white-space:nowrap;cursor:default;opacity:.75">
+      <span class="ico" style="display:inline-flex;align-items:center;justify-content:center">${icon('shield')}</span>逐次授权
     </button>`
   }
   const manual = state.executionPolicy === 'manual'
@@ -3094,7 +3593,11 @@ function openApprovalMenu(anchor) {
     'dsh-workspace-write-escalation': 'DSH 工作区越界升级',
     'dsh-read-only-approval': 'DSH 只读策略升级',
     'chat-mode-no-escalation': '对话模式只读',
+    'chat-mode-approval': '对话模式：请求授权',
+    'auto-chat-runtime-approval': '自动模式：执行请求',
     'external-side-effect': '外部副作用',
+    'scheduled-read-only-scope': '定时任务：只读范围',
+    'scheduled-scope-exceeded': '定时任务：超出预设范围',
     'dsh-scheduled-escalation-unavailable': '定时任务无人值守',
   }[p.rule] || p.rule
   const isReasonOnly = !p.arguments && /^审批原因：/.test(String(p.summary || ''))
@@ -3151,7 +3654,7 @@ function openApprovalMenu(anchor) {
 
 /** 审批策略菜单，用词与交互参考 Codex：点击后让用户选择，不直接切换。 */
 function openPolicyMenu(anchor) {
-  if (state.taskMode === 'chat') { toast('对话模式固定只读，切换到工作模式后可选择审批方式'); return }
+  if (state.taskMode === 'chat') { toast('对话模式默认只读；越权操作会先请你逐次确认'); return }
   document.querySelectorAll('.policy-pop').forEach((p) => p.remove())
   document.querySelectorAll('.mode-pop').forEach((p) => p.remove())
   if (window.__policyPop) { window.__policyPop.remove(); window.__policyPop = null; return }
@@ -3444,10 +3947,15 @@ async function renderHome(el) {
   }
   const projectConvs = project ? convs.filter((c) => c.projectId === project.id).slice(0, 4) : []
   el.innerHTML = `
-  <div class="home-home" style="padding-top:32vh">
+  <div class="home-home" style="padding-top:30vh">
     <div class="hh-center">
-      <div class="hh-title">${esc(rh.title)}</div>
-      <div class="hh-composer" style="width:100%;max-width:760px;margin:0 auto;box-sizing:border-box">
+      <div class="hh-title" style="margin-bottom:18px">${esc(rh.title)}</div>
+      ${(state.composerRefs || []).length ? `<div class="hh-refs" style="justify-content:center;margin:0 auto 10px;max-width:820px">
+        ${state.composerRefs.map((r) => `<span class="hh-ref" data-refdrop="${esc(r.id)}">
+          ${r.preview ? `<img class="hh-ref-thumb" src="${esc(r.preview)}" alt="图片附件" style="width:22px;height:22px;border-radius:5px;object-fit:cover;flex:none">` : `<span class="ico">${icon(r.kind === 'project' ? 'folder' : 'doc')}</span>`}${esc(composerRefLabel(r))}<span class="hh-ref-x">×</span>
+        </span>`).join('')}
+      </div>` : ''}
+      <div class="hh-composer" style="width:100%;max-width:820px;margin:0 auto;box-sizing:border-box">
         <div style="display:flex;align-items:center;gap:6px;flex:none">
           <button class="hc-plus" id="attachBtn" title="添加照片、文件或工具"><span class="ico">${icon('plus')}</span></button>
           ${state.pendingInteraction?.kind === 'approval' ? approvalControl() : ''}
@@ -3459,28 +3967,24 @@ async function renderHome(el) {
           <button class="hc-send" id="sendBtn" title="发送">${icon('up')}</button>
         </div>
       </div>
-      <div class="quick-row" style="justify-content:space-between;align-items:center;margin:8px auto 0;width:100%;max-width:760px;box-sizing:border-box">
+      <div class="quick-row" style="justify-content:space-between;align-items:center;margin:8px auto 0;width:100%;max-width:820px;box-sizing:border-box">
         <div style="display:flex;gap:6px;align-items:center">${projectContextControl()}</div>
         <div style="display:flex;gap:6px;align-items:center">
           <button class="hc-lang" id="langBtn" title="推理强度"><span id="langValue">${reasoningLabel(state.reasoningEffort)}</span><span class="ico hc-caret">${icon('chevron')}</span></button>
           ${taskModeControl()}
         </div>
       </div>
-      ${(state.composerRefs || []).length ? `<div class="hh-refs">
-        ${state.composerRefs.map((r) => `<span class="hh-ref" data-refdrop="${esc(r.id)}">
-          <span class="ico">${icon(r.kind === 'project' ? 'folder' : 'doc')}</span>${esc(composerRefLabel(r))}<span class="hh-ref-x">×</span>
-        </span>`).join('')}
-      </div>` : ''}
     </div>
   </div>`
 
   const draft = el.querySelector('#draft')
   if (draft) {
-    draft.addEventListener('input', (e) => { state.draft = e.target.value; updateSlashMenu(e.target) })
+    draft.addEventListener('input', (e) => { state.draft = e.target.value; updateSlashMenu(e.target); updateMentionMenu(e.target) })
     draft.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') closeSlashMenu()
-      if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); submitTask() }
+      if (e.key === 'Escape') { closeSlashMenu(); closeMentionMenu() }
+      if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); closeMentionMenu(); submitTask() }
     })
+    bindComposerPaste(draft)
   }
   el.querySelector('#projectContext')?.addEventListener('click', openWorkspacePicker)
   el.querySelector('#taskModeBtn')?.addEventListener('click', (ev) => { ev.stopPropagation(); openTaskModeMenu(ev.currentTarget) })
@@ -3493,7 +3997,7 @@ async function renderHome(el) {
   }))
   el.querySelector('#attachBtn')?.addEventListener('click', (ev) => openComposerPlus(ev.currentTarget))
   el.querySelectorAll('[data-refdrop]').forEach((b) => b.addEventListener('click', () => {
-    state.composerRefs = (state.composerRefs || []).filter((r) => r.id !== b.dataset.refdrop)
+    removeComposerRef(b.dataset.refdrop)
     renderView()
   }))
   el.querySelector('#micBtn')?.addEventListener('click', (ev) => startVoiceInput(ev.currentTarget))
@@ -3536,10 +4040,15 @@ function greet() {
 }
 
 async function openConversation(id) {
+  state.shareMode = false
+  state.shareSelection = []
   const { body: one } = await api(`/api/conversation?id=${id}`)
-  if (!one.item) return
+  if (!one?.item) return toast('该会话不存在或已被删除', true)
   state.conversation = one.item
-  const sp = (state.sidebarProjects || []).find((p) => p.id === one.item.projectId) || null
+  upsertConversationMeta(one.item)
+  const sp = (state.projects || []).find((p) => p.id === one.item.projectId)
+    || (state.sidebarProjects || []).find((p) => p.id === one.item.projectId)
+    || null
   state.activeProjectId = one.item.projectId || ''
   state.activeProjectName = sp?.name || ''
   state.activeProjectCwd = sp?.cwd || ''
@@ -3567,6 +4076,8 @@ async function openConversation(id) {
 // 避免两处按钮行为漂移。
 function startFreshChat() {
   stopInteractionPoll()
+  state.shareMode = false
+  state.shareSelection = []
   state.view = 'home'
   state.draft = ''
   state.conversation = null
@@ -3576,7 +4087,7 @@ function startFreshChat() {
   state.pendingConfirm = null
   state.qSel = {}
   state.qCustom = {}
-  state.composerRefs = []
+  clearComposerRefs()
   state.agentPresetId = ''
   state.activeProjectId = ''
   state.activeProjectName = ''
@@ -3614,7 +4125,7 @@ async function renderProjects(el) {
   const dir = state.prjSort === 'asc' ? 1 : -1
   const list = state.projects
     .filter((p) => p.personal)
-    .filter((p) => !q || (p.name + (p.desc || '')).includes(q))
+    .filter((p) => !q || (p.name + (p.cwd || '') + (p.desc || '')).includes(q))
     .slice()
     .sort((a, b) => (String(a.updated) > String(b.updated) ? dir : -dir))
   const pageSize = 10
@@ -3624,15 +4135,16 @@ async function renderProjects(el) {
   const pageItems = list.slice((page - 1) * pageSize, page * pageSize)
   el.innerHTML = `
     <div class="prj-head">
-      <div class="view-title">项目</div>
+      <div class="view-title">工作区</div>
       <div class="prj-head-actions">
-        <div class="search prj-search"><span class="ico">${icon('search')}</span><input id="prjSearch" placeholder="搜索项目" value="${esc(q)}"></div>
-        <button class="btn primary" id="prjNew">${icon('plus')}创建</button>
+        <div class="search prj-search"><span class="ico">${icon('search')}</span><input id="prjSearch" placeholder="搜索工作区或文件夹" value="${esc(q)}"></div>
+        <button class="btn primary" id="prjNew">${icon('plus')}关联文件夹</button>
       </div>
     </div>
+    <div style="margin:-4px 0 14px;font-size:var(--fs-meta);color:var(--muted);line-height:1.6">一个项目就是一个本地工作区；同一文件夹下的多个线程共享文件、指令与执行环境。</div>
     <div class="prj-table">
       <div class="prj-thead">
-        <span class="prj-th-name">名称</span>
+        <span class="prj-th-name">工作区</span>
         <span class="spacer"></span>
         <span class="prj-th-time">已更新 <button class="prj-sort" id="prjSort" title="切换排序">${dir < 0 ? '↓' : '↑'}</button></span>
         <span class="prj-th-acts"></span>
@@ -3640,15 +4152,18 @@ async function renderProjects(el) {
       ${list.length ? pageItems.map((p) => `
         <div class="prj-row" data-project="${p.id}">
           <span class="prj-ico">${icon('folder')}</span>
-          <span class="prj-name">${esc(p.name)}${p.cwd ? `<span class="prj-cwd" title="已连接本地文件夹">${icon('window')}</span>` : ''}</span>
+          <span class="prj-name" style="display:flex;flex-direction:column;align-items:flex-start;gap:2px;min-width:0">
+            <span>${esc(p.name)}</span>
+            <span style="max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:var(--fs-micro);font-weight:400;color:var(--muted);font-family:ui-monospace,SFMono-Regular,Consolas,monospace">${esc(p.cwd || '未绑定本地文件夹')} · ${p.convs || 0} 个线程</span>
+          </span>
           <span class="spacer"></span>
           <span class="prj-time mono">${relTime(p.updated)}</span>
           <span class="prj-acts">
             <button class="icon-btn" data-pmore="${p.id}" title="更多">${icon('dots')}</button>
             <button class="icon-btn${p.pinned ? ' on' : ''}" data-ppin="${p.id}" title="${p.pinned ? '取消置顶' : '置顶'}">${icon('pin')}</button>
-            <button class="icon-btn" data-pnewchat="${p.id}" title="在该项目中新建聊天">${icon('compose')}</button>
+            <button class="icon-btn" data-pnewchat="${p.id}" title="在该工作区新建线程">${icon('compose')}</button>
           </span>
-        </div>`).join('') : '<div class="prj-empty">没有匹配的项目。个人项目仅自己可见，点右上角「创建」新建。</div>'}
+        </div>`).join('') : '<div class="prj-empty">还没有工作区。点右上角「关联文件夹」，把一个本地目录变成项目。</div>'}
     </div>
     ${pages > 1 ? `<div class="ac-pager prj-pager">
       <button class="ac-pg" data-ppage="${page - 1}" ${page <= 1 ? 'disabled' : ''}>上一页</button>
@@ -3775,60 +4290,86 @@ function openProjectFiles({ projectId = '', conversationId = '' } = {}) {
 }
 
 function openProject(id) {
-  const p = (state.projects || []).find((x) => x.id === id) || state.boot?.projects?.find?.((x) => x.id === id)
+  const p = (state.projects || []).find((x) => x.id === id)
+    || (state.sidebarProjects || []).find((x) => x.id === id)
+    || state.boot?.projects?.find?.((x) => x.id === id)
   if (!p) return
   const slide = ensureSlide()
   const online = p.status === 'online'
+  const autoReview = (state.agentEntries || []).find((x) => x.id === 'auto-review')
+  const threads = (state.conversations || []).filter((c) => c.projectId === p.id)
+  const threadRows = threads.length
+    ? threads.slice(0, 20).map((c) => `<button class="lib-row" data-prjthread="${esc(c.id)}" style="width:100%;border:0;border-bottom:1px solid var(--line);border-radius:0;text-align:left">
+        <span class="ico">${icon('chat')}</span>
+        <span class="lib-name" style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.title || '未命名线程')}</span>
+        <span class="lib-meta">${esc(c.status === 'running' ? '运行中' : (c.time || '—'))}</span>
+      </button>`).join('')
+    : `<div style="padding:14px;color:var(--muted);font-size:var(--fs-meta)">还没有线程；点下方「新建线程」开始。</div>`
   slide.innerHTML = `
-    <div class="slide-head"><div><div class="slide-title">${esc(p.name)}</div><div class="slide-sub">${esc(p.id)} · ${esc(p.dept)} · 更新 ${esc(p.updated)}</div></div><span class="spacer"></span><button class="btn subtle" data-close>${icon('close')}</button></div>
+    <div class="slide-head"><div><div class="slide-title">${esc(p.name)}</div><div class="slide-sub">本地工作区 · ${online ? '已连接' : '不可用'} · 更新 ${relTime(p.updated)}</div></div><span class="spacer"></span><button class="btn subtle" data-close>${icon('close')}</button></div>
     <div class="slide-body">
       <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px">
-        ${(p.nets || []).map((n) => `<span class="tag">${esc(NET_NAME[n] || n)}</span>`).join('')}
-        <span class="tag">${esc(p.scope.replace(/^dept:/, '').replace(/^unit:/, '').replace('all-org', '集团全员'))}</span>
-        ${p.cwd ? `<span class="tag">${online ? '本地文件夹已连接' : '本地文件夹不可用'}</span>` : ''}
+        <span class="tag">${online ? '本地文件夹已连接' : '本地文件夹不可用'}</span>
+        <span class="tag" id="prjGitTag">检测 Git…</span>
       </div>
-      <div class="field"><div class="field-label">项目说明</div><div class="field-value">${esc(p.desc)}</div></div>
-      <div class="field"><div class="field-label">本地目录</div><div class="field-value">${p.cwd ? esc(p.cwd) : '未绑定本地文件夹（工作模式不可用）'}</div></div>
+      <div class="field"><div class="field-label">工作区目录</div>
+        <div style="display:flex;align-items:flex-start;gap:8px">
+          <div class="field-value" style="flex:1;min-width:0;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;word-break:break-all">${p.cwd ? esc(p.cwd) : '未绑定本地文件夹（工作模式不可用）'}</div>
+          ${p.cwd ? '<button class="btn" data-reveal>打开文件夹</button>' : ''}
+        </div>
+      </div>
       <div class="kv-row">
-        ${p.personal
-          ? `<div class="kv-box"><span>类型</span><b>个人项目</b></div>
-        <div class="kv-box"><span>会话</span><b>${p.convs}</b></div>
-        <div class="kv-box"><span>资料</span><b>${p.files} 份</b></div>`
-          : `<div class="kv-box"><span>负责人</span><b>${esc(p.owner)}</b></div>
-        <div class="kv-box"><span>参与人</span><b>${p.members} 人</b></div>
-        <div class="kv-box"><span>会话</span><b>${p.convs}</b></div>
-        <div class="kv-box"><span>资料</span><b>${p.files} 份</b></div>`}
+        <div class="kv-box"><span>线程</span><b>${threads.length}</b></div>
+        <div class="kv-box"><span>根目录文件</span><b>${p.files || 0}</b></div>
+        <div class="kv-box"><span>Git</span><b id="prjGitBranch">—</b></div>
       </div>
-      <div class="field"><div class="field-label">项目上下文</div><div class="field-value">进入项目对话时，Agent 直接读取该本地目录中的文件；不同会话共享项目目录，但聊天记录彼此独立。</div></div>
+      <div class="field"><div class="field-label">线程</div>
+        <div style="max-height:210px;overflow:auto;border:1px solid var(--line);border-radius:10px;background:#fff">${threadRows}</div>
+      </div>
+      <div class="field"><div class="field-label">工作区说明</div><div class="field-value">${esc(p.desc || '未填写工作区说明')}</div></div>
+      <div class="field"><div class="field-label">工作区指令</div><div class="field-value">${esc(p.instructions || '未设置；可在新建或编辑工作区时补充统一约定。')}</div></div>
+      <div class="field"><div class="field-label">工作区上下文</div><div class="field-value">Agent 直接读取该本地目录中的文件；同一工作区下的多个线程共享目录与指令，但聊天记录彼此独立。</div></div>
+      <div class="field"><div class="field-label">安全与权限</div>
+        <div class="field-value">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+            <span class="tag warn">自动审查权限层 · 未接入</span>
+            <span style="color:var(--muted);font-size:var(--fs-meta)">${autoReview?.runtimeEnabled ? 'DSH 运行时已安装，产品审批链路尚未接入' : 'DSH 运行时未加载'}</span>
+          </div>
+          <div style="color:var(--muted);font-size:var(--fs-meta);line-height:1.6">权限层用于工具调用前的放行、拒绝或人工审批，不属于普通工具入口；已从输入框菜单移除。</div>
+          <button class="btn sm" data-security style="margin-top:8px">查看项目安全设置</button>
+        </div>
+      </div>
     </div>
     <div class="slide-foot" style="flex-wrap:wrap">
-      <button class="btn primary" data-ask ${p.cwd ? '' : 'disabled'}>在项目中提问</button>
+      <button class="btn primary" data-ask ${p.cwd ? '' : 'disabled'}>新建线程</button>
       ${p.cwd ? '<button class="btn" data-files>浏览文件</button>' : ''}
+      ${p.cwd ? `<button class="btn" data-check ${online ? '' : 'disabled'} title="${online ? '只读检查成果中的指标、日期与版本冲突' : '工作区文件夹当前不可用'}">成果检查</button>` : ''}
       <button class="btn" data-rename>重命名</button>
-      <button class="btn" data-remove>移除项目</button>
+      <button class="btn" data-remove>移除</button>
     </div>`
   wireSlide(slide)
   slide.querySelector('[data-files]')?.addEventListener('click', () => openProjectFiles({ projectId: p.id }))
+  slide.querySelector('[data-check]')?.addEventListener('click', () => openDeliverableCheck(p))
+  slide.querySelector('[data-security]')?.addEventListener('click', () => openProjectSecurity(p, autoReview))
+  slide.querySelector('[data-reveal]')?.addEventListener('click', () => revealProjectFolder(p))
+  slide.querySelectorAll('[data-prjthread]').forEach((button) => button.addEventListener('click', async () => {
+    slide.classList.remove('open')
+    await openConversation(button.dataset.prjthread)
+  }))
   slide.querySelector('[data-ask]')?.addEventListener('click', () => {
     slide.classList.remove('open')
-    state.conversation = null
-    state.activeProjectId = p.id
-    state.activeProjectName = p.name
-    state.activeProjectCwd = p.cwd || ''
-    state.view = 'chat'
-    state.draft = `围绕「${p.name}」项目，汇总当前成果与待办`
-    render()
+    startProjectChat(p)
   })
   slide.querySelector('[data-rename]')?.addEventListener('click', () => {
-    const mask = openModal('重命名项目', `
-      <div class="field"><div class="field-label">项目名称</div><input class="text-input" id="renamePrj" value="${esc(p.name)}" /></div>
+    const mask = openModal('重命名工作区', `
+      <div class="field"><div class="field-label">工作区名称</div><input class="text-input" id="renamePrj" value="${esc(p.name)}" /></div>
       <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">
         <button class="btn" data-cancel>取消</button><button class="btn primary" data-ok>保存</button>
       </div>`)
     mask.querySelector('[data-cancel]').addEventListener('click', () => mask.remove())
     mask.querySelector('[data-ok]').addEventListener('click', async () => {
       const name = mask.querySelector('#renamePrj').value.trim()
-      if (!name) return toast('项目名称不能为空', true)
+      if (!name) return toast('工作区名称不能为空', true)
       const { ok, body } = await api('/api/projects/update', {
         method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ id: p.id, name }),
@@ -3836,15 +4377,15 @@ function openProject(id) {
       if (!ok) return toast(body.error || '重命名失败', true)
       mask.remove()
       if (state.activeProjectId === p.id) state.activeProjectName = name
-      toast('项目已重命名')
+      toast('工作区已重命名')
       render()
     })
   })
   slide.querySelector('[data-remove]')?.addEventListener('click', () => {
-    const mask = openModal('移除项目', `
-      <div class="notice">只移除平台记录，不会删除本地文件夹、文件或会话历史。项目下的会话会转为普通聊天。</div>
+    const mask = openModal('移除工作区', `
+      <div class="notice">只移除平台记录，不会删除本地文件夹、文件或线程历史。工作区下的线程会转为普通聊天。</div>
       <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">
-        <button class="btn" data-cancel>取消</button><button class="btn" style="color:var(--danger)" data-ok>移除项目</button>
+        <button class="btn" data-cancel>取消</button><button class="btn" style="color:var(--danger)" data-ok>移除工作区</button>
       </div>`)
     mask.querySelector('[data-cancel]').addEventListener('click', () => mask.remove())
     mask.querySelector('[data-ok]').addEventListener('click', async () => {
@@ -3862,24 +4403,140 @@ function openProject(id) {
       }
       state.projects = (state.projects || []).filter((x) => x.id !== p.id)
       state.sidebarProjects = (state.sidebarProjects || []).filter((x) => x.id !== p.id)
-      toast('项目记录已移除，本地文件未删除')
+      toast('工作区记录已移除，本地文件未删除')
       render()
     })
   })
+  api(`/api/worktrees?projectId=${encodeURIComponent(p.id)}`).then(({ ok, body }) => {
+    const tag = slide.querySelector('#prjGitTag')
+    const branch = slide.querySelector('#prjGitBranch')
+    if (!tag || !branch) return
+    if (!ok) { tag.textContent = 'Git 未检测'; return }
+    if (!body.repo) { tag.textContent = '非 Git 仓库'; branch.textContent = '—'; return }
+    const main = (body.items || []).find((item) => item.main) || (body.items || [])[0]
+    const current = (body.branches || []).find((item) => item.current)
+    tag.textContent = main?.dirty ? 'Git · 有未提交改动' : 'Git · 已就绪'
+    branch.textContent = main?.branch || current?.name || 'detached'
+  }).catch(() => {
+    const tag = slide.querySelector('#prjGitTag')
+    if (tag) tag.textContent = 'Git 未检测'
+  })
+}
+
+function openProjectSecurity(p, autoReview) {
+  const mask = openModal(`项目权限与安全 · ${esc(p.name)}`, `
+    <div class="form-note">权限层与代码审查是两个不同的能力：前者拦截工具调用，后者审查源码。自动审查权限层已从输入框工具菜单移除，统一放到项目安全设置。</div>
+    <div class="field"><div class="field-label">自动审查（权限层）</div>
+      <div class="field-value">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <span class="tag ${autoReview?.runtimeEnabled ? 'warn' : ''}">${autoReview?.runtimeEnabled ? '运行时已安装 · 产品未接入' : '运行时未加载'}</span>
+          <span class="mono" style="font-size:var(--fs-meta);color:var(--muted)">${esc(p.cwd || '未绑定目录')}</span>
+        </div>
+        <div style="color:var(--muted);font-size:var(--fs-meta);line-height:1.7;margin-top:8px">逐工具调用前决定放行、拒绝或转人工审批。当前产品没有把它接进审批链路，因此不会在这里显示成普通可勾选工具。</div>
+      </div>
+    </div>
+    <div class="field"><div class="field-label">代码审查服务</div>
+      <div class="field-value">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><span class="tag ok">已接入 · 只读</span><span style="color:var(--muted);font-size:var(--fs-meta)">扫描源码、语法检查、JSON 校验、静态规则提示</span></div>
+        <div style="margin-top:10px"><button class="btn" data-open-cr>打开代码审查控制台</button></div>
+      </div>
+    </div>
+  `)
+  mask.querySelector('[data-open-cr]')?.addEventListener('click', () => {
+    mask.remove()
+    document.querySelector('.slide')?.classList.remove('open')
+    state.view = 'codereview'
+    render()
+    toast('已打开代码审查控制台')
+  })
+}
+
+function deliverableStatusMeta(status) {
+  if (status === 'conflict') return { label: '发现冲突', fg: '#a3261e', bg: '#fdeeee', line: '#c0392b' }
+  if (status === 'warning') return { label: '有提示', fg: '#7a5200', bg: '#fff7e6', line: '#b7791f' }
+  return { label: '一致', fg: '#246b43', bg: '#edf8f1', line: '#2f855a' }
+}
+
+function deliverableFileLabel(status) {
+  return { ok: '可核对', spatial: '空间数据', empty: '无文本', error: '读取失败' }[status] || status
+}
+
+function deliverableResultHtml(result) {
+  const meta = deliverableStatusMeta(result.status)
+  const files = result.files || []
+  const checks = result.checks || []
+  const summary = result.summary || {}
+  const evidence = (items) => (items || []).map((item) => `
+    <div class="mc-id" style="margin-top:6px;white-space:normal;line-height:1.6">${esc(item.file || '')}${item.text ? ` · ${esc(item.text)}` : ''}</div>`).join('')
+  const cards = checks.length ? checks.map((item) => {
+    const color = item.level === 'conflict' ? '#c0392b' : item.level === 'warning' ? '#b7791f' : '#2f855a'
+    return `<div style="border:1px solid var(--line);border-left:3px solid ${color};border-radius:8px;padding:10px 12px;background:#fff;margin-bottom:8px">
+      <div style="font-size:var(--fs-sub);font-weight:var(--fw-semi);color:var(--text)">${esc(item.title || '检查项')}</div>
+      <div style="font-size:var(--fs-meta);color:var(--text-2);line-height:1.7;margin-top:4px">${esc(item.detail || '')}</div>
+      ${evidence(item.evidence)}
+    </div>`
+  }).join('') : '<div class="notice">未发现指标、日期或版本冲突；结果仍建议由项目负责人复核后确认。</div>'
+  return `
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px">
+      <span style="display:inline-flex;align-items:center;height:24px;padding:0 10px;border-radius:999px;background:${meta.bg};color:${meta.fg};font-size:var(--fs-meta);font-weight:var(--fw-semi)">${meta.label}</span>
+      <span style="font-size:var(--fs-meta);color:var(--text-2)">${summary.files || 0} 个成果文件 · ${summary.conflicts || 0} 个冲突 · ${summary.warnings || 0} 个提示</span>
+    </div>
+    <div class="form-note" style="margin-bottom:10px">扫描目录：${esc(result.project?.cwd || '')}<br>生成时间：${esc(result.generatedAt || '')}</div>
+    <div style="max-height:48vh;overflow:auto;padding-right:2px">${cards}</div>
+    <details style="margin-top:12px">
+      <summary style="cursor:pointer;font-size:var(--fs-meta);color:var(--text-2)">文件清单（${files.length}）</summary>
+      <div style="margin-top:8px;border:1px solid var(--line);border-radius:8px;overflow:hidden">
+        ${files.map((file) => `<div style="display:flex;gap:8px;align-items:center;padding:7px 10px;border-bottom:1px solid var(--line);font-size:var(--fs-meta)">
+          <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(file.name || '')}</span>
+          <span style="color:var(--muted);white-space:nowrap">${esc(deliverableFileLabel(file.status))}</span>
+        </div>`).join('') || '<div style="padding:10px;color:var(--muted);font-size:var(--fs-meta)">没有可检查文件</div>'}
+      </div>
+    </details>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">
+      <button class="btn" id="dcRecheck">重新扫描</button>
+      <button class="btn primary" id="dcClose">关闭</button>
+    </div>`
+}
+
+async function openDeliverableCheck(project) {
+  if (!project?.cwd) return toast('项目未绑定本地文件夹，无法检查成果', true)
+  if (project.status !== 'online') return toast('项目文件夹当前不可用，无法检查成果', true)
+  const mask = openModal('成果一致性检查', `
+    <div id="dcBody">
+      <div class="form-note">正在只读扫描「${esc(project.name)}」的本地成果，不会修改、移动或删除任何文件。</div>
+      <div style="padding:18px 0;color:var(--muted);font-size:var(--fs-meta)">正在提取文档文本并比对指标…</div>
+    </div>`)
+  const body = mask.querySelector('#dcBody')
+  const run = async () => {
+    if (!body) return
+    body.innerHTML = `<div class="form-note">正在只读扫描「${esc(project.name)}」的本地成果，不会修改任何文件。</div><div style="padding:18px 0;color:var(--muted);font-size:var(--fs-meta)">正在提取文档文本并比对指标…</div>`
+    const { ok, body: payload } = await api('/api/projects/verify', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ projectId: project.id }),
+    })
+    if (!ok) {
+      body.innerHTML = `<div class="notice">${esc(payload?.error || '成果检查失败')}</div><div style="display:flex;justify-content:flex-end;margin-top:14px"><button class="btn" id="dcClose">关闭</button></div>`
+    } else {
+      body.innerHTML = deliverableResultHtml(payload)
+    }
+    body.querySelector('#dcRecheck')?.addEventListener('click', run)
+    body.querySelector('#dcClose')?.addEventListener('click', () => mask.remove())
+  }
+  run()
 }
 
 function openProjectForm(onDone) {
   const hasBridge = Boolean(window.jgClient && window.jgClient.chooseFolder)
-  const mask = openModal('创建项目', `
+  const mask = openModal('新建工作区', `
     <div style="padding:4px 4px 2px">
-      <div class="field-label" style="font-size:var(--fs-sub);margin-bottom:10px">项目名称</div>
+      <div class="field-label" style="font-size:var(--fs-sub);margin-bottom:10px">工作区名称</div>
       <div id="prjNameWrap" style="display:flex;align-items:center;height:54px;border:1.5px solid var(--accent);border-radius:13px;background:#fff;overflow:hidden">
         <span style="width:50px;display:grid;place-items:center;color:var(--text)"><span class="ico" style="width:22px;height:22px">${icon('folder')}</span></span>
         <span style="width:1px;height:24px;background:#dcdfe4"></span>
-        <input id="prjName" placeholder="例如：八里湖片区控规调整" style="flex:1;min-width:0;border:0;outline:0;background:transparent;height:52px;padding:0 14px;font:inherit;font-size:var(--fs-sub);color:var(--text)" />
+        <input id="prjName" placeholder="留空则使用文件夹名" style="flex:1;min-width:0;border:0;outline:0;background:transparent;height:52px;padding:0 14px;font:inherit;font-size:var(--fs-sub);color:var(--text)" />
       </div>
 
-      <div class="field-label" style="font-size:var(--fs-sub);margin:20px 0 10px">源文件夹</div>
+      <div class="field-label" style="font-size:var(--fs-sub);margin:20px 0 10px">本地文件夹</div>
       <div id="prjDrop" style="border:1px solid #e1e4e9;border-radius:14px;padding:22px 18px 20px;background:#fff;text-align:center">
         <div style="font-size:var(--fs-sub);color:var(--text)">在此电脑上添加文件夹 <span style="color:var(--muted)">⌄</span></div>
         <button id="prjBrowse" type="button" style="display:inline-flex;align-items:center;gap:7px;margin-top:14px;border:0;border-radius:999px;background:#f1f2f4;padding:9px 17px;font:inherit;font-size:var(--fs-sub);color:var(--text);cursor:pointer">
@@ -3890,15 +4547,15 @@ function openProjectForm(onDone) {
 
       <div style="display:flex;align-items:flex-start;gap:12px;margin-top:16px;border-radius:12px;background:#f4f5f6;padding:14px 16px">
         <span class="ico" style="width:24px;height:24px;flex:none;color:var(--muted);margin-top:1px">${icon('spark')}</span>
-        <div style="font-size:var(--fs-meta);color:var(--text-2);line-height:1.7">项目功能可将聊天、文件和自定义指令集中保存。可将其用于持续进行的工作，或仅用于保持内容整洁有序。</div>
+        <div style="font-size:var(--fs-meta);color:var(--text-2);line-height:1.7">像 Codex 的 Project 一样：一个工作区对应一个本地文件夹，工作区下的多个线程共享文件、执行环境和指令，但聊天记录彼此独立。</div>
       </div>
 
-      <div class="field-label" style="font-size:var(--fs-sub);margin:18px 0 8px">项目指令（可选）</div>
+      <div class="field-label" style="font-size:var(--fs-sub);margin:18px 0 8px">工作区指令（可选）</div>
       <textarea id="prjInstructions" rows="3" placeholder="例如：本项目统一使用中文命名；修改代码前先运行现有测试。" style="width:100%;box-sizing:border-box;border:1px solid #e1e4e9;border-radius:12px;background:#fff;padding:11px 12px;font:inherit;font-size:var(--fs-meta);color:var(--text);resize:vertical;outline:none"></textarea>
 
       <div style="display:flex;align-items:center;justify-content:space-between;margin-top:18px">
-        <button id="prjMemory" type="button" style="border:0;background:transparent;padding:6px 0;font:inherit;font-size:var(--fs-sub);color:var(--text);cursor:pointer">默认记忆 <span style="color:var(--muted)">⌄</span></button>
-        <button class="btn primary" data-ok disabled style="min-width:126px;height:44px;border-radius:22px;font-size:var(--fs-sub);background:#b9bdc4 !important;color:#fff !important;border-color:#b9bdc4 !important">创建项目</button>
+        <button id="prjMemory" type="button" style="border:0;background:transparent;padding:6px 0;font:inherit;font-size:var(--fs-sub);color:var(--text);cursor:pointer">工作区记忆 <span style="color:var(--muted)">⌄</span></button>
+        <button class="btn primary" data-ok disabled style="min-width:126px;height:44px;border-radius:22px;font-size:var(--fs-sub);background:#b9bdc4 !important;color:#fff !important;border-color:#b9bdc4 !important">创建工作区</button>
       </div>
     </div>`)
   const modal = mask.querySelector('.jg-modal')
@@ -3910,8 +4567,9 @@ function openProjectForm(onDone) {
   const nameInput = mask.querySelector('#prjName')
   const cwdInput = mask.querySelector('#prjCwd')
   const okBtn = mask.querySelector('[data-ok]')
+  const folderNameOf = (path) => String(path || '').trim().replace(/[\\/]+$/, '').split(/[\\/]/).pop() || ''
   const syncOk = () => {
-    const ready = Boolean(nameInput.value.trim() && cwdInput.value.trim())
+    const ready = Boolean(cwdInput.value.trim())
     okBtn.disabled = !ready
     okBtn.style.setProperty('background', ready ? 'var(--accent)' : '#b9bdc4', 'important')
     okBtn.style.setProperty('color', ready ? '#fff' : '#fff', 'important')
@@ -3930,6 +4588,7 @@ function openProjectForm(onDone) {
       if (!result.canceled && result.path) {
         cwdInput.value = result.path
         cwdInput.style.color = 'var(--text)'
+        if (!nameInput.value.trim()) nameInput.value = folderNameOf(result.path)
         syncOk()
       }
     } catch (error) {
@@ -3940,20 +4599,19 @@ function openProjectForm(onDone) {
   mask.querySelector('#prjDrop')?.addEventListener('click', (e) => {
     if (hasBridge && e.target.closest('#prjDrop') && !e.target.closest('#prjBrowse') && !e.target.closest('#prjCwd')) chooseFolder()
   })
-  mask.querySelector('#prjMemory')?.addEventListener('click', () => toast('项目默认记忆将在后续版本开放'))
+  mask.querySelector('#prjMemory')?.addEventListener('click', () => toast('工作区记忆将在后续版本开放'))
   mask.querySelector('[data-ok]').addEventListener('click', async () => {
-    const name = nameInput.value.trim()
     const cwd = cwdInput.value.trim()
+    const name = nameInput.value.trim() || folderNameOf(cwd) || '本地工作区'
     const instructions = mask.querySelector('#prjInstructions')?.value.trim() || ''
-    if (!name) return toast('请填写项目名称', true)
-    if (!cwd) return toast('请选择项目本地文件夹', true)
+    if (!cwd) return toast('请选择本地文件夹', true)
     const { ok, body } = await api('/api/projects/create', {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ name, desc: '', cwd, instructions }),
     })
-    if (!ok) return toast(body.error || '创建失败', true)
+    if (!ok) return toast(body.error || '创建工作区失败', true)
     mask.remove()
-    toast(body.existing ? `已打开现有项目「${body.item.name}」` : `已创建项目「${name}」`)
+    toast(body.existing ? `已打开现有工作区「${body.item.name}」` : `已创建工作区「${name}」`)
     state.sidebarProjects = [body.item, ...(state.sidebarProjects || []).filter((p) => p.id !== body.item.id)].slice(0, 3)
     state.projects = [body.item, ...(state.projects || []).filter((p) => p.id !== body.item.id)]
     if (typeof onDone === 'function') { onDone(body.item); return }
@@ -3982,8 +4640,9 @@ function openToolsMenu(anchor) {
   })
   document.body.appendChild(pop)
   const rect = anchor.getBoundingClientRect()
-  pop.style.left = `${rect.left}px`
-  pop.style.top = `${rect.bottom + 6}px`
+  pop.style.left = `${Math.max(8, Math.min(window.innerWidth - 220, rect.left))}px`
+  const ph = pop.offsetHeight
+  pop.style.top = `${Math.max(8, Math.min(window.innerHeight - ph - 8, rect.bottom + 6))}px`
 
   pop.querySelectorAll('[data-tool]').forEach((btn) => {
     btn.addEventListener('click', () => {
@@ -4002,8 +4661,9 @@ function openToolsMenu(anchor) {
 
 async function submitTask() {
   closeSlashMenu()
-  const text = state.draft.trim()
-  if (!text) return toast('请输入任务描述', true)
+  if (state.pastingImages) return toast('图片还在上传，请稍候再发送', true)
+  const text = composerPrompt('')
+  if (!text) return toast('请输入任务描述，或粘贴图片附件', true)
   if (state.activeProjectId) {
     const p = currentProject()
     if (!p || p.status !== 'online') return toast('项目本地文件夹不可用，请重新连接或解除项目后再执行', true)
@@ -4037,6 +4697,7 @@ async function stopJob(jobId) {
 async function cancelChat() {
   if (!state.chatBusy) return
   stopInteractionPoll()
+  stopThinkingClock()
   state.pendingInteraction = null
   state.chatAbort = true
   state.chatRunId += 1
@@ -4057,14 +4718,24 @@ async function cancelChat() {
 function startInteractionPoll() {
   stopInteractionPoll()
   state.pendingInteraction = null
+  state.chatTask = {
+    progressText: state.deepThink ? '深度思索中' : '正在建立任务上下文',
+    activityDetail: state.deepThink ? '正在调用推理模型，等待首个结果' : '准备读取项目与工具状态',
+  }
   state.qSel = {}
   state.qCustom = {}
   let seen = ''
   state.interactionPoll = setInterval(async () => {
     if (!state.chatBusy) return
-    const { ok, body } = await api(`/api/chat/pending?conversationId=${encodeURIComponent(state.conversation?.id || '')}`)
-    if (!ok) return
-    const item = body.item || null
+    const conversationId = state.conversation?.id || ''
+    const [pendingRes, taskRes] = await Promise.all([
+      api(`/api/chat/pending?conversationId=${encodeURIComponent(conversationId)}`),
+      api(`/api/chat/task?conversationId=${encodeURIComponent(conversationId)}`),
+    ])
+    if (!state.chatBusy) return
+    if (taskRes?.ok && taskRes.body?.task) updateThinkingActivity(taskRes.body.task)
+    if (!pendingRes?.ok) return
+    const item = pendingRes.body.item || null
     const sig = item?.id || ''
     if (sig === seen) return
     seen = sig
@@ -4112,19 +4783,40 @@ async function submitAnswer(cancel = false) {
   if (!ok) toast(body.error || '回答回填失败', true)
 }
 
-async function sendMessage(text) {
+function upsertConversationMeta(conv) {
+  if (!conv?.id) return
+  state.conversations = state.conversations || []
+  const meta = {
+    id: conv.id,
+    title: conv.title || '新对话',
+    time: conv.time || '刚刚',
+    status: conv.status || 'running',
+    projectId: conv.projectId || null,
+    kind: conv.kind || 'chat',
+    workspace: conv.workspace || '',
+  }
+  const at = state.conversations.findIndex((item) => item.id === conv.id)
+  if (at >= 0) Object.assign(state.conversations[at], meta)
+  else state.conversations.unshift(meta)
+}
+
+async function sendMessage(text, options = {}) {
   closeSlashMenu()
+  closeMentionMenu()
+  const regenerate = options.regenerate === true
+  const messageIndex = Number(options.messageIndex)
   state.chatAbort = false
   const runId = ++state.chatRunId
   const idempotencyKey = (globalThis.crypto?.randomUUID?.() || `chat-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`)
   state.lastChatKey = idempotencyKey
   state.chatBusy = true
+  startThinkingClock()
   state.chatError = ''
   state.pendingConfirm = null
   const refs = (state.composerRefs || []).map((r) => ({ kind: r.kind, id: r.id }))
-  state.composerRefs = []
+  clearComposerRefs()
   let conv = state.conversation
-  if (!conv) {
+  if (!regenerate && !conv) {
     // 先分配会话 ID 并立即显示用户消息；首轮执行中的审批请求也能按会话被轮询到。
     conv = {
       id: `C-${Date.now()}${Math.floor(Math.random() * 900 + 100)}`,
@@ -4134,8 +4826,11 @@ async function sendMessage(text) {
       deepThink: Boolean(state.deepThink),
     }
     state.conversation = conv
+    upsertConversationMeta(conv)
+    renderSidebar()
   }
-  conv.messages.push({ role: 'user', text, time: '刚刚' })
+  if (!conv) return
+  if (!regenerate) conv.messages.push({ role: 'user', text, time: '刚刚' })
   renderView()
   startInteractionPoll()
 
@@ -4152,25 +4847,29 @@ async function sendMessage(text) {
       ownApiKey: localStorage.getItem('jg.ownKey') || '',
       refs,
       mode: state.taskMode || 'auto',
-      projectId: state.activeProjectId || '',
+      projectId: state.activeProjectId || state.conversation?.projectId || '',
       executionPolicy: state.executionPolicy,
       presetId: state.agentPresetId || '',
       webSearch: Boolean(state.webSearch),
       idempotencyKey,
+      regenerate,
+      messageIndex,
     }),
-  })
+  }).catch((error) => ({ ok: false, status: 0, body: { error: error?.message || '网络请求失败，请稍后重试' } }))
 
   stopInteractionPoll()
   state.pendingInteraction = null
   if (runId !== state.chatRunId) return
 
   if (!res.ok) {
+    stopThinkingClock()
     state.chatBusy = false
     state.chatError = res.body.error || '模型或工具调用失败'
     renderView()
     return
   }
   if (res.body.duplicate) {
+    stopThinkingClock()
     state.chatBusy = false
     if (res.body.conversation) state.conversation = res.body.conversation
     renderView()
@@ -4179,6 +4878,8 @@ async function sendMessage(text) {
   }
 
   state.conversation = res.body.conversation
+  upsertConversationMeta(state.conversation)
+  renderSidebar()
   const convMeta = state.conversations.find((c) => c.id === state.conversation?.id)
   if (convMeta && state.conversation?.title) convMeta.title = state.conversation.title
   const citations = (res.body.citations || []).map((c) => c.id || c)
@@ -4189,7 +4890,9 @@ async function sendMessage(text) {
       steps: res.body.steps || [],
     }
   } else {
-    const last = state.conversation.messages[state.conversation.messages.length - 1]
+    const last = regenerate
+      ? state.conversation.messages[Number(messageIndex)]
+      : state.conversation.messages[state.conversation.messages.length - 1]
     let draftMsg
     if (last && last.role === 'assistant') {
       draftMsg = last
@@ -4204,11 +4907,12 @@ async function sendMessage(text) {
     draftMsg.pendingText = res.body.reply || ''
     await animateMessage(draftMsg)
   }
+  stopThinkingClock()
   state.chatBusy = false
   renderView()
 }
 
-/** 逐步点亮工具步骤，再逐字吐字，模拟流式；不依赖真实 SSE */
+/** 逐段展开回答，保留流式阅读感；不等待真实 SSE 才显示全文。 */
 async function animateMessage(msg) {
   const steps = msg.pendingSteps || []
   state.chatSteps = []
@@ -4216,17 +4920,18 @@ async function animateMessage(msg) {
     state.chatSteps = [...state.chatSteps, steps[i]]
     msg.steps = state.chatSteps.slice()
     renderStream()
-    await sleep(Math.min(700, Math.max(200, steps[i].ms / 4)))
+    await sleep(Math.min(360, Math.max(90, Number(steps[i]?.ms || 0) / 10)))
   }
   msg.steps = steps
   delete msg.pendingSteps
   state.chatSteps = []
   const full = msg.pendingText || ''
   delete msg.pendingText
-  for (let i = 4; i <= full.length; i += 8) {
+  const chunk = Math.max(12, Math.ceil(full.length / 90))
+  for (let i = chunk; i <= full.length; i += chunk) {
     msg.text = full.slice(0, i)
     renderStream()
-    await sleep(24)
+    await sleep(16)
   }
   msg.text = full
   msg.streaming = false
@@ -5126,8 +5831,13 @@ async function renderSkills(el) {
   const marketSections = (type) => {
     const list = filterMarket(type)
     if (!list.length) return ''
-    const sectionName = list[0].section || (type === 'plugin' ? '插件市场' : '技能市场')
-    return sec(sectionName, list.map(marketCard).join(''))
+    const groups = new Map()
+    for (const item of list) {
+      const key = item.section || (type === 'plugin' ? '插件市场' : '技能市场')
+      if (!groups.has(key)) groups.set(key, [])
+      groups.get(key).push(item)
+    }
+    return [...groups.entries()].map(([name, cards]) => sec(name, cards.map(marketCard).join(''))).join('')
   }
 
   const personalSections = `
@@ -5346,9 +6056,42 @@ function openCapabilityPolicy(c) {
   })
 }
 
+const PLUGIN_SURFACES = {
+  // Bundle 自带的客户端面板不是独立网页；当前车流量插件的操作入口由本地工具提供。
+  'M-1794656954497': { url: 'http://127.0.0.1:5000', label: '进入操作界面', note: '车流量本地服务，服务不在线时请先启动原工具。' },
+  // 产品内置插件直接打开已有的代码审查控制台，不做第二套假页面。
+  'M-CODEREVIEW': { view: 'codereview', label: '进入审查控制台', note: '打开 Harness 代码审查服务，对项目目录执行只读扫描。' },
+}
+
+function pluginSurfaceFor(m) {
+  if (!m || !m.installed) return null
+  if (PLUGIN_SURFACES[m.id]) return PLUGIN_SURFACES[m.id]
+  if (String(m.name || '').includes('车流量')) return PLUGIN_SURFACES['M-1794656954497']
+  return null
+}
+
+function openPluginSurface(m) {
+  const surface = pluginSurfaceFor(m)
+  if (!surface) return toast('该插件没有声明可打开的操作界面', true)
+  if (surface.view) {
+    document.querySelector('.slide')?.classList.remove('open')
+    closeModals()
+    state.view = surface.view
+    render()
+    return toast(surface.note || '已打开插件操作界面')
+  }
+  const mask = openModal(`${m.name} · 操作界面`, `
+    <div class="form-note" style="margin:0 0 10px">${esc(surface.note || '插件操作界面')}</div>
+    <iframe src="${esc(surface.url)}" title="${esc(m.name)}" style="width:100%;height:68vh;border:1px solid var(--line);border-radius:10px;background:#fff"></iframe>
+    <div class="form-foot"><span class="mono">${esc(surface.url)}</span><span class="spacer"></span><button class="btn" data-surface-open>在浏览器打开</button></div>
+  `, { wide: true })
+  mask.querySelector('[data-surface-open]')?.addEventListener('click', () => window.open(surface.url, '_blank', 'noopener,noreferrer'))
+}
+
 function openPluginSlide(id) {
   const m = (state.market || []).find((x) => x.id === id)
   if (!m) return
+  const surface = pluginSurfaceFor(m)
   const slide = ensureSlide()
   slide.innerHTML = `
     <div class="slide-head"><div><div class="slide-title">${esc(m.name)}</div><div class="slide-sub">${esc(m.publisher)} · ${esc(m.section)} · ID ${esc(m.id)}</div></div><span class="spacer"></span><button class="btn subtle" data-close>${icon('close')}</button></div>
@@ -5357,16 +6100,17 @@ function openPluginSlide(id) {
       <div class="field"><div class="field-label">功能说明</div><div class="field-value">${esc(m.desc)}</div></div>
       <div class="field"><div class="field-label">来源</div><div class="field-value">${m.origin === 'community' ? `${esc(m.submittedUnit || '')} · 提交人 ${esc(m.submittedBy || '')} · v${esc(m.version || '1.0.0')}` : `DSH 官方 / 产品内置 · v${esc(m.version || '1.0.0')}`}</div></div>
       <div class="field"><div class="field-label">权限与数据</div><div class="field-value">按当前授权与网络范围返回数据；敏感字段最小必要展示，读取与调用进审计。写操作需人工确认。</div></div>
-      <div class="field"><div class="field-label">安装状态</div><div class="field-value">${m.locked ? '该技能已作为全客户端基线安装，由平台统一维护，不能按单个账号卸载。' : m.available === false ? '该插件尚未提供可安装的技能包，暂不能安装。上架后会显示安装入口。' : `安装到${esc(m.installScope || '当前账号或项目技能目录')}；安装或卸载后，下一轮对话生效。`}</div></div>
+      <div class="field"><div class="field-label">安装状态</div><div class="field-value">${m.locked ? (m.product ? '该插件由平台内置，随平台统一维护；无需按账号安装或卸载。' : '该技能已作为全客户端基线安装，由平台统一维护，不能按单个账号卸载。') : m.available === false ? '该插件尚未提供可安装的技能包，暂不能安装。上架后会显示安装入口。' : `安装到${esc(m.installScope || '当前账号或项目技能目录')}；安装或卸载后，下一轮对话生效。`}</div></div>
       ${(m.kind !== 'bundle' && !m.locked && m.available !== false && !m.installed) ? `<div class="field"><div class="field-label">安装范围</div><div class="field-value">
         <select class="text-input" id="mktInstallScope"><option value="user">仅当前账号</option><option value="project">当前项目（仅该项目会话可见）</option></select>
         <select class="text-input" id="mktInstallProject" style="display:none;margin-top:6px">${(state.projects || []).filter((p) => p.cwd).map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('')}</select>
       </div></div>` : ''}
       ${m.installed && m.installedScope ? `<div class="field"><div class="field-label">安装位置</div><div class="field-value">${m.installedScope === 'project' ? `项目 ${esc((state.projects || []).find((p) => p.id === m.installedProjectId)?.name || m.installedProjectId)}` : '当前账号'}</div></div>` : ''}
-      <div class="field"><div class="field-label">安装要求</div><div class="field-value">${m.locked ? '平台官方基线技能，无需安装；按当前网络与授权范围生效。' : m.scope === '需授权' ? '需部门负责人授权后安装，授权范围按岗位与项目参与关系核定。' : m.kind === 'bundle' ? 'Bundle 会安装到当前账号的 DSH 运行时，只对该账号生效。' : '官方技能，可直接安装；账号范围与其他账号互不可见，项目范围仅该项目会话可见。'}</div></div>
+      <div class="field"><div class="field-label">安装要求</div><div class="field-value">${m.locked ? (m.product ? '产品内置插件，随平台统一维护；无需安装，也不占用账号技能目录。' : '平台官方基线技能，无需安装；按当前网络与授权范围生效。') : m.scope === '需授权' ? '需部门负责人授权后安装，授权范围按岗位与项目参与关系核定。' : m.kind === 'bundle' ? 'Bundle 会安装到当前账号的 DSH 运行时，只对该账号生效。' : '官方技能，可直接安装；账号范围与其他账号互不可见，项目范围仅该项目会话可见。'}</div></div>
     </div>
     <div class="slide-foot">
-      ${m.locked ? '<button class="btn primary" disabled>全客户端基线</button>' : m.available === false ? '<button class="btn primary" disabled>尚未提供安装包</button>' : `<button class="btn primary" data-toggle>${m.installed ? '卸载' : '安装'}</button>`}
+      ${surface ? `<button class="btn" data-open-surface>${esc(surface.label)}</button>` : ''}
+      ${m.locked ? `<button class="btn primary" disabled>${m.product ? '产品内置' : '全客户端基线'}</button>` : m.available === false ? '<button class="btn primary" disabled>尚未提供安装包</button>' : `<button class="btn primary" data-toggle>${m.installed ? '卸载' : '安装'}</button>`}
       ${m.downloadUrl ? '<button class="btn" data-download>下载原始包</button>' : ''}
       <button class="btn" data-log>调用记录</button>
     </div>`
@@ -5378,6 +6122,7 @@ function openPluginSlide(id) {
       projectSelect.style.display = scopeSelect.value === 'project' ? '' : 'none'
     })
   }
+  slide.querySelector('[data-open-surface]')?.addEventListener('click', () => openPluginSurface(m))
   slide.querySelector('[data-toggle]')?.addEventListener('click', async () => {
     const scopeEl = slide.querySelector('#mktInstallScope')
     const projectEl = slide.querySelector('#mktInstallProject')
@@ -5391,6 +6136,8 @@ function openPluginSlide(id) {
     }
     const { ok, body } = await api('/api/plugin-market/install', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) })
     if (!ok) return toast(body.error, true)
+    const plugins = await api('/api/plugins')
+    if (plugins.ok) state.plugins = plugins.body.items || []
     slide.classList.remove('open')
     toast(body.message || (body.item.installed ? `已安装「${m.name}」，下一轮对话生效` : `已卸载「${m.name}」`))
     renderView()
@@ -6436,24 +7183,26 @@ function imageModel() {
   return ms.find((m) => m.id === state.composerModel) || ms[0] || {}
 }
 
+function imagegenReady() {
+  const cap = state.boot?.imageGeneration
+  if (cap) return Boolean(cap.enabled)
+  return Boolean(imageModel()?.image)
+}
+
 function showImageGate() {
+  const cap = state.boot?.imageGeneration
   const m = imageModel()
+  const reason = cap?.reason || `当前绑定的模型 ${m.label || '未选择'} 没有声明图像生成能力`
   const mask = openModal('图像功能暂不可用', `
-    <div class="notice">当前绑定的模型 <b>${esc(m.label || '未选择')}</b> 没有声明图像生成能力，图像模块暂时不可用。</div>
-    <div class="field" style="margin-top:10px"><div class="field-label">原因</div><div class="field-value">${esc(m.imageNote || '该模型 API 未开通文生图端点')}</div></div>
-    <div class="field"><div class="field-label">怎么解决</div><div class="field-value">在「设置 · 模型与密钥」中切换到已开通图像生成的模型 API（当前网络：${esc(state.boot.network?.label || '互联网')}）。</div></div>
-    <div class="form-note">模型能力由服务端声明，前端只按声明决定入口是否可用；切换后立即生效，无需重启会话。</div>`, {})
-  mask.querySelector('[data-mclose]')?.addEventListener('click', () => {})
+    <div class="notice">当前环境没有可用的真实图像生成通道。</div>
+    <div class="field" style="margin-top:10px"><div class="field-label">原因</div><div class="field-value">${esc(reason)}</div></div>
+    <div class="field"><div class="field-label">怎么解决</div><div class="field-value">图像生成与聊天模型解耦；在互联网网络下启用外部生图服务，或在服务端配置 JG_IMAGE_ENDPOINT / JG_IMAGE_API_KEY 指向企业图像模型。政务网与涉密网不启用外部生图。</div></div>
+    <div class="form-note">能力由服务端 /api/bootstrap 的 imageGeneration 声明，前端只按真实服务状态决定入口是否可用。</div>`, {})
   const foot = document.createElement('div')
   foot.style.cssText = 'display:flex;gap:8px;margin-top:14px'
-  foot.innerHTML = `<button class="btn primary" data-go>去设置更换模型</button><button class="btn" data-later>稍后再说</button>`
+  foot.innerHTML = `<button class="btn primary" data-net>检查当前网络</button><button class="btn" data-later>知道了</button>`
   mask.querySelector('.jg-modal-body').appendChild(foot)
-  foot.querySelector('[data-go]').addEventListener('click', () => {
-    mask.remove()
-    state.view = 'settings'
-    state.settingsTab = 'models'
-    render()
-  })
+  foot.querySelector('[data-net]').addEventListener('click', () => { mask.remove(); state.view = 'settings'; state.settingsTab = 'network'; render() })
   foot.querySelector('[data-later]').addEventListener('click', () => mask.remove())
 }
 
@@ -6982,17 +7731,18 @@ async function renderImage(el) {
   const models = state.boot.models || []
   const m = imageModel()
   const g = state.imagegen
+  const cap = state.boot?.imageGeneration || {}
 
-  if (!m.image) {
+  if (!imagegenReady()) {
     el.innerHTML = `
       <div class="img-head"><div><div class="img-title">图像</div><div class="img-sub"></div></div></div>
       <div class="ig-blocked">
         <div class="ig-blocked-ico">${icon('image')}</div>
-        <div class="ig-blocked-title">当前模型不支持图像生成</div>
-        <div class="ig-blocked-text">${esc(m.label || '未选择模型')}</div>
-        <button class="btn primary" id="igGoSettings">去设置更换模型</button>
+        <div class="ig-blocked-title">当前环境没有可用的真实生图通道</div>
+        <div class="ig-blocked-text">${esc(cap.reason || `当前模型 ${m.label || '未选择'} 未声明图像能力`)}</div>
+        <button class="btn primary" id="igGoSettings">检查网络与凭证</button>
       </div>`
-    el.querySelector('#igGoSettings').addEventListener('click', () => { state.view = 'settings'; state.settingsTab = 'models'; render() })
+    el.querySelector('#igGoSettings').addEventListener('click', () => { state.view = 'settings'; state.settingsTab = 'network'; render() })
     return
   }
 
@@ -7004,7 +7754,7 @@ async function renderImage(el) {
   el.innerHTML = `
     <div class="img-head">
       <div><div class="img-title">图像</div>
-        <div class="img-sub"></div></div>
+        <div class="img-sub">${g.busy ? '正在生成真实图像…' : `真实生图 · ${esc(cap.provider || '图像模型')} ${esc(cap.model || '')} · ${cap.external ? '提示词会发送到外部服务' : '服务端内部模型'}`}</div></div>
     </div>
     <div class="img-tabs">
       <button class="img-tab${g.tab === 'hot' ? ' on' : ''}" data-igtab="hot">热门</button>
@@ -7053,38 +7803,606 @@ async function renderImage(el) {
     openModal('生成结果', `
       <div class="ig-preview"><img src="${s.url}" alt=""></div>
       <div class="field" style="margin-top:10px"><div class="field-label">提示词</div><div class="field-value">${esc(s.prompt)}</div></div>
-      <div class="field"><div class="field-label">参数</div><div class="field-value">${esc(s.style)} · ${esc(s.ratio)} · ${esc(m.label)}</div></div>
-      <div style="display:flex;gap:8px;margin-top:12px"><button class="btn" data-dlg>下载 PNG</button><button class="btn primary" data-useimg>用于会话</button></div>
-      <div class="form-note">原型展示本地示意画面；正式版该位置为模型 API 返回图片，元数据含端点、耗时与审核结果。</div>`, { wide: true })
+      <div class="field"><div class="field-label">参数</div><div class="field-value">${esc(s.style)} · ${esc(s.ratio)} · ${esc(s.provider || cap.provider || '图像模型')} ${esc(s.model || cap.model || '')}</div></div>
+      <div style="display:flex;gap:8px;margin-top:12px"><button class="btn" data-dlg>下载原图</button><button class="btn primary" data-useimg>用于会话</button></div>
+      <div class="form-note">由真实图像生成服务返回，图片已落盘到服务端文件存储；提示词、比例、服务商和种子随结果记录，便于复核。</div>`, { wide: true })
     const mask = document.querySelector('.jg-modal-mask')
     mask.querySelector('[data-dlg]')?.addEventListener('click', () => {
       const a = document.createElement('a')
-      a.href = s.url; a.download = `jg-image-${s.id}.png`; a.click()
+      a.href = s.url; a.download = s.name || `jg-image-${s.id}.png`; a.click()
     })
-    mask.querySelector('[data-useimg]')?.addEventListener('click', () => {
-      mask.remove()
-      state.view = 'chat'; state.conversation = null
-      state.draft = `我生成了一张规划示意图（${s.style}${s.ratio}，提示词：${s.prompt}），请基于它整理一段汇报说明。`
-      render()
+    mask.querySelector('[data-useimg]')?.addEventListener('click', async (e) => {
+      const btn = e.currentTarget
+      btn.disabled = true
+      try {
+        const blob = await (await fetch(s.url)).blob()
+        const file = new File([blob], s.name || `jg-image-${s.id}.png`, { type: blob.type || s.mime || 'image/png' })
+        const uploaded = await uploadBinaryFile(file, 'chat')
+        if (!uploaded.ok) { toast(uploaded.body?.error || '图像上传失败', true); return }
+        addComposerRef({ kind: 'file', id: uploaded.file.id, label: file.name })
+        mask.remove()
+        state.view = 'chat'
+        state.conversation = null
+        state.draft = `我生成了一张图像（${s.style}${s.ratio}，提示词：${s.prompt}），请基于它整理一段汇报说明。`
+        render()
+        toast('图像已加入本轮附件')
+      } catch (err) {
+        toast(err.message || '图像处理失败', true)
+      } finally {
+        btn.disabled = false
+      }
     })
   }))
 
-  el.querySelector('#igGen').addEventListener('click', () => {
+  el.querySelector('#igGen').addEventListener('click', async () => {
     if (!g.prompt.trim()) { toast('请先描述要生成的图像', true); input.focus(); return }
     if (g.busy) return
     g.busy = true
     renderView()
-    setTimeout(() => {
-      const g2 = state.imagegen
-      const base = Date.now().toString().slice(-5)
-      for (let i = 0; i < g2.count; i += 1) {
-        g2.shots.unshift({ id: `${base}${i}`, prompt: g2.prompt.trim(), style: g2.style, ratio: g2.ratio, url: paintShot(g2.prompt.trim(), g2.ratio, g2.style, i + 1, { plain: true }), ts: new Date().toLocaleTimeString('zh-CN', { hour12: false }).slice(0, 5) })
+    toast('正在调用真实生图服务，通常需要 10–30 秒')
+    const g2 = state.imagegen
+    const count = Math.max(1, Math.min(4, Number(g2.count) || 1))
+    let made = 0
+    try {
+      for (let i = 0; i < count; i += 1) {
+        const res = await api('/api/images/generate', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            prompt: g2.prompt.trim(),
+            style: g2.style,
+            ratio: g2.ratio,
+            seed: Math.floor(Math.random() * 2_147_483_647),
+          }),
+        })
+        if (!res.ok || !res.body?.image?.url) {
+          throw new Error(res.body?.error || `生图服务返回 HTTP ${res.status}`)
+        }
+        const image = res.body.image
+        g2.shots.unshift({
+          id: image.id,
+          prompt: image.prompt || g2.prompt.trim(),
+          style: image.style || g2.style,
+          ratio: image.ratio || g2.ratio,
+          url: image.url,
+          name: image.name,
+          mime: image.mime,
+          provider: image.provider,
+          model: image.model,
+          seed: image.seed,
+          ts: new Date().toLocaleTimeString('zh-CN', { hour12: false }).slice(0, 5),
+        })
+        g2.shots = g2.shots.slice(0, 12)
+        made += 1
       }
       g2.busy = false
       renderView()
-      toast(`已生成 ${g2.count} 张图像（原型示意画面）`)
-    }, 900)
+      toast(`已生成 ${made} 张真实图像 · ${cap.provider || '图像服务'} ${cap.model || ''}`)
+    } catch (err) {
+      g2.busy = false
+      renderView()
+      toast(err.message || '真实生图失败，请稍后重试', true)
+    }
   })
+}
+
+function openDrawingBoard() {
+  const drawSvg = (name) => {
+    const paths = {
+      cursor: '<path d="M5 3l13 8-5.6 1.2L10 19z"/>',
+      pen: '<path d="M4 20c3.4-1.4 5.7-3.9 8.3-7.6 2-2.8 3.6-4.4 5.2-4.9 1.4-.5 2.2.7 1.2 2.2-1.7 2.5-4.2 4.1-7.1 4.9-1.7.5-2.8-.8-2.2-2.3.9-2.1 2.5-4 5.3-5.4"/>',
+      shapes: '<rect x="3.5" y="6" width="10.5" height="10.5" rx="2.4"/><rect x="9" y="9.5" width="10.5" height="10.5" rx="2.4"/>',
+      eraser: '<path d="M8.5 19.5l-4-4 9.5-9.5 6 6-7.5 7.5z"/><path d="M10.5 21h9"/>',
+      undo: '<path d="M9 7L4 12l5 5"/><path d="M5 12h8.5a6 6 0 0 1 6 6"/>',
+      redo: '<path d="M15 7l5 5-5 5"/><path d="M19 12h-8.5a6 6 0 0 0-6 6"/>',
+      line: '<path d="M5 19L19 5"/>',
+      arrow: '<path d="M5 19L19 5"/><path d="M13 5h6v6"/>',
+      rect: '<rect x="5" y="5" width="14" height="14" rx="1"/>',
+      ellipse: '<circle cx="12" cy="12" r="7"/>',
+      triangle: '<path d="M12 4l8 15H4z"/>',
+      diamond: '<path d="M12 4l8 8-8 8-8-8z"/>',
+      star: '<path d="M12 3.5l2.6 5.3 5.8.8-4.2 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.2-4.1 5.8-.8z"/>',
+      heart: '<path d="M12 20s-7-4.4-7-10a4 4 0 0 1 7-2 4 4 0 0 1 7 2c0 5.6-7 10-7 10z"/>',
+      check: '<path d="M5 12.5l4.2 4.2L19 6.5"/>',
+    }
+    return `<svg viewBox="0 0 24 24" aria-hidden="true">${paths[name] || ''}</svg>`
+  }
+  const colors = [
+    ['rainbow', '彩虹'], ['#1f2328', '墨黑'], ['#8b8f96', '灰'], ['#8b5e3c', '棕'],
+    ['#d92d20', '红'], ['#f26b21', '橙'], ['#f5a623', '黄'], ['#1f9d55', '绿'],
+    ['#0f9b8e', '青绿'], ['#13b5d6', '青'], ['#2563eb', '蓝'], ['#4f46e5', '靛'],
+    ['#7c3aed', '紫'], ['#d92d9b', '粉'],
+  ]
+  const shapeOptions = [['line', '直线'], ['arrow', '箭头'], ['rect', '矩形'], ['ellipse', '圆形'], ['triangle', '三角'], ['diamond', '菱形'], ['star', '星形'], ['heart', '心形']]
+  const mask = document.createElement('div')
+  mask.className = 'jg-draw-mask open'
+  mask.innerHTML = `
+    <div class="jg-draw-panel" data-tool="pen">
+      <canvas class="jg-draw-canvas" id="drawCanvas"></canvas>
+      <button class="jg-draw-close" data-dclose title="关闭" aria-label="关闭">${icon('close')}</button>
+      <div class="jg-draw-toolbar" role="toolbar" aria-label="绘图工具">
+        <button class="jg-draw-tool" data-tool="select" title="选择">${drawSvg('cursor')}</button>
+        <button class="jg-draw-tool on" data-tool="pen" title="画笔">${drawSvg('pen')}</button>
+        <button class="jg-draw-tool jg-draw-text-tool" data-tool="text" title="文字"><span>T</span></button>
+        <button class="jg-draw-tool" data-tool="shape" title="形状">${drawSvg('shapes')}</button>
+        <button class="jg-draw-tool" data-tool="eraser" title="橡皮">${drawSvg('eraser')}</button>
+      </div>
+      <div class="jg-draw-shapes" hidden>
+        ${shapeOptions.map(([kind, label]) => `<button class="jg-draw-shape" data-shape="${kind}" title="${label}">${drawSvg(kind)}</button>`).join('')}
+      </div>
+      <div class="jg-draw-topright">
+        <button class="jg-draw-topbtn" data-dundo title="撤销" aria-label="撤销" disabled>${drawSvg('undo')}</button>
+        <button class="jg-draw-topbtn" data-dredo title="重做" aria-label="重做" disabled>${drawSvg('redo')}</button>
+      </div>
+      <div class="jg-draw-size" title="画笔粗细">
+        <input id="drawSize" type="range" min="1" max="28" value="4" aria-label="画笔粗细">
+      </div>
+      <div class="jg-draw-colors">
+        ${colors.map(([c, label]) => `<button class="jg-draw-color${c === 'rainbow' ? ' rainbow' : ''}${c === '#1f2328' ? ' on' : ''}" data-color="${c}" title="${label}" aria-label="${label}"${c === 'rainbow' ? '' : ` style="background:${c}"`}></button>`).join('')}
+      </div>
+      <button class="jg-draw-confirm" data-ddone title="完成并加入对话" aria-label="完成并加入对话" disabled>${drawSvg('check')}</button>
+    </div>`
+  document.body.appendChild(mask)
+  const panel = mask.querySelector('.jg-draw-panel')
+  const canvas = mask.querySelector('#drawCanvas')
+  const ctx = canvas.getContext('2d')
+  const shapeMenu = mask.querySelector('.jg-draw-shapes')
+  const undoBtn = mask.querySelector('[data-dundo]')
+  const redoBtn = mask.querySelector('[data-dredo]')
+  const doneBtn = mask.querySelector('[data-ddone]')
+  let tool = 'pen'
+  let color = '#1f2328'
+  let brush = 4
+  const sizeWrap = mask.querySelector('.jg-draw-size')
+  const sizeInput = mask.querySelector('#drawSize')
+  const syncSize = () => {
+    const pct = 100 - ((brush - 1) / 27) * 100
+    sizeWrap.style.setProperty('--jg-fill', `${Math.max(0, Math.min(100, pct))}%`)
+  }
+  syncSize()
+  let shapeKind = 'rect'
+  let objects = []
+  let history = []
+  let histIndex = -1
+  let drawing = null
+  let dragging = null
+  let selected = -1
+  let erasing = false
+  let erased = false
+  let textInput = null
+  let dpr = Math.max(1, window.devicePixelRatio || 1)
+  let observer = null
+
+  const bounds = (o) => {
+    if (o.type === 'stroke') {
+      const xs = o.points.map((p) => p.x)
+      const ys = o.points.map((p) => p.y)
+      const pad = o.width / 2 + 2
+      return { x: Math.min(...xs) - pad, y: Math.min(...ys) - pad, w: Math.max(...xs) - Math.min(...xs) + pad * 2, h: Math.max(...ys) - Math.min(...ys) + pad * 2 }
+    }
+    if (o.type === 'shape') {
+      return { x: Math.min(o.x1, o.x2), y: Math.min(o.y1, o.y2), w: Math.abs(o.x2 - o.x1), h: Math.abs(o.y2 - o.y1) }
+    }
+    const lines = String(o.text || '').split('\n')
+    ctx.font = `500 ${o.size}px "PingFang SC","Microsoft YaHei",sans-serif`
+    const width = Math.max(...lines.map((line) => ctx.measureText(line).width), 0)
+    return { x: o.x, y: o.y, w: width, h: lines.length * o.size * 1.25 }
+  }
+  const paintStroke = (o) => {
+    if (!o.points.length) return
+    ctx.lineCap = 'round'
+    ctx.lineJoin = 'round'
+    if (o.points.length === 1) {
+      ctx.fillStyle = o.color === 'rainbow' ? '#2563eb' : o.color
+      ctx.beginPath()
+      ctx.arc(o.points[0].x, o.points[0].y, o.width / 2, 0, Math.PI * 2)
+      ctx.fill()
+      return
+    }
+    for (let i = 1; i < o.points.length; i += 1) {
+      ctx.strokeStyle = o.color === 'rainbow' ? `hsl(${(i * 18) % 360} 82% 55%)` : o.color
+      ctx.lineWidth = o.width
+      ctx.beginPath()
+      ctx.moveTo(o.points[i - 1].x, o.points[i - 1].y)
+      ctx.lineTo(o.points[i].x, o.points[i].y)
+      ctx.stroke()
+    }
+  }
+  const paintShape = (o) => {
+    const x1 = o.x1
+    const y1 = o.y1
+    const x2 = o.x2
+    const y2 = o.y2
+    const x = Math.min(x1, x2)
+    const y = Math.min(y1, y2)
+    const w = Math.abs(x2 - x1)
+    const h = Math.abs(y2 - y1)
+    ctx.lineWidth = o.width
+    ctx.lineCap = 'round'
+    ctx.lineJoin = 'round'
+    if (o.color === 'rainbow') {
+      const gradient = ctx.createLinearGradient(x, y, x + w, y + h)
+      gradient.addColorStop(0, '#ff4d4d')
+      gradient.addColorStop(.25, '#f5a623')
+      gradient.addColorStop(.5, '#1f9d55')
+      gradient.addColorStop(.75, '#13b5d6')
+      gradient.addColorStop(1, '#7c3aed')
+      ctx.strokeStyle = gradient
+    } else ctx.strokeStyle = o.color
+    ctx.beginPath()
+    if (o.shape === 'line' || o.shape === 'arrow') {
+      ctx.moveTo(x1, y1)
+      ctx.lineTo(x2, y2)
+      ctx.stroke()
+      if (o.shape === 'arrow') {
+        const angle = Math.atan2(y2 - y1, x2 - x1)
+        const head = Math.max(10, o.width * 2.5)
+        ctx.beginPath()
+        ctx.moveTo(x2, y2)
+        ctx.lineTo(x2 - head * Math.cos(angle - .45), y2 - head * Math.sin(angle - .45))
+        ctx.moveTo(x2, y2)
+        ctx.lineTo(x2 - head * Math.cos(angle + .45), y2 - head * Math.sin(angle + .45))
+        ctx.stroke()
+      }
+      return
+    }
+    if (o.shape === 'rect') ctx.strokeRect(x, y, w, h)
+    else if (o.shape === 'ellipse') ctx.ellipse(x + w / 2, y + h / 2, Math.max(1, w / 2), Math.max(1, h / 2), 0, 0, Math.PI * 2), ctx.stroke()
+    else if (o.shape === 'triangle') {
+      ctx.moveTo(x + w / 2, y)
+      ctx.lineTo(x + w, y + h)
+      ctx.lineTo(x, y + h)
+      ctx.closePath()
+      ctx.stroke()
+    } else if (o.shape === 'diamond') {
+      ctx.moveTo(x + w / 2, y)
+      ctx.lineTo(x + w, y + h / 2)
+      ctx.lineTo(x + w / 2, y + h)
+      ctx.lineTo(x, y + h / 2)
+      ctx.closePath()
+      ctx.stroke()
+    } else if (o.shape === 'star') {
+      const cx = x + w / 2
+      const cy = y + h / 2
+      for (let i = 0; i < 10; i += 1) {
+        const angle = -Math.PI / 2 + i * Math.PI / 5
+        const rx = (i % 2 ? .46 : 1) * w / 2
+        const ry = (i % 2 ? .46 : 1) * h / 2
+        const px = cx + Math.cos(angle) * rx
+        const py = cy + Math.sin(angle) * ry
+        if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py)
+      }
+      ctx.closePath()
+      ctx.stroke()
+    } else if (o.shape === 'heart') {
+      const cx = x + w / 2
+      ctx.moveTo(cx, y + h)
+      ctx.bezierCurveTo(x - .1 * w, y + .55 * h, x + .05 * w, y + .05 * h, cx, y + .35 * h)
+      ctx.bezierCurveTo(x + .95 * w, y + .05 * h, x + 1.1 * w, y + .55 * h, cx, y + h)
+      ctx.closePath()
+      ctx.stroke()
+    }
+  }
+  const paintText = (o) => {
+    ctx.fillStyle = o.color === 'rainbow' ? '#1f2328' : o.color
+    ctx.font = `500 ${o.size}px "PingFang SC","Microsoft YaHei",sans-serif`
+    ctx.textBaseline = 'top'
+    String(o.text || '').split('\n').forEach((line, i) => ctx.fillText(line, o.x, o.y + i * o.size * 1.25))
+  }
+  const paintObject = (o) => {
+    if (o.type === 'stroke') paintStroke(o)
+    else if (o.type === 'shape') paintShape(o)
+    else if (o.type === 'text') paintText(o)
+  }
+  const redraw = () => {
+    const w = canvas.width / dpr
+    const h = canvas.height / dpr
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+    ctx.clearRect(0, 0, w, h)
+    ctx.fillStyle = '#ffffff'
+    ctx.fillRect(0, 0, w, h)
+    objects.forEach(paintObject)
+    const sel = dragging ? dragging.index : selected
+    if (sel >= 0 && objects[sel]) {
+      const b = bounds(objects[sel])
+      ctx.save()
+      ctx.setLineDash([5, 4])
+      ctx.strokeStyle = '#2563eb'
+      ctx.lineWidth = 1.5
+      ctx.strokeRect(b.x - 6, b.y - 6, b.w + 12, b.h + 12)
+      ctx.restore()
+    }
+  }
+  const resize = () => {
+    const r = panel.getBoundingClientRect()
+    if (!r.width || !r.height) return
+    dpr = Math.max(1, window.devicePixelRatio || 1)
+    canvas.width = Math.round(r.width * dpr)
+    canvas.height = Math.round(r.height * dpr)
+    redraw()
+  }
+  const pointOf = (e) => {
+    const r = canvas.getBoundingClientRect()
+    return { x: e.clientX - r.left, y: e.clientY - r.top }
+  }
+  const clone = (o) => JSON.parse(JSON.stringify(o))
+  const commit = () => {
+    history = history.slice(0, histIndex + 1)
+    history.push(JSON.stringify(objects))
+    histIndex = history.length - 1
+    syncHistory()
+    doneBtn.disabled = objects.length === 0
+    redraw()
+  }
+  const syncHistory = () => {
+    undoBtn.disabled = histIndex <= 0
+    redoBtn.disabled = histIndex >= history.length - 1
+    doneBtn.disabled = objects.length === 0
+  }
+  const undo = () => {
+    if (histIndex <= 0) return
+    histIndex -= 1
+    objects = JSON.parse(history[histIndex])
+    dragging = null
+    selected = -1
+    redraw()
+    syncHistory()
+  }
+  const redo = () => {
+    if (histIndex >= history.length - 1) return
+    histIndex += 1
+    objects = JSON.parse(history[histIndex])
+    dragging = null
+    selected = -1
+    redraw()
+    syncHistory()
+  }
+  const distanceToSegment = (p, a, b) => {
+    const dx = b.x - a.x
+    const dy = b.y - a.y
+    if (!dx && !dy) return Math.hypot(p.x - a.x, p.y - a.y)
+    const t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / (dx * dx + dy * dy)))
+    return Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy))
+  }
+  const hitTest = (p) => {
+    for (let i = objects.length - 1; i >= 0; i -= 1) {
+      const o = objects[i]
+      const b = bounds(o)
+      if (p.x < b.x - 8 || p.x > b.x + b.w + 8 || p.y < b.y - 8 || p.y > b.y + b.h + 8) continue
+      if (o.type === 'stroke') {
+        if (o.points.length === 1) {
+          if (Math.hypot(p.x - o.points[0].x, p.y - o.points[0].y) <= o.width / 2 + 8) return i
+        } else {
+          for (let k = 1; k < o.points.length; k += 1) {
+            if (distanceToSegment(p, o.points[k - 1], o.points[k]) <= o.width / 2 + 8) return i
+          }
+        }
+        continue
+      }
+      return i
+    }
+    return -1
+  }
+  const translate = (o, dx, dy) => {
+    if (o.type === 'stroke') o.points.forEach((p) => { p.x += dx; p.y += dy })
+    else if (o.type === 'shape') { o.x1 += dx; o.x2 += dx; o.y1 += dy; o.y2 += dy }
+    else if (o.type === 'text') { o.x += dx; o.y += dy }
+  }
+  const eraseAt = (p) => {
+    const idx = hitTest(p)
+    if (idx < 0) return
+    objects.splice(idx, 1)
+    erased = true
+    if (dragging?.index === idx) dragging = null
+    if (selected === idx) selected = -1
+    else if (selected > idx) selected -= 1
+    redraw()
+  }
+  const syncTools = () => {
+    mask.querySelectorAll('[data-tool]').forEach((b) => b.classList.toggle('on', b.dataset.tool === tool))
+    mask.querySelectorAll('[data-color]').forEach((b) => b.classList.toggle('on', b.dataset.color === color))
+    panel.dataset.tool = tool
+  }
+  const closeTextEditor = (save = true) => {
+    if (!textInput) return
+    const { el, point } = textInput
+    textInput = null
+    const value = el.value.trim()
+    el.remove()
+    if (save && value) {
+      objects.push({ type: 'text', text: value, x: point.x, y: point.y, color: color === 'rainbow' ? '#1f2328' : color, size: 28 })
+      commit()
+    }
+  }
+  const startText = (point) => {
+    closeTextEditor(true)
+    const ta = document.createElement('textarea')
+    ta.className = 'jg-draw-text-input'
+    ta.rows = 1
+    ta.style.left = `${Math.max(12, Math.min(panel.clientWidth - 260, point.x))}px`
+    ta.style.top = `${Math.max(12, Math.min(panel.clientHeight - 52, point.y))}px`
+    ta.style.color = color === 'rainbow' ? '#1f2328' : color
+    panel.appendChild(ta)
+    textInput = { el: ta, point }
+    const finish = (save) => {
+      if (textInput?.el === ta) closeTextEditor(save)
+    }
+    ta.addEventListener('keydown', (e) => {
+      e.stopPropagation()
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); finish(true) }
+      if (e.key === 'Escape') { e.preventDefault(); finish(false) }
+    })
+    ta.addEventListener('input', () => { ta.style.height = 'auto'; ta.style.height = `${Math.min(140, ta.scrollHeight)}px` })
+    ta.addEventListener('blur', () => finish(true))
+    setTimeout(() => ta.focus(), 0)
+  }
+  const setTool = (next) => {
+    if (next !== 'text') closeTextEditor(true)
+    tool = next
+    if (next !== 'shape') shapeMenu.hidden = true
+    syncTools()
+  }
+  const closeBoard = () => {
+    closeTextEditor(false)
+    if (observer) observer.disconnect()
+    window.removeEventListener('resize', resize)
+    document.removeEventListener('keydown', onKey)
+    mask.remove()
+  }
+  const onKey = (e) => {
+    if (e.key === 'Escape') { closeBoard(); return }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+      e.preventDefault()
+      if (e.shiftKey) redo(); else undo()
+      return
+    }
+    if ((e.key === 'Delete' || e.key === 'Backspace') && !textInput && selected >= 0) {
+      e.preventDefault()
+      objects.splice(selected, 1)
+      selected = -1
+      commit()
+      redraw()
+    }
+  }
+  mask.addEventListener('pointerdown', (e) => {
+    if (textInput && !panel.contains(e.target)) closeTextEditor(true)
+  }, true)
+  canvas.addEventListener('pointerdown', (e) => {
+    if (e.button != null && e.button !== 0) return
+    const p = pointOf(e)
+    if (tool === 'text') {
+      e.preventDefault()
+      if (textInput) { closeTextEditor(true); return }
+      startText(p)
+      return
+    }
+    if (tool === 'select') {
+      const idx = hitTest(p)
+      selected = idx
+      dragging = idx >= 0 ? { index: idx, start: p, origin: clone(objects[idx]), moved: false } : null
+      if (idx >= 0) canvas.setPointerCapture?.(e.pointerId)
+      redraw()
+      return
+    }
+    if (tool === 'eraser') {
+      e.preventDefault()
+      erasing = true
+      erased = false
+      canvas.setPointerCapture?.(e.pointerId)
+      eraseAt(p)
+      return
+    }
+    e.preventDefault()
+    canvas.setPointerCapture?.(e.pointerId)
+    if (tool === 'pen') {
+      drawing = { type: 'stroke', color, width: brush, points: [p] }
+      objects.push(drawing)
+    } else if (tool === 'shape') {
+      drawing = { type: 'shape', shape: shapeKind, color, width: brush, x1: p.x, y1: p.y, x2: p.x, y2: p.y }
+      objects.push(drawing)
+    }
+    redraw()
+  })
+  canvas.addEventListener('pointermove', (e) => {
+    const p = pointOf(e)
+    if (drawing) {
+      if (drawing.type === 'stroke') {
+        const last = drawing.points[drawing.points.length - 1]
+        if (Math.hypot(p.x - last.x, p.y - last.y) >= 1.5) drawing.points.push(p)
+      } else if (drawing.type === 'shape') {
+        drawing.x2 = p.x
+        drawing.y2 = p.y
+      }
+      redraw()
+      return
+    }
+    if (dragging) {
+      const dx = p.x - dragging.start.x
+      const dy = p.y - dragging.start.y
+      if (dx || dy) {
+        const idx = dragging.index
+        objects[idx] = clone(dragging.origin)
+        translate(objects[idx], dx, dy)
+        dragging.moved = true
+        redraw()
+      }
+      return
+    }
+    if (erasing) eraseAt(p)
+  })
+  const endPointer = () => {
+    if (drawing) {
+      if (drawing.type === 'shape' && Math.abs(drawing.x2 - drawing.x1) < 3 && Math.abs(drawing.y2 - drawing.y1) < 3) objects.pop()
+      else commit()
+      drawing = null
+      redraw()
+    }
+    if (dragging) {
+      if (dragging.moved) commit()
+      dragging = null
+      redraw()
+    }
+    if (erasing) {
+      if (erased) commit()
+      erasing = false
+    }
+  }
+  canvas.addEventListener('pointerup', endPointer)
+  canvas.addEventListener('pointercancel', endPointer)
+  mask.querySelectorAll('[data-tool]').forEach((b) => {
+    if (b.dataset.tool === 'shape') return
+    b.addEventListener('click', () => setTool(b.dataset.tool))
+  })
+  mask.querySelector('[data-tool="shape"]').addEventListener('click', (e) => {
+    e.stopPropagation()
+    if (tool === 'shape') { shapeMenu.hidden = !shapeMenu.hidden; return }
+    setTool('shape')
+    shapeMenu.hidden = false
+  })
+  mask.querySelectorAll('[data-shape]').forEach((b) => b.addEventListener('click', () => {
+    shapeKind = b.dataset.shape
+    setTool('shape')
+    shapeMenu.hidden = true
+  }))
+  mask.querySelectorAll('[data-color]').forEach((b) => b.addEventListener('click', () => { color = b.dataset.color; syncTools() }))
+  mask.querySelector('#drawSize').addEventListener('input', (e) => {
+    brush = Number(e.target.value) || 4
+    syncSize()
+  })
+  undoBtn.addEventListener('click', undo)
+  redoBtn.addEventListener('click', redo)
+  mask.querySelector('[data-dclose]').addEventListener('click', closeBoard)
+  doneBtn.addEventListener('click', async () => {
+    if (!objects.length) return toast('画布还是空的', true)
+    doneBtn.disabled = true
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'))
+    if (!blob) { doneBtn.disabled = false; return toast('导出失败，请重试', true) }
+    const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14)
+    const file = new File([blob], `绘图-${stamp}.png`, { type: 'image/png' })
+    const uploaded = await uploadBinaryFile(file, 'chat')
+    doneBtn.disabled = false
+    if (!uploaded.ok) return toast(uploaded.body?.error || '绘图上传失败', true)
+    addComposerRef({ kind: 'file', id: uploaded.file.id, label: file.name })
+    closeBoard()
+    renderView()
+    toast('绘图已加入本轮附件')
+  })
+  mask.addEventListener('click', (e) => {
+    if (!shapeMenu.hidden && !shapeMenu.contains(e.target) && !e.target.closest('[data-tool="shape"]')) shapeMenu.hidden = true
+  })
+  document.addEventListener('keydown', onKey)
+  requestAnimationFrame(() => {
+    resize()
+    history = [JSON.stringify(objects)]
+    histIndex = 0
+    syncHistory()
+    redraw()
+  })
+  if (window.ResizeObserver) {
+    observer = new ResizeObserver(() => resize())
+    observer.observe(panel)
+  }
+  window.addEventListener('resize', resize)
 }
 
 /* ---------------------------- cloud browser --------------------------- */
@@ -7544,7 +8862,8 @@ function openCloudMore(anchor) {
   const r = anchor.getBoundingClientRect()
   const w = 236
   pop.style.left = Math.max(8, Math.min(window.innerWidth - w - 8, r.right - w)) + 'px'
-  pop.style.top = (r.bottom + 6) + 'px'
+  const h = pop.offsetHeight
+  pop.style.top = Math.round(Math.max(8, Math.min(window.innerHeight - h - 8, r.bottom + 6))) + 'px'
   const close = () => pop.remove()
   setTimeout(() => document.addEventListener('click', close, { once: true }), 0)
   pop.querySelectorAll('[data-cbm]').forEach((b) => b.addEventListener('click', (e) => {
@@ -7587,7 +8906,8 @@ function openCloudExtensions(anchor) {
   document.body.appendChild(pop)
   const r = anchor.getBoundingClientRect()
   pop.style.left = Math.max(8, Math.min(window.innerWidth - 308, r.left - 250)) + 'px'
-  pop.style.top = (r.bottom + 8) + 'px'
+  const h = pop.offsetHeight
+  pop.style.top = Math.round(Math.max(8, Math.min(window.innerHeight - h - 8, r.bottom + 8))) + 'px'
   const refresh = () => {
     pop.querySelector('.ce-list').innerHTML = rows()
     pop.querySelector('.ce-count').textContent = `${exts.filter((x) => x.on).length} 个已启用`
@@ -7680,13 +9000,30 @@ function openModal(title, body, opts = {}) {
     <div class="jg-modal-body">${body}</div>
   </div>`
   document.body.appendChild(mask)
-  mask.querySelector('[data-mclose]').addEventListener('click', () => mask.remove())
-  mask.addEventListener('click', (e) => { if (e.target === mask) mask.remove() })
+  // 顶部 X 已经是统一关闭入口；正文/底部重复的“取消”“关闭”只保留 X，避免两个关闭入口。
+  // 有些弹窗会在异步完成后重写正文，因此用观察器持续标记动态加入的重复按钮。
+  const markDuplicateDismiss = () => {
+    mask.querySelectorAll('.jg-modal-body button').forEach((btn) => {
+      const label = String(btn.textContent || '').replace(/\s+/g, '').trim()
+      if (label === '取消' || label === '关闭') btn.classList.add('jg-modal-dup-dismiss')
+    })
+  }
+  markDuplicateDismiss()
+  const dismissObserver = new MutationObserver(markDuplicateDismiss)
+  dismissObserver.observe(mask, { childList: true, subtree: true })
+  mask.querySelector('[data-mclose]').addEventListener('click', () => { dismissObserver.disconnect(); mask.remove() })
+  mask.addEventListener('click', (e) => { if (e.target === mask) { dismissObserver.disconnect(); mask.remove() } })
   if (typeof opts.onMount === 'function') opts.onMount(mask)
   return mask
 }
 
 const closeModals = () => document.querySelectorAll('.jg-modal-mask').forEach((m) => m.remove())
+window.JGVisualHost = {
+  openModal,
+  toast,
+  api,
+  refresh: () => renderView(),
+}
 
 async function switchNetwork() {
   const order = (state.boot.allNetworks || []).map((n) => n.id)
@@ -8641,20 +9978,27 @@ function openAutomationForm(idea) {
   if (pre.sch && !scheduleOptions.includes(pre.sch)) scheduleOptions.unshift(pre.sch)
   const scheduleHtml = scheduleOptions.map((s) => `<option${pre.sch === s || (!pre.sch && s === '每天 08:30') ? ' selected' : ''}>${esc(s)}</option>`).join('')
   const body = `
-    <div class="form-note">定时任务由系统 AI 按时执行：到点自动按指令运行一次，产出投递到你指定的位置，并生成一条执行记录。</div>
+    <div class="form-note">定时任务由系统 AI 按时执行。无人值守运行前，必须在这里明确它能做什么；超出范围会停止并记录，不会自动扩权。</div>
     <div class="form-grid">
       <label>名称<input id="auName" placeholder="例如：每日公示项目变更摘要" value="${esc(pre.name || '')}"></label>
       <label>频率<select id="auSch">${scheduleHtml}</select></label>
+      <label style="grid-column:1/-1">任务权限<select id="auPerm">
+        <option value="" disabled${(pre.permission || '') === '' ? ' selected' : ''}>请选择任务权限</option>
+        <option value="read-only"${pre.permission === 'read-only' ? ' selected' : ''}>只读 · 只查询和分析，不写文件、不执行命令</option>
+        <option value="workspace-write"${pre.permission === 'workspace-write' ? ' selected' : ''}>工作区可写 · 仅任务目录内读写、构建、测试</option>
+      </select></label>
     </div>
     <div class="form-label">执行内容</div>
     <textarea id="auPrompt" rows="3" class="form-area" placeholder="写给 AI 的指令，例如：读取公示项目台账，比昨日快照，列出新增、变更与到期节点">${esc(pre.desc || '')}</textarea>
-    <div class="form-foot"><span class="mono">写入类动作执行前仍需确认</span><span class="spacer"></span><button class="btn" data-mclose>取消</button><button class="btn primary" id="auSubmit">创建</button></div>`
+    <div class="form-foot"><span class="mono">权限在创建时固定；越权即停止</span><span class="spacer"></span><button class="btn" data-mclose>取消</button><button class="btn primary" id="auSubmit">创建</button></div>`
   const mask = openModal('新建定时任务', body)
   mask.querySelectorAll('[data-mclose]').forEach((b) => b.addEventListener('click', () => mask.remove()))
   mask.querySelector('#auSubmit').addEventListener('click', async () => {
+    const permission = mask.querySelector('#auPerm').value
+    if (!permission) return toast('请先选择任务权限范围', true)
     const { ok } = await api('/api/automations', {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ name: mask.querySelector('#auName').value.trim() || '未命名定时任务', schedule: mask.querySelector('#auSch').value, prompt: mask.querySelector('#auPrompt').value.trim() }),
+      body: JSON.stringify({ name: mask.querySelector('#auName').value.trim() || '未命名定时任务', schedule: mask.querySelector('#auSch').value, permission, prompt: mask.querySelector('#auPrompt').value.trim() }),
     })
     if (!ok) return toast('创建失败', true)
     mask.remove()
@@ -8871,7 +10215,7 @@ function render() {
     if (btn.closest('#railbar, #adminrail')) return
     btn.addEventListener('click', () => {
       if (btn.dataset.nav === 'more') { openMoreMenu(btn); return }
-      if (btn.dataset.nav === 'imagegen' && !imageModel().image) { showImageGate(); return }
+      if (btn.dataset.nav === 'imagegen' && !imagegenReady()) { showImageGate(); return }
       state.view = btn.dataset.nav
       markModuleRead(btn.dataset.nav)
       render()
@@ -8904,6 +10248,7 @@ async function main() {
   await loadBoot()
   renderMenubar()
   render()
+  consumeShareDeepLink()
   const viewRoot = document.getElementById('view')
   if (viewRoot) {
     installPaneSplitters()
@@ -8925,6 +10270,11 @@ async function main() {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
       e.preventDefault()
       openSearchPalette('')
+    }
+    if (e.key === 'Escape' && state.shareMode && !document.querySelector('.jg-modal-mask')) {
+      e.preventDefault()
+      exitShareMode()
+      return
     }
     if (e.key === 'Escape') document.querySelectorAll('.account-pop').forEach((p) => p.remove())
   })
@@ -8961,7 +10311,6 @@ function openDocDialog(format) {
       <label class="dd-field"><span>文件名称</span><input id="ddName" placeholder="例如：中心城区公示项目梳理"></label>
       <label class="dd-field"><span>内容要点</span><textarea id="ddBody" rows="5" placeholder="每行一条要点，可留空由系统按模板生成"></textarea></label>
       <div class="dd-foot"><span class="dd-hint">格式：${meta.label} · ${format}</span><span class="spacer"></span>
-        <button class="dd-btn" id="ddCancel">取消</button>
         <button class="dd-btn primary" id="ddOk">生成并保存</button>
       </div>
     </div>`
@@ -8969,7 +10318,6 @@ function openDocDialog(format) {
   const close = () => mask.remove()
   mask.addEventListener('click', (e) => { if (e.target === mask) close() })
   mask.querySelector('#ddClose').addEventListener('click', close)
-  mask.querySelector('#ddCancel').addEventListener('click', close)
   mask.querySelector('#ddOk').addEventListener('click', async () => {
     const title = mask.querySelector('#ddName').value.trim() || `未命名${meta.label}`
     const body = mask.querySelector('#ddBody').value.trim()
@@ -9524,7 +10872,8 @@ async function openShareCard(id, anchor) {
   document.body.appendChild(pop)
   const r = anchor.getBoundingClientRect()
   pop.style.left = `${Math.max(8, Math.min(window.innerWidth - 280, r.left - 200))}px`
-  pop.style.top = `${r.bottom + 6}px`
+  const ph = pop.offsetHeight
+  pop.style.top = `${Math.max(8, Math.min(window.innerHeight - ph - 8, r.bottom + 6))}px`
   pop.querySelectorAll('[data-dto]').forEach((b) => b.addEventListener('click', async () => {
     const { body: res } = await api('/api/drive/share', { method: 'POST', body: JSON.stringify({ id, to: b.dataset.dto }) })
     pop.remove()
@@ -10536,7 +11885,6 @@ function openNoticeDialog() {
       <label class="dd-field"><span>正文</span><textarea id="ntBody" rows="7" placeholder="每行一段；首段将作为摘要"></textarea></label>
       <label class="dd-check"><input type="checkbox" id="ntPin"> 置顶显示</label>
       <div class="dd-foot"><span class="dd-hint">发布人：${esc(state.boot.user.name)} · ${esc(state.boot.user.unit)}</span><span class="spacer"></span>
-        <button class="dd-btn" id="ntCancel">取消</button>
         <button class="dd-btn primary" id="ntOk">发布</button>
       </div>
     </div>`
@@ -10544,7 +11892,6 @@ function openNoticeDialog() {
   const close = () => mask.remove()
   mask.addEventListener('click', (e) => { if (e.target === mask) close() })
   mask.querySelector('#ntClose').addEventListener('click', close)
-  mask.querySelector('#ntCancel').addEventListener('click', close)
   mask.querySelector('#ntOk').addEventListener('click', async () => {
     const title = mask.querySelector('#ntTitle').value.trim()
     const text = mask.querySelector('#ntBody').value.trim()
@@ -10909,7 +12256,8 @@ function renderGuestShell(el, view) {
 function renderChat(el) {
   const conv = state.conversation
   const msgs = conv?.messages || []
-  const running = state.chatBusy && (state.chatSteps.length || state.deepThink)
+  const hasStreaming = msgs.some((m) => m.streaming)
+  const thinking = state.chatBusy && !hasStreaming
   const project = currentProject()
   if (state.activeProjectId && !project) {
     state.activeProjectId = ''
@@ -10918,24 +12266,35 @@ function renderChat(el) {
   }
 
   el.innerHTML = `
-    <div class="chat" style="height:100%;min-height:0">
+    <div class="chat${state.shareMode ? ' share-mode' : ''}" style="height:100%;min-height:0">
       <div class="chat-head">
         <div class="chat-title">${esc(conv?.title || '新对话')}</div>
         ${project ? `<div class="chat-empty-sub" style="margin:3px 0 0">${esc(project.name)} · ${esc(project.cwd)} · ${project.status === 'online' ? '已连接' : '文件夹不可用'}</div>` : ''}
+        <div class="chat-head-actions">
+          <button type="button" class="msg-act icon" data-copy-thread title="复制整段对话" aria-label="复制对话">${icon('doc')}</button>
+          <button type="button" class="msg-act icon" data-visual-shelf title="可视化成果" aria-label="可视化成果">${icon('grid')}</button>
+          <button type="button" class="msg-act icon" data-share-thread title="分享整段对话" aria-label="分享对话">${icon('send')}</button>
+        </div>
       </div>
-      <div class="chat-msgs" id="chatMsgs" style="width:100%;max-width:760px;margin:0 auto;box-sizing:border-box">
+      <div class="chat-msgs" id="chatMsgs" style="width:100%;max-width:none;margin:0 auto;box-sizing:border-box">
         ${jobsPanel(msgs)}
         ${msgs.length ? msgs.map((m, i) => renderMsg(m, i)).join('') : `
           <div class="chat-empty">
             <div class="chat-empty-title">${esc(conv ? '继续这个会话' : '有什么可以帮你？')}</div>
             <div class="chat-empty-sub">${project ? `${esc(project.cwd)} · Agent 将直接读取该目录中的文件` : '普通问答不需要项目；需要操作本地文件时，再在输入框下方绑定项目或文件夹。'}</div>
           </div>`}
-        ${running ? `<div class="steps-card"><div class="steps-title">${state.chatSteps.length ? '正在执行' : '深度思索中'}</div>${state.chatSteps.length ? state.chatSteps.map(stepRow).join('') : `<div style="font-size:12px;color:var(--muted);line-height:1.6">正在调用 DeepSeek 推理模型，完成思考后给出回答…</div>`}</div>` : ''}
+        ${thinking ? thinkingCardHTML() : ''}
+        ${stepsCardHTML()}
         ${state.chatError ? `<div class="chat-error"><b>调用失败</b><span>${esc(state.chatError)}</span><button class="btn sm" id="retryMsg">重试</button></div>` : ''}
         ${state.pendingConfirm ? renderConfirm() : ''}
         ${state.pendingInteraction ? renderInteraction() : ''}
       </div>
-      <div class="hh-composer" style="width:100%;max-width:760px;margin:0 auto;box-sizing:border-box">
+      ${(state.composerRefs || []).length ? `<div class="hh-refs" style="justify-content:center;align-self:center;width:100%;min-width:280px;max-width:920px;margin:0 auto 10px;box-sizing:border-box">
+        ${state.composerRefs.map((r) => `<span class="hh-ref" data-refdrop="${esc(r.id)}">
+          ${r.preview ? `<img class="hh-ref-thumb" src="${esc(r.preview)}" alt="图片附件" style="width:22px;height:22px;border-radius:5px;object-fit:cover;flex:none">` : `<span class="ico">${icon(r.kind === 'project' ? 'folder' : 'doc')}</span>`}${esc(composerRefLabel(r))}<span class="hh-ref-x">×</span>
+        </span>`).join('')}
+      </div>` : ''}
+      <div class="hh-composer" style="align-self:center;width:100%;min-width:280px;max-width:920px;margin:0 auto;box-sizing:border-box">
         <div style="display:flex;align-items:center;gap:6px;flex:none">
           <button class="hc-plus" id="chatAttach" title="添加照片、文件或工具"><span class="ico">${icon('plus')}</span></button>
           ${state.pendingInteraction?.kind === 'approval' ? approvalControl() : ''}
@@ -10949,40 +12308,50 @@ function renderChat(el) {
             : `<button class="hc-send" id="chatSend" title="发送">${icon('up')}</button>`}
         </div>
       </div>
-      <div class="quick-row" style="justify-content:space-between;align-items:center;margin:8px auto 0;width:100%;max-width:760px;box-sizing:border-box">
+      <div class="quick-row" style="align-self:center;justify-content:space-between;align-items:center;margin:8px auto 0;width:72%;min-width:280px;max-width:920px;box-sizing:border-box;flex-wrap:wrap;gap:6px">
         <div style="display:flex;gap:6px;align-items:center">${projectContextControl()}</div>
         <div style="display:flex;gap:6px;align-items:center">
           <button class="hc-lang" id="chatLang" title="推理强度"><span id="chatLangValue">${reasoningLabel(state.reasoningEffort)}</span><span class="ico hc-caret">${icon('chevron')}</span></button>
           ${taskModeControl()}
         </div>
       </div>
-      ${(state.composerRefs || []).length ? `<div class="hh-refs">
-        ${state.composerRefs.map((r) => `<span class="hh-ref" data-refdrop="${esc(r.id)}">
-          <span class="ico">${icon(r.kind === 'project' ? 'folder' : 'doc')}</span>${esc(composerRefLabel(r))}<span class="hh-ref-x">×</span>
-        </span>`).join('')}
-      </div>` : ''}
+      ${shareBarHTML()}
     </div>`
 
   const draft = el.querySelector('#draft')
-  draft?.addEventListener('input', (e) => { state.draft = e.target.value; updateSlashMenu(e.target) })
+  draft?.addEventListener('input', (e) => { state.draft = e.target.value; updateSlashMenu(e.target); updateMentionMenu(e.target) })
+  bindComposerPaste(draft)
   el.querySelector('#projectContext')?.addEventListener('click', openWorkspacePicker)
   el.querySelector('#taskModeBtn')?.addEventListener('click', (ev) => { ev.stopPropagation(); openTaskModeMenu(ev.currentTarget) })
   el.querySelector('#policyToggle')?.addEventListener('click', (ev) => { ev.stopPropagation(); openPolicyMenu(ev.currentTarget) })
   el.querySelector('#approvalToggle')?.addEventListener('click', (ev) => { ev.stopPropagation(); openApprovalMenu(ev.currentTarget) })
   draft?.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') closeSlashMenu()
-    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendFromChat() }
+    if (e.key === 'Escape') { closeSlashMenu(); closeMentionMenu() }
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); closeMentionMenu(); sendFromChat() }
   })
   if (state.chatFocus) { draft?.focus(); state.chatFocus = false }
   el.querySelector('#chatSend')?.addEventListener('click', sendFromChat)
   el.querySelector('#chatStop')?.addEventListener('click', cancelChat)
   el.querySelector('#chatAttach')?.addEventListener('click', (ev) => openComposerPlus(ev.currentTarget))
   el.querySelectorAll('[data-refdrop]').forEach((b) => b.addEventListener('click', () => {
-    state.composerRefs = (state.composerRefs || []).filter((r) => r.id !== b.dataset.refdrop)
+    removeComposerRef(b.dataset.refdrop)
     renderView()
   }))
   el.querySelector('#chatLang')?.addEventListener('click', (ev) => { ev.stopPropagation(); openReasoningMenu(ev.currentTarget) })
   el.querySelector('#chatMic')?.addEventListener('click', (ev) => startVoiceInput(ev.currentTarget))
+  el.querySelector('#shareAll')?.addEventListener('change', (e) => {
+    state.shareSelection = e.target.checked ? shareEligibleIndexes() : []
+    syncShareBar()
+  })
+  el.querySelectorAll('[data-share-pick]').forEach((input) => input.addEventListener('change', () => {
+    const idx = Number(input.dataset.sharePick)
+    const set = new Set(state.shareSelection || [])
+    if (input.checked) set.add(idx); else set.delete(idx)
+    state.shareSelection = [...set]
+    syncShareBar()
+  }))
+  el.querySelector('#shareImage')?.addEventListener('click', downloadShareImage)
+  el.querySelector('#shareLink')?.addEventListener('click', copyShareLink)
   el.querySelectorAll('[data-prompt]').forEach((b) => b.addEventListener('click', () => {
     state.draft = b.dataset.prompt
     renderView()
@@ -10991,6 +12360,7 @@ function renderChat(el) {
     const last = (state.conversation?.messages || []).filter((m) => m.role === 'user').pop()
     if (last) sendMessage(last.text)
   })
+  el.querySelector('[data-visual-shelf]')?.addEventListener('click', () => window.JGVisuals?.openShelf())
   el.querySelector('#confirmGo')?.addEventListener('click', confirmWrite)
   el.querySelector('#apprAllow')?.addEventListener('click', () => decideApproval('allowed-once'))
   el.querySelector('#apprReject')?.addEventListener('click', () => decideApproval('rejected'))
@@ -11025,6 +12395,7 @@ function renderChat(el) {
   })
   const msgsBox = document.getElementById('chatMsgs')
   if (msgsBox) msgsBox.scrollTop = msgsBox.scrollHeight
+  window.JGVisuals?.renderAll(el)
 }
 
 
@@ -11273,29 +12644,695 @@ async function openRunTrace(conversationId, traceId) {
   })
 }
 
+function formatTokensK(u) {
+  const total = Number(u?.totalTokens || ((u?.inputTokens || 0) + (u?.outputTokens || 0)) || 0)
+  if (!u?.calls || !total) return ''
+  return `${(total / 1000).toFixed(2)}K`
+}
+
+function tokenBadgeHTML(m) {
+  const value = formatTokensK(m.usage)
+  if (!value) return ''
+  return `<span class="msg-cost" title="${esc(usageTip(m.usage))}"><span class="ico">${icon('clock')}</span>消耗 ${esc(value)}</span>`
+}
+
+function shareSelected(idx) {
+  return (state.shareSelection || []).includes(Number(idx))
+}
+
+function sharePickHTML(idx, on) {
+  if (!state.shareMode || idx == null) return ''
+  return `<label class="share-pick${on ? ' on' : ''}" title="选择这条消息">
+    <input type="checkbox" data-share-pick="${idx}" ${on ? 'checked' : ''} aria-label="选择这条消息">
+    <span class="share-box">${icon('check')}</span>
+  </label>`
+}
+
+function shareEligibleIndexes() {
+  return (state.conversation?.messages || [])
+    .map((m, i) => (String(m.text || '').trim() && !m.streaming ? i : -1))
+    .filter((i) => i >= 0)
+}
+
+function shareBarHTML() {
+  if (!state.shareMode) return ''
+  const eligible = shareEligibleIndexes()
+  const selected = (state.shareSelection || []).filter((i) => eligible.includes(Number(i)))
+  const all = eligible.length > 0 && selected.length === eligible.length
+  return `<div class="share-bar">
+    <label class="share-all"><input type="checkbox" id="shareAll" ${all ? 'checked' : ''}><span>全选</span></label>
+    <span class="share-count">已选 ${selected.length} 条 · Esc 退出</span>
+    <div class="share-actions">
+      <button type="button" class="share-btn" id="shareImage" ${selected.length ? '' : 'disabled'}>分享图片</button>
+      <button type="button" class="share-btn primary" id="shareLink" ${selected.length ? '' : 'disabled'}>复制链接</button>
+    </div>
+  </div>`
+}
+
+function visualBlock(visuals) {
+  if (!Array.isArray(visuals) || !visuals.length) return ''
+  return `<div class="jg-visuals">${visuals.map((v) => {
+    const id = String(v?.id || '')
+    if (!id) return ''
+    const version = Number(v?.version || 1)
+    const typeLabel = String(v?.typeLabel || v?.type || '可视化')
+    return `<div class="jg-visual" data-visual-id="${esc(id)}" data-visual-version="${version}" data-visual-type="${esc(v?.type || '')}">
+      <div class="jg-visual-loading"><span class="jg-visual-spinner"></span><span>${esc(typeLabel)}渲染中…</span></div>
+    </div>`
+  }).join('')}</div>`
+}
+
 function renderMsg(m, idx = null) {
+  const on = shareSelected(idx)
   if (m.role === 'user') {
-    return `<div class="msg user"><div class="bubble">${esc(m.text)}</div><div class="msg-time">${esc(m.time || '')}</div></div>`
+    return `<div class="msg user${state.shareMode ? ' share-mode' : ''}${on ? ' share-on' : ''}">
+      ${sharePickHTML(idx, on)}<div class="bubble">${esc(m.text)}</div>
+      ${idx != null ? `<div class="msg-actions user-actions">
+        <span class="msg-time-inline">${esc(m.time || '')}</span>
+        <button type="button" class="msg-act icon" title="复制" aria-label="复制" data-copymsg="${idx}">${icon('copy')}</button>
+        <button type="button" class="msg-act icon" title="分享" aria-label="分享" data-sharemsg="${idx}">${icon('share')}</button>
+        <button type="button" class="msg-act icon" title="编辑并重新发送" aria-label="编辑" data-editmsg="${idx}">${icon('pen')}</button>
+        <button type="button" class="msg-act icon" title="更多" aria-label="更多" data-moremsg="${idx}">${icon('more')}</button>
+      </div>` : `<div class="msg-time">${esc(m.time || '')}</div>`}
+    </div>`
   }
-  return `<div class="msg ai">
+  return `<div class="msg ai${state.shareMode ? ' share-mode' : ''}${on ? ' share-on' : ''}">
+    ${sharePickHTML(idx, on)}
     <div class="ai-avatar">JG</div>
     <div class="ai-body">
       ${todoBlock(m.todos)}
       ${workflowBlock(m.workflows)}
       ${subagentBlock(m.subagents)}
       ${stepsBlock(m.steps)}
-      <div class="bubble">${richTextHTML(m.text)}${m.streaming ? '<span class="caret"></span>' : ''}</div>
+      <div class="bubble">${m.text ? markdownHTML(m.text) : ''}${m.streaming ? '<span class="caret"></span>' : ''}</div>
+      ${visualBlock(m.visuals)}
       ${deliverableBlock(m.deliverables)}
       ${changeBlock(m.workspaceChanges)}
       ${m.citations?.length ? `<div class="cite-row">${m.citations.map((c) => `<span class="cite">${richTextHTML(c)}</span>`).join('')}</div>` : ''}
-      <div class="msg-time">${esc(m.time || '')}${m.usage?.calls ? `<span title="${esc(usageTip(m.usage))}"> · ${esc(usageText(m.usage))}</span>` : ''}</div>
-      ${idx != null && !m.streaming ? `<div style="display:flex;gap:4px;margin-top:4px;flex-wrap:wrap">
-        <button class="btn sm subtle" style="padding:1px 7px;font-size:var(--fs-micro)" data-fb="${idx}" data-fbv="${m.feedback === 'up' ? 'clear' : 'up'}">${m.feedback === 'up' ? '✓ ' : ''}有帮助</button>
-        <button class="btn sm subtle" style="padding:1px 7px;font-size:var(--fs-micro)" data-fb="${idx}" data-fbv="${m.feedback === 'down' ? 'clear' : 'down'}">${m.feedback === 'down' ? '× ' : ''}需改进</button>
-        ${m.traceId ? `<button class="btn sm subtle" style="padding:1px 7px;font-size:var(--fs-micro)" data-trace="${esc(m.traceId)}">运行轨迹</button><button class="btn sm subtle" style="padding:1px 7px;font-size:var(--fs-micro)" data-tstats="${esc(m.traceId)}">本轮统计</button>` : ''}
-      </div>` : ''}
+      ${idx != null && !m.streaming ? `<div class="msg-actions">
+        <button type="button" class="msg-act icon" title="复制" aria-label="复制" data-copymsg="${idx}">${icon('copy')}</button>
+        <button type="button" class="msg-act icon ${state.speakingIndex === idx ? 'on' : ''}" title="${state.speakingIndex === idx ? (state.speechLoading ? '正在生成语音' : (state.speechPaused ? '继续朗读' : '暂停朗读')) : '朗读这条回复'}" aria-label="朗读" data-speak="${idx}">${icon('volume')}</button>
+        <button type="button" class="msg-act icon ${m.feedback === 'up' ? 'on' : ''}" title="有帮助" aria-label="有帮助" data-fb="${idx}" data-fbv="${m.feedback === 'up' ? 'clear' : 'up'}">${icon('thumbUp')}</button>
+        <button type="button" class="msg-act icon ${m.feedback === 'down' ? 'on' : ''}" title="需改进" aria-label="需改进" data-fb="${idx}" data-fbv="${m.feedback === 'down' ? 'clear' : 'down'}">${icon('thumbDown')}</button>
+        <button type="button" class="msg-act icon" title="分享" aria-label="分享" data-sharemsg="${idx}">${icon('share')}</button>
+        ${tokenBadgeHTML(m)}
+        <button type="button" class="msg-act icon" title="重新生成这条回复" aria-label="重新生成" data-refreshmsg="${idx}">${icon('refresh')}</button>
+        ${m.traceId ? `<button type="button" class="msg-act icon" title="更多" aria-label="更多" data-moremsg="${idx}">${icon('more')}</button>` : ''}
+        <span class="msg-time-inline" title="${esc(usageTip(m.usage))}">${esc(m.time || '')}</span>
+      </div>` : `<div class="msg-time">${esc(m.time || '')}${m.usage?.calls ? `<span title="${esc(usageTip(m.usage))}"> · ${esc(usageText(m.usage))}</span>` : ''}</div>`}
     </div>
   </div>`
+}
+
+async function copyToClipboard(text) {
+  const value = String(text || '')
+  try {
+    const area = document.createElement('textarea')
+    area.value = value
+    area.style.position = 'fixed'
+    area.style.opacity = '0'
+    document.body.appendChild(area)
+    area.focus()
+    area.select()
+    const ok = document.execCommand('copy')
+    area.remove()
+    if (ok) return true
+  } catch {}
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(value)
+      return true
+    }
+  } catch {}
+  return false
+}
+
+function messageShareText(m) {
+  const title = state.conversation?.title || '九规智能中枢对话'
+  return `${title}\n\n${String(m?.text || '')}`.trim()
+}
+
+function conversationPlainText() {
+  const title = state.conversation?.title || '九规智能中枢对话'
+  const messages = (state.conversation?.messages || []).filter((m) => String(m.text || '').trim())
+  return `${title}\n\n${messages.map((m) => `${m.role === 'user' ? '你' : '九规智能中枢'}：${String(m.text || '').trim()}`).join('\n\n')}`.trim()
+}
+
+async function copyConversation() {
+  const ok = await copyToClipboard(conversationPlainText())
+  toast(ok ? '已复制整段对话' : '复制失败，请手动选择文本', !ok)
+}
+
+function openShareDialog(title, text, kind = '消息') {
+  const mask = openModal(`分享${kind}`, `
+    <div class="form-note">可以直接调用系统分享，也可以复制完整内容或下载为文本文件。</div>
+    <textarea id="shareText" class="text-input" readonly style="height:220px;resize:vertical;line-height:1.6;white-space:pre-wrap">${esc(text)}</textarea>
+    <div class="form-foot">
+      <span class="spacer"></span>
+      <button class="btn" data-mclose>关闭</button>
+      ${navigator.share ? '<button class="btn" data-share-native>系统分享</button>' : ''}
+      <button class="btn" data-share-download>下载文本</button>
+      <button class="btn primary" data-share-copy>复制分享内容</button>
+    </div>`)
+  mask.querySelectorAll('[data-mclose]').forEach((b) => b.addEventListener('click', () => mask.remove()))
+  const nativeBtn = mask.querySelector('[data-share-native]')
+  if (nativeBtn) nativeBtn.addEventListener('click', async () => {
+    try {
+      await navigator.share({ title, text })
+      mask.remove()
+      toast('已打开系统分享')
+    } catch (error) {
+      if (error?.name === 'AbortError') return
+      toast(error?.message || '系统分享失败，可复制或下载内容', true)
+    }
+  })
+  mask.querySelector('[data-share-copy]').addEventListener('click', async () => {
+    const ok = await copyToClipboard(text)
+    toast(ok ? '分享内容已复制' : '复制失败，请手动选择文本', !ok)
+  })
+  mask.querySelector('[data-share-download]').addEventListener('click', () => {
+    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${String(title || '分享内容').replace(/[\\/:*?"<>|]/g, '_').slice(0, 80)}.txt`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    setTimeout(() => URL.revokeObjectURL(url), 500)
+    toast('已下载分享文本')
+  })
+}
+
+async function shareConversation() {
+  if (!state.conversation) return
+  startShareMode()
+}
+
+async function shareConversationById(id) {
+  await openConversation(id)
+  if (state.conversation?.id === id) startShareMode()
+}
+
+function startShareMode(indexes) {
+  const eligible = shareEligibleIndexes()
+  if (!eligible.length) return toast('当前没有可分享的消息', true)
+  const selected = indexes == null
+    ? eligible
+    : [...new Set(indexes.map(Number).filter((i) => eligible.includes(i)))]
+  state.shareMode = true
+  state.shareSelection = selected.length ? selected : eligible.slice(0, 1)
+  state.chatFocus = false
+  render()
+}
+
+function exitShareMode() {
+  if (!state.shareMode) return
+  state.shareMode = false
+  state.shareSelection = []
+  render()
+}
+
+function syncShareBar() {
+  const eligible = shareEligibleIndexes()
+  const selected = (state.shareSelection || []).filter((i) => eligible.includes(Number(i)))
+  state.shareSelection = selected
+  document.querySelectorAll('[data-share-pick]').forEach((input) => {
+    const on = selected.includes(Number(input.dataset.sharePick))
+    input.checked = on
+    const label = input.closest('.share-pick')
+    label?.classList.toggle('on', on)
+    input.closest('.msg')?.classList.toggle('share-on', on)
+  })
+  const all = document.querySelector('#shareAll')
+  if (all) all.checked = eligible.length > 0 && selected.length === eligible.length
+  const count = document.querySelector('.share-count')
+  if (count) count.textContent = `已选 ${selected.length} 条 · Esc 退出`
+  document.querySelectorAll('#shareImage, #shareLink').forEach((b) => { b.disabled = selected.length === 0 })
+}
+
+function selectedShareMessages() {
+  const msgs = state.conversation?.messages || []
+  return (state.shareSelection || [])
+    .map((i) => ({ index: Number(i), message: msgs[Number(i)] }))
+    .filter((x) => x.message && String(x.message.text || '').trim())
+    .sort((a, b) => a.index - b.index)
+}
+
+function downloadShareImage() {
+  const items = selectedShareMessages()
+  if (!items.length) return toast('请至少选择一条消息', true)
+  const width = 760
+  const pad = 38
+  const maxTextWidth = width - pad * 2
+  const title = state.conversation?.title || '九规智能中枢对话'
+  const stamp = new Date().toLocaleString('zh-CN', { hour12: false })
+  const canvas = document.createElement('canvas')
+  const ctx = canvas.getContext('2d')
+  const font = '15px "Microsoft YaHei", "PingFang SC", sans-serif'
+  const roleFont = '12px "Microsoft YaHei", "PingFang SC", sans-serif'
+  const titleFont = '600 24px "Microsoft YaHei", "PingFang SC", sans-serif'
+  const lineHeight = 26
+  const wrap = (text, maxWidth) => {
+    const lines = []
+    String(text || '').split('\n').forEach((paragraph) => {
+      let line = ''
+      for (const ch of paragraph) {
+        if (ctx.measureText(line + ch).width > maxWidth && line) {
+          lines.push(line)
+          line = ch
+        } else {
+          line += ch
+        }
+      }
+      lines.push(line || ' ')
+    })
+    return lines
+  }
+  ctx.font = titleFont
+  const titleLines = wrap(title, maxTextWidth)
+  ctx.font = font
+  const blocks = items.map(({ message }) => ({
+    role: message.role === 'user' ? '你' : '九规智能中枢',
+    lines: wrap(String(message.text || '').trim(), maxTextWidth),
+  }))
+  const contentHeight = titleLines.length * 34 + 28 + blocks.reduce((n, b) => n + 22 + b.lines.length * lineHeight + 24, 0)
+  const height = Math.max(360, 84 + contentHeight + 28)
+  canvas.width = width * 2
+  canvas.height = height * 2
+  ctx.scale(2, 2)
+  ctx.fillStyle = '#ffffff'
+  ctx.fillRect(0, 0, width, height)
+  ctx.fillStyle = '#1f2328'
+  ctx.font = titleFont
+  let y = 54
+  titleLines.forEach((line) => { ctx.fillText(line, pad, y); y += 34 })
+  ctx.fillStyle = '#8b909a'
+  ctx.font = roleFont
+  ctx.fillText(`九规智能中枢 · ${stamp}`, pad, y + 2)
+  y += 24
+  ctx.strokeStyle = '#e8eaed'
+  ctx.beginPath()
+  ctx.moveTo(pad, y)
+  ctx.lineTo(width - pad, y)
+  ctx.stroke()
+  y += 26
+  blocks.forEach((block, index) => {
+    ctx.fillStyle = '#8b909a'
+    ctx.font = roleFont
+    ctx.fillText(block.role, pad, y)
+    y += 22
+    ctx.fillStyle = '#1f2328'
+    ctx.font = font
+    block.lines.forEach((line) => { ctx.fillText(line, pad, y); y += lineHeight })
+    y += 20
+    if (index < blocks.length - 1) {
+      ctx.strokeStyle = '#f0f1f3'
+      ctx.beginPath()
+      ctx.moveTo(pad, y - 8)
+      ctx.lineTo(width - pad, y - 8)
+      ctx.stroke()
+    }
+  })
+  canvas.toBlob((blob) => {
+    if (!blob) return toast('生成分享图片失败', true)
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${String(title).replace(/[\\/:*?"<>|]/g, '_').slice(0, 60) || '九规智能中枢'}-分享.png`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    setTimeout(() => URL.revokeObjectURL(url), 800)
+    toast('分享图片已生成')
+  }, 'image/png')
+}
+
+async function copyShareLink() {
+  const items = selectedShareMessages()
+  if (!state.conversation?.id) return toast('当前会话尚未保存，无法生成链接', true)
+  if (!items.length) return toast('请至少选择一条消息', true)
+  const ids = items.map((x) => x.index).join(',')
+  const url = `${location.origin}${location.pathname}?shareConversation=${encodeURIComponent(state.conversation.id)}&shareMsg=${ids}`
+  const ok = await copyToClipboard(url)
+  toast(ok ? '分享链接已复制' : '复制失败，请重试', !ok)
+}
+
+function consumeShareDeepLink() {
+  if (state.shareLinkConsumed) return
+  if (!state.boot?.user) return
+  const params = new URLSearchParams(location.search)
+  const cid = params.get('shareConversation')
+  if (!cid) return
+  state.shareLinkConsumed = true
+  const ids = String(params.get('shareMsg') || '').split(',').map(Number).filter(Number.isFinite)
+  openConversation(cid).then(() => {
+    if (state.conversation?.id !== cid) return
+    startShareMode(ids.length ? ids : undefined)
+  }).catch(() => toast('分享链接已失效', true))
+}
+
+async function copyMessage(index) {
+  const m = state.conversation?.messages?.[Number(index)]
+  if (!m) return
+  const ok = await copyToClipboard(messageShareText(m))
+  toast(ok ? '已复制这条消息' : '复制失败，请手动选择文本', !ok)
+}
+
+async function shareMessage(index) {
+  const m = state.conversation?.messages?.[Number(index)]
+  if (!m) return
+  startShareMode([Number(index)])
+}
+
+function syncSpeechButtons() {
+  document.querySelectorAll('[data-speak]').forEach((btn) => {
+    const active = Number(btn.dataset.speak) === state.speakingIndex
+    btn.classList.toggle('on', active)
+    btn.title = active
+      ? (state.speechLoading ? '正在生成语音' : (state.speechPaused ? '继续朗读' : '暂停朗读'))
+      : '朗读这条回复'
+    btn.setAttribute('aria-pressed', active ? 'true' : 'false')
+  })
+}
+
+function stopSpeech() {
+  state.speechRun = (state.speechRun || 0) + 1
+  try { state.speechAbort?.abort?.() } catch {}
+  state.speechAbort = null
+  try {
+    if (state.speechAudio) {
+      state.speechAudio.pause()
+      state.speechAudio.src = ''
+      state.speechAudio.load?.()
+    }
+  } catch {}
+  state.speechAudio = null
+  try {
+    if (window.speechSynthesis) window.speechSynthesis.cancel()
+  } catch {}
+  state.speakingIndex = null
+  state.speechPaused = false
+  state.speechLoading = false
+  state.speechEngine = ''
+  syncSpeechButtons()
+}
+
+function endSpeech(idx, run) {
+  if (state.speechRun !== run || state.speakingIndex !== idx) return
+  state.speakingIndex = null
+  state.speechPaused = false
+  state.speechLoading = false
+  state.speechEngine = ''
+  state.speechAudio = null
+  syncSpeechButtons()
+}
+
+function speakWithBrowser(text, idx, run) {
+  if (!('speechSynthesis' in window) || typeof SpeechSynthesisUtterance === 'undefined') {
+    endSpeech(idx, run)
+    return toast('本地语音不可用，当前浏览器也不支持朗读', true)
+  }
+  try {
+    window.speechSynthesis.cancel()
+    try {
+      if (state.speechAudio) {
+        state.speechAudio.pause()
+        state.speechAudio.src = ''
+      }
+    } catch {}
+    state.speechAudio = null
+    const utterance = new SpeechSynthesisUtterance(text)
+    utterance.lang = 'zh-CN'
+    utterance.rate = 1.02
+    const zhVoice = window.speechSynthesis.getVoices().find((v) => /^zh(-|_)/i.test(v.lang))
+    if (zhVoice) utterance.voice = zhVoice
+    utterance.onend = () => endSpeech(idx, run)
+    utterance.onerror = () => endSpeech(idx, run)
+    state.speechEngine = 'browser'
+    state.speechLoading = false
+    state.speakingIndex = idx
+    state.speechPaused = false
+    window.speechSynthesis.speak(utterance)
+    syncSpeechButtons()
+    toast('本地模型暂不可用，已回退浏览器朗读')
+  } catch (error) {
+    endSpeech(idx, run)
+    toast(error?.message || '语音朗读启动失败', true)
+  }
+}
+
+async function speakMessage(index) {
+  const idx = Number(index)
+  const m = state.conversation?.messages?.[idx]
+  const text = String(m?.text || '').trim()
+  if (!text) return
+  const plain = text.replace(/[`*#|>]/g, '')
+
+  if (state.speakingIndex === idx) {
+    if (state.speechLoading) {
+      stopSpeech()
+      return toast('已取消语音生成')
+    }
+    if (state.speechEngine === 'audio' && state.speechAudio) {
+      try {
+        if (state.speechPaused) {
+          await state.speechAudio.play()
+          state.speechPaused = false
+          syncSpeechButtons()
+          return toast('继续朗读')
+        }
+        state.speechAudio.pause()
+        state.speechPaused = true
+        syncSpeechButtons()
+        return toast('已暂停朗读')
+      } catch {
+        state.speechPaused = true
+        syncSpeechButtons()
+        return toast('继续播放失败，请再点一次', true)
+      }
+    }
+    if (state.speechEngine === 'browser') {
+      if (state.speechPaused) {
+        window.speechSynthesis.resume()
+        state.speechPaused = false
+        syncSpeechButtons()
+        return toast('继续朗读')
+      }
+      window.speechSynthesis.pause()
+      state.speechPaused = true
+      syncSpeechButtons()
+      return toast('已暂停朗读')
+    }
+  }
+
+  stopSpeech()
+  const run = state.speechRun
+  state.speakingIndex = idx
+  state.speechPaused = false
+  state.speechLoading = true
+  state.speechEngine = 'audio'
+  syncSpeechButtons()
+  toast('正在用本地开源语音模型生成朗读')
+  const controller = new AbortController()
+  state.speechAbort = controller
+  try {
+    const res = await api('/api/tts', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text: plain }),
+      signal: controller.signal,
+    })
+    if (state.speechRun !== run || state.speakingIndex !== idx) return
+    state.speechAbort = null
+    if (!res.ok || !res.body?.url) throw new Error(res.body?.error || `语音合成失败（${res.status}）`)
+    const audio = new Audio(res.body.url)
+    audio.preload = 'auto'
+    audio.onended = () => endSpeech(idx, run)
+    audio.onerror = () => {
+      if (state.speechRun !== run || state.speakingIndex !== idx) return
+      endSpeech(idx, run)
+      toast('本地语音播放失败', true)
+    }
+    state.speechAudio = audio
+    state.speechLoading = false
+    state.speechPaused = false
+    syncSpeechButtons()
+    await audio.play()
+    if (state.speechRun !== run) return
+    toast('正在朗读，再次点击可暂停')
+  } catch (error) {
+    if (error?.name === 'AbortError' || state.speechRun !== run) return
+    state.speechAbort = null
+    if (state.speakingIndex !== idx) return
+    speakWithBrowser(plain, idx, run)
+  }
+}
+
+function openMessageAsDoc(index) {
+  const m = state.conversation?.messages?.[Number(index)]
+  if (!m?.text) return
+  const mask = openModal('转为文档编辑', `
+    <div class="form-note">把这条回复放入可编辑文档；当前版本先提供轻量编辑与复制，不改动原会话。</div>
+    <div id="msgDocText" class="form-area md-body" contenteditable="true" spellcheck="false" style="min-height:320px;max-height:52vh;overflow:auto;white-space:normal">${markdownHTML(m.text)}</div>
+    <div class="form-foot"><span class="spacer"></span><button class="btn" data-doc-copy>复制文档</button><button class="btn primary" data-mclose>关闭</button></div>`)
+  mask.querySelector('[data-doc-copy]').addEventListener('click', async (ev) => {
+    ev.currentTarget.disabled = true
+    const ok = await copyToClipboard(mask.querySelector('#msgDocText')?.innerText || '')
+    ev.currentTarget.disabled = false
+    toast(ok ? '文档已复制' : '复制失败，请手动选择文本', !ok)
+  })
+  mask.querySelectorAll('[data-mclose]').forEach((b) => b.addEventListener('click', () => mask.remove()))
+}
+
+function followUpMessage() {
+  state.draft = '追问：'
+  renderView()
+  setTimeout(() => {
+    const input = document.getElementById('draft')
+    input?.focus()
+    if (input) input.selectionStart = input.selectionEnd = input.value.length
+  }, 0)
+}
+
+function editUserMessage(index) {
+  const m = state.conversation?.messages?.[Number(index)]
+  if (!m || m.role !== 'user') return
+  state.draft = String(m.text || '')
+  renderView()
+  setTimeout(() => {
+    const input = document.getElementById('draft')
+    input?.focus()
+    if (input) input.selectionStart = input.selectionEnd = input.value.length
+  }, 0)
+  toast('已放入输入框，可修改后重新发送')
+}
+
+function deleteUserMessage(index) {
+  const conv = state.conversation
+  const m = conv?.messages?.[Number(index)]
+  if (!conv || !m || m.role !== 'user') return
+  const mask = openModal('删除这条消息', `
+    <div class="form-note">将删除这条用户消息；后续回复仍会保留。此操作不可撤销。</div>
+    <div class="form-foot"><span class="spacer"></span><button class="btn" data-mclose>取消</button><button class="btn danger" id="delUserMsg">删除</button></div>`)
+  mask.querySelectorAll('[data-mclose]').forEach((b) => b.addEventListener('click', () => mask.remove()))
+  const delBtn = mask.querySelector('#delUserMsg')
+  delBtn.addEventListener('click', async () => {
+    if (delBtn.disabled) return
+    delBtn.disabled = true
+    const { ok, body } = await api('/api/conversation/message/delete', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ conversationId: conv.id, index: Number(index) }),
+    })
+    if (!ok) { delBtn.disabled = false; return toast(body.error || '删除失败', true) }
+    conv.messages.splice(Number(index), 1)
+    mask.remove()
+    renderView()
+    toast('已删除这条消息')
+  })
+}
+
+function openMessageMoreMenu(anchor, index) {
+  closeRowMenu()
+  const conv = state.conversation
+  const m = conv?.messages?.[Number(index)]
+  if (!conv || !m) return
+  const isUser = m.role === 'user'
+  const menu = document.createElement('div')
+  menu.className = 'msg-more-menu'
+  menu.innerHTML = isUser ? `
+    <button type="button" class="msg-more-item" data-mm="edit"><span class="ico">${icon('pen')}</span><span>编辑并重新发送</span></button>
+    <button type="button" class="msg-more-item" data-mm="copy"><span class="ico">${icon('copy')}</span><span>复制</span></button>
+    <button type="button" class="msg-more-item" data-mm="share"><span class="ico">${icon('share')}</span><span>分享</span></button>
+    <button type="button" class="msg-more-item danger" data-mm="deleteMsg"><span class="ico">${icon('trash')}</span><span>删除这条消息</span></button>` : `
+    <button type="button" class="msg-more-item" data-mm="doc"><span class="ico">${icon('pen')}</span><span>转为文档编辑</span></button>
+    <button type="button" class="msg-more-item" data-mm="continue"><span class="ico">${icon('layers')}</span><span>在新对话中继续</span></button>
+    <button type="button" class="msg-more-item" data-mm="followup"><span class="ico">${icon('quote')}</span><span>追问</span></button>
+    <button type="button" class="msg-more-item" data-mm="report"><span class="ico">${icon('alert')}</span><span>反馈与举报</span></button>
+    <button type="button" class="msg-more-item danger" data-mm="delete"><span class="ico">${icon('trash')}</span><span>删除</span></button>`
+  document.body.appendChild(menu)
+  const r = anchor.getBoundingClientRect()
+  const w = menu.offsetWidth || 220
+  const h = menu.offsetHeight || 250
+  menu.style.left = `${Math.max(8, Math.min(window.innerWidth - w - 8, r.right - w))}px`
+  const below = r.bottom + 4
+  const above = r.top - h - 4
+  menu.style.top = `${Math.max(8, below + h <= window.innerHeight - 8 ? below : above)}px`
+  menu.querySelectorAll('[data-mm]').forEach((b) => b.addEventListener('click', (ev) => {
+    ev.stopPropagation()
+    const act = b.dataset.mm
+    menu.remove()
+    if (isUser) {
+      if (act === 'edit') return editUserMessage(index)
+      if (act === 'copy') return copyMessage(index)
+      if (act === 'share') return shareMessage(index)
+      if (act === 'deleteMsg') return deleteUserMessage(index)
+      return
+    }
+    if (act === 'doc') return openMessageAsDoc(index)
+    if (act === 'continue') return runConversationAction('fork', conv.id)
+    if (act === 'followup') return followUpMessage()
+    if (act === 'report') return openFeedbackModal()
+    if (act === 'delete') return runConversationAction('delete', conv.id)
+  }))
+  setTimeout(() => {
+    document.addEventListener('pointerdown', function onDown(e) {
+      if (!menu.contains(e.target)) {
+        menu.remove()
+        document.removeEventListener('pointerdown', onDown, true)
+      }
+    }, true)
+    window.addEventListener('resize', closeRowMenu, { once: true })
+    window.addEventListener('scroll', closeRowMenu, { once: true, capture: true })
+  }, 0)
+}
+
+function thinkingCardHTML() {
+  const label = state.deepThink ? '深度思索中' : '正在思考'
+  const activity = state.chatTask?.progressText || label
+  const detail = state.chatTask?.activityDetail || (state.deepThink ? '正在调用推理模型，完成思考后给出回答' : '正在读取项目上下文与工具状态')
+  return `<div class="thinking-card" id="thinkingCard" role="status" aria-live="polite">
+    <div class="thinking-main"><span class="thinking-spinner" aria-hidden="true"></span><span id="thinkingText">${esc(activity)}</span><span class="thinking-dots" aria-hidden="true"><i></i><i></i><i></i></span></div>
+    <div class="thinking-sub">已用时 <span id="thinkingElapsed">0.0</span> 秒 · <span id="thinkingActivity">${esc(detail)}</span></div>
+  </div>`
+}
+
+function stepsCardHTML() {
+  if (!state.chatBusy) return ''
+  if (!state.chatSteps.length) return ''
+  return `<div class="steps-card"><div class="steps-title">正在执行</div>${state.chatSteps.map(stepRow).join('')}</div>`
+}
+
+function startThinkingClock() {
+  if (state.chatTicker) clearInterval(state.chatTicker)
+  state.chatStartedAt = Date.now()
+  state.chatTicker = setInterval(() => {
+    const elapsed = Math.max(0, (Date.now() - state.chatStartedAt) / 1000)
+    const elapsedEl = document.getElementById('thinkingElapsed')
+    if (elapsedEl) elapsedEl.textContent = elapsed.toFixed(1)
+    const textEl = document.getElementById('thinkingText')
+    if (textEl) {
+      const next = state.chatTask?.progressText || (state.deepThink
+        ? (elapsed > 25 ? '正在深度推理' : '深度思索中')
+        : (elapsed > 25 ? '正在分析请求与工具结果' : elapsed > 10 ? '正在读取上下文' : '正在思考'))
+      if (textEl.textContent !== next) textEl.textContent = next
+    }
+  }, 500)
+}
+
+function updateThinkingActivity(task) {
+  if (!task) return
+  state.chatTask = task
+  const textEl = document.getElementById('thinkingText')
+  const activityEl = document.getElementById('thinkingActivity')
+  if (textEl && task.progressText && textEl.textContent !== task.progressText) textEl.textContent = task.progressText
+  if (activityEl && task.activityDetail && activityEl.textContent !== task.activityDetail) activityEl.textContent = task.activityDetail
+}
+
+function stopThinkingClock() {
+  if (state.chatTicker) clearInterval(state.chatTicker)
+  state.chatTicker = null
+  state.chatTask = null
 }
 
 
@@ -11439,7 +13476,7 @@ function openAdminTerminal() {
   setTimeout(() => input.focus(), 50)
 }
 
-document.addEventListener('click', (ev) => {
+document.addEventListener('click', async (ev) => {
   const webLink = ev.target?.closest?.('[data-weblink]')
   if (webLink) {
     ev.preventDefault()
@@ -11457,23 +13494,82 @@ document.addEventListener('click', (ev) => {
     if (!state.conversation?.id) return
     return openRunStats(state.conversation.id, statsBtn.dataset.tstats)
   }
+  const copyMsgBtn = ev.target?.closest?.('[data-copymsg]')
+  if (copyMsgBtn) {
+    ev.preventDefault()
+    return copyMessage(copyMsgBtn.dataset.copymsg)
+  }
+  const editMsgBtn = ev.target?.closest?.('[data-editmsg]')
+  if (editMsgBtn) {
+    ev.preventDefault()
+    return editUserMessage(editMsgBtn.dataset.editmsg)
+  }
+  const speakBtn = ev.target?.closest?.('[data-speak]')
+  if (speakBtn) {
+    ev.preventDefault()
+    return speakMessage(speakBtn.dataset.speak)
+  }
+  const moreMsgBtn = ev.target?.closest?.('[data-moremsg]')
+  if (moreMsgBtn) {
+    ev.preventDefault()
+    return openMessageMoreMenu(moreMsgBtn, moreMsgBtn.dataset.moremsg)
+  }
+  const refreshMsgBtn = ev.target?.closest?.('[data-refreshmsg]')
+  if (refreshMsgBtn) {
+    ev.preventDefault()
+    return refreshMessage(refreshMsgBtn.dataset.refreshmsg)
+  }
+  const shareMsgBtn = ev.target?.closest?.('[data-sharemsg]')
+  if (shareMsgBtn) {
+    ev.preventDefault()
+    return shareMessage(shareMsgBtn.dataset.sharemsg)
+  }
+  const copyCodeBtn = ev.target?.closest?.('[data-copy-code]')
+  if (copyCodeBtn) {
+    ev.preventDefault()
+    const code = copyCodeBtn.closest('.md-code')?.querySelector('pre code')?.textContent || ''
+    const ok = await copyToClipboard(code)
+    return toast(ok ? '代码已复制' : '复制失败，请手动选择代码', !ok)
+  }
+  if (ev.target?.closest?.('[data-copy-thread]')) {
+    ev.preventDefault()
+    return copyConversation()
+  }
+  if (ev.target?.closest?.('[data-share-thread]')) {
+    ev.preventDefault()
+    return shareConversation()
+  }
   const btn = ev.target?.closest?.('[data-fb]')
   if (!btn) return
   ev.preventDefault()
   sendFeedback(Number(btn.dataset.fb), btn.dataset.fbv)
 })
 
+async function refreshMessage(index) {
+  if (state.chatBusy) return toast('当前正在生成，请先等待或停止', true)
+  const conv = state.conversation
+  const m = conv?.messages?.[Number(index)]
+  if (!conv || !m || m.role !== 'assistant') return
+  const userMessage = [...conv.messages.slice(0, Number(index))].reverse().find((x) => x.role === 'user')
+  if (!userMessage?.text) return toast('找不到对应的用户消息，无法重新生成', true)
+  toast('正在重新生成这条回复')
+  await sendMessage(userMessage.text, { regenerate: true, messageIndex: Number(index) })
+}
+
 function renderChatMsgs() {
   const box = document.getElementById('chatMsgs')
   if (!box || !state.conversation) return
+  const hasStreaming = state.conversation.messages.some((m) => m.streaming)
   box.innerHTML = jobsPanel(state.conversation.messages) + state.conversation.messages.map((m, i) => renderMsg(m, i)).join('') +
-    (state.chatSteps.length ? `<div class="steps-card"><div class="steps-title">正在执行</div>${state.chatSteps.map(stepRow).join('')}</div>` : '')
+    (state.chatBusy && !hasStreaming ? thinkingCardHTML() : '') + stepsCardHTML()
 }
 
 
 async function sendFromChat() {
-  const text = state.draft.trim()
-  if (!text || state.chatBusy) return
+  if (state.chatBusy) return
+  if (state.pastingImages) return toast('图片还在上传，请稍候再发送', true)
+  const text = composerPrompt('')
+  if (!text) return toast('请输入内容，或粘贴图片附件', true)
   if (state.activeProjectId) {
     const p = currentProject()
     if (!p || p.status !== 'online') return toast('项目本地文件夹不可用，请重新连接或解除项目后再执行', true)
@@ -11686,6 +13782,8 @@ async function renderTaskCenter(el) {
             <div class="tk-foot-v">${esc(sel.prompt || '（未填写指令）')}</div>
             <div class="tk-foot-k">投递</div>
             <div class="tk-foot-v">${esc(sel.deliver || '工作台')}　·　模型 ${esc(sel.model || '系统默认模型')}</div>
+            <div class="tk-foot-k">权限</div>
+            <div class="tk-foot-v">${esc(automationPermissionLabel(sel))}　·　超出预设范围即停止</div>
             <button class="tk-foot-link" data-runs="1">执行记录（最近执行 ${esc(sel.last)}）</button>
           </div>
         </div>
@@ -11884,7 +13982,8 @@ async function renderTaskCenter(el) {
       document.body.appendChild(pop)
       const r = b.getBoundingClientRect()
       pop.style.left = `${Math.max(8, r.right - pop.offsetWidth)}px`
-      pop.style.top = `${r.bottom + 6}px`
+      const ph = pop.offsetHeight
+      pop.style.top = `${Math.max(8, Math.min(window.innerHeight - ph - 8, r.bottom + 6))}px`
       const close = (e) => { if (!pop.contains(e.target)) { pop.remove(); document.removeEventListener('click', close); document.removeEventListener('keydown', onKey) } }
       const onKey = (e) => {
         if (e.ctrlKey && e.altKey && (e.key === 'p' || e.key === 'P')) { e.preventDefault(); pop.querySelector('[data-tk="pin"]').click() }
@@ -12479,7 +14578,11 @@ async function renderAdmin(el) {
       'dsh-workspace-write-escalation': 'DSH 工作区越界升级',
       'dsh-read-only-approval': 'DSH 只读策略升级',
       'chat-mode-no-escalation': '对话模式只读',
+      'chat-mode-approval': '对话模式：请求授权',
+      'auto-chat-runtime-approval': '自动模式：执行请求',
       'external-side-effect': '外部副作用',
+      'scheduled-read-only-scope': '定时任务：只读范围',
+      'scheduled-scope-exceeded': '定时任务：超出预设范围',
       'dsh-scheduled-escalation-unavailable': '定时任务无人值守',
     }[value] || value || '—')
     const riskOf = (value) => ({ high: '高风险', medium: '中风险', low: '低风险' }[value] || value || '—')
@@ -14104,6 +16207,7 @@ function renderLogin(el) {
     if (state.boot.mustChangePassword) { render(); return }
     state.view = 'home'
     render()
+    consumeShareDeepLink()
     toast(`已以「${(state.boot.user || {}).name || usernameValue}」身份登录 · ${(state.boot.network || {}).label || net}`)
   })
   bindLoginClose(el)
@@ -14161,6 +16265,7 @@ function renderPasswordSetup(el) {
     await loadBoot()
     state.view = 'home'
     render()
+    consumeShareDeepLink()
     toast('密码已更新，已进入九规智能中枢')
   })
   bindLoginClose(el)
@@ -14216,6 +16321,9 @@ async function logout() {
   try { await api('/api/logout', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }) } catch (e) { /* 会话可能已过期 */ }
   state.boot = null
   state.conversation = null
+  state.shareMode = false
+  state.shareSelection = []
+  state.shareLinkConsumed = false
   state.loginUsername = undefined
   state.loginRole = ''
   state.loginPasswordDraft = undefined
@@ -14388,3 +16496,4 @@ document.addEventListener('mouseover', (e) => {
     }
   }
 }, true)
+

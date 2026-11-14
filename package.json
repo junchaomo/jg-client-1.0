@@ -5,12 +5,16 @@
   "description": "九规智能中枢 1.0 客户端：UI 严格复用产品原型",
   "main": "electron/main.cjs",
   "scripts": {
-    "start": "electron ."
+    "start": "electron .",
+    "eval:baseline": "node evals/run.mjs",
+    "test:visual": "node --test tests/visual-engine.test.mjs"
   },
   "devDependencies": {
     "electron": "45.2.1"
   },
   "dependencies": {
+    "echarts": "^5.6.0",
+    "mermaid": "^11.17.2",
     "pinyin-pro": "^3.29.5"
   }
 }
