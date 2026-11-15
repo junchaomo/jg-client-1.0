@@ -5921,7 +5921,13 @@ const api = {
   },
   'POST /api/as/heartbeat': (req, res) => {
     const body = JSON.parse(req.__body || '{}')
-    const result = heartbeatApp({ id: String(body.id || ''), leaseId: String(body.leaseId || '') })
+    const id = String(body.id || '').trim()
+    /* 市场条目 ID（M-*）与 AS 运行时 ID（appId）不是同一个值：
+       start/stop 已按市场条目解析，heartbeat 也必须落到 item.appId，
+       否则前端每 15 秒发来的心跳会被当作“应用不存在”，租约在 TTL 后失效。 */
+    const item = liveMarket.find((x) => x.kind === 'app' && (x.id === id || (x.appId || x.id) === id))
+    if (!item) return json(res, 404, { error: '应用不存在', code: 'AS_APP_NOT_FOUND' })
+    const result = heartbeatApp({ id: item.appId || item.id, leaseId: String(body.leaseId || '') })
     if (!result.ok) return json(res, 409, result)
     return json(res, 200, { ok: true, ...result })
   },

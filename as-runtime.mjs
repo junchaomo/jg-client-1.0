@@ -25,6 +25,12 @@ const START_TIMEOUT_MS = Math.max(5000, Number(process.env.AS_START_TIMEOUT_MS |
 const START_TIMEOUT_MAX_MS = Math.max(START_TIMEOUT_MS, Number(process.env.AS_START_TIMEOUT_MAX_MS || 120000))
 const CONTEXT_TTL_MS = Math.max(60000, Number(process.env.AS_CONTEXT_TTL_MS || 60 * 60 * 1000))
 const TOOL_CONTEXT_TTL_MS = Math.min(CONTEXT_TTL_MS, 5 * 60 * 1000)
+/* 同一台机器上可能残留上一轮客户端的 server.mjs（父进程已退出但进程未回收）。
+   它和当前服务共享 data/apps；若两边都跑 sweep，旧进程会把当前服务托管的
+   应用当成“无租约”并按时回收。给每个服务实例一个 owner，sweep/boot 只管理
+   自己或 owner 已死的应用。 */
+const RUNTIME_OWNER = `ASO-${randomBytes(8).toString('hex')}`
+const RUNTIME_OWNER_PID = Number(process.pid)
 const LEASES = new Map()
 const LOCKS = new Map()
 const APP_SECRETS = new Map()
@@ -437,6 +443,8 @@ export async function startApp({ id, userId }) {
           lastHeartbeat: Date.now(),
           status: 'running',
           stopAt: 0,
+          owner: RUNTIME_OWNER,
+          ownerPid: RUNTIME_OWNER_PID,
           dataRoot,
           activeUser: safeUser(userId),
           dataDir,
@@ -473,6 +481,8 @@ export async function startApp({ id, userId }) {
       startTimeoutMs,
       lastError: '',
       stopAt: 0,
+      owner: RUNTIME_OWNER,
+      ownerPid: RUNTIME_OWNER_PID,
     })
     let child = null
     try {
@@ -615,6 +625,11 @@ export function sweepApps(now = Date.now()) {
   for (const id of dirs) {
     const state = readRuntime(id)
     if (!state) continue
+    const ownerPid = Number(state.ownerPid || 0)
+    if (state.owner && state.owner !== RUNTIME_OWNER && ownerPid && pidAlive(ownerPid)) continue
+    if (state.owner && state.owner !== RUNTIME_OWNER) {
+      writeRuntime(id, { owner: RUNTIME_OWNER, ownerPid: RUNTIME_OWNER_PID })
+    }
     const pid = Number(state.pid || 0)
     if (pid && !pidAlive(pid)) {
       writeRuntime(id, { status: 'stopped', pid: 0, stopAt: 0, lastError: state.lastError || '' })
@@ -673,6 +688,8 @@ export async function reconcileAppsOnBoot() {
     const state = readRuntime(id)
     if (!state) continue
     const wasAlive = Boolean(state.pid && pidAlive(state.pid))
+    const ownerPid = Number(state.ownerPid || 0)
+    if (wasAlive && state.owner && state.owner !== RUNTIME_OWNER && ownerPid && pidAlive(ownerPid)) continue
     if (wasAlive) {
       killTree(state.pid)
       cleaned += 1
