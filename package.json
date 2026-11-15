@@ -6,6 +6,7 @@
   "main": "electron/main.cjs",
   "scripts": {
     "start": "electron .",
+    "test:as-smoke": "node scripts/as-smoke.mjs",
     "eval:baseline": "node evals/run.mjs",
     "test:visual": "node --test tests/visual-engine.test.mjs",
     "test:image": "node --test tests/image-providers.test.mjs"
