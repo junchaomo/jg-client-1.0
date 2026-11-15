@@ -228,6 +228,16 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_image_jobs_owner ON image_jobs(owner, created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_image_jobs_status ON image_jobs(status);
+
+  CREATE TABLE IF NOT EXISTS image_comments (
+    id TEXT PRIMARY KEY,
+    asset_id TEXT NOT NULL,
+    revision INTEGER NOT NULL DEFAULT 0,
+    owner TEXT NOT NULL DEFAULT '',
+    body TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_image_comments_asset ON image_comments(asset_id, created_at ASC);
 `)
 
 // 兼容 P0-2 之前已经建好的 sessions 表：补 account_id 列。
@@ -413,6 +423,12 @@ const stmt = {
       finished_at = COALESCE(?, finished_at)
     WHERE id = ?
   `),
+  insertImageComment: db.prepare(`
+    INSERT INTO image_comments (id, asset_id, revision, owner, body, created_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `),
+  getImageComment: db.prepare('SELECT * FROM image_comments WHERE id = ?'),
+  listImageComments: db.prepare('SELECT * FROM image_comments WHERE asset_id = ? ORDER BY created_at ASC'),
 }
 
 /* ------------------------------- sessions ------------------------------- */
@@ -1074,6 +1090,36 @@ export function listImageRevisions(assetId) {
 
 export function imageRevisionCount(assetId) {
   return Number(stmt.countImageRevisions.get(String(assetId || '')).count || 0)
+}
+
+function imageCommentOf(row) {
+  if (!row) return null
+  return {
+    id: row.id,
+    assetId: row.asset_id,
+    revision: Number(row.revision || 0),
+    owner: row.owner,
+    body: row.body,
+    createdAt: Number(row.created_at),
+  }
+}
+
+export function createImageComment(input = {}) {
+  const now = Number(input.createdAt || Date.now())
+  const id = String(input.id || '')
+  stmt.insertImageComment.run(
+    id,
+    String(input.assetId || ''),
+    Number(input.revision || 0),
+    String(input.owner || ''),
+    String(input.body || ''),
+    now
+  )
+  return imageCommentOf(stmt.getImageComment.get(id))
+}
+
+export function listImageComments(assetId) {
+  return stmt.listImageComments.all(String(assetId || '')).map(imageCommentOf)
 }
 
 export function createImageJob(input = {}) {

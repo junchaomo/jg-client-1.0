@@ -13,7 +13,7 @@ import { basename, dirname, extname, isAbsolute, join, normalize, relative, sep 
 import { fileURLToPath } from 'node:url'
 import {
   SESSION_TTL_MS, appendAudit, appendApprovalDecision, auditCount, backupNow, cleanupSessions, clearAudit, clearSessions, closeStore, createSession,
-  createImageAsset, createImageJob, createImageRevision, deleteFile, getImageAsset, imageRevisionCount, listImageAssets, listImageRevisions,
+  createImageAsset, createImageComment, createImageJob, createImageRevision, deleteFile, getImageAsset, imageRevisionCount, listImageAssets, listImageComments, listImageRevisions,
   dataDirPath, deleteSession, expirePendingApprovalDecisions, getAccount, getAccountByRole, getAccountByUsername, getFile, getSession, latestApprovalDecisions, latestAudit,
   listAccounts, listFiles, loadState, putFile, readFileBuffer, saveState, touchSession,
   softDeleteImageAsset, updateImageAssetLatest, updateImageJob,
@@ -1895,6 +1895,11 @@ const GUEST_GUARD = {
   'POST /api/images/edit': 'home',
   'POST /api/images/mask-edit': 'home',
   'POST /api/images/restore': 'home',
+  'POST /api/images/annotate': 'home',
+  'POST /api/images/resize': 'home',
+  'POST /api/images/remove-bg': 'home',
+  'GET /api/images/comments': 'home',
+  'POST /api/images/comments': 'home',
   'GET /api/images/models': 'home',
   'GET /api/images/recent': 'home',
   'GET /api/images/asset': 'home',
@@ -3753,6 +3758,132 @@ async function editOutputSize(buffer, fallbackWidth, fallbackHeight) {
     return rounded
   } catch {
     return fallback
+  }
+}
+
+const EDIT_CANVAS_RATIOS = {
+  '1:1': [2048, 2048],
+  '3:4': [1536, 2048],
+  '9:16': [1152, 2048],
+  '4:3': [2048, 1536],
+  '16:9': [2048, 1152],
+}
+
+function imageDataUrlBuffer(raw) {
+  const text = String(raw || '').trim()
+  const match = /^data:(image\/(?:png|jpeg|jpg|webp));base64,([a-z0-9+/=\s]+)$/i.exec(text)
+  if (!match) throw new Error('图片数据格式不支持，只接受 PNG、JPEG 或 WebP 的 Base64 data URL')
+  const mime = match[1].toLowerCase() === 'image/jpg' ? 'image/jpeg' : match[1].toLowerCase()
+  const buffer = Buffer.from(match[2].replace(/\s+/g, ''), 'base64')
+  if (!buffer.length) throw new Error('图片数据为空')
+  if (buffer.length > 16 * 1024 * 1024) throw new Error('图片数据超过 16 MB')
+  return { buffer, mime }
+}
+
+function ownedImageSource(user, assetId) {
+  const asset = getImageAsset(String(assetId || ''))
+  if (!asset || asset.deletedAt != null || asset.owner !== user.name) {
+    return { error: '图片不存在或无权操作', status: 404 }
+  }
+  const meta = getFile(asset.fileId)
+  const buffer = readFileBuffer(asset.fileId)
+  if (!meta || meta.deletedAt != null || !buffer) {
+    return { error: '图片文件不存在', status: 404 }
+  }
+  return { asset, meta, buffer }
+}
+
+function nextImageRevision(assetId) {
+  const revisions = listImageRevisions(assetId)
+  return Math.max(0, ...revisions.map((rev) => Number(rev.revision || 0))) + 1
+}
+
+function saveImageRevisionFromBuffer({
+  user,
+  net,
+  asset,
+  buffer,
+  mime = 'image/png',
+  ratio = asset.ratio,
+  note,
+  kind,
+  provider = 'local',
+  providerLabel = '浏览器编辑',
+  model = 'canvas-edit',
+  modelId = 'canvas-edit',
+  params = {},
+  jobId = '',
+}) {
+  const revision = nextImageRevision(asset.id)
+  const fileId = newFileId('IMG')
+  const ext = mime === 'image/webp' ? 'webp' : mime === 'image/jpeg' ? 'jpg' : 'png'
+  const name = `edit-${new Date().toISOString().slice(0, 19).replace(/[T:]/g, '')}-${revision}.${ext}`
+  const meta = putFile({
+    id: fileId,
+    name,
+    mime,
+    buffer,
+    owner: user.name,
+    net,
+    note: `imagegen:${provider}/${model};asset=${asset.id};revision=${revision}`,
+  })
+  createImageRevision({
+    assetId: asset.id,
+    revision,
+    fileId: meta.id,
+    prompt: asset.prompt,
+    style: asset.style,
+    ratio,
+    provider,
+    providerLabel,
+    model,
+    modelId,
+    seed: asset.seed || 0,
+    params,
+    note,
+    createdBy: user.name,
+  })
+  updateImageAssetLatest(asset.id, user.name, {
+    revision,
+    fileId: meta.id,
+    ratio,
+    provider,
+    providerLabel,
+    model,
+    modelId,
+  })
+  if (jobId) {
+    updateImageJob(jobId, {
+      status: 'completed',
+      assetId: asset.id,
+      provider,
+      modelId,
+      finishedAt: Date.now(),
+    })
+  }
+  logAudit(user, kind, `${asset.id}:v${revision}:${model}`, `allow(${buffer.length})`, net)
+  return {
+    ok: true,
+    image: {
+      id: asset.id,
+      assetId: asset.id,
+      fileId: meta.id,
+      name: meta.name,
+      mime,
+      size: meta.size,
+      ratio,
+      style: asset.style,
+      seed: asset.seed || 0,
+      prompt: asset.prompt,
+      provider,
+      providerLabel,
+      model,
+      modelId,
+      revision,
+      versions: revision,
+      jobId,
+      url: imageFileUrl(meta.id),
+    },
   }
 }
 
@@ -7891,7 +8022,10 @@ const api = {
     const referenceAssetIds = Array.isArray(body.referenceAssetIds)
       ? [...new Set(body.referenceAssetIds.map((id) => String(id || '').trim()).filter(Boolean))]
       : []
-    if (referenceAssetIds.length > 3) {
+    const referenceDataUrls = Array.isArray(body.referenceDataUrls)
+      ? body.referenceDataUrls.map((item) => String(item || '').trim()).filter(Boolean)
+      : []
+    if (referenceAssetIds.length + referenceDataUrls.length > 3) {
       return json(res, 400, { error: '最多只能选择 3 张参考图', code: 'IMAGE_REFERENCE_TOO_MANY' })
     }
     const referenceImages = []
@@ -7905,6 +8039,16 @@ const api = {
       }
       referenceImages.push({ buffer: referenceBuffer, mime: referenceMeta.mime, assetId: referenceId })
     }
+    for (const rawDataUrl of referenceDataUrls) {
+      try {
+        const parsed = imageDataUrlBuffer(rawDataUrl)
+        if (!['image/png', 'image/jpeg', 'image/webp'].includes(parsed.mime)) throw new Error('参考图格式不支持')
+        if (parsed.buffer.length > 10 * 1024 * 1024) throw new Error('单张参考图不能超过 10 MB')
+        referenceImages.push({ buffer: parsed.buffer, mime: parsed.mime, assetId: '' })
+      } catch (error) {
+        return json(res, 400, { error: String(error?.message || error), code: 'IMAGE_REFERENCE_INVALID' })
+      }
+    }
     const jobId = newFileId('IJOB')
     createImageJob({
       id: jobId,
@@ -7913,7 +8057,7 @@ const api = {
       kind: 'generate',
       modelId,
       prompt,
-      params: { ratio, style, seed, width, height, fullPrompt, referenceAssetIds },
+      params: { ratio, style, seed, width, height, fullPrompt, referenceAssetIds, referenceDataCount: referenceDataUrls.length },
     })
     try {
       const image = await generateImage({
@@ -7924,6 +8068,9 @@ const api = {
         height,
         seed,
         referenceImages,
+        timeoutMs: referenceImages.length
+          ? Math.max(Number(process.env.JG_IMAGE_TIMEOUT_MS || 120000), 180000)
+          : undefined,
       })
       const ext = image.mime === 'image/png' ? 'png' : image.mime === 'image/webp' ? 'webp' : 'jpg'
       const assetId = newFileId('IMG')
@@ -8407,6 +8554,215 @@ const api = {
     })
     logAudit(user, 'image.restore', `${asset.id}:v${target.revision}->v${nextRevision}`, 'allow', net)
     return json(res, 200, { ok: true, image: imageAssetPublic(updated), jobId })
+  },
+  'POST /api/images/annotate': async (req, res) => {
+    const user = roleOf(req)
+    const net = netOf(req)
+    const body = JSON.parse(req.__body || '{}')
+    const source = ownedImageSource(user, String(body.assetId || '').trim())
+    if (source.error) return json(res, source.status || 400, { error: source.error, code: 'IMAGE_ASSET_NOT_FOUND' })
+    const sharp = getSharp()
+    if (!sharp) return json(res, 503, { error: '服务器缺少图像合成能力', code: 'IMAGE_EDIT_UNAVAILABLE' })
+    let annotated
+    try {
+      annotated = imageDataUrlBuffer(body.dataUrl)
+    } catch (error) {
+      return json(res, 400, { error: String(error?.message || error), code: 'IMAGE_ANNOTATION_INVALID' })
+    }
+    const jobId = newFileId('IJOB')
+    createImageJob({
+      id: jobId,
+      owner: user.name,
+      net,
+      assetId: source.asset.id,
+      kind: 'annotate',
+      provider: 'local',
+      modelId: 'canvas-annotate',
+      prompt: source.asset.prompt,
+      params: { sourceRevision: source.asset.revision, width: Number(body.width || 0), height: Number(body.height || 0) },
+    })
+    try {
+      const [sourceInfo, annotatedInfo] = await Promise.all([
+        sharp(source.buffer).metadata(),
+        sharp(annotated.buffer).metadata(),
+      ])
+      const sourceWidth = Number(sourceInfo.width || 0)
+      const sourceHeight = Number(sourceInfo.height || 0)
+      if (Number(annotatedInfo.width) !== sourceWidth || Number(annotatedInfo.height) !== sourceHeight) {
+        throw new Error(`标注画布尺寸 ${annotatedInfo.width}×${annotatedInfo.height} 与原图 ${sourceWidth}×${sourceHeight} 不一致`)
+      }
+      const png = await sharp(annotated.buffer).png().toBuffer()
+      const revision = nextImageRevision(source.asset.id)
+      return json(res, 200, saveImageRevisionFromBuffer({
+        user,
+        net,
+        asset: source.asset,
+        buffer: png,
+        mime: 'image/png',
+        ratio: source.asset.ratio,
+        note: `标注 v${revision}`,
+        kind: 'image.annotate',
+        provider: 'local',
+        providerLabel: '浏览器标注',
+        model: 'canvas-annotate',
+        modelId: 'canvas-annotate',
+        params: { sourceRevision: source.asset.revision, width: sourceWidth, height: sourceHeight },
+        jobId,
+      }))
+    } catch (error) {
+      updateImageJob(jobId, { status: 'failed', error: String(error?.message || error), finishedAt: Date.now() })
+      logAudit(user, 'image.annotate', `${source.asset.id}:canvas-annotate`, 'deny', net)
+      return json(res, 400, { error: `标注保存失败：${error?.message || error}`, code: 'IMAGE_ANNOTATION_FAILED' })
+    }
+  },
+  'POST /api/images/resize': async (req, res) => {
+    const user = roleOf(req)
+    const net = netOf(req)
+    const body = JSON.parse(req.__body || '{}')
+    const source = ownedImageSource(user, String(body.assetId || '').trim())
+    if (source.error) return json(res, source.status || 400, { error: source.error, code: 'IMAGE_ASSET_NOT_FOUND' })
+    const ratio = String(body.ratio || '').trim()
+    const target = EDIT_CANVAS_RATIOS[ratio]
+    if (!target) return json(res, 400, { error: '不支持的画布比例', code: 'IMAGE_RESIZE_RATIO_INVALID' })
+    const sharp = getSharp()
+    if (!sharp) return json(res, 503, { error: '服务器缺少图像处理能力', code: 'IMAGE_EDIT_UNAVAILABLE' })
+    const [width, height] = target
+    const jobId = newFileId('IJOB')
+    createImageJob({
+      id: jobId,
+      owner: user.name,
+      net,
+      assetId: source.asset.id,
+      kind: 'resize',
+      provider: 'local',
+      modelId: 'canvas-resize',
+      prompt: source.asset.prompt,
+      params: { sourceRevision: source.asset.revision, from: source.asset.ratio, to: ratio, width, height },
+    })
+    try {
+      const png = await sharp(source.buffer)
+        .rotate()
+        .resize({
+          width,
+          height,
+          fit: 'contain',
+          background: { r: 0, g: 0, b: 0, alpha: 0 },
+        })
+        .png()
+        .toBuffer()
+      const revision = nextImageRevision(source.asset.id)
+      const saved = saveImageRevisionFromBuffer({
+        user,
+        net,
+        asset: source.asset,
+        buffer: png,
+        mime: 'image/png',
+        ratio,
+        note: `调整尺寸为 ${ratio} v${revision}`,
+        kind: 'image.resize',
+        provider: 'local',
+        providerLabel: '画布调整',
+        model: 'canvas-resize',
+        modelId: 'canvas-resize',
+        params: { sourceRevision: source.asset.revision, from: source.asset.ratio, to: ratio, width, height },
+        jobId,
+      })
+      return json(res, 200, { ...saved, image: { ...saved.image, width, height } })
+    } catch (error) {
+      updateImageJob(jobId, { status: 'failed', error: String(error?.message || error), finishedAt: Date.now() })
+      logAudit(user, 'image.resize', `${source.asset.id}:${ratio}`, 'deny', net)
+      return json(res, 500, { error: `调整尺寸失败：${error?.message || error}`, code: 'IMAGE_RESIZE_FAILED' })
+    }
+  },
+  'POST /api/images/remove-bg': async (req, res) => {
+    const user = roleOf(req)
+    const net = netOf(req)
+    const body = JSON.parse(req.__body || '{}')
+    const source = ownedImageSource(user, String(body.assetId || '').trim())
+    if (source.error) return json(res, source.status || 400, { error: source.error, code: 'IMAGE_ASSET_NOT_FOUND' })
+    const scene = ['general', 'human', 'product'].includes(String(body.scene || '')) ? String(body.scene) : 'general'
+    const jobId = newFileId('IJOB')
+    createImageJob({
+      id: jobId,
+      owner: user.name,
+      net,
+      assetId: source.asset.id,
+      kind: 'remove-bg',
+      provider: 'mediakit',
+      modelId: 'remove-image-background',
+      prompt: source.asset.prompt,
+      params: { sourceRevision: source.asset.revision, scene },
+    })
+    const cliArgs = ['image', 'remove-image-background', '--image-url', join(dataDirPath(), source.meta.path), '--scene', scene, '--output-format', 'png']
+    try {
+      const output = await new Promise((resolve, reject) => {
+        const child = spawn('mediakit-cli', cliArgs, { shell: process.platform === 'win32', windowsHide: true })
+        let stdout = ''
+        let stderr = ''
+        child.stdout.on('data', (chunk) => { stdout += String(chunk) })
+        child.stderr.on('data', (chunk) => { stderr += String(chunk) })
+        child.on('error', reject)
+        child.on('close', (code) => resolve({ code, stdout, stderr }))
+      })
+      if (Number(output.code) !== 0) throw new Error((output.stderr || output.stdout || 'mediakit-cli 执行失败').slice(0, 300))
+      const result = JSON.parse(output.stdout)
+      if (!result?.success || !result?.image_url) throw new Error('MediaKit 未返回可用的透明背景图')
+      const response = await fetch(result.image_url, { signal: AbortSignal.timeout(60_000) })
+      if (!response.ok) throw new Error(`下载抠图结果失败（HTTP ${response.status}）`)
+      const buffer = Buffer.from(await response.arrayBuffer())
+      if (buffer.length > 32 * 1024 * 1024) throw new Error('抠图结果超过 32 MB')
+      const revision = nextImageRevision(source.asset.id)
+      const saved = saveImageRevisionFromBuffer({
+        user,
+        net,
+        asset: source.asset,
+        buffer,
+        mime: 'image/png',
+        ratio: source.asset.ratio,
+        note: `移除背景 v${revision}`,
+        kind: 'image.remove-bg',
+        provider: 'mediakit',
+        providerLabel: 'MediaKit 抠图',
+        model: 'remove-image-background',
+        modelId: 'remove-image-background',
+        params: { sourceRevision: source.asset.revision, scene, requestId: result.request_id || '', taskId: result.task_id || '' },
+        jobId,
+      })
+      return json(res, 200, saved)
+    } catch (error) {
+      updateImageJob(jobId, { status: 'failed', error: String(error?.message || error), finishedAt: Date.now() })
+      logAudit(user, 'image.remove-bg', `${source.asset.id}:mediakit`, 'deny', net)
+      return json(res, 502, { error: `移除背景失败：${error?.message || error}`, code: 'IMAGE_REMOVE_BG_FAILED' })
+    }
+  },
+  'GET /api/images/comments': (req, res, url) => {
+    const user = roleOf(req)
+    const assetId = String(url.searchParams.get('assetId') || '').trim()
+    const asset = getImageAsset(assetId)
+    if (!asset || asset.deletedAt != null || asset.owner !== user.name) {
+      return json(res, 404, { error: '图像资产不存在或无权访问', code: 'IMAGE_ASSET_NOT_FOUND' })
+    }
+    return json(res, 200, { ok: true, comments: listImageComments(asset.id) })
+  },
+  'POST /api/images/comments': (req, res) => {
+    const user = roleOf(req)
+    const body = JSON.parse(req.__body || '{}')
+    const assetId = String(body.assetId || '').trim()
+    const text = String(body.body || '').trim()
+    if (!text) return json(res, 400, { error: '评论不能为空', code: 'IMAGE_COMMENT_REQUIRED' })
+    if (text.length > 500) return json(res, 400, { error: '评论不能超过 500 个字符', code: 'IMAGE_COMMENT_TOO_LONG' })
+    const asset = getImageAsset(assetId)
+    if (!asset || asset.deletedAt != null || asset.owner !== user.name) {
+      return json(res, 404, { error: '图像资产不存在或无权评论', code: 'IMAGE_ASSET_NOT_FOUND' })
+    }
+    const comment = createImageComment({
+      id: newFileId('CMT'),
+      assetId: asset.id,
+      revision: asset.revision,
+      owner: user.name,
+      body: text,
+    })
+    return json(res, 200, { ok: true, comment })
   },
   'GET /api/images/recent': (req, res, url) => {
     const user = roleOf(req)

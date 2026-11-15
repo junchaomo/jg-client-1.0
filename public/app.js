@@ -122,7 +122,7 @@ const state = {
   ],
   cbW: 440,
   cbUserW: 0,
-  imagegen: { prompt: '', ratio: '1:1', count: 1, style: '写实', shots: [], busy: false, modelId: '', references: [], assetsLoaded: false, assetsLoading: false },
+  imagegen: { prompt: '', ratio: '1:1', count: 1, style: '写实', shots: [], busy: false, modelId: '', references: [], assetsLoaded: false, assetsLoading: false, tab: 'templates', templateRatio: 'auto', templateRef: null },
 }
 
 const layout = new AppLayout(document.getElementById('app'))
@@ -7183,6 +7183,107 @@ function openNotebookSourcePicker(detail, opts = {}) {
 }
 
 
+const IMAGE_TEMPLATES = [
+  {
+    id: 'poster',
+    name: '海报',
+    tag: '视觉海报',
+    ratio: '3:4',
+    preview: './templates/poster.webp',
+    desc: '生成一张以主体视觉为核心、带有清晰标题层级和留白节奏的海报。适合活动、品牌与内容封面；会把标题、主体和背景作为一个完整画面来组织。',
+    prompt: '创作一张温暖极简的橙红色艺术海报，中央是一朵盛开的红色虞美人，粗体英文标题“BLOOM”，复古丝网印刷质感，大量留白，标题与花朵形成清晰层级，画面干净完整',
+  },
+  {
+    id: 'interior',
+    name: '室内设计',
+    tag: '空间方案',
+    ratio: '4:3',
+    preview: './templates/interior.webp',
+    desc: '生成一张可直接用于方案沟通的室内空间效果图，强调家具关系、材质、采光和空间尺度。适合客厅、卧室、餐厅与办公空间的概念表达。',
+    prompt: '生成一张温暖现代客厅的室内设计效果图，奶油色墙面、浅木家具、绿植、柔软地毯和自然采光，家具尺度真实，空间关系清楚，专业建筑可视化质感',
+  },
+  {
+    id: 'logo',
+    name: '徽标',
+    tag: '品牌标识',
+    ratio: '1:1',
+    preview: './templates/logo.webp',
+    desc: '生成一枚简洁、可用于品牌起步的徽标图形。默认使用纯色或浅色背景，便于后续直接移除背景并用于头像、物料和产品包装。',
+    prompt: '设计一枚深蓝色与浅灰蓝配色的圆形品牌徽标，中心是一只极简线条鱼形图案，图形对称、边缘干净、纯色背景，适合作为品牌标识',
+  },
+  {
+    id: 'illustration',
+    name: '插画',
+    tag: '叙事插画',
+    ratio: '1:1',
+    preview: './templates/illustration.webp',
+    desc: '生成具有叙事感的单幅插画，人物、动物与场景保持统一画风。适合社媒配图、文章插图、角色氛围图和轻量故事画面。',
+    prompt: '生成一张扁平化数字插画，年轻女孩穿黄色毛衣抱着黑白猫，柔和紫色房间背景，温暖治愈，人物与猫的互动自然，色块干净统一',
+  },
+  {
+    id: 'portrait',
+    name: '职业形象照',
+    tag: '人物肖像',
+    ratio: '3:4',
+    preview: './templates/portrait.webp',
+    desc: '生成干净、可信的职业肖像，保留自然皮肤质感和真实光影，适合团队介绍、个人主页、简历与商务物料。上传自己的照片后，可把它作为人物参考。',
+    prompt: '生成一张自然光职业形象照，年轻亚洲女性穿米白色针织衫，浅灰色纯色背景，温和微笑，真实皮肤质感，专业摄影棚肖像',
+  },
+  {
+    id: 'icon',
+    name: '图标',
+    tag: '图标套组',
+    ratio: '1:1',
+    preview: './templates/icon.webp',
+    desc: '生成一组风格统一的线性图标，适合产品界面、功能入口和品牌辅助图形。图标数量、主题与底色可以在补充描述里继续约束。',
+    prompt: '生成一组四枚白色极简线性图标，分别代表手势、流星、青蛙和星球，深墨绿色背景，线条粗细统一，四枚图标均匀排布',
+  },
+  {
+    id: 'product',
+    name: '产品照',
+    tag: '商业摄影',
+    ratio: '1:1',
+    preview: './templates/product.webp',
+    desc: '生成具有真实材质和商业布光的产品摄影，适合电商主图、详情页和品牌种草图。上传产品照片后，会优先保留产品外观。',
+    prompt: '生成一张高端香薰蜡烛产品摄影，透明玻璃杯内粉色蜡体，柔和粉色背景和清透光影，极简商业质感，产品边缘清晰，画面干净',
+  },
+  {
+    id: 'merch',
+    name: '周边商品',
+    tag: '商品应用',
+    ratio: '1:1',
+    preview: './templates/merch.webp',
+    desc: '把插画、徽标或品牌图形应用到T恤、帆布袋、杯子等周边上，生成完整的商品展示图。适合周边提案和电商选品预览。',
+    prompt: '生成一件白色T恤商品照，胸前印有戴耳机的青蛙DJ插画，蓝色背景，干净电商摄影，衣服版型自然，印花位置准确，画面完整',
+  },
+  {
+    id: 'infographic',
+    name: '信息图',
+    tag: '信息表达',
+    ratio: '1:1',
+    preview: './templates/infographic.webp',
+    desc: '生成一张视觉主导的信息图或解释图，用图形、箭头、分区和简短标题表达一个概念。适合科普、业务说明和社媒知识卡片。',
+    prompt: '生成一张简洁信息图插画，云朵中上升的红色箭头，蓝色天空背景，扁平矢量风格，画面留出标题和说明空间，结构清楚',
+  },
+  {
+    id: 'flyer',
+    name: '宣传单',
+    tag: '印刷物料',
+    ratio: '3:4',
+    preview: './templates/flyer.webp',
+    desc: '生成具有印刷质感的宣传单或活动单页，标题、主体图和辅助信息形成清晰层次。适合活动招募、失物招领、门店促销等场景。',
+    prompt: '生成一张黑白复古宣传单，中央是一只青蛙的黑白照片，粗体标题“LOST FROG”，复古印刷颗粒质感，信息层级清楚，适合打印',
+  },
+]
+
+function imageTemplateById(id) {
+  return IMAGE_TEMPLATES.find((item) => item.id === id) || null
+}
+
+function imageTemplateTabCount() {
+  return IMAGE_TEMPLATES.length
+}
+
 function selectedImageModel() {
   const cap = state.boot?.imageGeneration || {}
   const models = Array.isArray(cap.models) ? cap.models : []
@@ -7587,9 +7688,10 @@ function openImageMenu(anchor, shot) {
   }))
 }
 
-function openImageMaskEditor(shot) {
-  const mask = openModal('局部选区编辑', `
-    <div class="form-note">用画笔涂抹要修改的区域，白色为编辑区、未涂抹为保留区。提交后由万相局部重绘生成新版本，原图保留在版本历史；这不是用提示词模拟的局部编辑。</div>
+function openImageMaskEditor(shot, opts = {}) {
+  const erase = Boolean(opts.erase)
+  const mask = openModal(erase ? '擦除' : '局部选区编辑', `
+    <div class="form-note">${erase ? '涂抹要移除的物体或文字，白笔为擦除区、未涂抹为保留区。提交后由万相局部重绘用周围画面自然补全，并创建新版本。' : '用画笔涂抹要修改的区域，白色为编辑区、未涂抹为保留区。提交后由万相局部重绘生成新版本，原图保留在版本历史；这不是用提示词模拟的局部编辑。'}</div>
     <div class="img-mask-wrap">
       <div class="img-mask-stage">
         <img id="igMaskImg" src="${shot.url}" alt="">
@@ -7603,11 +7705,11 @@ function openImageMaskEditor(shot) {
       <button class="btn sm" type="button" id="igMaskClear">清除</button>
       <span class="img-mask-state" id="igMaskState">未标记</span>
     </div>
-    <input class="img-edit-input" id="igMaskPrompt" placeholder="描述选区里要改成什么，例如：把这段外墙改成暖灰色石材">
+    <input class="img-edit-input" id="igMaskPrompt" placeholder="${erase ? '可补充要擦除的对象，例如：移除广告牌和地面上的文字' : '描述选区里要改成什么，例如：把这段外墙改成暖灰色石材'}" value="${erase ? '移除选区内的物体，并用周围背景自然补全，保持光影和材质连续' : ''}">
     <div class="img-edit-err" id="igMaskErr"></div>
     <div class="img-edit-foot">
       <button class="btn" type="button" id="igMaskCancel">返回</button>
-      <button class="btn primary" type="button" id="igMaskGo">应用选区</button>
+      <button class="btn primary" type="button" id="igMaskGo">${erase ? '擦除并生成新版本' : '应用选区'}</button>
     </div>`, { wide: true })
   const img = mask.querySelector('#igMaskImg')
   const canvas = mask.querySelector('#igMaskCanvas')
@@ -7738,23 +7840,543 @@ function openImageMaskEditor(shot) {
         body: JSON.stringify({ assetId: shot.id, prompt, maskDataUrl }),
       })
       if (!res.ok) throw new Error(res.body?.error || `局部选区编辑失败（HTTP ${res.status}）`)
+      const next = imageShotFromAsset(res.body.image)
+      mergeRecentImage(next)
       mask.remove()
-      toast(`已生成局部编辑版本 v${res.body.image.revision}`)
-      await loadRecentImages({ force: true })
+      toast(erase ? `已擦除选区并生成版本 v${res.body.image.revision}` : `已生成局部编辑版本 v${res.body.image.revision}`)
+      renderView()
+      if (typeof opts.after === 'function') opts.after(next)
     } catch (error) {
       go.disabled = false
-      go.textContent = '应用选区'
+      go.textContent = erase ? '擦除并生成新版本' : '应用选区'
       err.textContent = error?.message || '局部选区编辑失败'
     }
   })
 }
 
-/* 生图模块仅展示真实图像服务返回的结果，不内置演示画面、示例卡片或假数据。 */
+function readTemplateReference(file) {
+  return new Promise((resolve, reject) => {
+    const objectUrl = URL.createObjectURL(file)
+    const image = new Image()
+    image.onload = () => {
+      try {
+        const maxEdge = 1280
+        const scale = Math.min(1, maxEdge / Math.max(image.naturalWidth || 1, image.naturalHeight || 1))
+        const canvas = document.createElement('canvas')
+        canvas.width = Math.max(1, Math.round((image.naturalWidth || 1) * scale))
+        canvas.height = Math.max(1, Math.round((image.naturalHeight || 1) * scale))
+        const ctx = canvas.getContext('2d')
+        ctx.drawImage(image, 0, 0, canvas.width, canvas.height)
+        const mime = file.type === 'image/png' ? 'image/png' : 'image/jpeg'
+        resolve({ dataUrl: canvas.toDataURL(mime, 0.9), width: canvas.width, height: canvas.height })
+      } catch (error) {
+        reject(error)
+      } finally {
+        URL.revokeObjectURL(objectUrl)
+      }
+    }
+    image.onerror = () => { URL.revokeObjectURL(objectUrl); reject(new Error('读取参考照片失败')) }
+    image.src = objectUrl
+  })
+}
+
+function imageTemplateTabs(g) {
+  const active = g.tab === 'mine' ? 'mine' : 'templates'
+  return `
+    <div class="img-tabs" role="tablist" aria-label="图像模块">
+      <button type="button" class="img-tab${active === 'templates' ? ' on' : ''}" data-igtab="templates" role="tab" aria-selected="${active === 'templates'}">模板<span class="img-tab-count">${imageTemplateTabCount()}</span></button>
+      <button type="button" class="img-tab${active === 'mine' ? ' on' : ''}" data-igtab="mine" role="tab" aria-selected="${active === 'mine'}">我的图像<span class="img-tab-count">${(g.shots || []).length}</span></button>
+    </div>`
+}
+
+function imageTemplateGrid() {
+  return `
+    <div class="img-tpl-grid">
+      ${IMAGE_TEMPLATES.map((tpl) => `
+        <button type="button" class="img-tpl-card" data-tpl="${esc(tpl.id)}" aria-label="打开模板：${esc(tpl.name)}">
+          <img src="${esc(tpl.preview)}" alt="${esc(tpl.name)}模板预览" loading="lazy">
+          <span class="img-tpl-shade"></span>
+          <span class="img-tpl-name">${esc(tpl.name)}</span>
+          <span class="img-tpl-tag">${esc(tpl.tag)}</span>
+        </button>`).join('')}
+    </div>`
+}
+
+function openImageTemplate(templateId) {
+  const tpl = imageTemplateById(templateId)
+  if (!tpl) return
+  const g = state.imagegen
+  let ratio = 'auto'
+  let referenceDataUrl = ''
+  let referenceName = ''
+  const mask = openModal(tpl.name, `
+    <div class="img-tpl-detail">
+      <div class="img-tpl-detail-art"><img src="${esc(tpl.preview)}" alt="${esc(tpl.name)}模板预览"></div>
+      <div class="img-tpl-detail-info">
+        <div class="img-tpl-kicker">${esc(tpl.tag)}</div>
+        <div class="img-tpl-title">${esc(tpl.name)}</div>
+        <div class="img-tpl-desc" id="igTplDesc">${esc(tpl.desc)}</div>
+        <button type="button" class="img-tpl-more" id="igTplMore">展开更多</button>
+        <div class="img-tpl-row">
+          <label for="igTplRatio">宽高比例</label>
+          <select id="igTplRatio" aria-label="宽高比例">
+            <option value="auto">自动</option>
+            ${['1:1', '3:4', '9:16', '4:3', '16:9'].map((item) => `<option value="${item}">${item}${item === tpl.ratio ? ' · 模板默认' : ''}</option>`).join('')}
+          </select>
+        </div>
+        <div class="img-tpl-upload-label">上传参考照片 <span>可选</span></div>
+        <div class="img-tpl-upload-wrap">
+          <button type="button" class="img-tpl-upload" id="igTplUpload" aria-label="上传参考照片">+</button>
+          <div class="img-tpl-ref" id="igTplRef" hidden>
+            <img id="igTplRefImg" alt="参考照片">
+            <button type="button" class="img-tpl-ref-x" id="igTplRefX" aria-label="移除参考照片">×</button>
+          </div>
+        </div>
+        <input id="igTplFile" type="file" accept="image/png,image/jpeg,image/webp" hidden>
+        <div class="img-tpl-note">参考照片会作为图1提交，帮助模型保留人物、产品或已有外观；不上传也能直接生成。</div>
+        <div class="img-edit-err" id="igTplErr"></div>
+        <div class="img-tpl-foot">
+          <button type="button" class="btn primary" id="igTplTry">试一试</button>
+        </div>
+      </div>
+    </div>`, { wide: true })
+
+  const desc = mask.querySelector('#igTplDesc')
+  const more = mask.querySelector('#igTplMore')
+  const ratioSelect = mask.querySelector('#igTplRatio')
+  const file = mask.querySelector('#igTplFile')
+  const upload = mask.querySelector('#igTplUpload')
+  const ref = mask.querySelector('#igTplRef')
+  const refImg = mask.querySelector('#igTplRefImg')
+  const err = mask.querySelector('#igTplErr')
+  const tryBtn = mask.querySelector('#igTplTry')
+  ratioSelect.value = ratio
+  if (tpl.desc.length > 72) {
+    desc.classList.add('clamp')
+  } else {
+    more.hidden = true
+  }
+  more.addEventListener('click', () => {
+    const clamped = desc.classList.toggle('clamp')
+    more.textContent = clamped ? '展开更多' : '收起'
+  })
+  ratioSelect.addEventListener('change', () => { ratio = ratioSelect.value })
+  upload.addEventListener('click', () => file.click())
+  file.addEventListener('change', () => {
+    const chosen = file.files?.[0]
+    if (!chosen) return
+    if (!['image/png', 'image/jpeg', 'image/webp'].includes(chosen.type)) {
+      err.textContent = '参考照片只支持 PNG、JPEG 或 WebP'
+      file.value = ''
+      return
+    }
+    if (chosen.size > 10 * 1024 * 1024) {
+      err.textContent = '参考照片不能超过 10 MB'
+      file.value = ''
+      return
+    }
+    readTemplateReference(chosen).then((result) => {
+      referenceDataUrl = result.dataUrl
+      referenceName = chosen.name || '参考照片'
+      refImg.src = referenceDataUrl
+      ref.hidden = false
+      upload.classList.add('has-ref')
+      err.textContent = ''
+    }).catch((error) => {
+      err.textContent = error?.message || '读取参考照片失败，请重试'
+    }).finally(() => { file.value = '' })
+  })
+  mask.querySelector('#igTplRefX').addEventListener('click', () => {
+    referenceDataUrl = ''
+    referenceName = ''
+    ref.hidden = true
+    refImg.removeAttribute('src')
+    upload.classList.remove('has-ref')
+    file.value = ''
+  })
+  tryBtn.addEventListener('click', async () => {
+    const selectedRatio = ratio === 'auto' ? tpl.ratio : ratio
+    const visualPrompt = referenceDataUrl
+      ? `${tpl.prompt}。以图1作为参考，保留其中主体的人物、产品或关键外观，不要替换身份和主要细节`
+      : tpl.prompt
+    tryBtn.disabled = true
+    tryBtn.textContent = '生成中…'
+    upload.disabled = true
+    ratioSelect.disabled = true
+    err.textContent = ''
+    try {
+      const res = await api('/api/images/generate', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          prompt: visualPrompt,
+          style: tpl.name,
+          ratio: selectedRatio,
+          modelId: g.modelId || selectedImageModel()?.id || '',
+          referenceDataUrls: referenceDataUrl ? [referenceDataUrl] : [],
+          seed: Math.floor(Math.random() * 2_147_483_647),
+        }),
+      })
+      if (!res.ok || !res.body?.image?.url) {
+        throw new Error(res.body?.error || `模板生成失败（HTTP ${res.status}）`)
+      }
+      const shot = imageShotFromAsset(res.body.image)
+      g.shots = [shot, ...(g.shots || []).filter((item) => item.id !== shot.id)]
+      g.assetsLoaded = true
+      g.tab = 'mine'
+      g.prompt = visualPrompt
+      mask.remove()
+      renderView()
+      toast(`已用「${tpl.name}」模板生成一张图像，已保存到我的图像`)
+      setTimeout(() => openImageWorkbench(shot), 60)
+    } catch (error) {
+      tryBtn.disabled = false
+      tryBtn.textContent = '试一试'
+      upload.disabled = false
+      ratioSelect.disabled = false
+      err.textContent = error?.message || '模板生成失败'
+    }
+  })
+}
+
+function mergeRecentImage(shot) {
+  const g = state.imagegen
+  const index = (g.shots || []).findIndex((item) => item.id === shot.id)
+  if (index >= 0) g.shots[index] = { ...g.shots[index], ...shot }
+  else g.shots = [shot, ...(g.shots || [])]
+  g.assetsLoaded = true
+}
+
+function wbIcon(name) {
+  const icons = {
+    dots: '<circle cx="5" cy="8" r="1"/><circle cx="8" cy="8" r="1"/><circle cx="11" cy="8" r="1"/>',
+    annotate: '<path d="M3 13.5V10l8.5-7 3.5 3.5-7 8.5H4.5"/><path d="M10 4.5l3.5 3.5"/>',
+    comment: '<path d="M3.5 4.5h9v6H7l-3.5 3v-3H3.5z"/>',
+    bg: '<path d="M4 3.5h8v9H4z"/><path d="M4 8.5l3-2 3 2 2-1.5"/><circle cx="9.5" cy="6" r="1"/>',
+    erase: '<path d="M7 14.5l-3-3 7-7 5 5-5 5z"/><path d="M8 16.5h6"/>',
+    resize: '<path d="M3.5 6V3.5h6"/><path d="M12.5 10v2.5h-6"/><path d="M10 3.5h2.5V6"/>',
+  }
+  return `<svg viewBox="0 0 16 16" aria-hidden="true">${icons[name] || ''}</svg>`
+}
+
+function openImageWorkbench(shot) {
+  if (!shot?.url) return
+  const mask = openModal('图像编辑', `
+    <div class="img-wb" id="imgWb">
+      <div class="img-wb-stage">
+        <img id="imgWbImg" src="${shot.url}" alt="">
+        <div class="img-wb-status" id="imgWbStatus" hidden></div>
+      </div>
+      <div class="img-wb-toolbar" role="toolbar" aria-label="图像编辑工具">
+        <button type="button" class="img-wb-dot" data-wb="more" aria-label="更多操作">${wbIcon('dots')}</button>
+        <button type="button" data-wb="annotate">${wbIcon('annotate')}<span>标注</span></button>
+        <button type="button" data-wb="comment">${wbIcon('comment')}<span>添加评论</span></button>
+        <button type="button" data-wb="removebg">${wbIcon('bg')}<span>移除背景</span></button>
+        <button type="button" data-wb="erase">${wbIcon('erase')}<span>擦除</span></button>
+        <button type="button" data-wb="resize">${wbIcon('resize')}<span>调整大小</span></button>
+      </div>
+      <div class="img-wb-more" id="imgWbMore" hidden>
+        <button type="button" data-wbmore="edit">提示词编辑</button>
+        <button type="button" data-wbmore="versions">版本历史</button>
+        <button type="button" data-wbmore="download">下载原图</button>
+        <button type="button" data-wbmore="usechat">用于会话</button>
+        <button type="button" data-wbmore="delete" class="danger">删除</button>
+      </div>
+      <aside class="img-wb-side" id="imgWbSide" hidden>
+        <div class="img-wb-side-head"><div><b>评论</b><span id="imgWbCommentCount"></span></div><button type="button" class="img-wb-side-x" id="imgWbSideX" aria-label="关闭评论">×</button></div>
+        <div class="img-wb-comments" id="imgWbComments"><div class="img-wb-empty">还没有评论</div></div>
+        <textarea id="imgWbCommentInput" maxlength="500" placeholder="写下对这张图的修改意见或备注…"></textarea>
+        <div class="img-wb-side-foot"><span class="img-edit-err" id="imgWbCommentErr"></span><button type="button" class="btn primary" id="imgWbCommentGo">发表评论</button></div>
+      </aside>
+    </div>`, { wide: true })
+  const body = mask.querySelector('.jg-modal-body')
+  body.classList.add('img-wb-body')
+  const status = mask.querySelector('#imgWbStatus')
+  const side = mask.querySelector('#imgWbSide')
+  const morePanel = mask.querySelector('#imgWbMore')
+  const setStatus = (text, busy = true) => {
+    status.hidden = false
+    status.textContent = text
+    status.classList.toggle('busy', busy)
+  }
+  const clearStatus = () => { status.hidden = true; status.textContent = '' }
+
+  const renderComments = async () => {
+    const list = mask.querySelector('#imgWbComments')
+    const count = mask.querySelector('#imgWbCommentCount')
+    const res = await api(`/api/images/comments?assetId=${encodeURIComponent(shot.id)}`)
+    if (!res.ok) {
+      list.innerHTML = `<div class="img-wb-empty">评论读取失败：${esc(res.body?.error || res.status)}</div>`
+      return
+    }
+    const comments = Array.isArray(res.body?.comments) ? res.body.comments : []
+    count.textContent = comments.length ? ` · ${comments.length}` : ''
+    list.innerHTML = comments.length ? comments.map((item) => `
+      <div class="img-wb-comment">
+        <div class="img-wb-comment-head"><span class="img-wb-avatar">${esc(String(item.owner || '我').slice(0, 1))}</span><span>${esc(item.owner || '我')}</span><span>${esc(new Date(item.createdAt).toLocaleString('zh-CN', { hour12: false }).slice(0, 16))}</span></div>
+        <div class="img-wb-comment-body">${esc(item.body)}</div>
+      </div>`).join('') : '<div class="img-wb-empty">还没有评论，写下第一条修改意见</div>'
+  }
+  const openComments = async () => {
+    side.hidden = false
+    await renderComments()
+    mask.querySelector('#imgWbCommentInput').focus()
+  }
+  mask.querySelector('#imgWbSideX').addEventListener('click', () => { side.hidden = true })
+  mask.querySelector('#imgWbCommentGo').addEventListener('click', async (event) => {
+    const btn = event.currentTarget
+    const input = mask.querySelector('#imgWbCommentInput')
+    const err = mask.querySelector('#imgWbCommentErr')
+    const text = input.value.trim()
+    if (!text) { err.textContent = '请先写评论'; input.focus(); return }
+    btn.disabled = true
+    const res = await api('/api/images/comments', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ assetId: shot.id, body: text }),
+    })
+    btn.disabled = false
+    if (!res.ok) { err.textContent = res.body?.error || '评论失败'; return }
+    input.value = ''
+    err.textContent = ''
+    await renderComments()
+  })
+
+  mask.querySelectorAll('[data-wb]').forEach((btn) => btn.addEventListener('click', async (event) => {
+    const action = btn.dataset.wb
+    if (action === 'more') {
+      morePanel.hidden = !morePanel.hidden
+      return
+    }
+    if (action === 'comment') { await openComments(); return }
+    if (action === 'annotate') { mask.remove(); openImageAnnotator(shot); return }
+    if (action === 'resize') { mask.remove(); openImageResize(shot); return }
+    if (action === 'erase') { mask.remove(); openImageMaskEditor(shot, { erase: true }); return }
+    if (action === 'removebg') {
+      btn.disabled = true
+      setStatus('正在移除背景，结果会创建新版本…')
+      try {
+        const res = await api('/api/images/remove-bg', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ assetId: shot.id, scene: 'general' }),
+        })
+        if (!res.ok || !res.body?.image) throw new Error(res.body?.error || `移除背景失败（HTTP ${res.status}）`)
+        const next = imageShotFromAsset(res.body.image)
+        mergeRecentImage(next)
+        mask.remove()
+        renderView()
+        toast('已移除背景并创建新版本')
+        setTimeout(() => openImageWorkbench(next), 60)
+      } catch (error) {
+        btn.disabled = false
+        setStatus(error?.message || '移除背景失败', false)
+      }
+    }
+  }))
+  mask.querySelectorAll('[data-wbmore]').forEach((btn) => btn.addEventListener('click', () => {
+    const action = btn.dataset.wbmore
+    mask.remove()
+    if (action === 'edit') editImageAsset(shot)
+    else if (action === 'versions') openImageVersions(shot)
+    else if (action === 'download') downloadImageAsset(shot)
+    else if (action === 'usechat') useImageInChat(shot)
+    else if (action === 'delete') deleteImageAsset(shot)
+  }))
+  mask.addEventListener('click', (event) => {
+    if (!morePanel.hidden && !morePanel.contains(event.target) && !event.target.closest('[data-wb="more"]')) morePanel.hidden = true
+  })
+}
+
+async function useImageInChat(shot) {
+  try {
+    const blob = await (await fetch(shot.url)).blob()
+    const file = new File([blob], shot.name || `jg-image-${shot.id}.png`, { type: blob.type || shot.mime || 'image/png' })
+    const uploaded = await uploadBinaryFile(file, 'chat')
+    if (!uploaded.ok) { toast(uploaded.body?.error || '图像上传失败', true); return }
+    addComposerRef({ kind: 'file', id: uploaded.file.id, label: file.name })
+    state.view = 'chat'
+    state.conversation = null
+    state.draft = `我生成了一张图像（${shot.style}${shot.ratio}，提示词：${shot.prompt}），请基于它整理一段汇报说明。`
+    render()
+    toast('图像已加入本轮附件')
+  } catch (error) {
+    toast(error?.message || '图像处理失败', true)
+  }
+}
+
+function openImageAnnotator(shot) {
+  const mask = openModal('标注', `
+    <div class="form-note">在图片上画红色标记，保存后会与当前版本合成并创建新版本；原版本保留在版本历史中。</div>
+    <div class="img-annot-stage">
+      <div class="img-annot-frame">
+        <img id="imgAnnotImg" src="${shot.url}" alt="">
+        <canvas id="imgAnnotCanvas"></canvas>
+      </div>
+    </div>
+    <div class="img-annot-tools">
+      <label class="img-mask-size">笔刷 <input id="imgAnnotSize" type="range" min="2" max="24" value="6"></label>
+      <button type="button" class="btn sm" id="imgAnnotClear">清除</button>
+      <span class="img-mask-state" id="imgAnnotState">未标注</span>
+      <button type="button" class="btn primary" id="imgAnnotSave">保存标注</button>
+    </div>
+    <div class="img-edit-err" id="imgAnnotErr"></div>`, { wide: true })
+  const img = mask.querySelector('#imgAnnotImg')
+  const canvas = mask.querySelector('#imgAnnotCanvas')
+  const size = mask.querySelector('#imgAnnotSize')
+  const stateLabel = mask.querySelector('#imgAnnotState')
+  const err = mask.querySelector('#imgAnnotErr')
+  const save = mask.querySelector('#imgAnnotSave')
+  let ctx = null
+  let drawing = false
+  let last = null
+  let hasInk = false
+  let pointerSeen = false
+  const setup = () => {
+    if (!img.naturalWidth || !img.naturalHeight) return
+    canvas.width = img.naturalWidth
+    canvas.height = img.naturalHeight
+    ctx = canvas.getContext('2d')
+    ctx.clearRect(0, 0, canvas.width, canvas.height)
+  }
+  if (img.complete && img.naturalWidth) setup()
+  else img.addEventListener('load', setup, { once: true })
+  const pointOf = (event) => {
+    const rect = canvas.getBoundingClientRect()
+    return { x: (event.clientX - rect.left) / rect.width * canvas.width, y: (event.clientY - rect.top) / rect.height * canvas.height, scale: canvas.width / rect.width }
+  }
+  const paint = (from, to) => {
+    if (!ctx) return
+    ctx.save()
+    ctx.strokeStyle = 'rgba(217, 45, 32, .9)'
+    ctx.fillStyle = 'rgba(217, 45, 32, .9)'
+    ctx.lineWidth = Math.max(2, Number(size.value) * to.scale)
+    ctx.lineCap = 'round'
+    ctx.lineJoin = 'round'
+    if (from) {
+      ctx.beginPath(); ctx.moveTo(from.x, from.y); ctx.lineTo(to.x, to.y); ctx.stroke()
+    } else {
+      ctx.beginPath(); ctx.arc(to.x, to.y, ctx.lineWidth / 2, 0, Math.PI * 2); ctx.fill()
+    }
+    ctx.restore()
+    hasInk = true
+    stateLabel.textContent = '已标注'
+  }
+  canvas.addEventListener('pointerdown', (event) => {
+    if (!ctx) return
+    pointerSeen = true; event.preventDefault(); drawing = true; last = pointOf(event)
+    canvas.setPointerCapture?.(event.pointerId); paint(null, last)
+  })
+  canvas.addEventListener('pointermove', (event) => {
+    if (!drawing || !ctx) return
+    event.preventDefault(); const next = pointOf(event); paint(last, next); last = next
+  })
+  const end = () => { drawing = false; last = null }
+  canvas.addEventListener('pointerup', end)
+  canvas.addEventListener('pointercancel', end)
+  canvas.addEventListener('pointerleave', end)
+  canvas.addEventListener('dragstart', (event) => event.preventDefault())
+  canvas.addEventListener('mousedown', (event) => {
+    if (pointerSeen || !ctx) return
+    event.preventDefault(); drawing = true; last = pointOf(event); paint(null, last)
+  })
+  canvas.addEventListener('mousemove', (event) => {
+    if (pointerSeen || !drawing || !ctx) return
+    event.preventDefault(); const next = pointOf(event); paint(last, next); last = next
+  })
+  canvas.addEventListener('mouseup', end)
+  canvas.addEventListener('mouseleave', end)
+  mask.querySelector('#imgAnnotClear').addEventListener('click', () => {
+    if (!ctx) return
+    ctx.clearRect(0, 0, canvas.width, canvas.height)
+    hasInk = false
+    stateLabel.textContent = '未标注'
+    err.textContent = ''
+  })
+  save.addEventListener('click', async () => {
+    if (!ctx || !canvas.width) return (err.textContent = '图片还没有加载完成')
+    if (!hasInk) return (err.textContent = '请先在图片上画标记')
+    save.disabled = true
+    save.textContent = '保存中…'
+    try {
+      const out = document.createElement('canvas')
+      out.width = canvas.width
+      out.height = canvas.height
+      const outCtx = out.getContext('2d')
+      outCtx.drawImage(img, 0, 0, out.width, out.height)
+      outCtx.drawImage(canvas, 0, 0)
+      const res = await api('/api/images/annotate', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ assetId: shot.id, dataUrl: out.toDataURL('image/png'), width: out.width, height: out.height }),
+      })
+      if (!res.ok || !res.body?.image) throw new Error(res.body?.error || `标注保存失败（HTTP ${res.status}）`)
+      const next = imageShotFromAsset(res.body.image)
+      mergeRecentImage(next)
+      mask.remove()
+      renderView()
+      toast(`已保存标注版本 v${res.body.image.revision}`)
+      setTimeout(() => openImageWorkbench(next), 60)
+    } catch (error) {
+      save.disabled = false
+      save.textContent = '保存标注'
+      err.textContent = error?.message || '标注保存失败'
+    }
+  })
+}
+
+function openImageResize(shot) {
+  const options = [
+    { ratio: '1:1', label: '正方形' },
+    { ratio: '3:4', label: '竖向' },
+    { ratio: '9:16', label: '故事版式' },
+    { ratio: '4:3', label: '横向' },
+    { ratio: '16:9', label: '宽屏' },
+  ]
+  const mask = openModal('调整大小', `
+    <div class="form-note">按所选比例扩展画布，主体完整保留，不裁掉画面内容；会创建新版本。</div>
+    <div class="img-resize-list">
+      ${options.map((item) => `
+        <button type="button" class="img-resize-choice${shot.ratio === item.ratio ? ' on' : ''}" data-resize-ratio="${item.ratio}">
+          <span class="img-resize-glyph ${item.ratio.replace(':', '-')}"></span>
+          <span class="img-resize-name">${item.label}</span>
+          <span class="img-resize-ratio">${item.ratio}</span>
+        </button>`).join('')}
+    </div>
+    <div class="img-edit-err" id="imgResizeErr"></div>`, {})
+  const err = mask.querySelector('#imgResizeErr')
+  mask.querySelectorAll('[data-resize-ratio]').forEach((btn) => btn.addEventListener('click', async () => {
+    const ratio = btn.dataset.resizeRatio
+    if (shot.ratio === ratio) { mask.remove(); return }
+    btn.disabled = true
+    btn.classList.add('loading')
+    try {
+      const res = await api('/api/images/resize', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ assetId: shot.id, ratio }),
+      })
+      if (!res.ok || !res.body?.image) throw new Error(res.body?.error || `调整大小失败（HTTP ${res.status}）`)
+      const next = imageShotFromAsset(res.body.image)
+      mergeRecentImage(next)
+      mask.remove()
+      renderView()
+      toast(`已调整为 ${ratio} 并创建新版本`)
+      setTimeout(() => openImageWorkbench(next), 60)
+    } catch (error) {
+      btn.disabled = false
+      btn.classList.remove('loading')
+      err.textContent = error?.message || '调整大小失败'
+    }
+  }))
+}
+
 async function renderImage(el) {
   const g = state.imagegen
   const cap = state.boot?.imageGeneration || {}
   const allModels = Array.isArray(cap.models) ? cap.models : []
   const selectedModel = selectedImageModel()
+  const tab = g.tab === 'mine' ? 'mine' : 'templates'
 
   if (!imagegenReady() || !selectedModel) {
     el.innerHTML = `
@@ -7769,35 +8391,52 @@ async function renderImage(el) {
     return
   }
 
-  if (!g.assetsLoaded) {
+  if (tab === 'mine' && !g.assetsLoaded) {
     if (!g.assetsLoading) loadRecentImages()
     el.innerHTML = `
       <div class="img-head"><div><div class="img-title">图像</div>
-        <div class="img-sub">正在读取已落库的最近生成…</div></div></div>
-      <div class="img-gallery"><div class="img-loading">正在读取最近生成…</div></div>`
+        <div class="img-sub">正在读取已落库的我的图像…</div></div></div>
+      ${imageTemplateTabs(g)}
+      <div class="img-gallery"><div class="img-loading">正在读取我的图像…</div></div>`
+    bindImageTabs(el)
+    return
+  }
+  if (!g.assetsLoaded && !g.assetsLoading) loadRecentImages()
+
+  const cards = g.shots || []
+  const modelOptions = allModels.map((model) => `<option value="${esc(model.id)}" ${model.id === g.modelId ? 'selected' : ''} ${model.configured ? '' : 'disabled'}>${esc(model.label)}${model.configured ? '' : '（未配置）'}</option>`).join('')
+  const headSub = tab === 'templates'
+    ? '真实模板 · 可上传参考照片，也可直接试一试；生成结果会保存到我的图像'
+    : `真实生图 · ${esc(selectedModel.label)} · ${esc(selectedModel.providerLabel || selectedModel.provider || '图像模型')} · ${cap.external ? '提示词会发送到外部服务' : '服务端内部模型'}`
+
+  const head = `
+    <div class="img-head">
+      <div><div class="img-title">图像</div><div class="img-sub">${g.busy ? '正在生成真实图像…' : headSub}</div></div>
+      ${tab === 'mine' ? `<button class="btn sm img-compare-open" id="igCompare" ${cards.length < 2 ? 'disabled' : ''}>并排对比</button>` : ''}
+    </div>
+    ${imageTemplateTabs(g)}`
+
+  if (tab === 'templates') {
+    el.innerHTML = `${head}
+      ${imageTemplateGrid()}
+      <div class="img-tpl-footnote">模板是真实提示词与真实模型调用，不使用示例图冒充生成结果；选择模板后可上传一张参考照片，或直接点“试一试”。</div>`
+    bindImageTabs(el)
+    el.querySelectorAll('[data-tpl]').forEach((btn) => btn.addEventListener('click', () => openImageTemplate(btn.dataset.tpl)))
     return
   }
 
-  const cards = g.shots
-  const modelOptions = allModels.map((model) => `<option value="${esc(model.id)}" ${model.id === g.modelId ? 'selected' : ''} ${model.configured ? '' : 'disabled'}>${esc(model.label)}${model.configured ? '' : '（未配置）'}</option>`).join('')
-
-  el.innerHTML = `
-    <div class="img-head">
-      <div><div class="img-title">图像</div>
-        <div class="img-sub">${g.busy ? '正在生成真实图像…' : `真实生图 · ${esc(selectedModel.label)} · ${esc(selectedModel.providerLabel || selectedModel.provider || '图像模型')} · ${cap.external ? '提示词会发送到外部服务' : '服务端内部模型'}`}</div></div>
-      <button class="btn sm img-compare-open" id="igCompare" ${cards.length < 2 ? 'disabled' : ''}>并排对比</button>
-    </div>
+  el.innerHTML = `${head}
     <div class="img-gallery">
       ${cards.length ? cards.map((c) => `
         <div class="img-card" data-igid="${esc(c.id)}" role="button" tabindex="0" title="${esc(c.prompt)}">
           <img src="${c.url}" alt="${esc(c.prompt)}">
-          <span class="img-card-label">最近生成</span>
+          <span class="img-card-label">我的图像</span>
           <span class="img-card-meta">${esc(c.style)} · ${esc(c.ratio)}${Number(c.versions || 1) > 1 ? ` · ${esc(String(c.versions))} 版` : ''}</span>
           <button class="img-more" type="button" data-igmore="${esc(c.id)}" aria-label="图片操作" title="图片操作">${icon('dots')}</button>
         </div>`).join('') : `
         <div class="img-empty">
           <div class="img-empty-title">还没有生成图像</div>
-          <div class="img-empty-text">在下方描述画面，真实生图结果会显示在这里；不会展示示例图片或演示数据。</div>
+          <div class="img-empty-text">先到“模板”选一个方向试一试，或在下方描述画面自由生成；真实结果会保存在这里。</div>
         </div>`}
     </div>
     <div class="img-composer-wrap">
@@ -7813,6 +8452,7 @@ async function renderImage(el) {
       </div>
     </div>`
 
+  bindImageTabs(el)
   const input = el.querySelector('#igPrompt')
   input.addEventListener('input', (e) => { g.prompt = e.target.value })
   input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); el.querySelector('#igGen').click() } })
@@ -7834,37 +8474,7 @@ async function renderImage(el) {
   el.querySelectorAll('.img-card').forEach((b) => {
     const openPreview = () => {
       const s = g.shots.find((x) => x.id === b.dataset.igid)
-      if (!s) return
-      const mask = openModal('生成结果', `
-        <div class="ig-preview"><img src="${s.url}" alt=""></div>
-        <div class="field" style="margin-top:10px"><div class="field-label">提示词</div><div class="field-value">${esc(s.prompt)}</div></div>
-        <div class="field"><div class="field-label">参数</div><div class="field-value">${esc(s.style)} · ${esc(s.ratio)} · ${esc(s.providerLabel || s.provider || selectedModel.providerLabel || '图像模型')} ${esc(s.model || selectedModel.model || '')}</div></div>
-        <div class="field"><div class="field-label">版本</div><div class="field-value">${Number(s.versions || 1)} 个版本${Number(s.revision || 1) > 1 ? ` · 当前 v${Number(s.revision)}` : ''}</div></div>
-        <div style="display:flex;gap:8px;margin-top:12px"><button class="btn" data-dlg>下载原图</button><button class="btn" data-versions>版本历史</button><button class="btn primary" data-useimg>用于会话</button></div>
-        <div class="form-note">由真实图像生成服务返回，图片已落盘到服务端文件存储；提示词、比例、服务商和种子随结果记录，便于复核。</div>`, { wide: true })
-      mask.querySelector('[data-dlg]')?.addEventListener('click', () => downloadImageAsset(s))
-      mask.querySelector('[data-versions]')?.addEventListener('click', () => { mask.remove(); openImageVersions(s) })
-      mask.querySelector('[data-useimg]')?.addEventListener('click', async (e) => {
-        const btn = e.currentTarget
-        btn.disabled = true
-        try {
-          const blob = await (await fetch(s.url)).blob()
-          const file = new File([blob], s.name || `jg-image-${s.id}.png`, { type: blob.type || s.mime || 'image/png' })
-          const uploaded = await uploadBinaryFile(file, 'chat')
-          if (!uploaded.ok) { toast(uploaded.body?.error || '图像上传失败', true); return }
-          addComposerRef({ kind: 'file', id: uploaded.file.id, label: file.name })
-          mask.remove()
-          state.view = 'chat'
-          state.conversation = null
-          state.draft = `我生成了一张图像（${s.style}${s.ratio}，提示词：${s.prompt}），请基于它整理一段汇报说明。`
-          render()
-          toast('图像已加入本轮附件')
-        } catch (err) {
-          toast(err.message || '图像处理失败', true)
-        } finally {
-          btn.disabled = false
-        }
-      })
+      if (s) openImageWorkbench(s)
     }
     b.addEventListener('click', (e) => {
       if (e.target.closest('.img-more')) return
@@ -7890,6 +8500,7 @@ async function renderImage(el) {
     if (!g.prompt.trim()) { toast('请先描述要生成的图像', true); input.focus(); return }
     if (g.busy) return
     g.busy = true
+    g.tab = 'mine'
     renderView()
     toast('正在调用真实生图服务，通常需要 10–30 秒')
     const g2 = state.imagegen
@@ -7927,6 +8538,16 @@ async function renderImage(el) {
       toast(err.message || '真实生图失败，请稍后重试', true)
     }
   })
+}
+
+function bindImageTabs(root) {
+  root.querySelectorAll('[data-igtab]').forEach((btn) => btn.addEventListener('click', () => {
+    const tab = btn.dataset.igtab
+    if (!tab) return
+    state.imagegen.tab = tab
+    if (tab === 'mine' && !state.imagegen.assetsLoaded) loadRecentImages()
+    renderView()
+  }))
 }
 
 function openDrawingBoard() {
