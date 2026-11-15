@@ -332,6 +332,12 @@ async function callSeedream(def, { prompt, ratio, width, height, seed, timeoutMs
   const payload = await responseJson(response)
   if (!response.ok || payload.error) {
     const message = String(payload?.error?.message || payload?.error || `HTTP ${response.status}`)
+    if (/does not exist or you do not have access/i.test(message)) {
+      throw new ImageProviderError(
+        'Seedream 模型未开通或无访问权限：请在火山方舟控制台开通 Seedream 5.5（仅充值不会自动开通），并确认当前 API Key 所属项目可调用该模型。',
+        { code: 'IMAGE_PROVIDER_MODEL_NOT_ACCESSIBLE', status: 503 },
+      )
+    }
     throw new ImageProviderError(`Seedream 生图失败：${message}`, {
       code: 'IMAGE_PROVIDER_ERROR',
       status: response.status >= 400 && response.status < 500 ? 400 : 502,
