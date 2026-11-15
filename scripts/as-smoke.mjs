@@ -14,7 +14,7 @@
  *   npm run test:as-smoke -- --keep-open
  *
  * 可选环境变量：
- *   JG_SMOKE_VIDEO  交通冒烟视频，默认 D:\projects-test\traffic_counter\videos\synth_traffic.mp4
+ *   JG_SMOKE_VIDEO  交通冒烟视频，默认 tests/fixtures/smoke-traffic.mp4（H.264）
  *   JG_SMOKE_PORT   Electron CDP 端口，默认 9222
  *
  * 说明：
