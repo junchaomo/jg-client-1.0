@@ -165,6 +165,69 @@ db.exec(`
     created_at INTEGER NOT NULL,
     PRIMARY KEY (visual_id, version)
   );
+
+  CREATE TABLE IF NOT EXISTS image_assets (
+    id TEXT PRIMARY KEY,
+    owner TEXT NOT NULL DEFAULT '',
+    net TEXT NOT NULL DEFAULT '',
+    prompt TEXT NOT NULL DEFAULT '',
+    style TEXT NOT NULL DEFAULT '',
+    ratio TEXT NOT NULL DEFAULT '',
+    provider TEXT NOT NULL DEFAULT '',
+    provider_label TEXT NOT NULL DEFAULT '',
+    model TEXT NOT NULL DEFAULT '',
+    model_id TEXT NOT NULL DEFAULT '',
+    seed INTEGER NOT NULL DEFAULT 0,
+    file_id TEXT NOT NULL,
+    revision INTEGER NOT NULL DEFAULT 1,
+    project_id TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT 'generate',
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    deleted_at INTEGER
+  );
+  CREATE INDEX IF NOT EXISTS idx_image_assets_owner ON image_assets(owner, updated_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_image_assets_deleted ON image_assets(deleted_at);
+
+  CREATE TABLE IF NOT EXISTS image_revisions (
+    asset_id TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    file_id TEXT NOT NULL,
+    prompt TEXT NOT NULL DEFAULT '',
+    style TEXT NOT NULL DEFAULT '',
+    ratio TEXT NOT NULL DEFAULT '',
+    provider TEXT NOT NULL DEFAULT '',
+    provider_label TEXT NOT NULL DEFAULT '',
+    model TEXT NOT NULL DEFAULT '',
+    model_id TEXT NOT NULL DEFAULT '',
+    seed INTEGER NOT NULL DEFAULT 0,
+    params TEXT NOT NULL DEFAULT '{}',
+    note TEXT NOT NULL DEFAULT '',
+    created_by TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (asset_id, revision)
+  );
+  CREATE INDEX IF NOT EXISTS idx_image_revisions_asset ON image_revisions(asset_id, revision DESC);
+
+  CREATE TABLE IF NOT EXISTS image_jobs (
+    id TEXT PRIMARY KEY,
+    owner TEXT NOT NULL DEFAULT '',
+    net TEXT NOT NULL DEFAULT '',
+    asset_id TEXT NOT NULL DEFAULT '',
+    kind TEXT NOT NULL DEFAULT 'generate',
+    provider TEXT NOT NULL DEFAULT '',
+    model_id TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'running',
+    prompt TEXT NOT NULL DEFAULT '',
+    params TEXT NOT NULL DEFAULT '{}',
+    error TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    finished_at INTEGER
+  );
+  CREATE INDEX IF NOT EXISTS idx_image_jobs_owner ON image_jobs(owner, created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_image_jobs_status ON image_jobs(status);
 `)
 
 // 兼容 P0-2 之前已经建好的 sessions 表：补 account_id 列。
@@ -304,6 +367,46 @@ const stmt = {
   restore: db.prepare('UPDATE files SET deleted_at = NULL, updated_at = ? WHERE id = ?'),
   purgeMeta: db.prepare('DELETE FROM files WHERE id = ?'),
   purgeVersions: db.prepare('DELETE FROM file_versions WHERE file_id = ?'),
+  insertImageAsset: db.prepare(`
+    INSERT INTO image_assets (
+      id, owner, net, prompt, style, ratio, provider, provider_label, model, model_id, seed,
+      file_id, revision, project_id, source, status, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `),
+  getImageAsset: db.prepare('SELECT * FROM image_assets WHERE id = ?'),
+  listImageAssets: db.prepare(`
+    SELECT * FROM image_assets
+    WHERE owner = ? AND deleted_at IS NULL
+    ORDER BY updated_at DESC
+    LIMIT ?
+  `),
+  softDeleteImageAsset: db.prepare(`
+    UPDATE image_assets SET deleted_at = ?, updated_at = ?, status = 'deleted'
+    WHERE id = ? AND owner = ? AND deleted_at IS NULL
+  `),
+  insertImageRevision: db.prepare(`
+    INSERT INTO image_revisions (
+      asset_id, revision, file_id, prompt, style, ratio, provider, provider_label, model, model_id,
+      seed, params, note, created_by, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `),
+  listImageRevisions: db.prepare('SELECT * FROM image_revisions WHERE asset_id = ? ORDER BY revision DESC'),
+  countImageRevisions: db.prepare('SELECT COUNT(*) AS count FROM image_revisions WHERE asset_id = ?'),
+  insertImageJob: db.prepare(`
+    INSERT INTO image_jobs (id, owner, net, asset_id, kind, provider, model_id, status, prompt, params, error, created_at, updated_at, finished_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `),
+  updateImageJob: db.prepare(`
+    UPDATE image_jobs SET
+      asset_id = COALESCE(?, asset_id),
+      provider = COALESCE(?, provider),
+      model_id = COALESCE(?, model_id),
+      status = COALESCE(?, status),
+      error = COALESCE(?, error),
+      updated_at = ?,
+      finished_at = COALESCE(?, finished_at)
+    WHERE id = ?
+  `),
 }
 
 /* ------------------------------- sessions ------------------------------- */
@@ -820,6 +923,163 @@ export function purgeFile(id) {
 
 export function fileCount() {
   return Number(stmt.countFiles.get().count || 0)
+}
+
+/* ----------------------------- image assets ----------------------------- */
+
+function imageAssetOf(row) {
+  if (!row) return null
+  return {
+    id: row.id,
+    owner: row.owner,
+    net: row.net,
+    prompt: row.prompt,
+    style: row.style,
+    ratio: row.ratio,
+    provider: row.provider,
+    providerLabel: row.provider_label,
+    model: row.model,
+    modelId: row.model_id,
+    seed: Number(row.seed),
+    fileId: row.file_id,
+    revision: Number(row.revision),
+    projectId: row.project_id,
+    source: row.source,
+    status: row.status,
+    createdAt: Number(row.created_at),
+    updatedAt: Number(row.updated_at),
+    deletedAt: row.deleted_at == null ? null : Number(row.deleted_at),
+  }
+}
+
+function imageRevisionOf(row) {
+  if (!row) return null
+  let params = {}
+  try { params = JSON.parse(row.params || '{}') } catch { params = {} }
+  return {
+    assetId: row.asset_id,
+    revision: Number(row.revision),
+    fileId: row.file_id,
+    prompt: row.prompt,
+    style: row.style,
+    ratio: row.ratio,
+    provider: row.provider,
+    providerLabel: row.provider_label,
+    model: row.model,
+    modelId: row.model_id,
+    seed: Number(row.seed),
+    params,
+    note: row.note,
+    createdBy: row.created_by,
+    createdAt: Number(row.created_at),
+  }
+}
+
+export function createImageAsset(input = {}) {
+  const now = Number(input.createdAt || Date.now())
+  stmt.insertImageAsset.run(
+    String(input.id || ''),
+    String(input.owner || ''),
+    String(input.net || ''),
+    String(input.prompt || ''),
+    String(input.style || ''),
+    String(input.ratio || ''),
+    String(input.provider || ''),
+    String(input.providerLabel || ''),
+    String(input.model || ''),
+    String(input.modelId || ''),
+    Number(input.seed || 0),
+    String(input.fileId || ''),
+    Number(input.revision || 1),
+    String(input.projectId || ''),
+    String(input.source || 'generate'),
+    String(input.status || 'active'),
+    now,
+    now
+  )
+  return imageAssetOf(stmt.getImageAsset.get(String(input.id || '')))
+}
+
+export function getImageAsset(id) {
+  return imageAssetOf(stmt.getImageAsset.get(String(id || '')))
+}
+
+export function listImageAssets({ owner = '', limit = 20 } = {}) {
+  const safeLimit = Math.max(1, Math.min(Number(limit) || 20, 100))
+  return stmt.listImageAssets.all(String(owner || ''), safeLimit).map(imageAssetOf)
+}
+
+export function softDeleteImageAsset(id, owner) {
+  const row = stmt.getImageAsset.get(String(id || ''))
+  if (!row) return null
+  const result = stmt.softDeleteImageAsset.run(Date.now(), Date.now(), String(id || ''), String(owner || ''))
+  if (!Number(result.changes || 0)) return null
+  return imageAssetOf(stmt.getImageAsset.get(String(id || '')))
+}
+
+export function createImageRevision(input = {}) {
+  const params = typeof input.params === 'string' ? input.params : JSON.stringify(input.params || {})
+  stmt.insertImageRevision.run(
+    String(input.assetId || ''),
+    Number(input.revision || 1),
+    String(input.fileId || ''),
+    String(input.prompt || ''),
+    String(input.style || ''),
+    String(input.ratio || ''),
+    String(input.provider || ''),
+    String(input.providerLabel || ''),
+    String(input.model || ''),
+    String(input.modelId || ''),
+    Number(input.seed || 0),
+    String(params || '{}'),
+    String(input.note || ''),
+    String(input.createdBy || ''),
+    Number(input.createdAt || Date.now())
+  )
+  return imageRevisionOf(stmt.listImageRevisions.all(String(input.assetId || ''))[0])
+}
+
+export function listImageRevisions(assetId) {
+  return stmt.listImageRevisions.all(String(assetId || '')).map(imageRevisionOf)
+}
+
+export function imageRevisionCount(assetId) {
+  return Number(stmt.countImageRevisions.get(String(assetId || '')).count || 0)
+}
+
+export function createImageJob(input = {}) {
+  const now = Number(input.createdAt || Date.now())
+  const params = typeof input.params === 'string' ? input.params : JSON.stringify(input.params || {})
+  stmt.insertImageJob.run(
+    String(input.id || ''),
+    String(input.owner || ''),
+    String(input.net || ''),
+    String(input.assetId || ''),
+    String(input.kind || 'generate'),
+    String(input.provider || ''),
+    String(input.modelId || ''),
+    String(input.status || 'running'),
+    String(input.prompt || ''),
+    String(params || '{}'),
+    String(input.error || ''),
+    now,
+    now,
+    input.finishedAt ? Number(input.finishedAt) : null
+  )
+  return String(input.id || '')
+}
+
+export function updateImageJob(id, patch = {}) {
+  stmt.updateImageJob.run(
+    patch.assetId == null ? null : String(patch.assetId),
+    patch.provider == null ? null : String(patch.provider),
+    patch.modelId == null ? null : String(patch.modelId),
+    patch.status == null ? null : String(patch.status),
+    patch.error == null ? null : String(patch.error),
+    Number(patch.updatedAt || Date.now()),
+    patch.finishedAt == null ? null : Number(patch.finishedAt),
+    String(id || '')
+  )
 }
 
 /* ------------------------------- backups -------------------------------- */

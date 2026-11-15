@@ -13,8 +13,10 @@ import { basename, dirname, extname, isAbsolute, join, normalize, relative, sep 
 import { fileURLToPath } from 'node:url'
 import {
   SESSION_TTL_MS, appendAudit, appendApprovalDecision, auditCount, backupNow, cleanupSessions, clearAudit, clearSessions, closeStore, createSession,
+  createImageAsset, createImageJob, createImageRevision, deleteFile, getImageAsset, imageRevisionCount, listImageAssets, listImageRevisions,
   dataDirPath, deleteSession, expirePendingApprovalDecisions, getAccount, getAccountByRole, getAccountByUsername, getFile, getSession, latestApprovalDecisions, latestAudit,
   listAccounts, listFiles, loadState, putFile, readFileBuffer, saveState, touchSession,
+  softDeleteImageAsset, updateImageJob,
   updateAccountSecret, updateApprovalDecision, updateSessionNet, upsertAccount, setAccountPassword, setAccountUsername,
   attachVisualMessage, createVisualArtifact, getVisualArtifact, listVisualArtifacts, listVisualVersions,
   saveVisualArtifact, updateVisualArtifact, restoreVisualVersion,
@@ -108,6 +110,48 @@ function normalizeImagePrompt(raw) {
 }
 function imageGenerationStatus(user, net) {
   return imageModelStatus(user, net)
+}
+
+function imageFileUrl(fileId) {
+  return fileId ? `/api/images/file?id=${encodeURIComponent(fileId)}` : ''
+}
+
+function imageAssetPublic(asset, { withRevisions = false } = {}) {
+  const revisions = withRevisions ? listImageRevisions(asset.id) : []
+  return {
+    id: asset.id,
+    prompt: asset.prompt,
+    style: asset.style,
+    ratio: asset.ratio,
+    provider: asset.provider,
+    providerLabel: asset.providerLabel,
+    model: asset.model,
+    modelId: asset.modelId,
+    seed: asset.seed,
+    fileId: asset.fileId,
+    url: imageFileUrl(asset.fileId),
+    revision: asset.revision,
+    versions: withRevisions ? revisions.length : imageRevisionCount(asset.id),
+    source: asset.source,
+    projectId: asset.projectId,
+    createdAt: asset.createdAt,
+    updatedAt: asset.updatedAt,
+    revisions: withRevisions ? revisions.map((item) => ({
+      revision: item.revision,
+      fileId: item.fileId,
+      url: imageFileUrl(item.fileId),
+      prompt: item.prompt,
+      style: item.style,
+      ratio: item.ratio,
+      provider: item.provider,
+      providerLabel: item.providerLabel,
+      model: item.model,
+      modelId: item.modelId,
+      seed: item.seed,
+      note: item.note,
+      createdAt: item.createdAt,
+    })) : undefined,
+  }
 }
 
 function newVisualId() {
@@ -1848,6 +1892,10 @@ const GUEST_GUARD = {
   'GET /api/projects': 'projects',
   'POST /api/settings': 'home',
   'POST /api/images/generate': 'home',
+  'GET /api/images/models': 'home',
+  'GET /api/images/recent': 'home',
+  'GET /api/images/asset': 'home',
+  'POST /api/images/delete': 'home',
   'GET /api/images/file': 'home',
   'GET /api/agent-presets': 'home',
   'POST /api/agent-presets': 'home',
@@ -7803,6 +7851,16 @@ const api = {
     const styleHint = IMAGE_STYLE_PROMPTS[style] || ''
     const cleanPrompt = normalizeImagePrompt(prompt)
     const fullPrompt = styleHint ? `${cleanPrompt}, ${styleHint}` : cleanPrompt
+    const jobId = newFileId('IJOB')
+    createImageJob({
+      id: jobId,
+      owner: user.name,
+      net,
+      kind: 'generate',
+      modelId,
+      prompt,
+      params: { ratio, style, seed, width, height, fullPrompt },
+    })
     try {
       const image = await generateImage({
         modelId,
@@ -7813,17 +7871,58 @@ const api = {
         seed,
       })
       const ext = image.mime === 'image/png' ? 'png' : image.mime === 'image/webp' ? 'webp' : 'jpg'
-      const id = newFileId('IMG')
+      const assetId = newFileId('IMG')
       const name = `AI-${new Date().toISOString().slice(0, 19).replace(/[T:]/g, '')}-${seed}.${ext}`
       const meta = putFile({
-        id, name, mime: image.mime, buffer: image.buffer, owner: user.name, net,
+        id: assetId, name, mime: image.mime, buffer: image.buffer, owner: user.name, net,
         note: `imagegen:${image.provider}/${image.model};modelId=${image.modelId};ratio=${ratio};style=${style};seed=${seed}`,
       })
-      logAudit(user, 'image.generate', `${id}:${image.modelId}:${ratio}:${seed}`, `allow(${meta.size})`, net)
+      const asset = createImageAsset({
+        id: assetId,
+        owner: user.name,
+        net,
+        prompt,
+        style,
+        ratio,
+        provider: image.provider,
+        providerLabel: image.providerLabel,
+        model: image.model,
+        modelId: image.modelId,
+        seed,
+        fileId: meta.id,
+        revision: 1,
+        source: 'generate',
+      })
+      createImageRevision({
+        assetId,
+        revision: 1,
+        fileId: meta.id,
+        prompt,
+        style,
+        ratio,
+        provider: image.provider,
+        providerLabel: image.providerLabel,
+        model: image.model,
+        modelId: image.modelId,
+        seed,
+        params: { fullPrompt, width, height, requestId: image.requestId || '' },
+        note: '首次生成',
+        createdBy: user.name,
+      })
+      updateImageJob(jobId, {
+        status: 'completed',
+        assetId,
+        provider: image.provider,
+        modelId: image.modelId,
+        finishedAt: Date.now(),
+      })
+      logAudit(user, 'image.generate', `${assetId}:${image.modelId}:${ratio}:${seed}`, `allow(${meta.size})`, net)
       return json(res, 200, {
         ok: true,
         image: {
-          id: meta.id,
+          id: asset.id,
+          assetId,
+          fileId: meta.id,
           name: meta.name,
           mime: meta.mime,
           size: meta.size,
@@ -7838,12 +7937,20 @@ const api = {
           model: image.model,
           modelId: image.modelId,
           requestId: image.requestId || '',
-          url: `/api/images/file?id=${encodeURIComponent(meta.id)}`,
+          revision: 1,
+          versions: 1,
+          jobId,
+          url: imageFileUrl(meta.id),
         },
       })
     } catch (error) {
       const timedOut = error?.name === 'TimeoutError' || error?.name === 'AbortError'
       const message = timedOut ? '图像模型调用超时，请稍后重试' : String(error?.message || error)
+      updateImageJob(jobId, {
+        status: 'failed',
+        error: message,
+        finishedAt: Date.now(),
+      })
       logAudit(user, 'image.generate', `${modelId}:${ratio}:${seed}`, 'deny', net)
       const statusCode = error instanceof ImageProviderError ? error.status : 502
       return json(res, statusCode, {
@@ -7852,6 +7959,51 @@ const api = {
         code: error instanceof ImageProviderError ? error.code : 'IMAGE_PROVIDER_ERROR',
       })
     }
+  },
+  'GET /api/images/recent': (req, res, url) => {
+    const user = roleOf(req)
+    const net = netOf(req)
+    const limit = Math.max(1, Math.min(Number(url.searchParams.get('limit')) || 20, 50))
+    const assets = listImageAssets({ owner: user.name, limit })
+      .filter((asset) => {
+        const meta = getFile(asset.fileId)
+        return Boolean(meta && meta.deletedAt == null && fileVisibleToUser(user, net, asset.fileId))
+      })
+      .map((asset) => imageAssetPublic(asset))
+    return json(res, 200, { ok: true, assets })
+  },
+  'GET /api/images/asset': (req, res, url) => {
+    const user = roleOf(req)
+    const net = netOf(req)
+    const id = String(url.searchParams.get('id') || '').trim()
+    const asset = getImageAsset(id)
+    if (!asset || asset.deletedAt != null || asset.owner !== user.name) {
+      return json(res, 404, { error: '图像资产不存在或无权访问', code: 'IMAGE_ASSET_NOT_FOUND' })
+    }
+    const meta = getFile(asset.fileId)
+    if (!meta || meta.deletedAt != null || !fileVisibleToUser(user, net, asset.fileId)) {
+      return json(res, 404, { error: '图像文件不存在或已失效', code: 'IMAGE_FILE_NOT_FOUND' })
+    }
+    return json(res, 200, { ok: true, asset: imageAssetPublic(asset, { withRevisions: true }) })
+  },
+  'POST /api/images/delete': (req, res) => {
+    const user = roleOf(req)
+    const net = netOf(req)
+    const body = JSON.parse(req.__body || '{}')
+    const id = String(body.id || '').trim()
+    const asset = getImageAsset(id)
+    if (!asset || asset.deletedAt != null || asset.owner !== user.name) {
+      return json(res, 404, { error: '图像资产不存在或无权删除', code: 'IMAGE_ASSET_NOT_FOUND' })
+    }
+    const revisions = listImageRevisions(asset.id)
+    const deleted = softDeleteImageAsset(asset.id, user.name)
+    if (!deleted) return json(res, 404, { error: '图像资产不存在或已删除', code: 'IMAGE_ASSET_NOT_FOUND' })
+    for (const revision of revisions) {
+      const meta = getFile(revision.fileId)
+      if (meta && meta.owner === user.name) deleteFile(revision.fileId, '图像资产删除')
+    }
+    logAudit(user, 'image.delete', `${asset.id}:${asset.modelId}`, 'allow', net)
+    return json(res, 200, { ok: true, id: asset.id })
   },
   'GET /api/images/file': (req, res, url) => {
     const user = roleOf(req)
@@ -7865,7 +8017,7 @@ const api = {
       'content-type': meta.mime || 'image/jpeg',
       'content-length': buffer.length,
       'content-disposition': `inline; filename="${encodeURIComponent(meta.name || 'image.jpg')}"`,
-      'cache-control': 'private, max-age=3600',
+      'cache-control': 'private, no-cache, must-revalidate',
     })
     res.end(buffer)
   },

@@ -122,7 +122,7 @@ const state = {
   ],
   cbW: 440,
   cbUserW: 0,
-  imagegen: { prompt: '', ratio: '1:1', count: 1, style: '写实', shots: [], busy: false, modelId: '' },
+  imagegen: { prompt: '', ratio: '1:1', count: 1, style: '写实', shots: [], busy: false, modelId: '', assetsLoaded: false, assetsLoading: false },
 }
 
 const layout = new AppLayout(document.getElementById('app'))
@@ -7216,6 +7216,174 @@ function showImageGate() {
   foot.querySelector('[data-later]').addEventListener('click', () => mask.remove())
 }
 
+function imageShotFromAsset(asset) {
+  const createdAt = Number(asset.createdAt || asset.updatedAt || Date.now())
+  return {
+    id: asset.id,
+    prompt: asset.prompt || '',
+    style: asset.style || '写实',
+    ratio: asset.ratio || '1:1',
+    url: asset.url || (asset.fileId ? `/api/images/file?id=${encodeURIComponent(asset.fileId)}` : ''),
+    name: asset.name || '',
+    mime: asset.mime || '',
+    provider: asset.provider || '',
+    providerLabel: asset.providerLabel || '',
+    model: asset.model || '',
+    modelId: asset.modelId || '',
+    seed: Number(asset.seed || 0),
+    revision: Number(asset.revision || 1),
+    versions: Number(asset.versions || 1),
+    fileId: asset.fileId || '',
+    createdAt,
+    updatedAt: Number(asset.updatedAt || createdAt),
+    ts: new Date(createdAt).toLocaleString('zh-CN', { hour12: false }).slice(0, 16),
+  }
+}
+
+async function loadRecentImages({ force = false } = {}) {
+  const g = state.imagegen
+  if (g.assetsLoading) return
+  if (g.assetsLoaded && !force) return
+  g.assetsLoading = true
+  try {
+    const res = await api('/api/images/recent?limit=30')
+    if (!res.ok) throw new Error(res.body?.error || `读取最近图像失败（HTTP ${res.status}）`)
+    g.shots = (Array.isArray(res.body?.assets) ? res.body.assets : []).map(imageShotFromAsset)
+    g.assetsLoaded = true
+  } catch (err) {
+    g.shots = []
+    g.assetsLoaded = true
+    toast(err.message || '读取最近图像失败', true)
+  } finally {
+    g.assetsLoading = false
+    if (state.view === 'imagegen') renderView()
+  }
+}
+
+function closeImageMenu() {
+  document.querySelectorAll('.img-menu').forEach((menu) => menu.remove())
+}
+
+function downloadImageAsset(shot) {
+  if (!shot?.url) return toast('这张图片没有可下载的文件', true)
+  const a = document.createElement('a')
+  a.href = shot.url
+  a.download = shot.name || `jg-image-${shot.id}.png`
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+}
+
+async function copyImagePrompt(shot) {
+  const text = String(shot?.prompt || '')
+  if (!text) return toast('这张图片没有记录提示词', true)
+  try {
+    await navigator.clipboard.writeText(text)
+    toast('已复制提示词')
+  } catch {
+    const ta = document.createElement('textarea')
+    ta.value = text
+    ta.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0'
+    document.body.appendChild(ta)
+    ta.select()
+    try { document.execCommand('copy'); toast('已复制提示词') } catch { toast('复制失败，请手动选择提示词', true) }
+    ta.remove()
+  }
+}
+
+async function openImageVersions(shot) {
+  const res = await api(`/api/images/asset?id=${encodeURIComponent(shot.id)}`)
+  if (!res.ok) return toast(res.body?.error || '读取版本历史失败', true)
+  const asset = res.body?.asset
+  const revisions = Array.isArray(asset?.revisions) ? asset.revisions : []
+  if (!revisions.length) return toast('这张图片还没有版本记录', true)
+  const mask = openModal('版本历史', `
+    <div class="img-ver-head">${esc(asset.prompt)}</div>
+    <div class="img-ver-list">
+      ${revisions.map((rev) => `
+        <div class="img-ver-row${rev.revision === asset.revision ? ' on' : ''}">
+          <div class="img-ver-thumb"><img src="${rev.url}" alt="v${rev.revision}"></div>
+          <div class="img-ver-main">
+            <div class="img-ver-title">v${rev.revision}${rev.revision === asset.revision ? ' · 当前版本' : ''}</div>
+            <div class="img-ver-meta">${esc(rev.style || '')} · ${esc(rev.ratio || '')} · ${esc(rev.providerLabel || rev.provider || '图像模型')} ${esc(rev.model || '')}</div>
+            <div class="img-ver-prompt">${esc(rev.prompt || '')}</div>
+          </div>
+          <button class="btn sm" data-ver-dl="${rev.revision}">下载</button>
+        </div>`).join('')}
+    </div>
+    <div class="form-note">当前只读展示已落库的版本；版本回退、局部编辑将在后续阶段接入真实模型能力后开放。</div>`, { wide: true })
+  const current = revisions.find((rev) => rev.revision === asset.revision) || revisions[0]
+  mask.querySelectorAll('[data-ver-dl]').forEach((btn) => btn.addEventListener('click', () => {
+    const rev = revisions.find((item) => item.revision === Number(btn.dataset.verDl))
+    if (rev) downloadImageAsset({ id: `v${rev.revision}`, url: rev.url, name: `jg-image-${shot.id}-v${rev.revision}.png` })
+  }))
+  if (current?.url) mask.querySelector('.img-ver-thumb img')?.setAttribute('alt', `v${current.revision}`)
+}
+
+function deleteImageAsset(shot) {
+  const mask = openModal('删除图像', `
+    <div class="confirm-text">确定删除这张图片？删除后不再出现在“最近生成”中，当前版本文件进入服务端回收状态。</div>
+  `)
+  const foot = document.createElement('div')
+  foot.style.cssText = 'display:flex;gap:8px;margin-top:14px;justify-content:flex-end'
+  foot.innerHTML = '<button class="btn" data-igcancel>返回</button><button class="btn primary" id="igDel">删除</button>'
+  mask.querySelector('.jg-modal-body').appendChild(foot)
+  foot.querySelector('[data-igcancel]').addEventListener('click', () => mask.remove())
+  foot.querySelector('#igDel').addEventListener('click', async (e) => {
+    const btn = e.currentTarget
+    btn.disabled = true
+    const res = await api('/api/images/delete', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id: shot.id }),
+    })
+    if (!res.ok) {
+      btn.disabled = false
+      return toast(res.body?.error || '删除失败', true)
+    }
+    state.imagegen.shots = state.imagegen.shots.filter((item) => item.id !== shot.id)
+    mask.remove()
+    renderView()
+    toast('图像已删除')
+  })
+}
+
+function openImageMenu(anchor, shot) {
+  closeImageMenu()
+  const menu = document.createElement('div')
+  menu.className = 'img-menu'
+  menu.innerHTML = `
+    <button type="button" data-imenu="download">下载原图</button>
+    <button type="button" data-imenu="copy">复制提示词</button>
+    <button type="button" data-imenu="versions">版本历史</button>
+    <button type="button" data-imenu="delete" class="danger">删除</button>`
+  document.body.appendChild(menu)
+  const rect = anchor.getBoundingClientRect()
+  const width = menu.offsetWidth || 148
+  const height = menu.offsetHeight || 156
+  menu.style.left = `${Math.max(8, Math.min(window.innerWidth - width - 8, rect.right - width))}px`
+  menu.style.top = `${Math.max(8, Math.min(window.innerHeight - height - 8, rect.bottom + 4))}px`
+  const close = (e) => {
+    if (menu.contains(e.target)) return
+    menu.remove()
+    document.removeEventListener('click', close, true)
+    document.removeEventListener('scroll', close, true)
+  }
+  setTimeout(() => {
+    document.addEventListener('click', close, true)
+    document.addEventListener('scroll', close, true)
+  }, 0)
+  menu.querySelectorAll('[data-imenu]').forEach((btn) => btn.addEventListener('click', (e) => {
+    e.stopPropagation()
+    menu.remove()
+    const action = btn.dataset.imenu
+    if (action === 'download') downloadImageAsset(shot)
+    else if (action === 'copy') copyImagePrompt(shot)
+    else if (action === 'versions') openImageVersions(shot)
+    else if (action === 'delete') deleteImageAsset(shot)
+  }))
+}
+
 /* 生图模块仅展示真实图像服务返回的结果，不内置演示画面、示例卡片或假数据。 */
 async function renderImage(el) {
   const g = state.imagegen
@@ -7236,15 +7404,16 @@ async function renderImage(el) {
     return
   }
 
-  const cards = g.shots.map((s) => ({
-    kind: 'shot',
-    id: s.id,
-    label: '最近生成',
-    prompt: s.prompt,
-    style: s.style,
-    url: s.url,
-    meta: `${s.style} · ${s.ratio}`,
-  }))
+  if (!g.assetsLoaded) {
+    if (!g.assetsLoading) loadRecentImages()
+    el.innerHTML = `
+      <div class="img-head"><div><div class="img-title">图像</div>
+        <div class="img-sub">正在读取已落库的最近生成…</div></div></div>
+      <div class="img-gallery"><div class="img-loading">正在读取最近生成…</div></div>`
+    return
+  }
+
+  const cards = g.shots
   const modelOptions = allModels.map((model) => `<option value="${esc(model.id)}" ${model.id === g.modelId ? 'selected' : ''} ${model.configured ? '' : 'disabled'}>${esc(model.label)}${model.configured ? '' : '（未配置）'}</option>`).join('')
 
   el.innerHTML = `
@@ -7254,11 +7423,12 @@ async function renderImage(el) {
     </div>
     <div class="img-gallery">
       ${cards.length ? cards.map((c) => `
-        <button class="img-card" data-igid="${esc(c.id)}" title="${esc(c.label)} · ${esc(c.prompt)}">
-          <img src="${c.url}" alt="${esc(c.prompt)}" loading="lazy">
-          <span class="img-card-label">${esc(c.label)}</span>
-          <span class="img-card-meta">${esc(c.meta)}</span>
-        </button>`).join('') : `
+        <div class="img-card" data-igid="${esc(c.id)}" role="button" tabindex="0" title="${esc(c.prompt)}">
+          <img src="${c.url}" alt="${esc(c.prompt)}">
+          <span class="img-card-label">最近生成</span>
+          <span class="img-card-meta">${esc(c.style)} · ${esc(c.ratio)}${Number(c.versions || 1) > 1 ? ` · ${esc(String(c.versions))} 版` : ''}</span>
+          <button class="img-more" type="button" data-igmore="${esc(c.id)}" aria-label="图片操作" title="图片操作">${icon('dots')}</button>
+        </div>`).join('') : `
         <div class="img-empty">
           <div class="img-empty-title">还没有生成图像</div>
           <div class="img-empty-text">在下方描述画面，真实生图结果会显示在这里；不会展示示例图片或演示数据。</div>
@@ -7282,42 +7452,60 @@ async function renderImage(el) {
     renderView()
   })
 
-  el.querySelectorAll('.img-card').forEach((b) => b.addEventListener('click', () => {
-    const s = g.shots.find((x) => x.id === b.dataset.igid)
-    if (!s) return
-    openModal('生成结果', `
-      <div class="ig-preview"><img src="${s.url}" alt=""></div>
-      <div class="field" style="margin-top:10px"><div class="field-label">提示词</div><div class="field-value">${esc(s.prompt)}</div></div>
-      <div class="field"><div class="field-label">参数</div><div class="field-value">${esc(s.style)} · ${esc(s.ratio)} · ${esc(s.providerLabel || s.provider || selectedModel.providerLabel || '图像模型')} ${esc(s.model || selectedModel.model || '')}</div></div>
-      <div style="display:flex;gap:8px;margin-top:12px"><button class="btn" data-dlg>下载原图</button><button class="btn primary" data-useimg>用于会话</button></div>
-      <div class="form-note">由真实图像生成服务返回，图片已落盘到服务端文件存储；提示词、比例、服务商和种子随结果记录，便于复核。</div>`, { wide: true })
-    const mask = document.querySelector('.jg-modal-mask')
-    mask.querySelector('[data-dlg]')?.addEventListener('click', () => {
-      const a = document.createElement('a')
-      a.href = s.url; a.download = s.name || `jg-image-${s.id}.png`; a.click()
+  el.querySelectorAll('.img-card').forEach((b) => {
+    const openPreview = () => {
+      const s = g.shots.find((x) => x.id === b.dataset.igid)
+      if (!s) return
+      const mask = openModal('生成结果', `
+        <div class="ig-preview"><img src="${s.url}" alt=""></div>
+        <div class="field" style="margin-top:10px"><div class="field-label">提示词</div><div class="field-value">${esc(s.prompt)}</div></div>
+        <div class="field"><div class="field-label">参数</div><div class="field-value">${esc(s.style)} · ${esc(s.ratio)} · ${esc(s.providerLabel || s.provider || selectedModel.providerLabel || '图像模型')} ${esc(s.model || selectedModel.model || '')}</div></div>
+        <div class="field"><div class="field-label">版本</div><div class="field-value">${Number(s.versions || 1)} 个版本${Number(s.revision || 1) > 1 ? ` · 当前 v${Number(s.revision)}` : ''}</div></div>
+        <div style="display:flex;gap:8px;margin-top:12px"><button class="btn" data-dlg>下载原图</button><button class="btn" data-versions>版本历史</button><button class="btn primary" data-useimg>用于会话</button></div>
+        <div class="form-note">由真实图像生成服务返回，图片已落盘到服务端文件存储；提示词、比例、服务商和种子随结果记录，便于复核。</div>`, { wide: true })
+      mask.querySelector('[data-dlg]')?.addEventListener('click', () => downloadImageAsset(s))
+      mask.querySelector('[data-versions]')?.addEventListener('click', () => { mask.remove(); openImageVersions(s) })
+      mask.querySelector('[data-useimg]')?.addEventListener('click', async (e) => {
+        const btn = e.currentTarget
+        btn.disabled = true
+        try {
+          const blob = await (await fetch(s.url)).blob()
+          const file = new File([blob], s.name || `jg-image-${s.id}.png`, { type: blob.type || s.mime || 'image/png' })
+          const uploaded = await uploadBinaryFile(file, 'chat')
+          if (!uploaded.ok) { toast(uploaded.body?.error || '图像上传失败', true); return }
+          addComposerRef({ kind: 'file', id: uploaded.file.id, label: file.name })
+          mask.remove()
+          state.view = 'chat'
+          state.conversation = null
+          state.draft = `我生成了一张图像（${s.style}${s.ratio}，提示词：${s.prompt}），请基于它整理一段汇报说明。`
+          render()
+          toast('图像已加入本轮附件')
+        } catch (err) {
+          toast(err.message || '图像处理失败', true)
+        } finally {
+          btn.disabled = false
+        }
+      })
+    }
+    b.addEventListener('click', (e) => {
+      if (e.target.closest('.img-more')) return
+      openPreview()
     })
-    mask.querySelector('[data-useimg]')?.addEventListener('click', async (e) => {
-      const btn = e.currentTarget
-      btn.disabled = true
-      try {
-        const blob = await (await fetch(s.url)).blob()
-        const file = new File([blob], s.name || `jg-image-${s.id}.png`, { type: blob.type || s.mime || 'image/png' })
-        const uploaded = await uploadBinaryFile(file, 'chat')
-        if (!uploaded.ok) { toast(uploaded.body?.error || '图像上传失败', true); return }
-        addComposerRef({ kind: 'file', id: uploaded.file.id, label: file.name })
-        mask.remove()
-        state.view = 'chat'
-        state.conversation = null
-        state.draft = `我生成了一张图像（${s.style}${s.ratio}，提示词：${s.prompt}），请基于它整理一段汇报说明。`
-        render()
-        toast('图像已加入本轮附件')
-      } catch (err) {
-        toast(err.message || '图像处理失败', true)
-      } finally {
-        btn.disabled = false
+    b.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        if (e.target.closest('.img-more')) return
+        e.preventDefault()
+        openPreview()
       }
     })
-  }))
+    const more = b.querySelector('.img-more')
+    more?.addEventListener('click', (e) => {
+      e.preventDefault()
+      e.stopPropagation()
+      const s = g.shots.find((x) => x.id === more.dataset.igmore)
+      if (s) openImageMenu(more, s)
+    })
+  })
 
   el.querySelector('#igGen').addEventListener('click', async () => {
     if (!g.prompt.trim()) { toast('请先描述要生成的图像', true); input.focus(); return }
@@ -7345,22 +7533,9 @@ async function renderImage(el) {
           throw new Error(res.body?.error || `生图服务返回 HTTP ${res.status}`)
         }
         const image = res.body.image
-        g2.shots.unshift({
-          id: image.id,
-          prompt: image.prompt || g2.prompt.trim(),
-          style: image.style || g2.style,
-          ratio: image.ratio || g2.ratio,
-          url: image.url,
-          name: image.name,
-          mime: image.mime,
-          provider: image.provider,
-          providerLabel: image.providerLabel,
-          model: image.model,
-          modelId: image.modelId,
-          seed: image.seed,
-          ts: new Date().toLocaleTimeString('zh-CN', { hour12: false }).slice(0, 5),
-        })
-        g2.shots = g2.shots.slice(0, 12)
+        g2.shots.unshift(imageShotFromAsset(image))
+        g2.assetsLoaded = true
+        g2.shots = g2.shots.slice(0, 30)
         made += 1
       }
       g2.busy = false
