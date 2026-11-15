@@ -15425,7 +15425,7 @@ async function renderAdmin(el) {
         return `<div class="mc-trow"><span class="mc-first">${esc(x.name)} <span class="tag" style="font-size:10px">${type}</span> <span class="mc-dim mono">v${esc(x.version)}</span></span><span>${esc(x.author)} · ${esc(x.unit)}</span><span><span class="mc-tag ${tone}">${bad ? '存在不通过项' : warn ? '有权限待复核' : '全部通过'}</span></span><span class="mc-acts"><button class="btn sm" data-review="reject" data-subid="${x.id}">退回</button><button class="btn sm primary" data-review="approve" data-subid="${x.id}">通过上架</button></span></div>`
       }).join('') || `<div class="mc-row">${emptyText}</div>`
       const wrap = document.createElement('div')
-      wrap.className = 'mc-block'
+      wrap.className = 'mc-block mc-span-2'
       wrap.innerHTML = `<div class="mc-block-head"><b>插件 / 技能 / 图像模板审核</b><span class="spacer"></span><span class="mc-count">${pending.length + pendingTemplates.length} 项待处理</span></div>
         <div style="display:flex;align-items:center;gap:8px;padding:8px 10px 4px"><b style="font-size:12px">插件审核</b><span class="mc-count">${pendingPlugins.length} 项待处理</span></div>
         <div class="mc-table" style="--mc-cols:1.4fr 1fr 1.2fr 1fr">
