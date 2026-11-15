@@ -208,7 +208,7 @@ const paths = {
   alert: '<path d="M12 4l9 16H3z"/><path d="M12 9v5M12 17h.01"/>',
 }
 
-const NET_LABEL = { inet: '互联网', gov: '政务网', secret: '涉密内网' }
+const NET_LABEL = { inet: '互联网', gov: '政务网' }
 
 const icon = (name) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${paths[name] || paths.doc}</svg>`
 
@@ -230,7 +230,7 @@ const securityMap = {
   secret: { label: '涉密', cls: 'secret' },
 }
 
-const NET_NAME = { inet: '互联网', gov: '政务网', secret: '涉密内网' }
+const NET_NAME = { inet: '互联网', gov: '政务网' }
 
 const statusMap = {
   authorized: { label: '已登记', cls: 'ok' },
@@ -2513,7 +2513,7 @@ async function openSearchPalette(initial = '') {
     appearance: '主题 深色 浅色 跟随系统 密度 字号 侧栏 品牌色 外观 个性化',
     notifications: '通知 任务 审批 授权 涉密 维护 渠道 免打扰 声音 角标',
     profile: '姓名 编码 岗位 任职 认证 设备 授权 头像 个人资料',
-    network: '网络 政务网 互联网 涉密内网 令牌 凭证 诊断 代理 证书 网络与凭证',
+    network: '网络 政务网 互联网 令牌 凭证 诊断 代理 证书 网络与凭证',
     models: '模型 密钥 外发 个人 Key 默认模型 推理 网关 模型与密钥',
     usage: 'token 用量 配额 账单 超额 模型 统计 用量与配额',
     data: '保留 导出 缓存 归档 导入 数据管理 清理 存储',
@@ -2541,7 +2541,7 @@ async function openSearchPalette(initial = '') {
   const settingItemSeeds = [
     { tab: 'general', group: '权限', label: '默认工作区文件读写', desc: '允许在工作区内读取与整理文件；访问工作区外目录需单次授权', kw: '文件读写 工作区外 授权 读写权限' },
     { tab: 'general', group: '权限', label: '工具自动执行', desc: '仅低风险只读工具可自动执行；写操作与高危调用始终二次确认', kw: '自动执行 只读工具 高危 二次确认' },
-    { tab: 'general', group: '权限', label: '互联网访问', desc: '涉密内网环境不可开启；外发内容按数据级别策略控制', kw: '联网 外发 涉密 数据级别' },
+    { tab: 'general', group: '权限', label: '互联网访问', desc: '政务网与互联网按数据级别策略控制外发', kw: '联网 外发 数据级别' },
     { tab: 'general', group: '常规', label: '默认工作区', desc: '会话与任务的默认落盘位置，仍受数据中心授权约束', kw: '工作区 落盘 目录 路径 存储' },
     { tab: 'general', group: '常规', label: '默认模型', desc: '逻辑模型标识稳定，展示名与版本由平台统一维护', kw: '模型 默认 云模型 路由' },
     { tab: 'general', group: '常规', label: '界面语言', desc: '界面文案语言，不改变数据内容的语言', kw: '语言 中文 自动检测' },
@@ -2567,19 +2567,18 @@ async function openSearchPalette(initial = '') {
     { tab: 'profile', group: '身份', label: '岗位', desc: '一人多岗时以主岗展示，兼任关系在授权服务维护', kw: '岗位 主岗 兼任 职责' },
     { tab: 'profile', group: '安全', label: '登录密码', desc: '账号密码登录与首次登录改密', kw: '密码 修改 登录 password' },
     { tab: 'profile', group: '安全', label: '二次认证', desc: '登录与高危操作需二次认证，认证记录进审计', kw: '二次认证 MFA 高危 审计 重新认证' },
-    { tab: 'profile', group: '安全', label: '当前设备', desc: 'Windows 客户端版本与本机内网地址段', kw: '设备 终端 客户端 登录设备' },
+    { tab: 'profile', group: '安全', label: '当前设备', desc: 'Windows 客户端版本与受信设备记录', kw: '设备 终端 客户端 登录设备' },
     { tab: 'network', group: '网络', label: '当前网络', desc: '决定可用模型、数据源与工具集合', kw: '当前网络 安全域 模型 数据源' },
-    { tab: 'network', group: '网络', label: '涉密内网', desc: '已连接，本地推理与涉密数据源可用', kw: '涉密 内网 本地推理 连接' },
-    { tab: 'network', group: '网络', label: '政务网', desc: '独立实例，未在本机接入', kw: '政务网 实例 接入' },
-    { tab: 'network', group: '网络', label: '互联网', desc: '隔离，未经批准不得跨网访问', kw: '互联网 隔离 跨网 外网' },
+    { tab: 'network', group: '网络', label: '政务网', desc: '与互联网同源模型网关，数据面与审计独立', kw: '政务网 实例 接入' },
+    { tab: 'network', group: '网络', label: '互联网', desc: '默认实例；跨网不共享会话与数据', kw: '互联网 跨网 外网' },
     { tab: 'network', group: '网络', label: '网络诊断', desc: '检查模型连通性、数据中心接口与证书有效期', kw: '诊断 连通性 证书 接口 检测' },
     { tab: 'network', group: '凭证', label: '政务模型 Token', desc: '由服务端持有，客户端不落盘、不展示', kw: 'token 令牌 政务模型 服务端' },
     { tab: 'network', group: '凭证', label: '操作系统凭证库', desc: '个人密钥存入系统受保护存储，不以明文出现在配置与日志', kw: '凭证库 keychain 密钥 明文' },
     { tab: 'network', group: '凭证', label: '会话有效期', desc: '超过时限需重新认证，长任务由服务端续跑', kw: '会话 有效期 超时 重新认证' },
-    { tab: 'models', group: '可用模型', label: '企业统一模型', desc: '逻辑 ID jg-enterprise；展示名与版本由平台维护', kw: '企业模型 统一模型 jg-enterprise 可用' },
-    { tab: 'models', group: '可用模型', label: '内网推理模型', desc: '本地推理模型，量化格式待实测确认', kw: '内网 推理 本地 量化' },
-    { tab: 'models', group: '可用模型', label: '政务模型', desc: '九江统一政务模型；Token 服务端持有，按配额计量', kw: '政务 模型 配额 九江' },
-    { tab: 'models', group: '个人密钥', label: '个人 API Key', desc: '仅互联网环境使用；涉密内容禁止经个人密钥外发', kw: 'API Key 个人密钥 key 外发' },
+    { tab: 'models', group: '共享模型', label: 'DeepSeek', desc: '首页默认对话模型；由管理中心统一模型网关调用', kw: 'DeepSeek 首页 默认 模型 网关' },
+    { tab: 'models', group: '共享模型', label: 'Qwen-Image', desc: '图像生成模型之一；图像页在 Qwen 与 Seedream 中二选一', kw: 'Qwen 图像 生成 模型' },
+    { tab: 'models', group: '共享模型', label: 'Seedream', desc: '图像生成模型之一；图像页在 Qwen 与 Seedream 中二选一', kw: 'Seedream 图像 生成 模型' },
+    { tab: 'models', group: '个人密钥', label: '个人 API Key', desc: '仅用于本机调试，不属于三个共享模型', kw: 'API Key 个人密钥 key 调试' },
     { tab: 'models', group: '个人密钥', label: '数据外发策略', desc: '决定个人模型可接触的数据级别', kw: '外发 数据级别 涉密 敏感 审批' },
     { tab: 'usage', group: '真实计量', label: '累计 tokens', desc: '来自每轮运行时返回的 usage；没有 usage 的轮次不计入', kw: 'token 累计 用量 统计' },
     { tab: 'usage', group: '真实计量', label: '输入 / 输出', desc: '输入 = 上下文与提示词；输出 = 模型生成', kw: '输入 输出 上下文 提示词 生成' },
@@ -2632,10 +2631,10 @@ async function openSearchPalette(initial = '') {
     { tab: 'mcp', group: '服务状态', label: '能力', desc: '工具列表、资源列表、资源模板与资源读取均已声明', kw: '能力 tools resources 模板 读取' },
     { tab: 'mcp', group: '服务状态', label: '订阅', desc: '当前服务未声明资源变更订阅，页面按手动刷新读取', kw: '订阅 资源变更 刷新' },
     { tab: 'mcp', group: '资源目录', label: '资源检索', desc: '按名称、说明、类型或 URI 过滤当前身份可见的资源', kw: '资源检索 名称 说明 类型 URI' },
-    { tab: 'about', group: '版本', label: '客户端版本', desc: 'Windows 客户端，随内网离线包分发', kw: '客户端 版本 windows 离线包' },
+    { tab: 'about', group: '版本', label: '客户端版本', desc: 'Windows 客户端，随安装包分发', kw: '客户端 版本 windows 安装包' },
     { tab: 'about', group: '版本', label: '运行时基线', desc: 'DeepSeek Harness，锁定版本并按季度吸收上游补丁', kw: '运行时 基线 harness 补丁' },
-    { tab: 'about', group: '版本', label: '更新通道', desc: '内网离线包，更新前完成回归与签名校验', kw: '更新 通道 回归 签名 校验' },
-    { tab: 'about', group: '帮助', label: '帮助与反馈', desc: '内网文档站与工单由本域运维受理', kw: '帮助 反馈 文档 工单 运维' },
+    { tab: 'about', group: '版本', label: '更新通道', desc: '安装包更新，发布前完成回归与签名校验', kw: '更新 通道 回归 签名 校验' },
+    { tab: 'about', group: '帮助', label: '帮助与反馈', desc: '文档站与工单由本域运维受理', kw: '帮助 反馈 文档 工单 运维' },
     { tab: 'about', group: '帮助', label: '许可与合规', desc: '使用范围受集团信息安全制度与数据分级约束', kw: '许可 合规 制度 数据分级' },
   ]
   const settingItems = settingItemSeeds.map((x, i) => ({
@@ -5614,7 +5613,7 @@ async function openResource(id) {
         <span class="tag ${st.cls}">${st.label}</span>
         <span class="tag ${sec.cls}">${sec.label}</span>
         <span class="tag">${esc(r.owner)}</span>
-        <span class="tag">${esc((r.nets || []).map((n) => (n === 'inet' ? '互联网' : n === 'gov' ? '政务网' : '涉密内网')).join(' / '))}</span>
+        <span class="tag">${esc((r.nets || []).map((n) => (n === 'inet' ? '互联网' : n === 'gov' ? '政务网' : '内部')).join(' / '))}</span>
       </div>
       <div class="field"><div class="field-label">资源描述</div><div class="field-value" style="color:var(--text-2)">${esc(r.desc)}</div></div>
       ${regWorkflowHtml(r)}
@@ -9997,7 +9996,7 @@ async function switchNetwork() {
   state.cloudTab = 'new'
   if (state.cloudOpen) ensureCloud().then(renderCloudPanel)
   render()
-  toast(`已切换演示网络：${state.boot.network.label}（仅演示环境差异，真实三网不互通）`)
+  toast(`已切换演示网络：${state.boot.network.label}（互联网与政务网为两套独立环境，跨网不共享会话与数据）`)
 }
 
 /* ---- 资源登记 ---- */
@@ -10023,7 +10022,7 @@ async function openRegisterForm() {
   const formats = ['PDF', 'DOCX', 'XLSX', 'PPTX', 'SHP', 'GDB', 'DWG', 'GeoTIFF', '3D Tiles', 'CSV', '其他']
   const mapCategories = [['satellite', '01 卫星影像'], ['current', '02 现状数据'], ['planning', '03 规划数据'], ['construction', '04 建设工程数据'], ['management', '05 管理数据'], ['socioeconomic', '06 社会经济数据'], ['threeD', '07 三维数据']]
   const spatialTypes = [['GIS_VECTOR', 'GIS 矢量'], ['GIS_RASTER', 'GIS 栅格'], ['3D_MODEL', '三维模型'], ['POINT_CLOUD', '点云'], ['BIM', 'BIM 模型']]
-  const zones = [['intranet', '内网'], ['gov', '政务外网'], ['inet', '互联网']]
+  const zones = [['gov', '政务网'], ['inet', '互联网']]
   let kind = 'pure'
   let files = []
   let projects = state.projects || []
@@ -10142,13 +10141,13 @@ async function openRegisterForm() {
         </div>
         <div class="form-label">允许访问环境（申请）</div>
         <div class="check-row">${zones.map(([v, l]) => `<label class="check"><input type="checkbox" class="rf-zone" value="${v}" ${v === (state.boot.network?.id || 'inet') ? 'checked' : ''}>${esc(l)}</label>`).join('')}</div>
-        <div class="form-note">网络可见范围按层级展开：勾选互联网会自动包含政务外网与内网；勾选政务外网会自动包含内网。内网目录的数据最全。</div>
+        <div class="form-note">网络可见范围按层级展开：勾选互联网会自动包含政务网；勾选政务网只在本网可见。当前产品只提供互联网与政务网两套环境。</div>
         <div id="rfOrgsWrap" hidden>
           <div class="form-label">授权部门或角色</div>
           <div class="check-row">${orgOptions.map(([v, l]) => `<label class="check"><input type="checkbox" class="rf-org" value="${v}">${esc(l)}</label>`).join('')}</div>
         </div>
         <div class="form-note">登记成功只表示资源进入统一目录，不等于已发布或开放访问；发布状态独立管理（未发布 / 待审核 / 已发布 / 已停用）。</div>
-        <div class="form-note">员工申报、系统校验、有权人员批准。即使勾选互联网，也不等于可把内网数据直接发布到互联网；跨安全域须走独立安全审批与交换流程。</div>
+        <div class="form-note">员工申报、系统校验、有权人员批准。即使勾选互联网，也不等于可把政务网数据直接发布到互联网；跨网须走独立安全审批与交换流程。</div>
         <div class="reg-sub-head">3.1 登记流程</div>
         <div class="reg-flow">
           <div class="reg-flow-step on"><i>1</i><span>部门负责人同意登记</span></div>
@@ -10264,16 +10263,7 @@ async function openRegisterForm() {
     const boxes = [...mask.querySelectorAll('.rf-zone')]
     if (!boxes.length) return
     const by = Object.fromEntries(boxes.map((b) => [b.value, b]))
-    if (by.inet?.checked) {
-      if (by.gov) by.gov.checked = true
-      if (by.intranet) by.intranet.checked = true
-    } else if (by.gov?.checked && by.intranet) {
-      by.intranet.checked = true
-    }
-    if (by.intranet && !by.intranet.checked) {
-      if (by.gov) by.gov.checked = false
-      if (by.inet) by.inet.checked = false
-    }
+    if (by.inet?.checked && by.gov) by.gov.checked = true
     if (by.gov && !by.gov.checked && by.inet) by.inet.checked = false
   }
 
@@ -10352,8 +10342,8 @@ async function openRegisterForm() {
       zone.innerHTML = `<div class="reg-sub-head">2.2 数据服务专属</div>
         <div class="form-grid">
           <label>服务提供方（默认当前部门）<input id="rfServiceProvider" value="${esc(user.unit || '')}" placeholder="例如：集团信息中心"></label>
-          <label>网络域（按地址推断，可修改）<select id="rfServiceZone"><option>内网</option><option>政务外网</option><option>互联网</option></select></label>
-          <label>鉴权方式<select id="rfAuthMode"><option>统一网关票据</option><option>OAuth2 客户端凭证</option><option>内网 IP 白名单</option><option>无鉴权（仅内网）</option></select></label>
+          <label>网络域（按地址推断，可修改）<select id="rfServiceZone"><option>政务网</option><option>互联网</option></select></label>
+          <label>鉴权方式<select id="rfAuthMode"><option>统一网关票据</option><option>OAuth2 客户端凭证</option><option>服务端地址白名单</option></select></label>
         </div>
         <div class="form-note">服务通过连接校验后完成登记并进入服务目录；开放调用前另行执行发布审核。调用量、延迟与鉴权状态由服务网关回写。</div>`
       const zoneSel = q('rfServiceZone')
@@ -10418,8 +10408,8 @@ async function openRegisterForm() {
   function inferServiceZone(url) {
     try {
       const host = new URL(url).hostname.toLowerCase()
-      if (/^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(host) || host.endsWith('.local')) return '内网'
-      if (host.endsWith('.gov.cn') || host.endsWith('.gov')) return '政务外网'
+      if (/^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(host) || host.endsWith('.local')) return '政务网'
+      if (host.endsWith('.gov.cn') || host.endsWith('.gov')) return '政务网'
       return '互联网'
     } catch (e) {
       return ''
@@ -10974,7 +10964,7 @@ function openTicketForm() {
     <div class="form-note">按网络环境分派；离职为高优先级，账号停用与会话终止必须留痕。</div>
     <div class="form-grid">
       <label>变动类型<select id="tkType"><option>入职</option><option>调岗</option><option>借调</option><option>离职</option></select></label>
-      <label>网络环境<select id="tkNet"><option>互联网</option><option>政务网</option><option>涉密内网</option></select></label>
+      <label>网络环境<select id="tkNet"><option>互联网</option><option>政务网</option></select></label>
     </div>
     <div class="form-label">变动内容</div>
     <input id="tkSubject" class="form-area" placeholder="例如：王五 · 规划一所 · 助理规划师">
@@ -15430,7 +15420,7 @@ async function renderAdmin(el) {
   state.consoleTab = tab
   const AI_SEGMENTS = [
     { id: 'baseline', no: '01', label: '运行基线', note: '系统内核只读；平台公共能力可停用；官方技能在市场按需安装' },
-    { id: 'models', no: '02', label: '模型与网关', note: '当前账号真实模型网关配置；没有真实用量数据时不展示虚构配额' },
+    { id: 'models', no: '02', label: '模型与网关', note: 'DeepSeek 首页默认；Qwen-Image / Seedream 图像生成二选一；三个共享模型统一由模型网关管理' },
     { id: 'agents', no: '03', label: 'Agent 与 MCP', note: '运行时实际加载的 Agent、MCP、技能与调度模块' },
     { id: 'plugins', no: '04', label: '插件与技能', note: '员工提交的插件与技能、审核与分类上架管理' },
   ]
@@ -15440,12 +15430,14 @@ async function renderAdmin(el) {
     '官方内置插件与技能': 'baseline',
     '系统内核': 'baseline',
     '平台公共能力': 'baseline',
+    '概念边界': 'models',
     '模型管理': 'models',
     '模型网关': 'models',
     '用量与配额': 'models',
     'Agent 与 MCP': 'agents',
     'Agent、MCP 与技能运行时': 'agents',
     'DSH 运行时诊断': 'agents',
+    '插件运行管理 · DSH 运行时诊断': 'agents',
     '插件审核': 'plugins',
     '插件 / 技能审核': 'plugins',
     '插件市场已上架管理': 'plugins',
@@ -15702,16 +15694,46 @@ async function renderAdmin(el) {
       }))
     }
     if (blocks) {
+      const concept = document.createElement('div')
+      concept.className = 'mc-block'
+      concept.innerHTML = `<div class="mc-block-head"><b>概念边界</b><span class="spacer"></span><span class="mc-count">两个独立控制面</span></div>
+        <div class="mc-concept-grid">
+          <div class="mc-concept">
+            <div class="mc-concept-k">模型网关</div>
+            <div class="mc-concept-v">管理中枢共享模型的调用、路由、鉴权、计费与审计。</div>
+            <span class="mc-tag ok">共享模型</span>
+          </div>
+          <div class="mc-concept">
+            <div class="mc-concept-k">插件运行管理</div>
+            <div class="mc-concept-v">管理插件自身的运行环境、依赖、资源配额与安全权限，包括插件内置的开源模型。</div>
+            <span class="mc-tag">插件运行时</span>
+          </div>
+        </div>
+        <div class="mc-block-note">模型网关管“共享模型怎么被调用”；插件运行管理管“插件在自己的环境里怎么运行”。插件内置的开源模型由插件运行管理负责，不进入共享模型网关的调用、计费与路由。</div>`
+      blocks.prepend(concept)
+    }
+    if (blocks) {
       const wrap = document.createElement('div')
       wrap.className = 'mc-block'
-      const modelReady = Boolean(modelCfg.apiKeySaved && modelCfg.defaultModel)
-      wrap.innerHTML = `<div class="mc-block-head"><b>模型网关</b><span class="spacer"></span><span class="mc-count">${modelReady ? '1 套已配置' : '未配置'}</span></div>
+      const imageModels = Array.isArray(state.boot?.imageGeneration?.models) ? state.boot.imageGeneration.models : []
+      const imageRows = imageModels.map((m) => `<div class="mc-trow">
+        <span class="mc-first">${esc(m.label)} <span class="mc-dim" style="display:block;font-size:10px;font-weight:400;margin-top:2px">${esc(m.providerLabel || m.provider || '—')}</span></span>
+        <span>图像生成 · 用户二选一</span>
+        <span><span class="mc-tag ${m.configured ? 'ok' : 'warn'}">${m.configured ? '可用' : '未配置'}</span></span>
+      </div>`).join('')
+      wrap.innerHTML = `<div class="mc-block-head"><b>模型网关</b><span class="spacer"></span><span class="mc-count">3 个共享模型</span></div>
+        <div class="form-note" style="margin:0 0 8px">首页默认 DeepSeek；图像生成由用户在 Qwen-Image 与 Seedream 中二选一。三个模型统一由管理中心维护调用、路由、鉴权、计费与审计，互联网与政务网均按本网关策略执行。</div>
+        <div class="mc-table" style="--mc-cols:minmax(126px,1.28fr) minmax(128px,1.2fr) minmax(70px,.62fr)">
+          <div class="mc-thead"><span>模型</span><span>角色</span><span>状态</span></div>
+          <div class="mc-trow"><span class="mc-first">DeepSeek <span class="mc-dim" style="display:block;font-size:10px;font-weight:400;margin-top:2px">${esc(modelCfg.provider || '统一模型网关')}</span></span><span>首页 · 默认对话</span><span><span class="mc-tag ok">统一网关</span></span></div>
+          ${imageRows || '<div class="mc-row">服务端未返回图像模型清单</div>'}
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;padding:12px 10px 4px"><b style="font-size:12px">当前账号接入</b><span class="mc-count">只读展示，共享模型凭证由服务端托管</span></div>
         <div class="mc-table" style="--mc-cols:minmax(90px,.7fr) minmax(200px,1.6fr)">
           <div class="mc-thead"><span>配置项</span><span>当前值</span></div>
-          <div class="mc-trow"><span>供应商</span><span>${esc(modelCfg.provider || '未配置')}</span></div>
           <div class="mc-trow"><span>接口地址</span><span class="mono" style="font-size:11px">${esc(modelCfg.endpoint || '未配置')}</span></div>
           <div class="mc-trow"><span>默认模型</span><span>${esc(modelCfg.defaultModel || '未配置')}</span></div>
-          <div class="mc-trow"><span>API Key</span><span><span class="mc-tag ${modelCfg.apiKeySaved ? 'ok' : 'warn'}">${modelCfg.apiKeySaved ? '已保存' : '未保存'}</span> <span class="mc-dim mono">${esc(modelCfg.key || '—')}</span></span></div>
+          <div class="mc-trow"><span>API Key</span><span><span class="mc-tag ${modelCfg.apiKeySaved ? 'ok' : 'warn'}">${modelCfg.apiKeySaved ? '已保存' : '统一网关'}</span> <span class="mc-dim mono">${esc(modelCfg.key || '—')}</span></span></div>
           <div class="mc-trow"><span>连接测试</span><span>${modelCfg.testedAt ? `${esc(modelCfg.testedAt)} · ${esc(modelCfg.latency || '—')}` : '<span class="mc-dim">尚未测试</span>'}</span></div>
         </div>`
       blocks.appendChild(wrap)
@@ -15722,8 +15744,8 @@ async function renderAdmin(el) {
       const keyIds = ['agent', 'agent-loop', 'llm-deepseek', 'mcp-jg', 'skill-office', 'optional-session-search', 'schedule']
       const keyRows = keyIds.map((id) => runtimePlugins.find((p) => p.id === id)).filter(Boolean)
       const enabledCount = runtimePlugins.filter((p) => p.enabled).length
-      wrap.innerHTML = `<div class="mc-block-head"><b>DSH 运行时诊断</b><span class="spacer"></span><span class="mc-count">${enabledCount} / ${runtimePlugins.length} 启用 · ${runtimePlugins.filter((p) => !p.enabled).length} 停用</span><button class="btn sm" data-speech-open>本地语音</button><button class="btn sm" data-term-open>开发终端</button><button class="btn sm" data-runtime-all>查看全部</button></div>
-        <div class="form-note" style="margin:0 0 8px">这里是 DSH 内部运行时模块，不是员工在插件市场安装的插件；停用项由当前 sdk profile 配置决定，属于运行诊断，不作为业务能力指标。</div>
+      wrap.innerHTML = `<div class="mc-block-head"><b>插件运行管理 · DSH 运行时诊断</b><span class="spacer"></span><span class="mc-count">${enabledCount} / ${runtimePlugins.length} 启用 · ${runtimePlugins.filter((p) => !p.enabled).length} 停用</span><button class="btn sm" data-speech-open>本地语音</button><button class="btn sm" data-term-open>开发终端</button><button class="btn sm" data-runtime-all>查看全部</button></div>
+        <div class="form-note" style="margin:0 0 8px">插件运行管理只负责插件运行环境、依赖、资源配额与安全权限；插件内置的开源模型随插件运行环境管理，不经过共享模型网关。这里是 DSH 内部运行时模块，不是员工在插件市场安装的插件。</div>
         <div class="mc-table" style="--mc-cols:minmax(90px,.9fr) minmax(0,1.55fr) minmax(44px,.5fr)">
           <div class="mc-thead"><span>运行时 ID</span><span>插件包</span><span>状态</span></div>
           ${keyRows.map((p) => `<div class="mc-trow"><span class="mono" style="font-size:11px">${esc(p.id)}</span><span class="mono" style="font-size:10px">${esc(p.name)}</span><span><span class="mc-tag ${p.enabled ? 'ok' : 'warn'}">${p.enabled ? '启用' : '停用'}</span></span></div>`).join('') || '<div class="mc-row">运行时未返回插件清单</div>'}
@@ -16480,7 +16502,7 @@ function renderSettings(el) {
         workspace: '工作区变更需在客户端选择目录，并由数据中心记录归属（演示）',
         workspaceReset: '已恢复为默认工作区（演示）',
         reauth: '已发起二次认证（演示）：认证结果写入审计',
-        devices: '当前仅 1 台受信设备：Windows 10 · 内网地址段（演示）',
+        devices: '当前仅 1 台受信设备：Windows 10 · 受信设备（演示）',
         diag: '诊断完成：模型连通 72 ms；数据中心接口 200；证书有效期至 2027-05（演示）',
         saveKey: '个人密钥已写入操作系统凭证库，界面仅保留掩码（演示）',
         clearKey: '已清除本机保存的个人密钥（演示）',
@@ -16489,8 +16511,8 @@ function renderSettings(el) {
         archive: '归档会话：按保留期自动迁移，可申请调阅（演示）',
         clearCache: '已清理本机缓存，业务数据不在客户端留存（演示）',
         testMcp: 'MCP 连接正常，工具 12 项；写操作需二次确认（演示）',
-        update: '当前为内网最新版本；新版本随离线包分发（演示）',
-        help: '内网文档站 help.jg.local；工单由本域运维受理（演示）',
+        update: '当前为最新版本；新版本随安装包发布（演示）',
+        help: '文档站与工单由本域运维受理（演示）',
       }
       if (act === 'moreConfig') {
         openMoreConfig()
@@ -16518,13 +16540,13 @@ function settingsBody(tab) {
         sgroup('权限', [
           srow('默认工作区文件读写', '允许在工作区内读取与整理文件；访问工作区外目录需单次授权', sw(`${p}fs`, true)),
           srow('工具自动执行', '仅低风险只读工具可自动执行；写操作与高危调用始终二次确认', sw(`${p}auto`, false)),
-          srow('互联网访问', '涉密内网环境不可开启；外发内容按数据级别策略控制', sw(`${p}web`, false, true)),
+          srow('互联网访问', '政务网与互联网按数据级别策略控制外发', sw(`${p}web`, false, true)),
         ]),
         sgroup('常规', [
           srow('默认工作区', '会话与任务的默认落盘位置，仍受数据中心授权约束',
             `<span class="mono set-value">D:\\JGWorkspace\\${esc(user.unit)}</span><span class="set-btn-gap"></span>${sbtn('workspace', '更改')}${sbtn('workspaceReset', '重置')}`),
           srow('默认模型', '逻辑模型标识稳定，展示名与版本由平台统一维护',
-            sel(`${p}model`, models.map((m) => m.label), state.composerModel === 'jg-enterprise' ? 'JG-Enterprise' : 'Qwen3.8-27B')),
+            sel(`${p}model`, models.map((m) => m.label), (models.find((m) => m.id === state.composerModel) || models[0] || {}).label || 'DeepSeek')),
           srow('界面语言', '界面文案语言，不改变数据内容的语言', sel(`${p}lang`, ['简体中文', '自动检测'], '简体中文')),
           srow('关闭窗口前确认', '使用关闭快捷键导致窗口关闭时给出提示', sel(`${p}close`, ['仅在使用关闭快捷键时', '总是确认', '从不确认'], '仅在使用关闭快捷键时')),
           srow('登录时启动应用', '开机后随系统登录自动启动客户端', sw(`${p}launch`, true)),
@@ -16586,25 +16608,28 @@ function settingsBody(tab) {
         sgroup('安全', [
           srow('登录密码', '用于账号密码登录；首次登录必须修改初始密码', '<span class="tag ok">已设置</span><span class="set-btn-gap"></span>' + sbtn('changePassword', '修改密码')),
           srow('二次认证', '登录与高危操作需二次认证，认证记录进审计', '<span class="tag ok">已启用</span><span class="set-btn-gap"></span>' + sbtn('reauth', '重新认证')),
-          srow('当前设备', 'Windows 10 · 客户端 1.0.0-mvp · 内网地址段', sbtn('devices', '查看全部设备')),
+          srow('当前设备', 'Windows 10 · 客户端 1.0.0-mvp · 受信设备', sbtn('devices', '查看全部设备')),
         ]),
       ],
     }
   }
 
   if (tab === 'network') {
+    const currentNet = state.boot?.network || {}
+    const allNetworks = Array.isArray(state.boot?.allNetworks) ? state.boot.allNetworks : []
     return {
       title: '网络与凭证',
       groups: [
         sgroup('网络', [
-          srow('当前网络', '决定可用模型、数据源与工具集合', '<span class="tag secret">涉密内网</span>'),
-          srow('涉密内网', '已连接，Qwen3.8-27B 本地推理与涉密数据源可用', '<span class="tag ok">已连接</span>'),
-          srow('政务网', '独立实例，未在本机接入', '<span class="tag">未接入</span>'),
-          srow('互联网', '隔离，未经批准不得跨网访问', '<span class="tag">隔离</span>'),
-          srow('网络诊断', '检查模型连通性、数据中心接口与证书有效期', sbtn('diag', '运行诊断')),
+          srow('当前网络', '决定当前实例可用模型、数据源与工具集合', `<span class="tag ok">${esc(currentNet.label || '互联网')}</span>`),
+          ...allNetworks.filter((n) => n.id !== currentNet.id).map((n) => srow(n.label,
+            n.id === 'gov' ? '政务网独立实例；与互联网使用同一套模型网关，但数据与审计独立' : '默认实例；DeepSeek 对话与 Qwen / Seedream 图像生成',
+            '<span class="tag">可切换</span>')),
+          srow('网络范围', '仅互联网与政务网；共用模型网关，数据与审计独立', '<span class="set-value">两网</span>'),
+          srow('网络诊断', '检查模型网关连通性、数据中心接口与证书有效期', sbtn('diag', '运行诊断')),
         ]),
         sgroup('凭证', [
-          srow('政务模型 Token', '由服务端持有，客户端不落盘、不展示', '<span class="set-value">服务端托管</span>'),
+          srow('模型网关 Token', '由服务端持有，客户端不落盘、不展示；调用、路由、计费与审计统一在管理中心', '<span class="set-value">服务端托管</span>'),
           srow('操作系统凭证库', '个人密钥存入系统受保护存储，不以明文出现在配置与日志', sw(`${p}keychain`, true)),
           srow('会话有效期', '超过时限需重新认证，长任务由服务端续跑', sel(`${p}session`, ['8 小时', '4 小时', '1 小时'], '8 小时')),
         ]),
@@ -16613,18 +16638,31 @@ function settingsBody(tab) {
   }
 
   if (tab === 'models') {
+    const imageModels = Array.isArray(state.boot?.imageGeneration?.models) ? state.boot.imageGeneration.models : []
+    const imageRows = imageModels.map((model) => srow(
+      model.label,
+      `${model.providerLabel || model.provider || '图像模型'} · ${model.model || model.id} · 图像页可选`,
+      `<span class="tag ${model.configured ? 'ok' : ''}">${model.configured ? '已配置' : '未配置'}</span>`,
+    ))
     return {
       title: '模型与密钥',
       groups: [
-        sgroup('可用模型', [
-          srow('企业统一模型', '逻辑 ID jg-enterprise；展示名与版本由平台维护', '<span class="tag ok">可用</span>'),
-          srow('内网推理模型', 'Qwen3.8-27B · 本地推理 · 量化格式待实测确认', '<span class="tag ok">可用</span>'),
-          srow('政务模型', '九江统一政务模型；Token 服务端持有，按配额计量', '<span class="tag">本网不可用</span>'),
+        sgroup('共享模型（由管理中心统一管理）', [
+          srow('首页对话模型', 'DeepSeek · 首页默认；调用、鉴权、计费与审计统一走模型网关',
+            `<span class="tag ok">DeepSeek · 默认</span>`),
+          ...(imageRows.length ? imageRows : [srow('图像生成模型', 'Qwen-Image / Seedream 未从服务端返回', '<span class="tag">未配置</span>')]),
+          srow('图像模型选择', '图像页由用户在 Qwen-Image 与 Seedream 之间二选一；管理中心维护凭证、端点与可用状态',
+            '<span class="set-value">用户二选一</span>'),
         ]),
-        sgroup('个人密钥', [
-          srow('个人 API Key', '仅互联网环境使用；涉密内容禁止经个人密钥外发',
-            `<input class="mini-input mono" id="${p}key" value="${esc(state.modelCfg?.key || 'sk-••••••••••••4f2a')}" placeholder="粘贴完整 API Key"><span class="set-btn-gap"></span>${sbtn('saveKey', '保存到凭证库')}${sbtn('clearKey', '清除')}`),
-          srow('数据外发策略', '决定个人模型可接触的数据级别', sel(`${p}egress`, ['禁止涉密与敏感内容外发', '仅内部级可外发', '按单次审批'], '禁止涉密与敏感内容外发')),
+        sgroup('网关策略', [
+          srow('调用与路由', '共享模型统一由管理中心模型网关调度；插件内置开源模型不进入该网关', '<span class="set-value">管理中心</span>'),
+          srow('鉴权与计费', '服务端持有凭证，按模型与账号计量；客户端不保存共享模型密钥', '<span class="set-value">服务端托管</span>'),
+          srow('审计', '每次模型调用记录账号、模型、网络与结果，进入管理中心审计', '<span class="set-value">统一审计</span>'),
+        ]),
+        sgroup('个人凭证（可选）', [
+          srow('个人 API Key', '仅用于本机调试，不属于三个共享模型；共享模型仍由管理中心统一管理',
+            `<input class="mini-input mono" id="${p}key" value="${esc(state.modelCfg?.key || '')}" placeholder="粘贴完整 API Key"><span class="set-btn-gap"></span>${sbtn('saveKey', '保存到凭证库')}${sbtn('clearKey', '清除')}`),
+          srow('数据外发策略', '决定个人调试凭证可接触的数据级别', sel(`${p}egress`, ['禁止涉密与敏感内容外发', '仅内部级可外发', '按单次审批'], '禁止涉密与敏感内容外发')),
         ]),
       ],
     }
@@ -16829,12 +16867,12 @@ function settingsBody(tab) {
     title: '关于',
     groups: [
       sgroup('版本', [
-        srow('客户端版本', 'Windows 客户端，随内网离线包分发', '<span class="set-value mono">1.0.0-mvp</span>'),
+        srow('客户端版本', 'Windows 客户端，随安装包分发', '<span class="set-value mono">1.0.0-mvp</span>'),
         srow('运行时基线', 'DeepSeek Harness，锁定版本并按季度吸收上游补丁', '<span class="set-value mono">0.2.2-rc.1</span>'),
-        srow('更新通道', '内网离线包，更新前完成回归与签名校验', sbtn('update', '检查更新')),
+        srow('更新通道', '安装包更新，发布前完成回归与签名校验', sbtn('update', '检查更新')),
       ]),
       sgroup('帮助', [
-        srow('帮助与反馈', '内网文档站与工单由本域运维受理', sbtn('help', '打开帮助')),
+        srow('帮助与反馈', '文档站与工单由本域运维受理', sbtn('help', '打开帮助')),
         srow('许可与合规', '使用范围受集团信息安全制度与数据分级约束', '<span class="set-value">内部文档</span>'),
       ]),
     ],
@@ -16992,7 +17030,7 @@ function renderLogin(el) {
   const captcha = state.loginCaptcha
   const captchaAnswer = state.loginCaptchaAnswerDraft !== undefined ? state.loginCaptchaAnswerDraft : ''
   const nets = state.boot.allNetworks || []
-  const netDesc = { inet: '统一模型与获准个人模型', gov: '政务网专用模型，数据不出网', secret: '涉密内网，物理隔离环境' }
+  const netDesc = { inet: '互联网默认实例，DeepSeek + Qwen / Seedream', gov: '政务网独立实例，同一套模型网关、独立数据与审计' }
   const fieldStyle = 'width:100%!important;max-width:100%!important;box-sizing:border-box;height:40px;margin-top:8px;padding:0 12px;border:1px solid var(--line);border-radius:8px;background:#fff;font-size:var(--fs-sub);outline:none'
   el.innerHTML = `
     <style>
@@ -17392,7 +17430,7 @@ const settingsTabs = [
   { id: 'adm-access', label: '授权与策略', group: '管理（仅管理员）', scope: 'admin', kw: '角色 权限 数据授权 审批 模型 工具' },
   { id: 'adm-catalog', label: '数据目录与接入', group: '管理（仅管理员）', scope: 'admin', kw: '目录 资源 Resource 数据源 字段 服务能力' },
   { id: 'adm-apps', label: '应用审核', group: '管理（仅管理员）', scope: 'admin', kw: '应用 接入 验证 审核 发布 下架' },
-  { id: 'adm-ops', label: '系统与运维', group: '管理（仅管理员）', scope: 'admin', kw: '三网 实例 环境 证书 更新 限流 可用性' },
+  { id: 'adm-ops', label: '系统与运维', group: '管理（仅管理员）', scope: 'admin', kw: '两网 实例 环境 证书 更新 限流 可用性' },
   { id: 'adm-audit', label: '审计与告警', group: '管理（仅管理员）', scope: 'admin', kw: '审计 留痕 告警 留存 导出' },
 ]
 

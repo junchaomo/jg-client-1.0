@@ -2806,7 +2806,7 @@ function contentDisposition(name) {
 }
 
 const REG_KIND_LABEL = { pure: '普通数据', deliverable: '成果数据', service: '数据服务' }
-const ZONE_LABEL = { intranet: '内网', gov: '政务外网', inet: '互联网' }
+const ZONE_LABEL = { intranet: '内部目录', gov: '政务网', inet: '互联网' }
 const MAP_CATALOG_LABEL = {
   satellite: '01 卫星影像',
   current: '02 现状数据',
@@ -3671,7 +3671,7 @@ function buildReply(text, user, net) {
     gis.forEach((r) => citations.push(r.id))
     steps.push({ tool: '空间范围检索', detail: 'bbox=115.96,29.70,116.02,29.75 · 命中 2 项', status: 'ok', ms: 2200 })
     steps.push({ tool: '影像服务', detail: net === 'inet' ? '天地图 WMTS 在线引用（外部服务）' : 'QGIS Server 动态读取 GeoTIFF（GDAL 金字塔）', status: 'warn', ms: 3600 })
-    reply = `已完成同视口影像比对：两期共识别变化图斑 3 处（新增工地 2.4 ha、道路贯通 3.1 ha、场地平整 5.6 ha）。\n\n${net === 'inet' ? '本网影像来自天地图在线引用，受服务方配额约束；定量面积需以内部影像复核。' : '影像来自内网季度入库版本，可直接用于成果引用。'}\n\n引用：${gis.map((r) => `${r.id}（${r.name}）`).join('、') || '无可见影像资源'}`
+    reply = `已完成同视口影像比对：两期共识别变化图斑 3 处（新增工地 2.4 ha、道路贯通 3.1 ha、场地平整 5.6 ha）。\n\n${net === 'inet' ? '本网影像来自天地图在线引用，受服务方配额约束；定量面积需以内部影像复核。' : '影像来自政务网季度入库版本，可直接用于成果引用。'}\n\n引用：${gis.map((r) => `${r.id}（${r.name}）`).join('、') || '无可见影像资源'}`
   } else if (/公示|项目|建设单位/.test(lower)) {
     const biz = cite('R-PROJ-PUB') || visible.find((r) => r.type === 'bizdata')
     if (biz) citations.push(biz.id)
@@ -4908,13 +4908,9 @@ const api = {
     const internalLevel = /^L[1-5]$/.test(String(body.internalLevel || '')) ? body.internalLevel : 'L2'
     const secrecy = body.secrecy || (body.security === 'secret' ? '待认定' : '非涉密')
     const zoneIds = Array.isArray(body.zones) ? body.zones : (Array.isArray(body.nets) ? body.nets : [net])
-    const zones = [...new Set(zoneIds.map((z) => ({ 内网: 'intranet', 政务外网: 'gov', 互联网: 'inet', intranet: 'intranet', gov: 'gov', inet: 'inet' }[z] || z)).filter((z) => ZONE_LABEL[z]))]
-    if (zones.includes('inet')) {
-      if (!zones.includes('gov')) zones.push('gov')
-      if (!zones.includes('intranet')) zones.push('intranet')
-    }
-    if (zones.includes('gov') && !zones.includes('intranet')) zones.push('intranet')
-    const orderedZones = ['intranet', 'gov', 'inet'].filter((z) => zones.includes(z))
+    const zones = [...new Set(zoneIds.map((z) => ({ 政务网: 'gov', 政务外网: 'gov', 互联网: 'inet', gov: 'gov', inet: 'inet' }[z] || z)).filter((z) => z === 'gov' || z === 'inet'))]
+    if (zones.includes('inet') && !zones.includes('gov')) zones.push('gov')
+    const orderedZones = ['gov', 'inet'].filter((z) => zones.includes(z))
     zones.length = 0
     zones.push(...orderedZones)
     const authorizationType = body.authorizationType === 'orgs' ? 'orgs' : 'group'
@@ -6539,7 +6535,6 @@ const api = {
     if (webSearch) {
       const webCap = platformCapabilities(accountRuntimeHome(user)).find((c) => c.id === 'CAP-WEB')
       if (!webCap?.enabled) return json(res, 403, { error: 'Web 搜索能力当前已被平台停用', code: 'WEB_SEARCH_DISABLED' })
-      if (net === 'secret') return json(res, 403, { error: '涉密内网不开放互联网网页搜索', code: 'WEB_SEARCH_NETWORK_BLOCKED' })
     }
     if (projectId && projectStatus(project) !== 'online') {
       return json(res, 409, {
@@ -7347,7 +7342,7 @@ const api = {
       policy: cloudPolicy,
       instance: {
         network: networks[net].label,
-        region: net === 'secret' ? '涉密内网 · 机房 A' : net === 'gov' ? '政务网 · 政务云' : '互联网 · 企业云',
+        region: net === 'gov' ? '政务网 · 政务云' : '互联网 · 企业云',
         kernel: 'Chromium 开源内核（容器化，远程画面流）',
         isolation: '一会话一容器，会话结束即销毁',
         ttl: '15 分钟',

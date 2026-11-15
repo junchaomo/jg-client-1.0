@@ -64,18 +64,17 @@ export const roles = {
 }
 
 /**
- * 三网环境配置：同一份基线，身份、模型、工具、数据面各自独立（PRD 9.2）。
- * 演示默认互联网；`demo` 标记的能力差异用于演示 U12。
+ * 两网环境配置：互联网与政务网共用一套模型网关，但身份、数据面、工具与审计各自独立。
+ * 内网不适用当前云端模型，网络配置中不再提供涉密内网。
  */
 export const networks = {
   inet: {
     id: 'inet',
     label: '互联网',
     badge: '互联网',
-    desc: '统一模型与获准个人模型；按数据级别执行外发控制',
+    desc: 'DeepSeek 首页对话；Qwen-Image / Seedream 图像生成由用户二选一',
     models: [
-      { id: 'jg-cloud', label: '默认云模型', network: '互联网', note: '企业统一云模型，服务端持有 Key', image: false, imageNote: '聊天模型本身不生图；图像工作台走服务端真实图像通道' },
-      { id: 'personal-key', label: '个人 API Key', network: '互联网', note: '按数据级别执行外发控制', image: false, imageNote: '聊天模型本身不生图；图像工作台走服务端真实图像通道' },
+      { id: 'deepseek', label: 'DeepSeek', network: '互联网', note: '首页默认对话模型；由管理中心统一模型网关调用', image: false, imageNote: '对话模型不生图；图像工作台使用独立图像模型通道' },
     ],
     tools: [
       { id: 'T-DATA', label: '数据中心检索', enabled: true },
@@ -83,17 +82,16 @@ export const networks = {
       { id: 'T-WEB', label: '互联网检索', enabled: true },
       { id: 'T-MCP', label: 'MCP 工具', enabled: false, reason: '本网未登记 MCP 工具' },
     ],
-    defaultModel: 'jg-cloud',
-    note: '互联网环境仅处理获准在该网处理的数据；涉密与政务数据不在本目录中可见',
+    defaultModel: 'deepseek',
+    note: '互联网环境处理获准在该网处理的数据；模型调用、鉴权、计费与审计统一走管理中心模型网关',
   },
   gov: {
     id: 'gov',
     label: '政务网',
     badge: '政务网',
-    desc: '九江市统一政务模型；Token 由服务端持有并计量',
+    desc: 'DeepSeek 首页对话；Qwen-Image / Seedream 图像生成由用户二选一',
     models: [
-      { id: 'jg-gov', label: '九江政务模型', network: '政务网', note: 'Token 由服务端持有，按配额计量', image: false, imageNote: '政务网模型未开通生图端点，需更换为已开通的模型 API' },
-      { id: 'jg-enterprise', label: 'JG-Enterprise', network: '政务网', note: '企业统一模型', image: false, imageNote: '政务网侧未开通生图端点' },
+      { id: 'deepseek', label: 'DeepSeek', network: '政务网', note: '政务网实例的首页默认对话模型；由管理中心统一模型网关调用', image: false, imageNote: '对话模型不生图；图像工作台使用独立图像模型通道' },
     ],
     tools: [
       { id: 'T-DATA', label: '数据中心检索', enabled: true },
@@ -101,30 +99,12 @@ export const networks = {
       { id: 'T-WEB', label: '互联网检索', enabled: false, reason: '政务网禁止直连互联网' },
       { id: 'T-MCP', label: 'MCP 工具', enabled: true },
     ],
-    defaultModel: 'jg-gov',
-    note: '政务网数据由主管平台授权，跨网不继承',
-  },
-  secret: {
-    id: 'secret',
-    label: '涉密内网',
-    badge: '涉密内网',
-    desc: 'Qwen3.8-27B 本地推理；离线运行，工具调用需兼容性验证',
-    models: [
-      { id: 'jg-enterprise', label: 'JG-Enterprise', network: '涉密内网', note: '企业统一模型', image: false, imageNote: '涉密内网禁止图像生成与外发' },
-      { id: 'qwen-3.8-27b', label: 'Qwen3.8-27B', network: '涉密内网', note: '本地推理，离线部署', image: false, imageNote: '本地推理模型不含图像生成权重' },
-    ],
-    tools: [
-      { id: 'T-DATA', label: '数据中心检索', enabled: true },
-      { id: 'T-SKILL', label: '企业技能', enabled: true },
-      { id: 'T-WEB', label: '互联网检索', enabled: false, reason: '涉密内网不可开启' },
-      { id: 'T-MCP', label: 'MCP 工具', enabled: true },
-    ],
-    defaultModel: 'jg-enterprise',
-    note: '涉密内网独立认证、独立存储、独立审计；不提供任意跨网切换',
+    defaultModel: 'deepseek',
+    note: '政务网数据由主管平台授权，跨网不继承；模型调用与审计同样由管理中心统一管理',
   },
 }
 
-export const networkOrder = ['inet', 'gov', 'secret']
+export const networkOrder = ['inet', 'gov']
 
 export const modules = {
   home: { label: '首页' },
@@ -1263,10 +1243,10 @@ export const resourceGrantSeed = {
 
 /** 安全后台：模型使用策略与访问异常（PRD 9.3） */
 export const modelPolicy = [
-  { level: 'public', label: '公开', models: ['企业云模型', '个人 Key'], egress: '允许', note: '可经互联网模型处理' },
-  { level: 'internal', label: '内部', models: ['企业云模型'], egress: '按策略', note: '禁止个人 Key 外发' },
-  { level: 'sensitive', label: '敏感', models: ['政务模型（本域）'], egress: '需审批', note: '仅政务网内处理' },
-  { level: 'secret', label: '涉密', models: ['Qwen3.8-27B（离线）'], egress: '禁止外发', note: '仅涉密内网推理' },
+  { level: 'public', label: '公开', models: ['DeepSeek', 'Qwen-Image', 'Seedream'], egress: '允许', note: '经统一模型网关在互联网或政务网处理' },
+  { level: 'internal', label: '内部', models: ['DeepSeek'], egress: '按策略', note: '仅共享对话模型；图像模型按图像页授权使用' },
+  { level: 'sensitive', label: '敏感', models: ['DeepSeek'], egress: '需审批', note: '仅政务网实例处理，调用进统一审计' },
+  { level: 'secret', label: '涉密', models: ['—'], egress: '禁止外发', note: '当前云端模型不适用涉密内网' },
 ]
 
 export const accessAnomalies = [

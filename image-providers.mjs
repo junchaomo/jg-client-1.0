@@ -114,14 +114,14 @@ export function imageModelStatus(user = {}, net = 'inet') {
   const selected = models.find((model) => model.id === defaultModelId && model.configured)
     || models.find((model) => model.configured)
     || null
-  const allowedNetwork = net === 'inet'
+  const allowedNetwork = net === 'inet' || net === 'gov'
   const allowedUser = user.id !== 'guest'
   const enabled = allowedNetwork && allowedUser && Boolean(selected)
   let reason = ''
   if (!allowedNetwork) reason = `当前为${net}网络，外部图像模型不启用`
   else if (!allowedUser) reason = '外部访客不能调用外部图像模型'
   else if (!selected) reason = '尚未配置图像模型：请配置 QWEN_IMAGE_API_KEY 或 SEEDREAM_IMAGE_API_KEY'
-  else reason = '提示词会发送到外部图像模型；政务网与涉密网不启用'
+  else reason = '提示词会发送到外部图像模型；互联网与政务网均按管理中心模型网关策略执行'
 
   return {
     enabled,
