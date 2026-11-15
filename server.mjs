@@ -13,7 +13,7 @@ import { basename, dirname, extname, isAbsolute, join, normalize, relative, sep 
 import { fileURLToPath } from 'node:url'
 import {
   SESSION_TTL_MS, appendAudit, appendApprovalDecision, auditCount, backupNow, cleanupSessions, clearAudit, clearSessions, closeStore, createSession,
-  createImageAsset, createImageComment, createImageJob, createImageRevision, deleteFile, getImageAsset, imageRevisionCount, listImageAssets, listImageComments, listImageRevisions,
+  createImageAsset, createImageComment, createImageJob, createImageRevision, createImageTemplate, deleteFile, getImageAsset, getImageTemplate, imageRevisionCount, listImageAssets, listImageComments, listImageRevisions, listApprovedImageTemplates, listAllImageTemplates, listImageTemplatesByApplicant, reviewImageTemplate,
   dataDirPath, deleteSession, expirePendingApprovalDecisions, getAccount, getAccountByRole, getAccountByUsername, getFile, getSession, latestApprovalDecisions, latestAudit,
   listAccounts, listFiles, loadState, putFile, readFileBuffer, saveState, touchSession,
   softDeleteImageAsset, updateImageAssetLatest, updateImageJob,
@@ -98,6 +98,7 @@ const IMAGE_STYLE_PROMPTS = {
   室内: 'interior design photography, warm natural light',
   封面: 'magazine cover composition, clean negative space for typography',
 }
+const IMAGE_TEMPLATE_CATEGORY_VALUES = ['海报', '室内设计', '徽标', '插画', '职业形象照', '图标', '产品照', '周边商品', '信息图', '宣传单', '其他']
 function normalizeImagePrompt(raw) {
   let text = String(raw || '').trim()
   text = text
@@ -114,6 +115,25 @@ function imageGenerationStatus(user, net) {
 
 function imageFileUrl(fileId) {
   return fileId ? `/api/images/file?id=${encodeURIComponent(fileId)}` : ''
+}
+
+function imageTemplatePublic(template) {
+  if (!template) return null
+  return {
+    id: template.id,
+    title: template.title,
+    category: template.category,
+    ratio: template.ratio,
+    prompt: template.prompt,
+    description: template.description,
+    applicant: template.applicant,
+    status: template.status,
+    reviewer: template.reviewer,
+    reviewNote: template.reviewNote,
+    createdAt: template.createdAt,
+    reviewedAt: template.reviewedAt,
+    previewUrl: `/api/images/template-preview?id=${encodeURIComponent(template.id)}`,
+  }
 }
 
 function imageAssetPublic(asset, { withRevisions = false } = {}) {
@@ -1905,6 +1925,11 @@ const GUEST_GUARD = {
   'GET /api/images/asset': 'home',
   'POST /api/images/delete': 'home',
   'GET /api/images/file': 'home',
+  'GET /api/images/templates': 'home',
+  'GET /api/images/template-applications': 'home',
+  'POST /api/images/template-applications': 'home',
+  'POST /api/images/template-review': 'home',
+  'GET /api/images/template-preview': 'home',
   'GET /api/agent-presets': 'home',
   'POST /api/agent-presets': 'home',
   'DELETE /api/agent-presets': 'home',
@@ -8775,6 +8800,101 @@ const api = {
       })
       .map((asset) => imageAssetPublic(asset))
     return json(res, 200, { ok: true, assets })
+  },
+  'GET /api/images/templates': (req, res) => {
+    const templates = listApprovedImageTemplates().map((item) => imageTemplatePublic(item))
+    return json(res, 200, { ok: true, templates })
+  },
+  'GET /api/images/template-applications': (req, res) => {
+    const user = roleOf(req)
+    const applications = canManage(user)
+      ? listAllImageTemplates().map((item) => imageTemplatePublic(item))
+      : listImageTemplatesByApplicant(user.name).map((item) => imageTemplatePublic(item))
+    return json(res, 200, { ok: true, applications })
+  },
+  'POST /api/images/template-applications': (req, res) => {
+    const user = roleOf(req)
+    const net = netOf(req)
+    const body = JSON.parse(req.__body || '{}')
+    const title = String(body.title || '').trim()
+    const category = String(body.category || '').trim()
+    const ratio = String(body.ratio || '').trim()
+    const prompt = String(body.prompt || '').trim()
+    const description = String(body.description || '').trim()
+    if (!title || title.length > 40) return json(res, 400, { error: '模板名称必填，且在 40 个字符以内' })
+    if (!prompt || prompt.length > 2000) return json(res, 400, { error: '模板提示词必填，且在 2000 个字符以内' })
+    if (description.length > 800) return json(res, 400, { error: '模板说明不能超过 800 个字符' })
+    if (!IMAGE_TEMPLATE_CATEGORY_VALUES.includes(category)) return json(res, 400, { error: '模板分类不受支持' })
+    if (!['1:1', '3:4', '9:16', '4:3', '16:9'].includes(ratio)) return json(res, 400, { error: '宽高比例不受支持' })
+    if (!body.previewDataUrl) return json(res, 400, { error: '请上传模板预览图' })
+    let preview
+    try {
+      preview = imageDataUrlBuffer(body.previewDataUrl)
+    } catch (error) {
+      return json(res, 400, { error: String(error?.message || '模板预览图无效') })
+    }
+    if (preview.buffer.length > 8 * 1024 * 1024) return json(res, 400, { error: '模板预览图不能超过 8 MB' })
+    const ext = preview.mime === 'image/webp' ? 'webp' : preview.mime === 'image/jpeg' ? 'jpg' : 'png'
+    const previewFileId = newFileId('TPF')
+    const previewMeta = putFile({
+      id: previewFileId,
+      name: `template-preview-${Date.now()}.${ext}`,
+      mime: preview.mime,
+      buffer: preview.buffer,
+      owner: user.name,
+      net,
+      note: `image-template preview; applicant=${user.name}`,
+    })
+    const id = newFileId('TPL')
+    const template = createImageTemplate({
+      id,
+      title,
+      category,
+      ratio,
+      prompt,
+      description,
+      previewFileId: previewMeta.id,
+      applicant: user.name,
+      status: 'pending',
+    })
+    logAudit(user, 'image.template.apply', `${id}:${category}`, 'pending', net)
+    return json(res, 200, { ok: true, application: imageTemplatePublic(template) })
+  },
+  'POST /api/images/template-review': (req, res) => {
+    const user = roleOf(req)
+    const net = netOf(req)
+    if (!canManage(user)) return json(res, 403, { error: '只有管理员可以审核模板申请' })
+    const body = JSON.parse(req.__body || '{}')
+    const id = String(body.id || '').trim()
+    const decision = String(body.decision || '').trim()
+    const note = String(body.note || '').trim()
+    if (!['approve', 'reject'].includes(decision)) return json(res, 400, { error: '审核动作不支持' })
+    if (note.length > 300) return json(res, 400, { error: '驳回原因不能超过 300 个字符' })
+    const template = getImageTemplate(id)
+    if (!template) return json(res, 404, { error: '模板申请不存在' })
+    if (template.status !== 'pending') return json(res, 409, { error: '该申请已经审核过，不能重复处理' })
+    const updated = reviewImageTemplate(id, decision, user.name, decision === 'reject' ? note : '')
+    if (!updated) return json(res, 409, { error: '该申请已经审核过，不能重复处理' })
+    logAudit(user, 'image.template.review', `${id}:${decision}`, 'allow', net)
+    return json(res, 200, { ok: true, application: imageTemplatePublic(updated) })
+  },
+  'GET /api/images/template-preview': (req, res, url) => {
+    const user = roleOf(req)
+    const id = String(url.searchParams.get('id') || '').trim()
+    const template = getImageTemplate(id)
+    if (!template) return json(res, 404, { error: '模板不存在或已失效' })
+    const allowed = template.status === 'approved' || template.applicant === user.name || canManage(user)
+    if (!allowed) return json(res, 403, { error: '该模板预览不在当前用户的授权范围内' })
+    const meta = getFile(template.previewFileId)
+    const buffer = readFileBuffer(template.previewFileId)
+    if (!meta || !buffer) return json(res, 404, { error: '模板预览文件不存在或已失效' })
+    res.writeHead(200, {
+      'content-type': meta.mime || 'image/jpeg',
+      'content-length': buffer.length,
+      'content-disposition': `inline; filename="${encodeURIComponent(meta.name || 'template-preview.jpg')}"`,
+      'cache-control': template.status === 'approved' ? 'public, max-age=300' : 'private, no-cache, must-revalidate',
+    })
+    res.end(buffer)
   },
   'GET /api/images/asset': (req, res, url) => {
     const user = roleOf(req)

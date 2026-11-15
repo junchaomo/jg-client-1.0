@@ -238,6 +238,25 @@ db.exec(`
     created_at INTEGER NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_image_comments_asset ON image_comments(asset_id, created_at ASC);
+
+  CREATE TABLE IF NOT EXISTS image_templates (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    category TEXT NOT NULL DEFAULT '',
+    ratio TEXT NOT NULL DEFAULT '1:1',
+    prompt TEXT NOT NULL DEFAULT '',
+    description TEXT NOT NULL DEFAULT '',
+    preview_file_id TEXT NOT NULL,
+    source_asset_id TEXT NOT NULL DEFAULT '',
+    applicant TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending',
+    reviewer TEXT NOT NULL DEFAULT '',
+    review_note TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL,
+    reviewed_at INTEGER
+  );
+  CREATE INDEX IF NOT EXISTS idx_image_templates_status ON image_templates(status, created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_image_templates_applicant ON image_templates(applicant, created_at DESC);
 `)
 
 // 兼容 P0-2 之前已经建好的 sessions 表：补 account_id 列。
@@ -429,6 +448,20 @@ const stmt = {
   `),
   getImageComment: db.prepare('SELECT * FROM image_comments WHERE id = ?'),
   listImageComments: db.prepare('SELECT * FROM image_comments WHERE asset_id = ? ORDER BY created_at ASC'),
+  insertImageTemplate: db.prepare(`
+    INSERT INTO image_templates (
+      id, title, category, ratio, prompt, description, preview_file_id, source_asset_id,
+      applicant, status, reviewer, review_note, created_at, reviewed_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `),
+  getImageTemplate: db.prepare('SELECT * FROM image_templates WHERE id = ?'),
+  listApprovedImageTemplates: db.prepare("SELECT * FROM image_templates WHERE status = 'approved' ORDER BY reviewed_at DESC, created_at DESC"),
+  listImageTemplatesByApplicant: db.prepare('SELECT * FROM image_templates WHERE applicant = ? ORDER BY created_at DESC'),
+  listAllImageTemplates: db.prepare('SELECT * FROM image_templates ORDER BY created_at DESC'),
+  reviewImageTemplate: db.prepare(`
+    UPDATE image_templates SET status = ?, reviewer = ?, review_note = ?, reviewed_at = ?
+    WHERE id = ? AND status = 'pending'
+  `),
 }
 
 /* ------------------------------- sessions ------------------------------- */
@@ -1120,6 +1153,71 @@ export function createImageComment(input = {}) {
 
 export function listImageComments(assetId) {
   return stmt.listImageComments.all(String(assetId || '')).map(imageCommentOf)
+}
+
+function imageTemplateOf(row) {
+  if (!row) return null
+  return {
+    id: row.id,
+    title: row.title,
+    category: row.category,
+    ratio: row.ratio,
+    prompt: row.prompt,
+    description: row.description,
+    previewFileId: row.preview_file_id,
+    sourceAssetId: row.source_asset_id,
+    applicant: row.applicant,
+    status: row.status,
+    reviewer: row.reviewer,
+    reviewNote: row.review_note,
+    createdAt: Number(row.created_at || 0),
+    reviewedAt: row.reviewed_at ? Number(row.reviewed_at) : null,
+  }
+}
+
+export function createImageTemplate(input = {}) {
+  const now = Number(input.createdAt || Date.now())
+  const id = String(input.id || '')
+  stmt.insertImageTemplate.run(
+    id,
+    String(input.title || ''),
+    String(input.category || ''),
+    String(input.ratio || '1:1'),
+    String(input.prompt || ''),
+    String(input.description || ''),
+    String(input.previewFileId || ''),
+    String(input.sourceAssetId || ''),
+    String(input.applicant || ''),
+    String(input.status || 'pending'),
+    String(input.reviewer || ''),
+    String(input.reviewNote || ''),
+    now,
+    input.reviewedAt ? Number(input.reviewedAt) : null
+  )
+  return getImageTemplate(id)
+}
+
+export function getImageTemplate(id) {
+  return imageTemplateOf(stmt.getImageTemplate.get(String(id || '')))
+}
+
+export function listApprovedImageTemplates() {
+  return stmt.listApprovedImageTemplates.all().map(imageTemplateOf)
+}
+
+export function listImageTemplatesByApplicant(applicant) {
+  return stmt.listImageTemplatesByApplicant.all(String(applicant || '')).map(imageTemplateOf)
+}
+
+export function listAllImageTemplates() {
+  return stmt.listAllImageTemplates.all().map(imageTemplateOf)
+}
+
+export function reviewImageTemplate(id, decision, reviewer, note = '') {
+  const status = decision === 'approve' ? 'approved' : 'rejected'
+  const result = stmt.reviewImageTemplate.run(status, String(reviewer || ''), String(note || ''), Date.now(), String(id || ''))
+  if (!Number(result.changes || 0)) return null
+  return getImageTemplate(id)
 }
 
 export function createImageJob(input = {}) {

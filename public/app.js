@@ -122,7 +122,7 @@ const state = {
   ],
   cbW: 440,
   cbUserW: 0,
-  imagegen: { prompt: '', ratio: '1:1', count: 1, style: '写实', shots: [], busy: false, modelId: '', references: [], assetsLoaded: false, assetsLoading: false, tab: 'templates', templateRatio: 'auto', templateRef: null },
+  imagegen: { prompt: '', ratio: '1:1', count: 1, style: '写实', shots: [], busy: false, modelId: '', references: [], assetsLoaded: false, assetsLoading: false, tab: 'templates', templates: [], templatesLoaded: false, templatesLoading: false, templateApps: [], templateAppsLoaded: false, templateAppsLoading: false },
 }
 
 const layout = new AppLayout(document.getElementById('app'))
@@ -3847,13 +3847,13 @@ function blobToBase64(blob) {
   })
 }
 
-async function startVoiceInput(btn) {
+async function startVoiceInput(btn, targetInput = null) {
   if (voiceMedia && voiceMedia.state === 'recording') {
     voiceMedia.stop()
     return
   }
   if (voiceBusy) return
-  const input = document.getElementById('draft')
+  const input = targetInput || document.getElementById('draft')
   if (!input) return
   const { ok, body } = await api('/api/speech/catalog')
   if (!ok) return toast(body?.error || '本地语音服务不可用', true)
@@ -7183,105 +7183,14 @@ function openNotebookSourcePicker(detail, opts = {}) {
 }
 
 
-const IMAGE_TEMPLATES = [
-  {
-    id: 'poster',
-    name: '海报',
-    tag: '视觉海报',
-    ratio: '3:4',
-    preview: './templates/poster.webp',
-    desc: '生成一张以主体视觉为核心、带有清晰标题层级和留白节奏的海报。适合活动、品牌与内容封面；会把标题、主体和背景作为一个完整画面来组织。',
-    prompt: '创作一张温暖极简的橙红色艺术海报，中央是一朵盛开的红色虞美人，粗体英文标题“BLOOM”，复古丝网印刷质感，大量留白，标题与花朵形成清晰层级，画面干净完整',
-  },
-  {
-    id: 'interior',
-    name: '室内设计',
-    tag: '空间方案',
-    ratio: '4:3',
-    preview: './templates/interior.webp',
-    desc: '生成一张可直接用于方案沟通的室内空间效果图，强调家具关系、材质、采光和空间尺度。适合客厅、卧室、餐厅与办公空间的概念表达。',
-    prompt: '生成一张温暖现代客厅的室内设计效果图，奶油色墙面、浅木家具、绿植、柔软地毯和自然采光，家具尺度真实，空间关系清楚，专业建筑可视化质感',
-  },
-  {
-    id: 'logo',
-    name: '徽标',
-    tag: '品牌标识',
-    ratio: '1:1',
-    preview: './templates/logo.webp',
-    desc: '生成一枚简洁、可用于品牌起步的徽标图形。默认使用纯色或浅色背景，便于后续直接移除背景并用于头像、物料和产品包装。',
-    prompt: '设计一枚深蓝色与浅灰蓝配色的圆形品牌徽标，中心是一只极简线条鱼形图案，图形对称、边缘干净、纯色背景，适合作为品牌标识',
-  },
-  {
-    id: 'illustration',
-    name: '插画',
-    tag: '叙事插画',
-    ratio: '1:1',
-    preview: './templates/illustration.webp',
-    desc: '生成具有叙事感的单幅插画，人物、动物与场景保持统一画风。适合社媒配图、文章插图、角色氛围图和轻量故事画面。',
-    prompt: '生成一张扁平化数字插画，年轻女孩穿黄色毛衣抱着黑白猫，柔和紫色房间背景，温暖治愈，人物与猫的互动自然，色块干净统一',
-  },
-  {
-    id: 'portrait',
-    name: '职业形象照',
-    tag: '人物肖像',
-    ratio: '3:4',
-    preview: './templates/portrait.webp',
-    desc: '生成干净、可信的职业肖像，保留自然皮肤质感和真实光影，适合团队介绍、个人主页、简历与商务物料。上传自己的照片后，可把它作为人物参考。',
-    prompt: '生成一张自然光职业形象照，年轻亚洲女性穿米白色针织衫，浅灰色纯色背景，温和微笑，真实皮肤质感，专业摄影棚肖像',
-  },
-  {
-    id: 'icon',
-    name: '图标',
-    tag: '图标套组',
-    ratio: '1:1',
-    preview: './templates/icon.webp',
-    desc: '生成一组风格统一的线性图标，适合产品界面、功能入口和品牌辅助图形。图标数量、主题与底色可以在补充描述里继续约束。',
-    prompt: '生成一组四枚白色极简线性图标，分别代表手势、流星、青蛙和星球，深墨绿色背景，线条粗细统一，四枚图标均匀排布',
-  },
-  {
-    id: 'product',
-    name: '产品照',
-    tag: '商业摄影',
-    ratio: '1:1',
-    preview: './templates/product.webp',
-    desc: '生成具有真实材质和商业布光的产品摄影，适合电商主图、详情页和品牌种草图。上传产品照片后，会优先保留产品外观。',
-    prompt: '生成一张高端香薰蜡烛产品摄影，透明玻璃杯内粉色蜡体，柔和粉色背景和清透光影，极简商业质感，产品边缘清晰，画面干净',
-  },
-  {
-    id: 'merch',
-    name: '周边商品',
-    tag: '商品应用',
-    ratio: '1:1',
-    preview: './templates/merch.webp',
-    desc: '把插画、徽标或品牌图形应用到T恤、帆布袋、杯子等周边上，生成完整的商品展示图。适合周边提案和电商选品预览。',
-    prompt: '生成一件白色T恤商品照，胸前印有戴耳机的青蛙DJ插画，蓝色背景，干净电商摄影，衣服版型自然，印花位置准确，画面完整',
-  },
-  {
-    id: 'infographic',
-    name: '信息图',
-    tag: '信息表达',
-    ratio: '1:1',
-    preview: './templates/infographic.webp',
-    desc: '生成一张视觉主导的信息图或解释图，用图形、箭头、分区和简短标题表达一个概念。适合科普、业务说明和社媒知识卡片。',
-    prompt: '生成一张简洁信息图插画，云朵中上升的红色箭头，蓝色天空背景，扁平矢量风格，画面留出标题和说明空间，结构清楚',
-  },
-  {
-    id: 'flyer',
-    name: '宣传单',
-    tag: '印刷物料',
-    ratio: '3:4',
-    preview: './templates/flyer.webp',
-    desc: '生成具有印刷质感的宣传单或活动单页，标题、主体图和辅助信息形成清晰层次。适合活动招募、失物招领、门店促销等场景。',
-    prompt: '生成一张黑白复古宣传单，中央是一只青蛙的黑白照片，粗体标题“LOST FROG”，复古印刷颗粒质感，信息层级清楚，适合打印',
-  },
-]
+const IMAGE_TEMPLATE_CATEGORIES = ['海报', '室内设计', '徽标', '插画', '职业形象照', '图标', '产品照', '周边商品', '信息图', '宣传单', '其他']
 
 function imageTemplateById(id) {
-  return IMAGE_TEMPLATES.find((item) => item.id === id) || null
+  return (state.imagegen.templates || []).find((item) => item.id === id) || null
 }
 
 function imageTemplateTabCount() {
-  return IMAGE_TEMPLATES.length
+  return Array.isArray(state.imagegen.templates) ? state.imagegen.templates.length : 0
 }
 
 function selectedImageModel() {
@@ -7366,6 +7275,55 @@ async function loadRecentImages({ force = false } = {}) {
   }
 }
 
+async function loadImageTemplates({ force = false } = {}) {
+  const g = state.imagegen
+  if (g.templatesLoading) return
+  if (g.templatesLoaded && !force) return
+  g.templatesLoading = true
+  try {
+    const res = await api('/api/images/templates')
+    if (!res.ok) throw new Error(res.body?.error || `读取模板失败（HTTP ${res.status}）`)
+    g.templates = Array.isArray(res.body?.templates) ? res.body.templates : []
+    g.templatesLoaded = true
+  } catch (err) {
+    g.templates = []
+    g.templatesLoaded = true
+    toast(err.message || '读取模板失败', true)
+  } finally {
+    g.templatesLoading = false
+    if (state.view === 'imagegen') renderView()
+  }
+}
+
+async function loadImageTemplateApplications({ force = false } = {}) {
+  const g = state.imagegen
+  if (g.templateAppsLoading) return
+  if (g.templateAppsLoaded && !force) return
+  g.templateAppsLoading = true
+  try {
+    const res = await api('/api/images/template-applications')
+    if (!res.ok) throw new Error(res.body?.error || `读取模板申请失败（HTTP ${res.status}）`)
+    g.templateApps = Array.isArray(res.body?.applications) ? res.body.applications : []
+    g.templateAppsLoaded = true
+  } catch (err) {
+    g.templateApps = []
+    g.templateAppsLoaded = true
+    toast(err.message || '读取模板申请失败', true)
+  } finally {
+    g.templateAppsLoading = false
+    if (state.view === 'imagegen') renderView()
+  }
+}
+
+function imageTemplateAdminVisible() {
+  return Boolean((state.boot?.user?.visibleModules || []).includes('admin'))
+}
+
+function imageTemplatePendingCount() {
+  return (state.imagegen.templateApps || []).filter((item) => item.status === 'pending').length
+}
+
+
 function renderImageReferenceChips(g) {
   const refs = Array.isArray(g.references) ? g.references : []
   if (!refs.length) return ''
@@ -7421,6 +7379,39 @@ function openImageReferencePicker() {
     mask.remove()
     renderView()
   })
+}
+
+function openLocalImagePicker() {
+  const input = document.createElement('input')
+  input.type = 'file'
+  input.accept = 'image/png,image/jpeg,image/webp'
+  input.addEventListener('change', () => {
+    const file = input.files?.[0]
+    if (file) addLocalImageReference(file)
+  })
+  input.click()
+}
+
+async function addLocalImageReference(file) {
+  const g = state.imagegen
+  if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) {
+    return toast('参考图片只支持 PNG、JPEG 或 WebP', true)
+  }
+  if (file.size > 10 * 1024 * 1024) return toast('参考图片不能超过 10 MB', true)
+  if ((g.references || []).length >= 3) return toast('最多只能添加 3 张参考图', true)
+  try {
+    const result = await readTemplateReference(file)
+    g.references = [...(g.references || []), {
+      id: `local-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      url: result.dataUrl,
+      name: file.name || '本地图片',
+      local: true,
+    }]
+    renderView()
+    toast('已添加本地图片作为参考')
+  } catch (error) {
+    toast(error?.message || '读取本地图片失败', true)
+  }
 }
 
 function openImageCompare() {
@@ -7889,39 +7880,247 @@ function imageTemplateTabs(g) {
     </div>`
 }
 
-function imageTemplateGrid() {
+function imageTemplateActions() {
+  const g = state.imagegen
+  const userName = String(state.boot?.user?.name || '')
+  const mine = (g.templateApps || []).filter((item) => item.applicant === userName)
+  const pending = imageTemplatePendingCount()
+  const admin = imageTemplateAdminVisible()
+  return `
+    <div class="img-tpl-actions">
+      <button type="button" class="btn sm" id="igTplApply">申请成为模板</button>
+      <button type="button" class="btn sm" id="igTplMine">我的申请${mine.length ? ` · ${mine.length}` : ''}</button>
+      ${admin ? `<button type="button" class="btn sm img-tpl-review-open" id="igTplReview">审核申请${pending ? ` · ${pending}` : ''}</button>` : ''}
+    </div>`
+}
+
+function imageTemplateGrid(g) {
+  const templates = Array.isArray(g.templates) ? g.templates : []
+  if (g.templatesLoading || !g.templatesLoaded) {
+    return '<div class="img-tpl-empty"><div class="img-loading">正在读取已上线模板…</div></div>'
+  }
+  if (!templates.length) {
+    return `
+      <div class="img-tpl-empty">
+        <div class="img-tpl-empty-icon">${icon('grid')}</div>
+        <div class="img-tpl-empty-title">还没有已上线的模板</div>
+        <div class="img-tpl-empty-text">模板由用户提交提示词与预览图，经管理员审核通过后才会出现在这里。你可以在右上方申请成为模板。</div>
+      </div>`
+  }
   return `
     <div class="img-tpl-grid">
-      ${IMAGE_TEMPLATES.map((tpl) => `
-        <button type="button" class="img-tpl-card" data-tpl="${esc(tpl.id)}" aria-label="打开模板：${esc(tpl.name)}">
-          <img src="${esc(tpl.preview)}" alt="${esc(tpl.name)}模板预览" loading="lazy">
+      ${templates.map((tpl) => `
+        <button type="button" class="img-tpl-card" data-tpl="${esc(tpl.id)}" aria-label="打开模板：${esc(tpl.title)}">
+          <img src="${esc(tpl.previewUrl)}" alt="${esc(tpl.title)}模板预览" loading="lazy">
           <span class="img-tpl-shade"></span>
-          <span class="img-tpl-name">${esc(tpl.name)}</span>
-          <span class="img-tpl-tag">${esc(tpl.tag)}</span>
+          <span class="img-tpl-name">${esc(tpl.title)}</span>
+          <span class="img-tpl-tag">${esc(tpl.category)}</span>
         </button>`).join('')}
     </div>`
+}
+
+function bindImageTemplateActions(root) {
+  root.querySelectorAll('[data-tpl]').forEach((btn) => btn.addEventListener('click', () => openImageTemplate(btn.dataset.tpl)))
+  root.querySelector('#igTplApply')?.addEventListener('click', () => openImageTemplateApplication())
+  root.querySelector('#igTplMine')?.addEventListener('click', () => openImageTemplateApplications('mine'))
+  root.querySelector('#igTplReview')?.addEventListener('click', () => openImageTemplateApplications('review'))
+}
+
+function openImageTemplateApplication() {
+  let previewDataUrl = ''
+  let previewName = ''
+  const mask = openModal('申请成为模板', `
+    <div class="form-note">提交后进入管理员审核队列，审核通过后才会出现在模板页。请填写真实的提示词，并上传一张能代表模板效果的预览图。</div>
+    <div class="img-tpl-app-form">
+      <label>模板名称<input id="igTplAppName" maxlength="40" placeholder="例如：城市夜景海报"></label>
+      <label>分类<select id="igTplAppCategory">${IMAGE_TEMPLATE_CATEGORIES.map((item) => `<option value="${esc(item)}">${esc(item)}</option>`).join('')}</select></label>
+      <label>宽高比例<select id="igTplAppRatio">${['1:1', '3:4', '9:16', '4:3', '16:9'].map((item) => `<option value="${item}">${item}</option>`).join('')}</select></label>
+      <label class="img-tpl-app-wide">提示词<textarea id="igTplAppPrompt" maxlength="2000" placeholder="描述模板的构图、主体、风格、光线和画面用途"></textarea></label>
+      <label class="img-tpl-app-wide">说明（可选）<textarea id="igTplAppDesc" maxlength="800" placeholder="说明这个模板适合什么场景"></textarea></label>
+      <div class="img-tpl-app-wide">
+        <div class="img-tpl-upload-label">预览图 <span>必填</span></div>
+        <div class="img-tpl-upload-wrap">
+          <button type="button" class="img-tpl-upload" id="igTplAppUpload" aria-label="上传模板预览图">+</button>
+          <div class="img-tpl-ref" id="igTplAppPreview" hidden>
+            <img id="igTplAppPreviewImg" alt="模板预览图">
+            <button type="button" class="img-tpl-ref-x" id="igTplAppPreviewX" aria-label="移除预览图">×</button>
+          </div>
+        </div>
+        <input id="igTplAppFile" type="file" accept="image/png,image/jpeg,image/webp" hidden>
+        <div class="img-tpl-note">预览图会用于模板卡片；建议使用与模板效果一致的竖版或方版画面。</div>
+      </div>
+    </div>
+    <div class="img-edit-err" id="igTplAppErr"></div>
+    <div class="img-edit-foot">
+      <button class="btn" data-tplappcancel>取消</button>
+      <button class="btn primary" id="igTplAppGo">提交审核</button>
+    </div>`, { wide: true })
+  const name = mask.querySelector('#igTplAppName')
+  const category = mask.querySelector('#igTplAppCategory')
+  const ratio = mask.querySelector('#igTplAppRatio')
+  const prompt = mask.querySelector('#igTplAppPrompt')
+  const desc = mask.querySelector('#igTplAppDesc')
+  const file = mask.querySelector('#igTplAppFile')
+  const upload = mask.querySelector('#igTplAppUpload')
+  const preview = mask.querySelector('#igTplAppPreview')
+  const previewImg = mask.querySelector('#igTplAppPreviewImg')
+  const err = mask.querySelector('#igTplAppErr')
+  const go = mask.querySelector('#igTplAppGo')
+  upload.addEventListener('click', () => file.click())
+  file.addEventListener('change', () => {
+    const chosen = file.files?.[0]
+    if (!chosen) return
+    if (!['image/png', 'image/jpeg', 'image/webp'].includes(chosen.type)) {
+      err.textContent = '预览图只支持 PNG、JPEG 或 WebP'
+      file.value = ''
+      return
+    }
+    if (chosen.size > 10 * 1024 * 1024) {
+      err.textContent = '预览图不能超过 10 MB'
+      file.value = ''
+      return
+    }
+    readTemplateReference(chosen).then((result) => {
+      previewDataUrl = result.dataUrl
+      previewName = chosen.name || '模板预览图'
+      previewImg.src = previewDataUrl
+      preview.hidden = false
+      upload.classList.add('has-ref')
+      err.textContent = ''
+    }).catch((error) => {
+      err.textContent = error?.message || '读取预览图失败，请重试'
+    }).finally(() => { file.value = '' })
+  })
+  mask.querySelector('#igTplAppPreviewX').addEventListener('click', () => {
+    previewDataUrl = ''
+    previewName = ''
+    preview.hidden = true
+    previewImg.removeAttribute('src')
+    upload.classList.remove('has-ref')
+    file.value = ''
+  })
+  mask.querySelector('[data-tplappcancel]').addEventListener('click', () => mask.remove())
+  go.addEventListener('click', async () => {
+    const title = name.value.trim()
+    const cat = category.value
+    const ratioValue = ratio.value
+    const promptValue = prompt.value.trim()
+    if (!title) { err.textContent = '请填写模板名称'; name.focus(); return }
+    if (!promptValue) { err.textContent = '请填写模板提示词'; prompt.focus(); return }
+    if (!previewDataUrl) { err.textContent = '请上传一张模板预览图'; return }
+    go.disabled = true
+    go.textContent = '提交中…'
+    try {
+      const res = await api('/api/images/template-applications', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          title,
+          category: cat,
+          ratio: ratioValue,
+          prompt: promptValue,
+          description: desc.value.trim(),
+          previewDataUrl,
+          previewName,
+        }),
+      })
+      if (!res.ok || !res.body?.application) throw new Error(res.body?.error || `提交申请失败（HTTP ${res.status}）`)
+      const g = state.imagegen
+      g.templateApps = [res.body.application, ...(g.templateApps || [])]
+      g.templateAppsLoaded = true
+      mask.remove()
+      renderView()
+      toast('模板申请已提交，管理员审核通过后会上线')
+    } catch (error) {
+      go.disabled = false
+      go.textContent = '提交审核'
+      err.textContent = error?.message || '提交申请失败'
+    }
+  })
+}
+
+async function openImageTemplateApplications(mode = 'mine') {
+  const g = state.imagegen
+  if (!g.templateAppsLoaded) await loadImageTemplateApplications()
+  const apps = Array.isArray(g.templateApps) ? g.templateApps : []
+  const admin = mode === 'review' && imageTemplateAdminVisible()
+  const statusText = { pending: '待审核', approved: '已通过', rejected: '已驳回' }
+  const visibleApps = admin ? apps : apps.filter((item) => item.applicant === state.boot?.user?.name)
+  const mask = openModal(admin ? '模板申请审核' : '我的模板申请', `
+    <div class="form-note">${admin ? '审核通过后模板会立即对所有人上线；驳回时可填写原因，申请人可在“我的申请”中查看。' : '这里显示你提交过的模板申请及审核状态。'}</div>
+    ${visibleApps.length ? visibleApps.map((item) => `
+      <article class="img-tpl-app" data-tpl-app-row="${esc(item.id)}">
+        <img src="${esc(item.previewUrl)}" alt="${esc(item.title)}预览">
+        <div class="img-tpl-app-main">
+          <div class="img-tpl-app-head"><b>${esc(item.title)}</b><span class="img-tpl-app-status ${esc(item.status)}">${esc(statusText[item.status] || item.status)}</span></div>
+          <div class="img-tpl-app-meta">${esc(item.applicant)} · ${esc(item.category)} · ${esc(item.ratio)} · ${esc(new Date(item.createdAt).toLocaleString('zh-CN', { hour12: false }).slice(0, 16))}</div>
+          <div class="img-tpl-app-prompt">${esc(item.prompt)}</div>
+          ${item.description ? `<div class="img-tpl-app-desc">${esc(item.description)}</div>` : ''}
+          ${item.status === 'rejected' && item.reviewNote ? `<div class="img-edit-err">驳回原因：${esc(item.reviewNote)}</div>` : ''}
+          ${admin && item.status === 'pending' ? `
+            <div class="img-tpl-app-review">
+              <input data-tpl-note placeholder="驳回原因（可选）" maxlength="300">
+              <button type="button" class="btn sm" data-tpl-review="reject">驳回</button>
+              <button type="button" class="btn primary sm" data-tpl-review="approve">通过</button>
+            </div>` : ''}
+        </div>
+      </article>`).join('') : '<div class="img-tpl-empty"><div class="img-tpl-empty-title">还没有模板申请</div><div class="img-tpl-empty-text">去模板页提交第一个申请。</div></div>'}
+    `, { wide: true })
+  mask.querySelectorAll('[data-tpl-review]').forEach((btn) => btn.addEventListener('click', async () => {
+    const row = btn.closest('[data-tpl-app-row]')
+    const id = row?.dataset.tplAppRow
+    if (!id) return
+    const note = row.querySelector('[data-tpl-note]')?.value.trim() || ''
+    const decision = btn.dataset.tplReview
+    row.querySelectorAll('[data-tpl-review]').forEach((item) => { item.disabled = true })
+    try {
+      const res = await api('/api/images/template-review', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ id, decision, note }),
+      })
+      if (!res.ok || !res.body?.application) throw new Error(res.body?.error || `审核失败（HTTP ${res.status}）`)
+      const updated = res.body.application
+      g.templateApps = (g.templateApps || []).map((item) => item.id === updated.id ? updated : item)
+      mask.remove()
+      if (decision === 'approve') {
+        g.templatesLoaded = false
+        await loadImageTemplates({ force: true })
+        toast(`模板「${updated.title}」已上线`)
+      } else {
+        renderView()
+        toast('已驳回模板申请')
+      }
+    } catch (error) {
+      row.querySelectorAll('[data-tpl-review]').forEach((item) => { item.disabled = false })
+      toast(error?.message || '审核失败', true)
+    }
+  }))
 }
 
 function openImageTemplate(templateId) {
   const tpl = imageTemplateById(templateId)
   if (!tpl) return
   const g = state.imagegen
+  const templateTitle = tpl.title || '模板'
+  const category = tpl.category || '模板'
+  const description = tpl.description || tpl.prompt || '暂无说明'
+  const defaultRatio = ['1:1', '3:4', '9:16', '4:3', '16:9'].includes(tpl.ratio) ? tpl.ratio : '1:1'
   let ratio = 'auto'
   let referenceDataUrl = ''
-  let referenceName = ''
-  const mask = openModal(tpl.name, `
+  const mask = openModal(templateTitle, `
     <div class="img-tpl-detail">
-      <div class="img-tpl-detail-art"><img src="${esc(tpl.preview)}" alt="${esc(tpl.name)}模板预览"></div>
+      <div class="img-tpl-detail-art"><img src="${esc(tpl.previewUrl || '')}" alt="${esc(templateTitle)}模板预览"></div>
       <div class="img-tpl-detail-info">
-        <div class="img-tpl-kicker">${esc(tpl.tag)}</div>
-        <div class="img-tpl-title">${esc(tpl.name)}</div>
-        <div class="img-tpl-desc" id="igTplDesc">${esc(tpl.desc)}</div>
+        <div class="img-tpl-kicker">${esc(category)}</div>
+        <div class="img-tpl-title">${esc(templateTitle)}</div>
+        <div class="img-tpl-desc" id="igTplDesc">${esc(description)}</div>
         <button type="button" class="img-tpl-more" id="igTplMore">展开更多</button>
         <div class="img-tpl-row">
           <label for="igTplRatio">宽高比例</label>
           <select id="igTplRatio" aria-label="宽高比例">
             <option value="auto">自动</option>
-            ${['1:1', '3:4', '9:16', '4:3', '16:9'].map((item) => `<option value="${item}">${item}${item === tpl.ratio ? ' · 模板默认' : ''}</option>`).join('')}
+            ${['1:1', '3:4', '9:16', '4:3', '16:9'].map((item) => `<option value="${item}">${item}${item === defaultRatio ? ' · 模板默认' : ''}</option>`).join('')}
           </select>
         </div>
         <div class="img-tpl-upload-label">上传参考照片 <span>可选</span></div>
@@ -7951,11 +8150,8 @@ function openImageTemplate(templateId) {
   const err = mask.querySelector('#igTplErr')
   const tryBtn = mask.querySelector('#igTplTry')
   ratioSelect.value = ratio
-  if (tpl.desc.length > 72) {
-    desc.classList.add('clamp')
-  } else {
-    more.hidden = true
-  }
+  if (description.length > 72) desc.classList.add('clamp')
+  else more.hidden = true
   more.addEventListener('click', () => {
     const clamped = desc.classList.toggle('clamp')
     more.textContent = clamped ? '展开更多' : '收起'
@@ -7977,7 +8173,6 @@ function openImageTemplate(templateId) {
     }
     readTemplateReference(chosen).then((result) => {
       referenceDataUrl = result.dataUrl
-      referenceName = chosen.name || '参考照片'
       refImg.src = referenceDataUrl
       ref.hidden = false
       upload.classList.add('has-ref')
@@ -7988,14 +8183,13 @@ function openImageTemplate(templateId) {
   })
   mask.querySelector('#igTplRefX').addEventListener('click', () => {
     referenceDataUrl = ''
-    referenceName = ''
     ref.hidden = true
     refImg.removeAttribute('src')
     upload.classList.remove('has-ref')
     file.value = ''
   })
   tryBtn.addEventListener('click', async () => {
-    const selectedRatio = ratio === 'auto' ? tpl.ratio : ratio
+    const selectedRatio = ratio === 'auto' ? defaultRatio : ratio
     const visualPrompt = referenceDataUrl
       ? `${tpl.prompt}。以图1作为参考，保留其中主体的人物、产品或关键外观，不要替换身份和主要细节`
       : tpl.prompt
@@ -8010,16 +8204,14 @@ function openImageTemplate(templateId) {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           prompt: visualPrompt,
-          style: tpl.name,
+          style: category,
           ratio: selectedRatio,
           modelId: g.modelId || selectedImageModel()?.id || '',
           referenceDataUrls: referenceDataUrl ? [referenceDataUrl] : [],
           seed: Math.floor(Math.random() * 2_147_483_647),
         }),
       })
-      if (!res.ok || !res.body?.image?.url) {
-        throw new Error(res.body?.error || `模板生成失败（HTTP ${res.status}）`)
-      }
+      if (!res.ok || !res.body?.image?.url) throw new Error(res.body?.error || `模板生成失败（HTTP ${res.status}）`)
       const shot = imageShotFromAsset(res.body.image)
       g.shots = [shot, ...(g.shots || []).filter((item) => item.id !== shot.id)]
       g.assetsLoaded = true
@@ -8027,7 +8219,7 @@ function openImageTemplate(templateId) {
       g.prompt = visualPrompt
       mask.remove()
       renderView()
-      toast(`已用「${tpl.name}」模板生成一张图像，已保存到我的图像`)
+      toast(`已用「${templateTitle}」模板生成一张图像，已保存到我的图像`)
       setTimeout(() => openImageWorkbench(shot), 60)
     } catch (error) {
       tryBtn.disabled = false
@@ -8038,7 +8230,6 @@ function openImageTemplate(templateId) {
     }
   })
 }
-
 function mergeRecentImage(shot) {
   const g = state.imagegen
   const index = (g.shots || []).findIndex((item) => item.id === shot.id)
@@ -8371,6 +8562,25 @@ function openImageResize(shot) {
   }))
 }
 
+function openImageSkills() {
+  const shots = (state.imagegen.shots || []).filter((shot) => shot.url)
+  if (!shots.length) return toast('还没有可用于技能处理的图像，先生成或从模板生成一张', true)
+  const mask = openModal('图像技能', `
+    <div class="form-note">选择一张已落库的图像进入工作台，使用标注、添加评论、移除背景、擦除和调整大小。</div>
+    <div class="img-ref-picker">
+      ${shots.map((shot) => `
+        <button type="button" class="img-ref-choice" data-skill-pick="${esc(shot.id)}">
+          <img src="${shot.url}" alt="">
+          <span>${esc(shot.style)} · ${esc(shot.ratio)} · v${esc(String(shot.revision || 1))}</span>
+        </button>`).join('')}
+    </div>`, { wide: true })
+  mask.querySelectorAll('[data-skill-pick]').forEach((btn) => btn.addEventListener('click', () => {
+    const shot = shots.find((item) => item.id === btn.dataset.skillPick)
+    mask.remove()
+    if (shot) openImageWorkbench(shot)
+  }))
+}
+
 async function renderImage(el) {
   const g = state.imagegen
   const cap = state.boot?.imageGeneration || {}
@@ -8402,11 +8612,13 @@ async function renderImage(el) {
     return
   }
   if (!g.assetsLoaded && !g.assetsLoading) loadRecentImages()
+  if (tab === 'templates' && !g.templatesLoaded && !g.templatesLoading) loadImageTemplates()
+  if (!g.templateAppsLoaded && !g.templateAppsLoading) loadImageTemplateApplications()
 
   const cards = g.shots || []
   const modelOptions = allModels.map((model) => `<option value="${esc(model.id)}" ${model.id === g.modelId ? 'selected' : ''} ${model.configured ? '' : 'disabled'}>${esc(model.label)}${model.configured ? '' : '（未配置）'}</option>`).join('')
   const headSub = tab === 'templates'
-    ? '真实模板 · 可上传参考照片，也可直接试一试；生成结果会保存到我的图像'
+    ? '真实模板 · 由用户申请、管理员审核后上线；选择模板后可上传参考照片，或直接试一试'
     : `真实生图 · ${esc(selectedModel.label)} · ${esc(selectedModel.providerLabel || selectedModel.provider || '图像模型')} · ${cap.external ? '提示词会发送到外部服务' : '服务端内部模型'}`
 
   const head = `
@@ -8418,10 +8630,11 @@ async function renderImage(el) {
 
   if (tab === 'templates') {
     el.innerHTML = `${head}
-      ${imageTemplateGrid()}
-      <div class="img-tpl-footnote">模板是真实提示词与真实模型调用，不使用示例图冒充生成结果；选择模板后可上传一张参考照片，或直接点“试一试”。</div>`
+      ${imageTemplateActions()}
+      ${imageTemplateGrid(g)}
+      <div class="img-tpl-footnote">模板是用户提交、管理员审核后上线的真实提示词；选择模板后可上传一张参考照片，或直接点“试一试”。</div>`
     bindImageTabs(el)
-    el.querySelectorAll('[data-tpl]').forEach((btn) => btn.addEventListener('click', () => openImageTemplate(btn.dataset.tpl)))
+    bindImageTemplateActions(el)
     return
   }
 
@@ -8442,14 +8655,21 @@ async function renderImage(el) {
     <div class="img-composer-wrap">
       <div class="img-refs" id="igRefs">${renderImageReferenceChips(g)}</div>
       <div class="img-composer">
+        <button type="button" class="img-plus" id="igPlus" aria-label="更多图像能力" aria-expanded="false" title="更多图像能力">${icon('plus')}</button>
+        <div class="img-plus-menu" id="igPlusMenu" hidden>
+          <button type="button" data-igplus="image"><span class="img-plus-menu-ico">${icon('image')}</span><span><b>添加图片</b><small>上传本地图片作为参考</small></span></button>
+          <button type="button" data-igplus="draw"><span class="img-plus-menu-ico">${icon('pen')}</span><span><b>绘图</b><small>打开画板，把画好的图作为参考</small></span></button>
+          <button type="button" data-igplus="skills"><span class="img-plus-menu-ico">${icon('spark')}</span><span><b>技能</b><small>标注、抠图、擦除、调整大小</small></span></button>
+        </div>
         <select class="img-model-select" id="igModel" aria-label="选择图像模型" title="选择图像模型" ${allModels.length <= 1 ? 'disabled' : ''}>${modelOptions}</select>
         <input class="img-input" id="igPrompt" placeholder="描述新图像" value="${esc(g.prompt)}">
         <div class="img-tools">
           <select class="img-count-select" id="igCount" aria-label="方案数量" title="方案数量">${[1, 2, 3].map((n) => `<option value="${n}" ${Number(g.count) === n ? 'selected' : ''}>${n} 方案</option>`).join('')}</select>
-          <button class="img-ref-add" id="igRefAdd" title="添加参考图" aria-label="添加参考图">${icon('image')}</button>
+          <button type="button" class="img-mic" id="igMic" title="语音输入" aria-label="语音输入">${icon('mic')}</button>
           <button class="img-send" id="igGen" title="生成" ${g.busy ? 'disabled' : ''}>${g.busy ? '…' : icon('up')}</button>
         </div>
       </div>
+      <input id="igLocalFile" type="file" accept="image/png,image/jpeg,image/webp" hidden>
     </div>`
 
   bindImageTabs(el)
@@ -8463,7 +8683,34 @@ async function renderImage(el) {
   el.querySelector('#igCount')?.addEventListener('change', (e) => {
     g.count = Math.max(1, Math.min(3, Number(e.target.value) || 1))
   })
-  el.querySelector('#igRefAdd')?.addEventListener('click', () => openImageReferencePicker())
+  const plus = el.querySelector('#igPlus')
+  const plusMenu = el.querySelector('#igPlusMenu')
+  const closePlus = () => {
+    if (!plusMenu || !plus) return
+    plusMenu.hidden = true
+    plus.setAttribute('aria-expanded', 'false')
+  }
+  plus?.addEventListener('click', (event) => {
+    event.stopPropagation()
+    const open = plusMenu.hidden
+    plusMenu.hidden = !open
+    plus.setAttribute('aria-expanded', open ? 'true' : 'false')
+  })
+  el.querySelector('#igComposer')?.addEventListener('click', (event) => {
+    if (!event.target.closest('#igPlus') && !plusMenu?.contains(event.target)) closePlus()
+  })
+  plusMenu?.querySelectorAll('[data-igplus]').forEach((btn) => btn.addEventListener('click', () => {
+    closePlus()
+    if (btn.dataset.igplus === 'image') openLocalImagePicker()
+    else if (btn.dataset.igplus === 'draw') openDrawingBoard({ imageReference: true })
+    else if (btn.dataset.igplus === 'skills') openImageSkills()
+  }))
+  el.querySelector('#igLocalFile')?.addEventListener('change', (event) => {
+    const file = event.target.files?.[0]
+    if (file) addLocalImageReference(file)
+    event.target.value = ''
+  })
+  el.querySelector('#igMic')?.addEventListener('click', (event) => startVoiceInput(event.currentTarget, input))
   el.querySelectorAll('[data-ref-remove]').forEach((btn) => btn.addEventListener('click', (e) => {
     e.stopPropagation()
     g.references = (g.references || []).filter((item) => item.id !== btn.dataset.refRemove)
@@ -8505,6 +8752,9 @@ async function renderImage(el) {
     toast('正在调用真实生图服务，通常需要 10–30 秒')
     const g2 = state.imagegen
     const count = Math.max(1, Math.min(4, Number(g2.count) || 1))
+    const refs = g2.references || []
+    const assetRefs = refs.filter((item) => !item.local)
+    const localRefs = refs.filter((item) => item.local && item.url)
     let made = 0
     try {
       for (let i = 0; i < count; i += 1) {
@@ -8516,7 +8766,8 @@ async function renderImage(el) {
             style: g2.style,
             ratio: g2.ratio,
             modelId: g2.modelId || selectedModel.id,
-            referenceAssetIds: (g2.references || []).map((item) => item.id),
+            referenceAssetIds: assetRefs.map((item) => item.id),
+            referenceDataUrls: localRefs.map((item) => item.url),
             seed: Math.floor(Math.random() * 2_147_483_647),
           }),
         })
@@ -8550,7 +8801,8 @@ function bindImageTabs(root) {
   }))
 }
 
-function openDrawingBoard() {
+function openDrawingBoard(opts = {}) {
+  const forImage = Boolean(opts.imageReference)
   const drawSvg = (name) => {
     const paths = {
       cursor: '<path d="M5 3l13 8-5.6 1.2L10 19z"/>',
@@ -8604,7 +8856,7 @@ function openDrawingBoard() {
       <div class="jg-draw-colors">
         ${colors.map(([c, label]) => `<button class="jg-draw-color${c === 'rainbow' ? ' rainbow' : ''}${c === '#1f2328' ? ' on' : ''}" data-color="${c}" title="${label}" aria-label="${label}"${c === 'rainbow' ? '' : ` style="background:${c}"`}></button>`).join('')}
       </div>
-      <button class="jg-draw-confirm" data-ddone title="完成并加入对话" aria-label="完成并加入对话" disabled>${drawSvg('check')}</button>
+      <button class="jg-draw-confirm" data-ddone title="${forImage ? '完成并加入参考图' : '完成并加入对话'}" aria-label="${forImage ? '完成并加入参考图' : '完成并加入对话'}" disabled>${drawSvg('check')}</button>
     </div>`
   document.body.appendChild(mask)
   const panel = mask.querySelector('.jg-draw-panel')
@@ -9039,6 +9291,31 @@ function openDrawingBoard() {
   doneBtn.addEventListener('click', async () => {
     if (!objects.length) return toast('画布还是空的', true)
     doneBtn.disabled = true
+    if (forImage) {
+      try {
+        const g = state.imagegen
+        if ((g.references || []).length >= 3) {
+          doneBtn.disabled = false
+          return toast('最多只能添加 3 张参考图', true)
+        }
+        const dataUrl = canvas.toDataURL('image/png')
+        g.references = [...(g.references || []), {
+          id: `local-draw-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+          url: dataUrl,
+          name: '绘图参考',
+          local: true,
+        }]
+        closeBoard()
+        state.imagegen.tab = 'mine'
+        renderView()
+        toast('绘图已加入参考图')
+      } catch (error) {
+        toast(error?.message || '绘图导出失败', true)
+      } finally {
+        doneBtn.disabled = false
+      }
+      return
+    }
     const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'))
     if (!blob) { doneBtn.disabled = false; return toast('导出失败，请重试', true) }
     const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14)
