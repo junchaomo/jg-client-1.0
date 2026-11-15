@@ -1,6 +1,7 @@
 const { app, BrowserWindow, Menu, ipcMain, shell, dialog, WebContentsView } = require('electron')
 const path = require('path')
 const fs = require('fs')
+const crypto = require('crypto')
 const { spawn } = require('child_process')
 const http = require('http')
 const net = require('net')
@@ -44,6 +45,12 @@ let browserUrl = ''
 /* 最近一次渲染进程推来的槽位矩形。容器先行（应用启动期间先挂壳、后建视图）时，
    这次 bounds 会早于视图创建到达，先存下来、建视图时立刻应用，避免 0 尺寸白屏。 */
 let browserBounds = null
+/* 应用工作区标签页：每个应用一个独立的 WebContentsView。
+   appViews 只保存视图与加载状态，不参与 AS 进程租约；关闭标签只销毁视图，
+   应用进程仍由渲染层的 /api/as/heartbeat 租约维持。 */
+const appViews = new Map()
+let activeAppId = ''
+let appBounds = null
 let serverProcess = null
 let serverPort = null
 let quitting = false
@@ -255,6 +262,115 @@ function closeBrowserView() {
   browserUrl = ''
 }
 
+function appPartition(appId) {
+  const digest = crypto.createHash('sha256').update(String(appId || '')).digest('hex').slice(0, 16)
+  return `persist:jg-as-${digest}`
+}
+
+function appViewSend(rec, patch = {}) {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  try {
+    mainWindow.webContents.send('app:tab-state', {
+      appId: rec.appId,
+      url: String(rec.url || ''),
+      title: String(rec.view.webContents.getTitle() || ''),
+      status: rec.status || 'loading',
+      ...patch,
+    })
+  } catch (_) {}
+}
+
+function ensureAppView(appId, url = '') {
+  if (!mainWindow || mainWindow.isDestroyed()) return null
+  const key = String(appId || '').trim()
+  if (!key) return null
+  let rec = appViews.get(key)
+  if (!rec) {
+    const view = new WebContentsView({
+      webPreferences: {
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+        spellcheck: false,
+        /* 每个应用独立持久化分区：应用之间、应用与中枢主界面之间不共享
+           Cookie / localStorage，避免一个应用读到中枢登录态。 */
+        partition: appPartition(key),
+      },
+    })
+    rec = { appId: key, view, url: '', status: 'starting' }
+    appViews.set(key, rec)
+    view.setBackgroundColor('#ffffff')
+    view.webContents.setWindowOpenHandler(({ url: target }) => {
+      if (/^https?:\/\//i.test(String(target || ''))) shell.openExternal(String(target))
+      return { action: 'deny' }
+    })
+    view.webContents.on('will-navigate', (event, target) => {
+      if (!/^https?:\/\//i.test(String(target || ''))) event.preventDefault()
+    })
+    view.webContents.on('did-finish-load', () => {
+      rec.status = 'ready'
+      appViewSend(rec, { status: 'ready', url: String(rec.view.webContents.getURL() || rec.url || '') })
+    })
+    view.webContents.on('page-title-updated', (_event, title) => {
+      appViewSend(rec, { title: String(title || '') })
+    })
+    view.webContents.on('did-fail-load', (_event, code, description, validatedURL, isMainFrame) => {
+      if (!isMainFrame || code === -3) return
+      rec.status = 'failed'
+      appViewSend(rec, { status: 'failed', url: String(validatedURL || rec.url || ''), error: String(description || code || '') })
+    })
+    view.webContents.on('render-process-gone', (_event, details) => {
+      rec.status = 'crashed'
+      appViewSend(rec, { status: 'crashed', error: String(details?.reason || '') })
+    })
+    mainWindow.contentView.addChildView(view)
+    view.setVisible(false)
+  }
+  if (url && rec.url !== url) {
+    rec.url = String(url)
+    rec.status = 'loading'
+    appViewSend(rec, { status: 'loading', url: rec.url })
+    rec.view.webContents.loadURL(rec.url).catch((error) => {
+      rec.status = 'failed'
+      appViewSend(rec, { status: 'failed', error: String(error?.message || error) })
+    })
+  }
+  return rec
+}
+
+function showAppView(appId) {
+  const key = String(appId || '').trim()
+  const rec = appViews.get(key)
+  if (!rec) return false
+  for (const [id, item] of appViews) item.view.setVisible(id === key)
+  activeAppId = key
+  if (appBounds) rec.view.setBounds(appBounds)
+  try { rec.view.webContents.focus() } catch (_) {}
+  return true
+}
+
+function hideAppViews() {
+  for (const item of appViews.values()) item.view.setVisible(false)
+}
+
+function closeAppView(appId) {
+  const key = String(appId || '').trim()
+  const rec = appViews.get(key)
+  if (!rec) return
+  appViews.delete(key)
+  if (activeAppId === key) activeAppId = ''
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    try { mainWindow.contentView.removeChildView(rec.view) } catch (_) {}
+  }
+  try { rec.view.webContents.close() } catch (_) {}
+}
+
+function closeAllAppViews() {
+  for (const key of [...appViews.keys()]) closeAppView(key)
+  activeAppId = ''
+  appBounds = null
+}
+
 function createWindow() {
   const window = new BrowserWindow({
     width: 1440,
@@ -281,6 +397,7 @@ function createWindow() {
   window.once('ready-to-show', () => window.show())
   window.on('closed', () => {
     if (mainWindow === window) {
+      closeAllAppViews()
       mainWindow = null
       browserView = null
       browserAttached = false
@@ -379,6 +496,36 @@ ipcMain.on('browser:reload', () => {
 })
 
 ipcMain.on('browser:close', () => closeBrowserView())
+
+/* ---------- 应用工作区标签页 ---------- */
+ipcMain.on('app:open', (_event, payload = {}) => {
+  const appId = String(payload.appId || '').trim()
+  const url = String(payload.url || '')
+  if (!appId || !/^https?:\/\//i.test(url)) return
+  ensureAppView(appId, url)
+  if (payload.activate !== false) showAppView(appId)
+})
+
+ipcMain.on('app:activate', (_event, appId) => {
+  showAppView(String(appId || '').trim())
+})
+
+ipcMain.on('app:hide', () => hideAppViews())
+
+ipcMain.on('app:close', (_event, appId) => {
+  closeAppView(String(appId || '').trim())
+})
+
+ipcMain.on('app:bounds', (_event, payload = {}) => {
+  const rect = payload.rect || payload
+  const x = Math.max(0, Math.round(Number(rect.x) || 0))
+  const y = Math.max(0, Math.round(Number(rect.y) || 0))
+  const width = Math.max(1, Math.round(Number(rect.width) || 1))
+  const height = Math.max(1, Math.round(Number(rect.height) || 1))
+  appBounds = { x, y, width, height }
+  const active = appViews.get(activeAppId)
+  if (active) active.view.setBounds(appBounds)
+})
 
 ipcMain.on('browser:open-external', (_event, url) => {
   if (/^https?:\/\//i.test(String(url || ''))) shell.openExternal(String(url))

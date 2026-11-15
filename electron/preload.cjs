@@ -24,4 +24,17 @@ contextBridge.exposeInMainWorld('jgClient', {
       return () => ipcRenderer.removeListener('browser:download-state', handler)
     },
   },
+  asApp: {
+    open: (payload = {}) => ipcRenderer.send('app:open', payload),
+    activate: (appId) => ipcRenderer.send('app:activate', appId),
+    hide: () => ipcRenderer.send('app:hide'),
+    close: (appId) => ipcRenderer.send('app:close', appId),
+    bounds: (payload = {}) => ipcRenderer.send('app:bounds', payload),
+    onTabState: (callback) => {
+      if (typeof callback !== 'function') return () => {}
+      const handler = (_event, entry) => callback(entry)
+      ipcRenderer.on('app:tab-state', handler)
+      return () => ipcRenderer.removeListener('app:tab-state', handler)
+    },
+  },
 })

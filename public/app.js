@@ -2142,7 +2142,7 @@ function applyLayout() {
   const enabled = hasSidebarView()
   const open = enabled && state.sbPinned
   const cloud = state.cloudOpen && cloudAllowed()
-  if (!cloud) closeNativeWeb()
+  if (!cloud) { closeNativeWeb(); hideNativeApp() }
   const panesW = Math.max(0, window.innerWidth - 58)
   const cbW = cloud ? (state.cbUserW || Math.round(panesW / 4)) : 0
   document.documentElement.style.setProperty('--cb-w', `${cbW}px`)
@@ -2159,6 +2159,7 @@ function applyLayout() {
   const app = document.getElementById('app')
   app?.classList.toggle('home-cloud', state.view === 'home' && cloud)
   if (document.getElementById('cbWebSlot')) requestAnimationFrame(sendNativeBounds)
+  if (document.getElementById('cbAppSlot')) requestAnimationFrame(() => sendCloudAppBounds(asPaneAppId))
   requestAnimationFrame(syncPaneScrollbars)
 }
 window.addEventListener('resize', () => applyLayout())
@@ -2906,7 +2907,6 @@ async function renderViewInner() {
 
 /** 所有模块统一从这里进入渲染，渲染完由 AppLayout 接管侧栏挂载。 */
 async function renderView() {
-  if (asPaneAppId && state.view !== asPaneView) hideAsPane()
   await renderViewInner()
   mountPageSidebar()
   requestAnimationFrame(syncPaneScrollbars)
@@ -6151,10 +6151,8 @@ function openPluginSurface(m) {
 }
 
 function openPluginSlide(id) {
-  /* 抽屉与应用工作区互斥：原生视图会把抽屉压在底下，所以先收起工作区。
-     但只收视图、不动租约——「看一眼详情」不该把正在跑的应用回收，
-     智能中枢客户端运行期间进程一直保留（显式「停止应用」除外）。 */
-  if (asPaneAppId) { const prevId = asPaneAppId; hideAsPane(); armIdleRelease(prevId) }
+  /* 抽屉不再压制右侧浏览器里的应用视图：应用现在是浏览器分栏中的标签，
+     打开应用详情不会影响主工作区，也不会回收应用租约。 */
   const m = (state.market || []).find((x) => x.id === id)
   if (!m) return
   const isApp = m.kind === 'app'
@@ -6266,18 +6264,55 @@ function openPluginSlide(id) {
     const btn = slide.querySelector('[data-as-start]')
     if (btn?.disabled) return
     if (btn) btn.disabled = true
-    const useElectron = Boolean(window.jgClient?.browser?.open)
+    const useElectron = Boolean(window.jgClient?.asApp?.open)
+    const hadTab = Boolean(asTabById(m.id))
+    if (useElectron && hadTab) {
+      if (btn) btn.disabled = false
+      activateAsTab(m.id)
+      return
+    }
+    /* 标签关掉但应用还在跑：复用原租约和地址重新挂标签，不再发 /api/as/start。
+       否则每次“关闭标签→打开应用”都会新增一条租约，租约只增不减。 */
+    const liveLease = state.asLeases?.[m.id]
+    if (useElectron && !hadTab && liveLease?.url) {
+      try {
+        const tab = upsertAsTab(m, liveLease.url, 'loading')
+        if (tab) {
+          await openAppCloudTab(tab)
+          renderCloudPanel()
+          toast(`已打开「${m.name}」，应用进程继续复用`)
+        }
+      } catch (error) {
+        toast(String(error?.message || error), true)
+      } finally {
+        if (btn) btn.disabled = false
+      }
+      return
+    }
+    if (useElectron && !hadTab && asTabs.length >= AS_TAB_LIMIT) {
+      if (btn) btn.disabled = false
+      return toast(`最多同时打开 ${AS_TAB_LIMIT} 个应用标签，请先关闭一个`, true)
+    }
     const popup = useElectron ? null : window.open('', '_blank')
     try {
       /* 先开容器，再等启动：应用进程是冷启动（交通的 Python 侧实测 import 就要 13.5s），
          等 /api/as/start 返回才开窗，等于把这十几秒变成“点了没反应”。
-         先把容器挂出来并显示“启动中”，拿到 url 后立刻导航进去。 */
-      const paneUp = useElectron ? showAsPane(m, '') : false
+         先把应用标签挂进右侧“展开浏览器”，并显示“启动中”，拿到 url 后加载进独立视图。 */
+      let paneUp = false
+      if (useElectron) {
+        const bootTab = upsertAsTab(m, '', 'starting')
+        if (bootTab) paneUp = await openAppCloudTab(bootTab)
+      }
       const { ok, body } = await api('/api/as/start', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: m.id }) })
       if (!ok) {
         popup?.close()
-        if (paneUp) hideAsPane()
+        if (paneUp && !hadTab) removeAsTab(m.id, true)
         return toast(body.error || '应用启动失败', true)
+      }
+      if (asCanceledStarts.has(m.id)) {
+        asCanceledStarts.delete(m.id)
+        try { await api('/api/as/stop', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: m.id, leaseId: body.leaseId || '', force: true }) }) } catch (_) {}
+        return toast('应用启动已取消')
       }
       state.asLeases = state.asLeases || {}
       if (state.asLeases[m.id]?.timer) clearInterval(state.asLeases[m.id].timer)
@@ -6287,25 +6322,29 @@ function openPluginSlide(id) {
         if (!hb.ok) {
           clearInterval(timer)
           if (state.asLeases[m.id]?.leaseId === leaseId) delete state.asLeases[m.id]
+          setAsTabStatus(m.id, 'expired')
           toast('应用租约已失效，进程会在宽限期后回收', true)
         }
       }, 15000)
       state.asLeases[m.id] = { leaseId, timer, url: body.url }
       if (state.asLeases[m.id].idleTimer) { clearTimeout(state.asLeases[m.id].idleTimer); state.asLeases[m.id].idleTimer = null }
-      if (paneUp) {
-        const origin = document.getElementById('asPaneOrigin')
-        if (origin) origin.textContent = asPaneOrigin(body.url)
-        window.jgClient.browser.open(body.url)
-        /* 容器先行时 rAF 里的 bounds 早于视图创建，会被主进程丢弃；
-           open 之后再推一次，否则视图以默认 0 尺寸出现，表现为一片空白。 */
-        requestAnimationFrame(() => sendNativeBounds('asWebSlot'))
-      } else if (useElectron && showAsPane(m, body.url)) window.jgClient.browser.open(body.url)
-      else if (popup && !popup.closed) popup.location.href = body.url
-      else window.open(body.url, '_blank', 'noopener,noreferrer')
-      toast(useElectron ? `已启动「${m.name}」` : `已启动「${m.name}」，界面已在新窗口打开`)
+      if (useElectron) {
+        const tab = upsertAsTab(m, body.url, 'loading')
+        if (tab) {
+          state.cloudTab = tab.id
+          asPaneAppId = tab.id
+          state.cloudOpen = true
+          if (!paneUp) paneUp = await openAppCloudTab(tab)
+          renderCloudPanel()
+        }
+      } else if (popup && !popup.closed) {
+        popup.location.href = body.url
+      } else {
+        window.open(body.url, '_blank', 'noopener,noreferrer')
+      }
+      toast(useElectron ? `已启动「${m.name}」，已加入右侧浏览器标签` : `已启动「${m.name}」，界面已在新窗口打开`)
       const st = await api(`/api/as/status?id=${encodeURIComponent(m.id)}`)
       if (st.ok) m.runtime = st.body.runtime
-      /* 界面打开时抽屉已由 showAsPane 收起，停止入口在工作区条带上。 */
       if (!useElectron) openPluginSlide(m.id)
     } catch (error) {
       popup?.close()
@@ -6319,9 +6358,8 @@ function openPluginSlide(id) {
     const leaseId = state.asLeases?.[m.id]?.leaseId || ''
     const { ok, body } = await api('/api/as/stop', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: m.id, leaseId, force: true }) })
     if (!ok) return toast(body.error || '停止失败', true)
-    if (state.asLeases?.[m.id]?.timer) clearInterval(state.asLeases[m.id].timer)
-    delete state.asLeases?.[m.id]
-    hideAsPane()
+    releaseAsLease(m.id)
+    removeAsTab(m.id, true)
     toast('应用已停止')
     const st = await api(`/api/as/status?id=${encodeURIComponent(m.id)}`)
     if (st.ok) m.runtime = st.body.runtime
@@ -6340,7 +6378,7 @@ function openPluginSlide(id) {
     }
     const { ok, body } = await api('/api/plugin-market/install', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) })
     if (!ok) return toast(body.error, true)
-    if (m.installed) { hideAsPane(); releaseAsLease(m.id) }
+    if (m.installed) { removeAsTab(m.id, true); releaseAsLease(m.id) }
     const plugins = await api('/api/plugins')
     if (plugins.ok) state.plugins = plugins.body.items || []
     slide.classList.remove('open')
@@ -9426,6 +9464,7 @@ async function openCloudWebTab(url, title = '') {
   const existing = state.cloudTabs?.find((t) => t.kind === 'web' && t.url === target)
   if (existing) {
     state.cloudTab = existing.id
+    asPaneAppId = ''
     state.cloudOpen = true
     applyLayout()
     renderCloudPanel()
@@ -9440,6 +9479,7 @@ async function openCloudWebTab(url, title = '') {
   state.cloudTabs = (state.cloudTabs || []).filter((t) => t.kind !== 'new')
   state.cloudTabs.push({ id, kind: 'web', title: name, url: target })
   state.cloudTab = id
+  asPaneAppId = ''
   state.cloudOpen = true
   applyLayout()
   renderCloudPanel()
@@ -9447,7 +9487,25 @@ async function openCloudWebTab(url, title = '') {
   toast('已在右侧自带浏览器打开')
 }
 
-function toggleCloudPanel(force) {  const next = typeof force === 'boolean' ? force : !state.cloudOpen
+async function openAppCloudTab(tab) {
+  if (!tab) return false
+  try { await ensureCloud() } catch { toast('右侧浏览器初始化失败', true); return false }
+  state.cloudOpen = true
+  state.cloudTab = tab.id
+  asPaneAppId = tab.id
+  asPaneView = state.view || ''
+  const panesW = Math.max(0, window.innerWidth - 58)
+  state.cbUserW = Math.max(Number(state.cbUserW) || 0, Math.min(900, Math.round(panesW * 0.45)))
+  document.getElementById('slide')?.classList.remove('open')
+  applyLayout()
+  renderCloudPanel()
+  renderTopbar()
+  renderMenubar()
+  return true
+}
+
+function toggleCloudPanel(force) {
+  const next = typeof force === 'boolean' ? force : !state.cloudOpen
   state.cloudOpen = next
   applyLayout()
   renderMenubar()
@@ -9464,7 +9522,8 @@ async function endAllCloudSessions() {
     await api('/api/cloud/close', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: t.id }) })
   }
   state.cloudTabs = state.cloudTabs.filter((t) => t.kind !== 'session')
-  state.cloudTab = 'new'
+  /* 折叠浏览器只结束云会话，不改变当前应用标签；重新展开时仍回到原应用。 */
+  if (!asTabById(state.cloudTab)) state.cloudTab = 'new'
 }
 
 function cloudHomeHTML() {
@@ -9555,6 +9614,32 @@ function cloudWebHTML(tab) {
     </div>`
 }
 
+function cloudAppHTML(tab) {
+  const status = String(tab.status || 'starting')
+  const statusLabel = status === 'ready' || status === 'running' ? '运行中'
+    : status === 'failed' || status === 'crashed' ? '异常'
+    : status === 'expired' ? '租约失效'
+    : '启动中'
+  return `
+    <div class="cb-frame" style="padding:0;display:flex;flex-direction:column;height:100%;min-height:0">
+      <div class="cb-frame-bar">
+        <span class="cb-dots"><i></i><i></i><i></i></span>
+        <span class="mono cb-frame-url" title="${esc(tab.url || '')}">${esc(originOf(tab.url) || '应用进程')}</span>
+        <span class="spacer"></span>
+        <span class="tag${status === 'ready' || status === 'running' ? ' ok' : status === 'failed' || status === 'crashed' || status === 'expired' ? ' warn' : ''}">${statusLabel}</span>
+        <button class="btn sm subtle" data-cb-app-stop="${esc(tab.id)}" ${!tab.url ? 'disabled' : ''}>停止应用</button>
+        <button class="btn sm subtle" data-cb-app-external="${esc(tab.url || '')}" ${!tab.url ? 'disabled' : ''}>外部打开</button>
+      </div>
+      <div id="cbAppSlot" style="flex:1;width:100%;min-height:0;background:#fff;position:relative">
+        <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:var(--fs-sub)">${tab.url ? '正在加载应用…' : '正在启动应用，请稍候…'}</div>
+      </div>
+    </div>`
+}
+
+function originOf(url) {
+  try { return new URL(String(url)).origin } catch (_) { return String(url || '').split('?')[0] }
+}
+
 function renderCloudPanel() {
   let panel = document.getElementById('cbPanel')
   const app = document.getElementById('app')
@@ -9563,6 +9648,7 @@ function renderCloudPanel() {
     app?.classList.remove('has-cloud')
     document.documentElement.style.setProperty('--cb-w', '0px')
     closeNativeWeb()
+    hideNativeApp()
     return
   }
   app?.classList.add('has-cloud')
@@ -9575,8 +9661,18 @@ function renderCloudPanel() {
   panel.className = `cb-panel${state.cbFull ? ' full' : ''}`
   panel.style.width = ''
   applyLayout()
-  const tabs = state.cloudTabs.length ? state.cloudTabs : [{ id: 'new', kind: 'new', title: '新标签页' }]
-  state.cloudTabs = tabs
+  const webTabs = state.cloudTabs.length ? state.cloudTabs : [{ id: 'new', kind: 'new', title: '新标签页' }]
+  state.cloudTabs = webTabs
+  /* 应用标签与云浏览器标签共用同一条标签栏：应用进程仍由 AS Runtime 托管，
+     切回“新标签页/网页”只隐藏原生视图，不停止应用。 */
+  const appTabs = (asTabs || []).map((t) => ({
+    id: t.id,
+    kind: 'app',
+    title: t.name,
+    url: t.url,
+    status: t.status,
+  }))
+  const tabs = [...webTabs, ...appTabs]
   const active = tabs.find((t) => t.id === state.cloudTab) || tabs[0]
   state.cloudTab = active.id
 
@@ -9584,10 +9680,10 @@ function renderCloudPanel() {
     <div class="cb-grip" id="cbGrip" title="拖动调整宽度"></div>
     <div class="cb-head">
       <div class="cb-tabs">
-        ${tabs.map((t) => `<button class="cb-tab${t.id === active.id ? ' on' : ''}" data-tab="${t.id}">
-          <span class="cb-tab-ico">${icon('globe')}</span>
+        ${tabs.map((t) => `<button class="cb-tab${t.id === active.id ? ' on' : ''}" data-tab="${esc(t.id)}" title="${esc(t.title)}">
+          <span class="cb-tab-ico">${icon(t.kind === 'app' ? 'grid' : 'globe')}</span>
           <span class="cb-tab-name">${esc(t.title)}</span>
-          <em class="cb-tab-x" data-x="${t.id}">×</em>
+          <em class="cb-tab-x" data-x="${esc(t.id)}">×</em>
         </button>`).join('')}
         <button class="cb-tab-add" id="cbNew" title="新标签页">${icon('plus')}</button>
       </div>
@@ -9596,7 +9692,7 @@ function renderCloudPanel() {
         : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>'}</button>
       <button class="cb-icon-btn" id="cbFold" title="折叠云浏览器"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M15 4v16"/></svg></button>
     </div>
-    <div class="cb-body">${active.kind === 'session' ? cloudSessionHTML(active) : active.kind === 'web' ? cloudWebHTML(active) : cloudHomeHTML()}</div>
+    <div class="cb-body">${active.kind === 'app' ? cloudAppHTML(active) : active.kind === 'session' ? cloudSessionHTML(active) : active.kind === 'web' ? cloudWebHTML(active) : cloudHomeHTML()}</div>
     ${state.cbFull ? `<div class="cb-composer">
       <button class="cbc-plus" title="附件">${icon('plus')}</button>
       <input id="cbcInput" placeholder="询问 九规智能中枢" autocomplete="off">
@@ -9607,10 +9703,17 @@ function renderCloudPanel() {
   panel.querySelectorAll('[data-tab]').forEach((b) => b.addEventListener('click', (e) => {
     if (e.target.closest('[data-x]')) return
     state.cloudTab = b.dataset.tab
+    if (asTabById(b.dataset.tab)) asPaneAppId = b.dataset.tab
+    else asPaneAppId = ''
     renderCloudPanel()
   }))
   panel.querySelectorAll('[data-x]').forEach((b) => b.addEventListener('click', async (e) => {
     e.stopPropagation()
+    const appTab = asTabById(b.dataset.x)
+    if (appTab) {
+      closeAsTab(appTab.id)
+      return
+    }
     const tab = state.cloudTabs.find((t) => t.id === b.dataset.x)
     if (tab?.kind === 'session') await api('/api/cloud/close', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: tab.id }) })
     state.cloudTabs = state.cloudTabs.filter((t) => t.id !== b.dataset.x)
@@ -9624,6 +9727,7 @@ function renderCloudPanel() {
     const id = `new-${n}`
     state.cloudTabs.push({ id, kind: 'new', title: '新标签页' })
     state.cloudTab = id
+    asPaneAppId = ''
     renderCloudPanel()
   })
   panel.querySelector('#cbFull').addEventListener('click', () => {
@@ -9651,6 +9755,15 @@ function renderCloudPanel() {
   })
   panel.querySelector('[data-web-external]')?.addEventListener('click', (e) => {
     const url = e.currentTarget.dataset.webExternal
+    if (window.jgClient?.browser) window.jgClient.browser.openExternal(url)
+    else window.open(url, '_blank')
+  })
+  panel.querySelectorAll('[data-cb-app-stop]').forEach((btn) => {
+    btn.addEventListener('click', () => stopAsApp(btn.dataset.cbAppStop))
+  })
+  panel.querySelector('[data-cb-app-external]')?.addEventListener('click', (e) => {
+    const url = e.currentTarget.dataset.cbAppExternal
+    if (!url) return
     if (window.jgClient?.browser) window.jgClient.browser.openExternal(url)
     else window.open(url, '_blank')
   })
@@ -9703,6 +9816,7 @@ function renderCloudPanel() {
 
 var nativeWebUrl = ''
 var nativeWebObserver = null
+var nativeAppObserver = null
 
 function sendNativeBounds(slotId = 'cbWebSlot') {
   const bridge = window.jgClient?.browser
@@ -9717,57 +9831,286 @@ function sendNativeBounds(slotId = 'cbWebSlot') {
   })
 }
 
-/* ---------- 应用工作区：AS Runtime 应用的原生视图槽位 ----------
-   browser:open 只负责把页面加载进 WebContentsView，窗口位置与尺寸由这里按
-   #asWebSlot 的矩形推送；不推送就是 0×0，表现为“只有 toast、没有界面”。 */
+/* ---------- 应用标签：AS Runtime 应用进入“展开浏览器”的同一标签栏 ----------
+   每个标签对应主进程里的一个独立 WebContentsView。切换标签只切可见性，
+   关闭标签只销毁视图，不停止 AS 进程；只有“停止应用”才回收进程与租约。 */
 var asPaneAppId = ''
 var asPaneView = ''
 var asWebObserver = null
+var asTabs = []
+var AS_TAB_LIMIT = 6
+var asTabBridgeBound = false
+var asCanceledStarts = new Set()
 
 function asPaneOrigin(url) {
   try { return new URL(String(url)).origin } catch (_) { return String(url || '').split('?')[0] }
 }
 
-function showAsPane(app, url) {
-  const pane = document.getElementById('asPane')
-  const slot = document.getElementById('asWebSlot')
-  if (!pane || !slot) return false
-  const nextId = app?.id || ''
-  /* 同屏只保留一个应用界面：切换时只收视图，不释放上一个应用的租约。
-     只要智能中枢客户端还在运行，各应用进程就继续保留并心跳。 */
-  if (asPaneAppId && asPaneAppId !== nextId) {
-    hideAsPane()
+function asTabById(appId) {
+  return (asTabs || []).find((tab) => tab.id === String(appId || '')) || null
+}
+
+function upsertAsTab(app, url, status) {
+  const id = String(app?.id || '').trim()
+  if (!id) return null
+  let tab = asTabById(id)
+  if (!tab) {
+    if (asTabs.length >= AS_TAB_LIMIT) {
+      toast(`最多同时打开 ${AS_TAB_LIMIT} 个应用标签，请先关闭一个`, true)
+      return null
+    }
+    asCanceledStarts.delete(id)
+    tab = {
+      id,
+      appId: String(app.appId || app.id || id),
+      name: String(app.name || '应用'),
+      url: String(url || ''),
+      status: String(status || (url ? 'loading' : 'starting')),
+    }
+    asTabs.push(tab)
+  } else {
+    tab.name = String(app?.name || tab.name || '应用')
+    tab.appId = String(app?.appId || tab.appId || id)
+    if (url) tab.url = String(url)
+    if (status) tab.status = String(status)
   }
-  asPaneAppId = nextId
-  asPaneView = state.view || ''
-  const title = document.getElementById('asPaneTitle')
-  if (title) title.textContent = app?.name || '应用'
-  const origin = document.getElementById('asPaneOrigin')
-  if (origin) origin.textContent = url ? asPaneOrigin(url) : '正在启动…'
-  /* 重新打开时取消空闲回收倒计时，避免“刚点开就被回收”。 */
-  const lease = state.asLeases?.[nextId]
-  if (lease?.idleTimer) { clearTimeout(lease.idleTimer); lease.idleTimer = null }
-  pane.hidden = false
-  /* 不要用 ensureSlide()：它内部会 add('open')，等于把抽屉重新弹出来。 */
-  document.getElementById('slide')?.classList.remove('open')
-  requestAnimationFrame(() => sendNativeBounds('asWebSlot'))
+  return tab
+}
+
+function setAsTabStatus(appId, status) {
+  const tab = asTabById(appId)
+  if (!tab) return
+  tab.status = String(status || tab.status)
+  renderAsTabs()
+  if (state.cloudOpen) renderCloudPanel()
+}
+
+function sendCloudAppBounds(appId = asPaneAppId, slotId = 'cbAppSlot') {
+  const bridge = window.jgClient?.asApp
+  const slot = document.getElementById(slotId)
+  if (!bridge || !appId || !slot || !slot.getClientRects().length) return
+  const r = slot.getBoundingClientRect()
+  bridge.bounds({
+    appId: String(appId),
+    rect: {
+      x: Math.round(r.left),
+      y: Math.round(r.top),
+      width: Math.round(r.width),
+      height: Math.round(r.height),
+    },
+  })
+}
+
+function hideNativeApp() {
+  if (nativeAppObserver) { nativeAppObserver.disconnect(); nativeAppObserver = null }
+  window.jgClient?.asApp?.hide()
+}
+
+window.addEventListener('resize', () => {
+  if (asPaneAppId) sendCloudAppBounds(asPaneAppId)
+})
+
+function closeNativeWeb() {
+  nativeWebUrl = ''
+  if (nativeWebObserver) { nativeWebObserver.disconnect(); nativeWebObserver = null }
+  window.jgClient?.browser?.close()
+}
+
+function syncNativeBrowser(active) {
+  const bridge = window.jgClient?.browser
+  const appBridge = window.jgClient?.asApp
+  if (active?.kind === 'app') {
+    closeNativeWeb()
+    const tab = asTabById(active.id)
+    if (!appBridge || !tab?.url) return
+    appBridge.open({ appId: tab.id, url: tab.url, activate: true })
+    requestAnimationFrame(() => sendCloudAppBounds(tab.id))
+    if (window.ResizeObserver) {
+      if (!nativeAppObserver) nativeAppObserver = new ResizeObserver(() => sendCloudAppBounds(asPaneAppId))
+      nativeAppObserver.disconnect()
+      const slot = document.getElementById('cbAppSlot')
+      if (slot) nativeAppObserver.observe(slot)
+    }
+    return
+  }
+  hideNativeApp()
+  if (!bridge) return
+  if (!active || active.kind !== 'web') return closeNativeWeb()
+  if (nativeWebUrl !== active.url) {
+    nativeWebUrl = active.url
+    bridge.open(active.url)
+  }
+  requestAnimationFrame(sendNativeBounds)
   if (window.ResizeObserver) {
-    if (!asWebObserver) asWebObserver = new ResizeObserver(() => sendNativeBounds('asWebSlot'))
-    asWebObserver.disconnect()
-    asWebObserver.observe(slot)
+    if (!nativeWebObserver) nativeWebObserver = new ResizeObserver(() => sendNativeBounds())
+    nativeWebObserver.disconnect()
+    const slot = document.getElementById('cbWebSlot')
+    if (slot) nativeWebObserver.observe(slot)
   }
+}
+
+window.addEventListener('resize', () => {
+  if (nativeWebUrl) requestAnimationFrame(sendNativeBounds)
+  if (asPaneAppId) sendCloudAppBounds(asPaneAppId)
+})
+
+function asTabDotStatus(tab) {
+  if (!tab) return 'starting'
+  if (tab.status === 'running') return 'ready'
+  return tab.status || 'starting'
+}
+
+function renderAsTabs() {
+  const box = document.getElementById('asPaneTabs')
+  if (!box) return
+  box.innerHTML = asTabs.map((tab) => {
+    const active = tab.id === asPaneAppId
+    return `<div class="as-pane-tab${active ? ' active' : ''}" role="tab" tabindex="0" aria-selected="${active ? 'true' : 'false'}" data-as-tab="${esc(tab.id)}" title="${esc(tab.name)}">
+      <span class="as-pane-tab-dot" data-status="${esc(asTabDotStatus(tab))}"></span>
+      <span class="as-pane-tab-name">${esc(tab.name)}</span>
+      <button class="as-pane-tab-x" type="button" data-as-tab-close="${esc(tab.id)}" aria-label="关闭应用标签 ${esc(tab.name)}">×</button>
+    </div>`
+  }).join('')
+  box.querySelectorAll('[data-as-tab]').forEach((el) => {
+    const id = el.dataset.asTab
+    el.addEventListener('click', (event) => {
+      if (event.target.closest('[data-as-tab-close]')) return
+      activateAsTab(id)
+    })
+    el.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter' && event.key !== ' ') return
+      event.preventDefault()
+      activateAsTab(id)
+    })
+  })
+  box.querySelectorAll('[data-as-tab-close]').forEach((btn) => {
+    btn.addEventListener('click', (event) => {
+      event.preventDefault()
+      event.stopPropagation()
+      closeAsTab(btn.dataset.asTabClose)
+    })
+  })
+}
+
+function updateAsPaneMeta(tab = asTabById(asPaneAppId)) {
+  const origin = document.getElementById('asPaneOrigin')
+  const stop = document.getElementById('asPaneStop')
+  if (stop) stop.disabled = !tab
+  if (!origin) return
+  if (!tab) {
+    origin.textContent = ''
+  } else if (!tab.url) {
+    origin.textContent = tab.status === 'failed' ? '启动失败' : '正在启动…'
+  } else {
+    origin.textContent = asPaneOrigin(tab.url)
+  }
+}
+
+function sendAsPaneBounds(appId = asPaneAppId) {
+  const bridge = window.jgClient?.asApp
+  const slot = document.getElementById('asWebSlot')
+  if (!bridge?.bounds || !slot || !appId || !slot.getClientRects().length) return
+  const r = slot.getBoundingClientRect()
+  bridge.bounds({
+    appId,
+    rect: {
+      x: Math.round(r.left),
+      y: Math.round(r.top),
+      width: Math.round(r.width),
+      height: Math.round(r.height),
+    },
+  })
+}
+
+function activateAsTab(appId) {
+  const tab = asTabById(appId)
+  if (!tab) return false
+  asPaneAppId = tab.id
+  asPaneView = state.view || ''
+  state.cloudOpen = true
+  state.cloudTab = tab.id
+  const pane = document.getElementById('asPane')
+  if (pane) pane.hidden = true
+  document.getElementById('slide')?.classList.remove('open')
+  applyLayout()
+  renderCloudPanel()
+  renderTopbar()
+  renderMenubar()
   return true
+}
+
+function showAsPane(app, url) {
+  const tab = upsertAsTab(app, url, url ? 'loading' : 'starting')
+  if (!tab) return false
+  return activateAsTab(tab.id)
 }
 
 function hideAsPane() {
   const pane = document.getElementById('asPane')
-  const wasOpen = Boolean(pane && !pane.hidden)
   if (pane) pane.hidden = true
   if (asWebObserver) { asWebObserver.disconnect(); asWebObserver = null }
   asPaneAppId = ''
   asPaneView = ''
-  if (wasOpen) window.jgClient?.browser?.close()
+  hideNativeApp()
+  if (state.cloudOpen) {
+    const next = (state.cloudTabs || []).find((t) => t.kind !== 'app') || null
+    state.cloudTab = next?.id || 'new'
+    renderCloudPanel()
+  }
 }
+
+function removeAsTab(appId, closeView = true) {
+  const id = String(appId || '')
+  const idx = asTabs.findIndex((tab) => tab.id === id)
+  if (idx < 0) return false
+  const wasActive = asPaneAppId === id || state.cloudTab === id
+  const tab = asTabs[idx]
+  if (tab.status === 'starting' && !tab.url) asCanceledStarts.add(id)
+  asTabs.splice(idx, 1)
+  if (closeView) window.jgClient?.asApp?.close(id)
+  asPaneAppId = ''
+  if (wasActive) {
+    const next = asTabs[idx] || asTabs[idx - 1] || null
+    if (next) {
+      state.cloudTab = next.id
+      asPaneAppId = next.id
+      state.cloudOpen = true
+      renderCloudPanel()
+    } else {
+      hideNativeApp()
+      state.cloudTab = (state.cloudTabs || []).find((t) => t.kind !== 'app')?.id || 'new'
+      if (state.cloudOpen) renderCloudPanel()
+    }
+  } else if (state.cloudOpen) {
+    renderCloudPanel()
+  } else {
+    renderAsTabs()
+  }
+  return true
+}
+
+function closeAsTab(appId) {
+  if (!removeAsTab(appId, true)) return
+  toast('已关闭应用标签；应用进程仍保留')
+}
+
+function initAsTabBridge() {
+  const bridge = window.jgClient?.asApp
+  if (!bridge || asTabBridgeBound) return
+  asTabBridgeBound = true
+  if (typeof bridge.onTabState !== 'function') return
+  bridge.onTabState((event) => {
+    if (!event?.appId) return
+    const tab = asTabById(event.appId)
+    if (!tab) return
+    if (event.url) tab.url = String(event.url)
+    if (event.status) tab.status = String(event.status)
+    renderAsTabs()
+    if (state.cloudOpen) renderCloudPanel()
+  })
+}
+
+initAsTabBridge()
 
 function releaseAsLease(appId) {
   const lease = state.asLeases?.[appId]
@@ -9794,52 +10137,23 @@ function armIdleRelease(appId) {
 }
 
 document.getElementById('asPaneClose')?.addEventListener('click', () => {
-  const appId = asPaneAppId
   hideAsPane()
-  if (appId) armIdleRelease(appId)
-  toast('已退出应用界面；智能中枢运行期间进程会继续保留')
+  toast('已退出应用界面；已打开的应用标签会继续保留')
 })
 
-document.getElementById('asPaneStop')?.addEventListener('click', async () => {
-  const appId = asPaneAppId
-  if (!appId) return
-  const leaseId = state.asLeases?.[appId]?.leaseId || ''
-  const { ok, body } = await api('/api/as/stop', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: appId, leaseId, force: true }) })
+async function stopAsApp(appId = asPaneAppId) {
+  const id = String(appId || '')
+  if (!id) return
+  const leaseId = state.asLeases?.[id]?.leaseId || ''
+  const { ok, body } = await api('/api/as/stop', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id, leaseId, force: true }) })
   if (!ok) return toast(body.error || '停止失败', true)
-  hideAsPane()
-  releaseAsLease(appId)
+  removeAsTab(id, true)
+  releaseAsLease(id)
   toast('应用已停止，进程已回收')
   renderView()
-})
-
-window.addEventListener('resize', () => {
-  if (asPaneAppId) sendNativeBounds('asWebSlot')
-})
-
-function closeNativeWeb() {
-  nativeWebUrl = ''
-  if (nativeWebObserver) { nativeWebObserver.disconnect(); nativeWebObserver = null }
-  window.jgClient?.browser?.close()
 }
 
-function syncNativeBrowser(active) {
-  const bridge = window.jgClient?.browser
-  if (!bridge) return
-  if (!active || active.kind !== 'web') return closeNativeWeb()
-  if (nativeWebUrl !== active.url) {
-    nativeWebUrl = active.url
-    bridge.open(active.url)
-  }
-  requestAnimationFrame(sendNativeBounds)
-  if (window.ResizeObserver) {
-    if (!nativeWebObserver) nativeWebObserver = new ResizeObserver(() => sendNativeBounds())
-    nativeWebObserver.disconnect()
-    const slot = document.getElementById('cbWebSlot')
-    if (slot) nativeWebObserver.observe(slot)
-  }
-}
-
-window.addEventListener('resize', () => { if (nativeWebUrl) requestAnimationFrame(sendNativeBounds) })
+document.getElementById('asPaneStop')?.addEventListener('click', () => stopAsApp(asPaneAppId))
 
 var cloudDownloads = []
 var cloudDownloadsBound = false

@@ -16,7 +16,7 @@
 <link rel="stylesheet" href="./chat-render.css?v=13" />
 <link rel="stylesheet" href="./drawing.css?v=5" />
 <link rel="stylesheet" href="./visuals.css?v=8" />
-<link rel="stylesheet" href="./as-pane.css?v=1" />
+<link rel="stylesheet" href="./as-pane.css?v=2" />
 <script>window.addEventListener("error",function(e){try{localStorage.setItem("jg.lastErr",(e.message||"")+" @ "+(e.filename||"")+":"+e.lineno)}catch(_){}});</script>
 </head>
 <body>
@@ -30,9 +30,9 @@
         <section class="view" id="view"></section>
         <div class="as-pane" id="asPane" hidden>
           <div class="as-pane-bar">
-            <span class="as-pane-title" id="asPaneTitle">应用</span>
+            <div class="as-pane-tabs" id="asPaneTabs" role="tablist" aria-label="已打开的应用"></div>
             <span class="as-pane-origin" id="asPaneOrigin"></span>
-            <button class="as-pane-close" id="asPaneStop" type="button">停止应用</button>
+            <button class="as-pane-close" id="asPaneStop" type="button" disabled>停止应用</button>
             <button class="as-pane-close" id="asPaneClose" type="button">退出应用界面</button>
           </div>
           <div class="as-web-slot" id="asWebSlot"></div>
@@ -45,7 +45,7 @@
   <script src="./vendor/mermaid.min.js?v=1"></script>
   <script src="./vendor/echarts.min.js?v=1"></script>
   <script src="./visuals.js?v=17"></script>
-  <script type="module" src="./app.js?v=697"></script>
+  <script type="module" src="./app.js?v=701"></script>
 </body>
 </html>
 

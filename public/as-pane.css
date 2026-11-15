@@ -21,15 +21,86 @@
   border-bottom: 1px solid #e8eaed;
   background: #fbfcfd;
 }
-.as-pane-title {
-  flex: 0 0 auto;
-  font-size: 13px;
-  font-weight: 600;
-  color: #1f2329;
-  white-space: nowrap;
-}
-.as-pane-origin {
+.as-pane-tabs {
   flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: #d7dbe0 transparent;
+  padding: 4px 0;
+}
+.as-pane-tabs::-webkit-scrollbar { height: 5px; }
+.as-pane-tabs::-webkit-scrollbar-thumb { background: #d7dbe0; border-radius: 4px; }
+.as-pane-tab {
+  flex: 0 0 auto;
+  max-width: 240px;
+  min-width: 112px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 6px 0 10px;
+  border: 1px solid #e1e4e8;
+  border-radius: 7px;
+  background: #ffffff;
+  color: #4e5969;
+  cursor: pointer;
+  user-select: none;
+  outline: none;
+}
+.as-pane-tab:hover { background: #f3f5f7; }
+.as-pane-tab.active {
+  border-color: #b9c4d0;
+  background: #eef2f6;
+  color: #1f2329;
+  box-shadow: inset 0 -2px 0 #2f6fed;
+}
+.as-pane-tab:focus-visible { box-shadow: 0 0 0 2px rgba(47, 111, 237, .28); }
+.as-pane-tab-dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #9aa4b0;
+}
+.as-pane-tab-dot[data-status="ready"] { background: #22a06b; }
+.as-pane-tab-dot[data-status="starting"],
+.as-pane-tab-dot[data-status="loading"] { background: #d99a1f; }
+.as-pane-tab-dot[data-status="failed"],
+.as-pane-tab-dot[data-status="crashed"],
+.as-pane-tab-dot[data-status="expired"] { background: #d64545; }
+.as-pane-tab-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 500;
+}
+.as-pane-tab-x {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #8f959e;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+.as-pane-tab-x:hover { background: #dfe4ea; color: #1f2329; }
+.as-pane-origin {
+  flex: 0 1 220px;
   min-width: 0;
   font-size: 12px;
   color: #8f959e;
@@ -51,6 +122,12 @@
   cursor: pointer;
 }
 .as-pane-close:hover { background: #f2f3f5; }
+.as-pane-close:disabled { opacity: .5; cursor: not-allowed; }
+.as-pane-close:disabled:hover { background: #ffffff; }
+
+@media (max-width: 900px) {
+  .as-pane-origin { display: none; }
+}
 
 .as-web-slot {
   flex: 1 1 auto;
