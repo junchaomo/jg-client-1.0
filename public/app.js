@@ -9692,7 +9692,7 @@ function renderCloudPanel() {
         : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>'}</button>
       <button class="cb-icon-btn" id="cbFold" title="折叠云浏览器"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M15 4v16"/></svg></button>
     </div>
-    <div class="cb-body">${active.kind === 'app' ? cloudAppHTML(active) : active.kind === 'session' ? cloudSessionHTML(active) : active.kind === 'web' ? cloudWebHTML(active) : cloudHomeHTML()}</div>
+    <div class="cb-body${active.kind === 'app' ? ' cb-body-app' : ''}">${active.kind === 'app' ? cloudAppHTML(active) : active.kind === 'session' ? cloudSessionHTML(active) : active.kind === 'web' ? cloudWebHTML(active) : cloudHomeHTML()}</div>
     ${state.cbFull ? `<div class="cb-composer">
       <button class="cbc-plus" title="附件">${icon('plus')}</button>
       <input id="cbcInput" placeholder="询问 九规智能中枢" autocomplete="off">
@@ -9924,7 +9924,14 @@ function syncNativeBrowser(active) {
     const tab = asTabById(active.id)
     if (!appBridge || !tab?.url) return
     appBridge.open({ appId: tab.id, url: tab.url, activate: true })
-    requestAnimationFrame(() => sendCloudAppBounds(tab.id))
+    const syncAppBounds = () => {
+      appBridge.activate?.(tab.id)
+      sendCloudAppBounds(tab.id)
+    }
+    requestAnimationFrame(syncAppBounds)
+    /* 面板重建/完整视图切换后，栅格与滚动条可能在同一帧内再次变化；
+       补一次延迟同步，避免原生视图停留在上一档窄栏尺寸。 */
+    setTimeout(syncAppBounds, 120)
     if (window.ResizeObserver) {
       if (!nativeAppObserver) nativeAppObserver = new ResizeObserver(() => sendCloudAppBounds(asPaneAppId))
       nativeAppObserver.disconnect()

@@ -535,9 +535,19 @@ body.resizing { cursor: col-resize; user-select: none; }
   left: 0 !important;
   width: auto !important;
   height: auto !important;
-  z-index: 20;
+  z-index: 62 !important;
 }
-.app.has-cloud #cbPanel.full { grid-column: 1 / -1; grid-row: 1; }
+.app.has-cloud #cbPanel.full { grid-column: 1 / -1 !important; grid-row: 1 !important; }
+#app.layout-shell.has-cloud > #cbPanel.cb-panel.full { grid-column: 1 / -1 !important; grid-row: 1 !important; }
+
+/* 完整视图下应用槽位必须真正占满面板，而不是留在窄栏宽度 */
+#cbPanel.full .cb-body.cb-body-app {
+  width: 100% !important;
+  max-width: none !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  overflow: hidden !important;
+}
 
 /* 智能笔记本：Gemini notebook 风格空状态 */
 .nbs {
