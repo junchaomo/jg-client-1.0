@@ -122,7 +122,7 @@ const state = {
   ],
   cbW: 440,
   cbUserW: 0,
-  imagegen: { prompt: '', ratio: '1:1', count: 1, style: '写实', shots: [], busy: false, modelId: '', assetsLoaded: false, assetsLoading: false },
+  imagegen: { prompt: '', ratio: '1:1', count: 1, style: '写实', shots: [], busy: false, modelId: '', references: [], assetsLoaded: false, assetsLoading: false },
 }
 
 const layout = new AppLayout(document.getElementById('app'))
@@ -7265,6 +7265,127 @@ async function loadRecentImages({ force = false } = {}) {
   }
 }
 
+function renderImageReferenceChips(g) {
+  const refs = Array.isArray(g.references) ? g.references : []
+  if (!refs.length) return ''
+  return refs.map((ref, index) => `
+    <span class="img-ref-chip">
+      <img src="${ref.url}" alt="">
+      <span>参考 ${index + 1}</span>
+      <button type="button" data-ref-remove="${esc(ref.id)}" aria-label="移除参考图">×</button>
+    </span>`).join('')
+}
+
+function openImageReferencePicker() {
+  const g = state.imagegen
+  const shots = (g.shots || []).filter((shot) => shot.url)
+  if (!shots.length) return toast('还没有可用于参考的已生成图像', true)
+  const selected = new Set((g.references || []).map((item) => item.id))
+  const mask = openModal('选择参考图', `
+    <div class="form-note">最多选择 3 张已生成图像作为参考，可分别用于构图、风格、材质或建筑形态；参考图会随提示词一起发送给当前图像模型。</div>
+    <div class="img-ref-picker">
+      ${shots.map((shot) => `
+        <button type="button" class="img-ref-choice${selected.has(shot.id) ? ' on' : ''}" data-ref-pick="${esc(shot.id)}" aria-pressed="${selected.has(shot.id)}">
+          <img src="${shot.url}" alt="">
+          <span>${esc(shot.style)} · ${esc(shot.ratio)}</span>
+        </button>`).join('')}
+    </div>
+    <div class="img-edit-err" id="igRefErr"></div>
+    <div class="img-edit-foot">
+      <button class="btn" data-igrefcancel>返回</button>
+      <button class="btn primary" id="igRefGo">使用参考图</button>
+    </div>`, { wide: true })
+  const err = mask.querySelector('#igRefErr')
+  const choices = [...mask.querySelectorAll('[data-ref-pick]')]
+  const paint = () => {
+    choices.forEach((btn) => {
+      const on = selected.has(btn.dataset.refPick)
+      btn.classList.toggle('on', on)
+      btn.setAttribute('aria-pressed', on ? 'true' : 'false')
+    })
+  }
+  choices.forEach((btn) => btn.addEventListener('click', () => {
+    const id = btn.dataset.refPick
+    if (selected.has(id)) selected.delete(id)
+    else if (selected.size >= 3) {
+      err.textContent = '最多只能选择 3 张参考图'
+      return
+    } else selected.add(id)
+    err.textContent = ''
+    paint()
+  }))
+  mask.querySelector('[data-igrefcancel]').addEventListener('click', () => mask.remove())
+  mask.querySelector('#igRefGo').addEventListener('click', () => {
+    g.references = shots.filter((shot) => selected.has(shot.id)).map((shot) => ({ id: shot.id, url: shot.url, name: shot.name }))
+    mask.remove()
+    renderView()
+  })
+}
+
+function openImageCompare() {
+  const g = state.imagegen
+  const shots = (g.shots || []).filter((shot) => shot.url)
+  if (shots.length < 2) return toast('至少需要两张图像才能并排对比', true)
+  const selected = new Set(shots.slice(0, 2).map((shot) => shot.id))
+  const mask = openModal('选择对比图像', `
+    <div class="form-note">选择 2–3 张图像并排查看。对比不会生成新图，只读取当前已落库的版本文件。</div>
+    <div class="img-ref-picker">
+      ${shots.map((shot) => `
+        <button type="button" class="img-ref-choice${selected.has(shot.id) ? ' on' : ''}" data-cmp-pick="${esc(shot.id)}" aria-pressed="${selected.has(shot.id)}">
+          <img src="${shot.url}" alt="">
+          <span>${esc(shot.style)} · ${esc(shot.ratio)}</span>
+        </button>`).join('')}
+    </div>
+    <div class="img-edit-err" id="igCmpErr"></div>
+    <div class="img-edit-foot">
+      <button class="btn" data-igcmpcancel>返回</button>
+      <button class="btn primary" id="igCmpGo">开始对比</button>
+    </div>`, { wide: true })
+  const err = mask.querySelector('#igCmpErr')
+  const choices = [...mask.querySelectorAll('[data-cmp-pick]')]
+  const paint = () => choices.forEach((btn) => {
+    const on = selected.has(btn.dataset.cmpPick)
+    btn.classList.toggle('on', on)
+    btn.setAttribute('aria-pressed', on ? 'true' : 'false')
+  })
+  choices.forEach((btn) => btn.addEventListener('click', () => {
+    const id = btn.dataset.cmpPick
+    if (selected.has(id)) {
+      if (selected.size <= 1) {
+        err.textContent = '至少保留一张图像'
+        return
+      }
+      selected.delete(id)
+    } else if (selected.size >= 3) {
+      err.textContent = '最多对比 3 张图像'
+      return
+    } else selected.add(id)
+    err.textContent = ''
+    paint()
+  }))
+  mask.querySelector('[data-igcmpcancel]').addEventListener('click', () => mask.remove())
+  mask.querySelector('#igCmpGo').addEventListener('click', () => {
+    if (selected.size < 2) {
+      err.textContent = '请至少选择两张图像'
+      return
+    }
+    const chosen = shots.filter((shot) => selected.has(shot.id))
+    mask.remove()
+    openModal('并排对比', `
+      <div class="img-compare-grid" style="grid-template-columns:repeat(${chosen.length},minmax(0,1fr))">
+        ${chosen.map((shot) => `
+          <figure class="img-compare-card">
+            <img src="${shot.url}" alt="">
+            <figcaption>
+              <div class="img-compare-title">${esc(shot.style)} · ${esc(shot.ratio)} · v${Number(shot.revision || 1)}</div>
+              <div class="img-compare-prompt">${esc(shot.prompt || '')}</div>
+            </figcaption>
+          </figure>`).join('')}
+      </div>
+      <div class="form-note">对比只展示已落库版本，不改变当前版本，也不会生成新图。</div>`, { wide: true })
+  })
+}
+
 function closeImageMenu() {
   document.querySelectorAll('.img-menu').forEach((menu) => menu.remove())
 }
@@ -7313,14 +7434,36 @@ async function openImageVersions(shot) {
             <div class="img-ver-meta">${esc(rev.style || '')} · ${esc(rev.ratio || '')} · ${esc(rev.providerLabel || rev.provider || '图像模型')} ${esc(rev.model || '')}</div>
             <div class="img-ver-prompt">${esc(rev.prompt || '')}</div>
           </div>
-          <button class="btn sm" data-ver-dl="${rev.revision}">下载</button>
+          <div class="img-ver-actions">
+            <button class="btn sm" data-ver-dl="${rev.revision}">下载</button>
+            ${rev.revision !== asset.revision ? `<button class="btn sm primary" data-ver-restore="${rev.revision}">恢复</button>` : ''}
+          </div>
         </div>`).join('')}
     </div>
-    <div class="form-note">当前只读展示已落库的版本；版本回退、局部编辑将在后续阶段接入真实模型能力后开放。</div>`, { wide: true })
+    <div class="form-note">恢复历史版本会创建一个新的当前版本，原版本记录不会被覆盖；局部选区编辑仍需模型原生 Mask 能力。</div>`, { wide: true })
   const current = revisions.find((rev) => rev.revision === asset.revision) || revisions[0]
   mask.querySelectorAll('[data-ver-dl]').forEach((btn) => btn.addEventListener('click', () => {
     const rev = revisions.find((item) => item.revision === Number(btn.dataset.verDl))
     if (rev) downloadImageAsset({ id: `v${rev.revision}`, url: rev.url, name: `jg-image-${shot.id}-v${rev.revision}.png` })
+  }))
+  mask.querySelectorAll('[data-ver-restore]').forEach((btn) => btn.addEventListener('click', async () => {
+    const rev = revisions.find((item) => item.revision === Number(btn.dataset.verRestore))
+    if (!rev) return
+    btn.disabled = true
+    btn.textContent = '恢复中…'
+    const res = await api('/api/images/restore', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ assetId: shot.id, revision: rev.revision }),
+    })
+    if (!res.ok) {
+      btn.disabled = false
+      btn.textContent = '恢复'
+      return toast(res.body?.error || '恢复版本失败', true)
+    }
+    mask.remove()
+    toast(`已恢复到 v${rev.revision}，并生成新的当前版本`)
+    await loadRecentImages({ force: true })
   }))
   if (current?.url) mask.querySelector('.img-ver-thumb img')?.setAttribute('alt', `v${current.revision}`)
 }
@@ -7410,6 +7553,7 @@ function openImageMenu(anchor, shot) {
   menu.className = 'img-menu'
   menu.innerHTML = `
     ${editModel ? '<button type="button" data-imenu="edit">编辑</button>' : ''}
+    <button type="button" data-imenu="mask">局部选区</button>
     <button type="button" data-imenu="download">下载原图</button>
     <button type="button" data-imenu="copy">复制提示词</button>
     <button type="button" data-imenu="versions">版本历史</button>
@@ -7435,11 +7579,174 @@ function openImageMenu(anchor, shot) {
     menu.remove()
     const action = btn.dataset.imenu
     if (action === 'edit') editImageAsset(shot)
+    else if (action === 'mask') openImageMaskEditor(shot)
     else if (action === 'download') downloadImageAsset(shot)
     else if (action === 'copy') copyImagePrompt(shot)
     else if (action === 'versions') openImageVersions(shot)
     else if (action === 'delete') deleteImageAsset(shot)
   }))
+}
+
+function openImageMaskEditor(shot) {
+  const mask = openModal('局部选区编辑', `
+    <div class="form-note">用画笔涂抹要修改的区域，白色为编辑区、未涂抹为保留区。提交后由万相局部重绘生成新版本，原图保留在版本历史；这不是用提示词模拟的局部编辑。</div>
+    <div class="img-mask-wrap">
+      <div class="img-mask-stage">
+        <img id="igMaskImg" src="${shot.url}" alt="">
+        <canvas id="igMaskCanvas"></canvas>
+      </div>
+    </div>
+    <div class="img-mask-tools">
+      <button class="btn sm primary" type="button" data-mask-mode="brush">画笔</button>
+      <button class="btn sm" type="button" data-mask-mode="eraser">橡皮</button>
+      <label class="img-mask-size">笔刷 <input id="igMaskSize" type="range" min="6" max="72" value="26"></label>
+      <button class="btn sm" type="button" id="igMaskClear">清除</button>
+      <span class="img-mask-state" id="igMaskState">未标记</span>
+    </div>
+    <input class="img-edit-input" id="igMaskPrompt" placeholder="描述选区里要改成什么，例如：把这段外墙改成暖灰色石材">
+    <div class="img-edit-err" id="igMaskErr"></div>
+    <div class="img-edit-foot">
+      <button class="btn" type="button" id="igMaskCancel">返回</button>
+      <button class="btn primary" type="button" id="igMaskGo">应用选区</button>
+    </div>`, { wide: true })
+  const img = mask.querySelector('#igMaskImg')
+  const canvas = mask.querySelector('#igMaskCanvas')
+  const size = mask.querySelector('#igMaskSize')
+  const stateLabel = mask.querySelector('#igMaskState')
+  const err = mask.querySelector('#igMaskErr')
+  const go = mask.querySelector('#igMaskGo')
+  const promptInput = mask.querySelector('#igMaskPrompt')
+  let ctx = null
+  let mode = 'brush'
+  let drawing = false
+  let last = null
+  let hasInk = false
+  const modeButtons = [...mask.querySelectorAll('[data-mask-mode]')]
+  let pointerSeen = false
+  const setupCanvas = () => {
+    const width = Number(img.naturalWidth || 0)
+    const height = Number(img.naturalHeight || 0)
+    if (!width || !height) return
+    canvas.width = width
+    canvas.height = height
+    ctx = canvas.getContext('2d')
+    ctx.clearRect(0, 0, width, height)
+  }
+  if (img.complete && img.naturalWidth) setupCanvas()
+  else img.addEventListener('load', setupCanvas, { once: true })
+  const pointOf = (event) => {
+    const rect = canvas.getBoundingClientRect()
+    return {
+      x: (event.clientX - rect.left) / rect.width * canvas.width,
+      y: (event.clientY - rect.top) / rect.height * canvas.height,
+      scale: canvas.width / rect.width,
+    }
+  }
+  const paint = (from, to, scale) => {
+    if (!ctx) return
+    const lineWidth = Math.max(2, Number(size.value) * scale)
+    ctx.save()
+    ctx.globalCompositeOperation = mode === 'eraser' ? 'destination-out' : 'source-over'
+    ctx.strokeStyle = '#ffffff'
+    ctx.fillStyle = '#ffffff'
+    ctx.lineWidth = lineWidth
+    ctx.lineCap = 'round'
+    ctx.lineJoin = 'round'
+    if (from) {
+      ctx.beginPath()
+      ctx.moveTo(from.x, from.y)
+      ctx.lineTo(to.x, to.y)
+      ctx.stroke()
+    } else {
+      ctx.beginPath()
+      ctx.arc(to.x, to.y, lineWidth / 2, 0, Math.PI * 2)
+      ctx.fill()
+    }
+    ctx.restore()
+    hasInk = true
+    stateLabel.textContent = '已标记'
+  }
+  canvas.addEventListener('pointerdown', (event) => {
+    if (!ctx) return
+    pointerSeen = true
+    event.preventDefault()
+    drawing = true
+    last = pointOf(event)
+    canvas.setPointerCapture?.(event.pointerId)
+    paint(null, last, last.scale)
+  })
+  canvas.addEventListener('pointermove', (event) => {
+    if (!drawing || !ctx) return
+    event.preventDefault()
+    const next = pointOf(event)
+    paint(last, next, next.scale)
+    last = next
+  })
+  const end = () => { drawing = false; last = null }
+  canvas.addEventListener('pointerup', end)
+  canvas.addEventListener('pointercancel', end)
+  canvas.addEventListener('pointerleave', end)
+  canvas.addEventListener('dragstart', (event) => event.preventDefault())
+  canvas.addEventListener('mousedown', (event) => {
+    if (pointerSeen || !ctx) return
+    event.preventDefault()
+    drawing = true
+    last = pointOf(event)
+    paint(null, last, last.scale)
+  })
+  canvas.addEventListener('mousemove', (event) => {
+    if (pointerSeen || !drawing || !ctx) return
+    event.preventDefault()
+    const next = pointOf(event)
+    paint(last, next, next.scale)
+    last = next
+  })
+  canvas.addEventListener('mouseup', end)
+  canvas.addEventListener('mouseleave', end)
+  modeButtons.forEach((btn) => btn.addEventListener('click', () => {
+    mode = btn.dataset.maskMode
+    modeButtons.forEach((item) => item.classList.toggle('primary', item === btn))
+  }))
+  mask.querySelector('#igMaskClear').addEventListener('click', () => {
+    if (!ctx) return
+    ctx.clearRect(0, 0, canvas.width, canvas.height)
+    hasInk = false
+    stateLabel.textContent = '未标记'
+    err.textContent = ''
+  })
+  mask.querySelector('#igMaskCancel').addEventListener('click', () => mask.remove())
+  go.addEventListener('click', async () => {
+    err.textContent = ''
+    if (!ctx || !canvas.width) return (err.textContent = '图片还没有加载完成')
+    if (!hasInk) return (err.textContent = '请先在图片上涂抹要修改的区域')
+    const prompt = String(promptInput.value || '').trim()
+    if (!prompt) return (err.textContent = '请描述选区里要改成什么')
+    const exportCanvas = document.createElement('canvas')
+    exportCanvas.width = canvas.width
+    exportCanvas.height = canvas.height
+    const exportCtx = exportCanvas.getContext('2d')
+    exportCtx.fillStyle = '#000000'
+    exportCtx.fillRect(0, 0, exportCanvas.width, exportCanvas.height)
+    exportCtx.drawImage(canvas, 0, 0)
+    const maskDataUrl = exportCanvas.toDataURL('image/png')
+    go.disabled = true
+    go.textContent = '提交中…'
+    try {
+      const res = await api('/api/images/mask-edit', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ assetId: shot.id, prompt, maskDataUrl }),
+      })
+      if (!res.ok) throw new Error(res.body?.error || `局部选区编辑失败（HTTP ${res.status}）`)
+      mask.remove()
+      toast(`已生成局部编辑版本 v${res.body.image.revision}`)
+      await loadRecentImages({ force: true })
+    } catch (error) {
+      go.disabled = false
+      go.textContent = '应用选区'
+      err.textContent = error?.message || '局部选区编辑失败'
+    }
+  })
 }
 
 /* 生图模块仅展示真实图像服务返回的结果，不内置演示画面、示例卡片或假数据。 */
@@ -7478,6 +7785,7 @@ async function renderImage(el) {
     <div class="img-head">
       <div><div class="img-title">图像</div>
         <div class="img-sub">${g.busy ? '正在生成真实图像…' : `真实生图 · ${esc(selectedModel.label)} · ${esc(selectedModel.providerLabel || selectedModel.provider || '图像模型')} · ${cap.external ? '提示词会发送到外部服务' : '服务端内部模型'}`}</div></div>
+      <button class="btn sm img-compare-open" id="igCompare" ${cards.length < 2 ? 'disabled' : ''}>并排对比</button>
     </div>
     <div class="img-gallery">
       ${cards.length ? cards.map((c) => `
@@ -7493,10 +7801,13 @@ async function renderImage(el) {
         </div>`}
     </div>
     <div class="img-composer-wrap">
+      <div class="img-refs" id="igRefs">${renderImageReferenceChips(g)}</div>
       <div class="img-composer">
         <select class="img-model-select" id="igModel" aria-label="选择图像模型" title="选择图像模型" ${allModels.length <= 1 ? 'disabled' : ''}>${modelOptions}</select>
         <input class="img-input" id="igPrompt" placeholder="描述新图像" value="${esc(g.prompt)}">
         <div class="img-tools">
+          <select class="img-count-select" id="igCount" aria-label="方案数量" title="方案数量">${[1, 2, 3].map((n) => `<option value="${n}" ${Number(g.count) === n ? 'selected' : ''}>${n} 方案</option>`).join('')}</select>
+          <button class="img-ref-add" id="igRefAdd" title="添加参考图" aria-label="添加参考图">${icon('image')}</button>
           <button class="img-send" id="igGen" title="生成" ${g.busy ? 'disabled' : ''}>${g.busy ? '…' : icon('up')}</button>
         </div>
       </div>
@@ -7509,6 +7820,16 @@ async function renderImage(el) {
     g.modelId = e.target.value
     renderView()
   })
+  el.querySelector('#igCount')?.addEventListener('change', (e) => {
+    g.count = Math.max(1, Math.min(3, Number(e.target.value) || 1))
+  })
+  el.querySelector('#igRefAdd')?.addEventListener('click', () => openImageReferencePicker())
+  el.querySelectorAll('[data-ref-remove]').forEach((btn) => btn.addEventListener('click', (e) => {
+    e.stopPropagation()
+    g.references = (g.references || []).filter((item) => item.id !== btn.dataset.refRemove)
+    renderView()
+  }))
+  el.querySelector('#igCompare')?.addEventListener('click', () => openImageCompare())
 
   el.querySelectorAll('.img-card').forEach((b) => {
     const openPreview = () => {
@@ -7584,6 +7905,7 @@ async function renderImage(el) {
             style: g2.style,
             ratio: g2.ratio,
             modelId: g2.modelId || selectedModel.id,
+            referenceAssetIds: (g2.references || []).map((item) => item.id),
             seed: Math.floor(Math.random() * 2_147_483_647),
           }),
         })

@@ -41,7 +41,7 @@ import { checkProjectDeliverables } from './deliverable-check.mjs'
 import { inspectGeoFiles } from './gis-datasets.mjs'
 import { HARNESS_BASE_SERVICES, runHarnessService } from './harness-services.mjs'
 import { ModelError, chatCompletion, resolveModelConfig, routeModel } from './model.mjs'
-import { ImageProviderError, editImage, generateImage, imageModelStatus } from './image-providers.mjs'
+import { ImageProviderError, editImage, editImageWithMask, generateImage, imageModelStatus } from './image-providers.mjs'
 import { prepareSpeech, modelStatus, transcribeSpeech } from './speech.mjs'
 import { pinyin } from 'pinyin-pro'
 import { HarnessError, cancelRun, closeHarness, closeHarnessForHome, dshBin, runAgent, stopBackgroundRuntime } from './harness.mjs'
@@ -1893,6 +1893,8 @@ const GUEST_GUARD = {
   'POST /api/settings': 'home',
   'POST /api/images/generate': 'home',
   'POST /api/images/edit': 'home',
+  'POST /api/images/mask-edit': 'home',
+  'POST /api/images/restore': 'home',
   'GET /api/images/models': 'home',
   'GET /api/images/recent': 'home',
   'GET /api/images/asset': 'home',
@@ -3718,6 +3720,40 @@ function getSharp() {
   if (sharpLib !== undefined) return sharpLib
   try { sharpLib = createRequire(import.meta.url)('./dsh-runtime/node_modules/sharp') } catch { sharpLib = null }
   return sharpLib
+}
+
+async function editOutputSize(buffer, fallbackWidth, fallbackHeight) {
+  const fallback = [fallbackWidth, fallbackHeight]
+  const sharp = getSharp()
+  if (!sharp) return fallback
+  try {
+    const meta = await sharp(buffer).metadata()
+    let width = Number(meta.width || 0)
+    let height = Number(meta.height || 0)
+    if (width < 1 || height < 1) return fallback
+    const maxEdge = 2048
+    const minEdge = 384
+    const longEdge = Math.max(width, height)
+    if (longEdge > maxEdge) {
+      const scale = maxEdge / longEdge
+      width *= scale
+      height *= scale
+    } else if (longEdge < minEdge) {
+      const scale = minEdge / longEdge
+      width *= scale
+      height *= scale
+    }
+    const rounded = [Math.max(16, Math.round(width / 16) * 16), Math.max(16, Math.round(height / 16) * 16)]
+    const total = rounded[0] * rounded[1]
+    if (total > maxEdge * maxEdge) {
+      const scale = Math.sqrt((maxEdge * maxEdge) / total)
+      rounded[0] = Math.max(16, Math.floor((rounded[0] * scale) / 16) * 16)
+      rounded[1] = Math.max(16, Math.floor((rounded[1] * scale) / 16) * 16)
+    }
+    return rounded
+  } catch {
+    return fallback
+  }
 }
 
 /**
@@ -7852,6 +7888,23 @@ const api = {
     const styleHint = IMAGE_STYLE_PROMPTS[style] || ''
     const cleanPrompt = normalizeImagePrompt(prompt)
     const fullPrompt = styleHint ? `${cleanPrompt}, ${styleHint}` : cleanPrompt
+    const referenceAssetIds = Array.isArray(body.referenceAssetIds)
+      ? [...new Set(body.referenceAssetIds.map((id) => String(id || '').trim()).filter(Boolean))]
+      : []
+    if (referenceAssetIds.length > 3) {
+      return json(res, 400, { error: '最多只能选择 3 张参考图', code: 'IMAGE_REFERENCE_TOO_MANY' })
+    }
+    const referenceImages = []
+    for (const referenceId of referenceAssetIds) {
+      const referenceAsset = getImageAsset(referenceId)
+      const referenceMeta = referenceAsset ? getFile(referenceAsset.fileId) : null
+      const referenceBuffer = referenceAsset ? readFileBuffer(referenceAsset.fileId) : null
+      if (!referenceAsset || referenceAsset.deletedAt != null || referenceAsset.owner !== user.name
+        || !referenceMeta || referenceMeta.deletedAt != null || !referenceBuffer) {
+        return json(res, 400, { error: `参考图 ${referenceId} 不存在或无权使用`, code: 'IMAGE_REFERENCE_INVALID' })
+      }
+      referenceImages.push({ buffer: referenceBuffer, mime: referenceMeta.mime, assetId: referenceId })
+    }
     const jobId = newFileId('IJOB')
     createImageJob({
       id: jobId,
@@ -7860,7 +7913,7 @@ const api = {
       kind: 'generate',
       modelId,
       prompt,
-      params: { ratio, style, seed, width, height, fullPrompt },
+      params: { ratio, style, seed, width, height, fullPrompt, referenceAssetIds },
     })
     try {
       const image = await generateImage({
@@ -7870,6 +7923,7 @@ const api = {
         width,
         height,
         seed,
+        referenceImages,
       })
       const ext = image.mime === 'image/png' ? 'png' : image.mime === 'image/webp' ? 'webp' : 'jpg'
       const assetId = newFileId('IMG')
@@ -7995,7 +8049,7 @@ const api = {
     }
     const style = asset.style || '写实'
     const ratio = IMAGE_RATIOS[asset.ratio] ? asset.ratio : '1:1'
-    const [width, height] = IMAGE_RATIOS[ratio]
+    const [width, height] = await editOutputSize(sourceBuffer, ...IMAGE_RATIOS[ratio])
     const seed = Number.isInteger(Number(body.seed)) && Number(body.seed) > 0 ? Number(body.seed) : Math.floor(Math.random() * 2_147_483_647)
     const jobId = newFileId('IJOB')
     createImageJob({
@@ -8112,6 +8166,247 @@ const api = {
         code: error instanceof ImageProviderError ? error.code : 'IMAGE_PROVIDER_ERROR',
       })
     }
+  },
+  'POST /api/images/mask-edit': async (req, res) => {
+    const user = roleOf(req)
+    const net = netOf(req)
+    const body = JSON.parse(req.__body || '{}')
+    const assetId = String(body.assetId || body.id || '').trim()
+    const prompt = String(body.prompt || '').trim()
+    const maskDataUrl = String(body.maskDataUrl || '').trim()
+    if (!assetId) return json(res, 400, { error: '缺少要编辑的图像资产', code: 'IMAGE_ASSET_REQUIRED' })
+    if (!prompt) return json(res, 400, { error: '请先描述选区里要修改成什么', code: 'IMAGE_MASK_PROMPT_REQUIRED' })
+    if (prompt.length > 800) return json(res, 400, { error: '局部编辑要求不能超过 800 个字符', code: 'IMAGE_MASK_PROMPT_TOO_LONG' })
+    if (!/^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(maskDataUrl)) {
+      return json(res, 400, { error: '选区 Mask 无效', code: 'IMAGE_MASK_INVALID' })
+    }
+    const asset = getImageAsset(assetId)
+    if (!asset || asset.deletedAt != null || asset.owner !== user.name) {
+      return json(res, 404, { error: '图像资产不存在或无权编辑', code: 'IMAGE_ASSET_NOT_FOUND' })
+    }
+    const sourceMeta = getFile(asset.fileId)
+    const sourceBuffer = readFileBuffer(asset.fileId)
+    if (!sourceMeta || !sourceBuffer || sourceMeta.deletedAt != null) {
+      return json(res, 404, { error: '待编辑的图像文件不存在或已失效', code: 'IMAGE_FILE_NOT_FOUND' })
+    }
+    const sharp = getSharp()
+    if (!sharp) {
+      return json(res, 503, { error: '当前环境缺少图像处理组件，无法校验选区', code: 'IMAGE_MASK_UNAVAILABLE' })
+    }
+    const style = asset.style || '写实'
+    let maskBuffer = Buffer.from(maskDataUrl.split(',')[1] || '', 'base64')
+    if (!maskBuffer.length || maskBuffer.length > 10 * 1024 * 1024) {
+      return json(res, 400, { error: '选区 Mask 为空或超过 10 MB', code: 'IMAGE_MASK_TOO_LARGE' })
+    }
+    let sourceMetaInfo
+    let maskMetaInfo
+    let normalizedMask
+    try {
+      sourceMetaInfo = await sharp(sourceBuffer).metadata()
+      maskMetaInfo = await sharp(maskBuffer).metadata()
+      const width = Number(sourceMetaInfo.width || 0)
+      const height = Number(sourceMetaInfo.height || 0)
+      if (width < 512 || height < 512 || width > 4096 || height > 4096) {
+        return json(res, 400, { error: '当前图片尺寸不适合局部重绘，宽度和高度需在 512–4096 像素之间', code: 'IMAGE_MASK_SOURCE_SIZE_UNSUPPORTED' })
+      }
+      normalizedMask = await sharp(maskBuffer)
+        .resize(width, height, { fit: 'fill', kernel: 'nearest' })
+        .greyscale()
+        .threshold(128)
+        .png()
+        .toBuffer()
+      if (!normalizedMask.length) throw new Error('empty mask')
+      sourceMetaInfo.width = width
+      sourceMetaInfo.height = height
+    } catch (error) {
+      if (error instanceof ImageProviderError) throw error
+      return json(res, 400, { error: `选区 Mask 无法处理：${error?.message || error}`, code: 'IMAGE_MASK_INVALID' })
+    }
+    const normalizedMaskDataUrl = `data:image/png;base64,${normalizedMask.toString('base64')}`
+    const width = sourceMetaInfo.width
+    const height = sourceMetaInfo.height
+    const ratio = IMAGE_RATIOS[asset.ratio] ? asset.ratio : '1:1'
+    const jobId = newFileId('IJOB')
+    createImageJob({
+      id: jobId,
+      owner: user.name,
+      net,
+      assetId: asset.id,
+      kind: 'mask-edit',
+      provider: 'wanx',
+      modelId: 'wanx-edit',
+      prompt,
+      params: { ratio, style, width, height, maskWidth: maskMetaInfo.width, maskHeight: maskMetaInfo.height, sourceFileId: asset.fileId, sourceRevision: asset.revision },
+    })
+    try {
+      const image = await editImageWithMask({
+        prompt,
+        imageBuffer: sourceBuffer,
+        imageMime: sourceMeta.mime,
+        maskDataUrl: normalizedMaskDataUrl,
+        width,
+        height,
+      })
+      const ext = image.mime === 'image/png' ? 'png' : image.mime === 'image/webp' ? 'webp' : 'jpg'
+      const fileId = newFileId('IMG')
+      const name = `AI-${new Date().toISOString().slice(0, 19).replace(/[T:]/g, '')}-${jobId.slice(-6)}.${ext}`
+      const meta = putFile({
+        id: fileId, name, mime: image.mime, buffer: image.buffer, owner: user.name, net,
+        note: `imagemask:${image.provider}/${image.model};modelId=${image.modelId};source=${asset.id}:v${asset.revision};ratio=${ratio};style=${style}`,
+      })
+      const revision = Number(asset.revision || 1) + 1
+      createImageRevision({
+        assetId: asset.id,
+        revision,
+        fileId: meta.id,
+        prompt,
+        style,
+        ratio,
+        provider: image.provider,
+        providerLabel: image.providerLabel,
+        model: image.model,
+        modelId: image.modelId,
+        seed: 0,
+        params: { sourceFileId: asset.fileId, sourceRevision: asset.revision, width, height, mask: 'browser-canvas', requestId: image.requestId || '', taskId: image.taskId || '' },
+        note: `局部选区编辑 v${revision}`,
+        createdBy: user.name,
+      })
+      updateImageAssetLatest(asset.id, user.name, {
+        prompt,
+        style,
+        ratio,
+        provider: image.provider,
+        providerLabel: image.providerLabel,
+        model: image.model,
+        modelId: image.modelId,
+        seed: 0,
+        fileId: meta.id,
+        revision,
+      })
+      updateImageJob(jobId, {
+        status: 'completed',
+        assetId: asset.id,
+        provider: image.provider,
+        modelId: image.modelId,
+        finishedAt: Date.now(),
+      })
+      logAudit(user, 'image.mask-edit', `${asset.id}:v${revision}:${image.modelId}`, `allow(${meta.size})`, net)
+      return json(res, 200, {
+        ok: true,
+        image: {
+          id: asset.id,
+          assetId: asset.id,
+          fileId: meta.id,
+          name: meta.name,
+          mime: meta.mime,
+          size: meta.size,
+          width: image.width || width,
+          height: image.height || height,
+          ratio,
+          style,
+          prompt,
+          provider: image.provider,
+          providerLabel: image.providerLabel,
+          model: image.model,
+          modelId: image.modelId,
+          requestId: image.requestId || '',
+          revision,
+          versions: imageRevisionCount(asset.id),
+          jobId,
+          url: imageFileUrl(meta.id),
+        },
+      })
+    } catch (error) {
+      const timedOut = error?.name === 'TimeoutError' || error?.name === 'AbortError'
+      const message = timedOut ? '局部重绘模型调用超时，请稍后重试' : String(error?.message || error)
+      updateImageJob(jobId, { status: 'failed', error: message, finishedAt: Date.now() })
+      logAudit(user, 'image.mask-edit', `${asset.id}:wanx-edit`, 'deny', net)
+      const statusCode = error instanceof ImageProviderError ? error.status : 502
+      return json(res, statusCode, {
+        ok: false,
+        error: `局部选区编辑失败：${message}`,
+        code: error instanceof ImageProviderError ? error.code : 'IMAGE_PROVIDER_ERROR',
+      })
+    }
+  },
+  'POST /api/images/restore': async (req, res) => {
+    const user = roleOf(req)
+    const net = netOf(req)
+    const body = JSON.parse(req.__body || '{}')
+    const assetId = String(body.assetId || body.id || '').trim()
+    const revisionNumber = Number(body.revision)
+    if (!assetId || !Number.isInteger(revisionNumber) || revisionNumber < 1) {
+      return json(res, 400, { error: '缺少要恢复的图像资产或版本号', code: 'IMAGE_RESTORE_TARGET_REQUIRED' })
+    }
+    const asset = getImageAsset(assetId)
+    if (!asset || asset.deletedAt != null || asset.owner !== user.name) {
+      return json(res, 404, { error: '图像资产不存在或无权恢复', code: 'IMAGE_ASSET_NOT_FOUND' })
+    }
+    const revisions = listImageRevisions(asset.id)
+    const target = revisions.find((item) => Number(item.revision) === revisionNumber)
+    if (!target) {
+      return json(res, 404, { error: `版本 v${revisionNumber} 不存在`, code: 'IMAGE_REVISION_NOT_FOUND' })
+    }
+    if (Number(asset.revision) === revisionNumber) {
+      return json(res, 400, { error: '该版本已经是当前版本', code: 'IMAGE_REVISION_ALREADY_CURRENT' })
+    }
+    const targetMeta = getFile(target.fileId)
+    if (!targetMeta || targetMeta.deletedAt != null) {
+      return json(res, 404, { error: '该版本文件已失效，无法恢复', code: 'IMAGE_FILE_NOT_FOUND' })
+    }
+    const nextRevision = revisions.reduce((max, item) => Math.max(max, Number(item.revision) || 0), 0) + 1
+    createImageRevision({
+      assetId: asset.id,
+      revision: nextRevision,
+      fileId: target.fileId,
+      prompt: target.prompt,
+      style: target.style,
+      ratio: target.ratio,
+      provider: target.provider,
+      providerLabel: target.providerLabel,
+      model: target.model,
+      modelId: target.modelId,
+      seed: target.seed,
+      params: { restoredFrom: target.revision },
+      note: `恢复自 v${target.revision}`,
+      createdBy: user.name,
+    })
+    const updated = updateImageAssetLatest(asset.id, user.name, {
+      prompt: target.prompt,
+      style: target.style,
+      ratio: target.ratio,
+      provider: target.provider,
+      providerLabel: target.providerLabel,
+      model: target.model,
+      modelId: target.modelId,
+      seed: target.seed,
+      fileId: target.fileId,
+      revision: nextRevision,
+    })
+    if (!updated) {
+      return json(res, 409, { error: '版本恢复写入失败，请重试', code: 'IMAGE_RESTORE_FAILED' })
+    }
+    const jobId = newFileId('IJOB')
+    createImageJob({
+      id: jobId,
+      owner: user.name,
+      net,
+      assetId: asset.id,
+      kind: 'restore',
+      provider: target.provider,
+      modelId: target.modelId,
+      prompt: target.prompt,
+      params: { restoredFrom: target.revision, revision: nextRevision, fileId: target.fileId },
+    })
+    updateImageJob(jobId, {
+      status: 'completed',
+      assetId: asset.id,
+      provider: target.provider,
+      modelId: target.modelId,
+      finishedAt: Date.now(),
+    })
+    logAudit(user, 'image.restore', `${asset.id}:v${target.revision}->v${nextRevision}`, 'allow', net)
+    return json(res, 200, { ok: true, image: imageAssetPublic(updated), jobId })
   },
   'GET /api/images/recent': (req, res, url) => {
     const user = roleOf(req)
