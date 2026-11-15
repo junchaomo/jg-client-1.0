@@ -39,6 +39,7 @@ import { checkProjectDeliverables } from './deliverable-check.mjs'
 import { inspectGeoFiles } from './gis-datasets.mjs'
 import { HARNESS_BASE_SERVICES, runHarnessService } from './harness-services.mjs'
 import { ModelError, chatCompletion, resolveModelConfig, routeModel } from './model.mjs'
+import { ImageProviderError, generateImage, imageModelStatus } from './image-providers.mjs'
 import { prepareSpeech, modelStatus, transcribeSpeech } from './speech.mjs'
 import { pinyin } from 'pinyin-pro'
 import { HarnessError, cancelRun, closeHarness, closeHarnessForHome, dshBin, runAgent, stopBackgroundRuntime } from './harness.mjs'
@@ -75,13 +76,7 @@ const port = Number(process.env.PORT || 4173)
 const forcedMaxToolCalls = Number(process.env.JG_MAX_TOOL_CALLS || 0) > 0 ? Number(process.env.JG_MAX_TOOL_CALLS) : 0
 const downloadSecret = process.env.JG_DOWNLOAD_SECRET || randomBytes(32).toString('hex')
 const UPLOAD_LIMIT_BYTES = Math.max(1024 * 1024, Number(process.env.JG_UPLOAD_LIMIT_MB || 200) * 1024 * 1024)
-// 真实文生图：默认走互联网外部生图服务；政务网/涉密网不启用，避免把提示词外发。
-const IMAGE_GENERATION = {
-  provider: process.env.JG_IMAGE_PROVIDER || 'Pollinations',
-  model: process.env.JG_IMAGE_MODEL || 'flux',
-  endpoint: process.env.JG_IMAGE_ENDPOINT || 'https://image.pollinations.ai/prompt',
-  timeoutMs: Math.max(10_000, Number(process.env.JG_IMAGE_TIMEOUT_MS || 90_000)),
-}
+// 生图模型独立于聊天模型：Provider 与 Key 由 image-providers.mjs 管理。
 const IMAGE_RATIOS = {
   '1:1': [1024, 1024],
   '4:3': [1024, 768],
@@ -111,44 +106,8 @@ function normalizeImagePrompt(raw) {
     .trim()
   return text || String(raw || '').trim()
 }
-async function translateImagePrompt(user, text) {
-  if (!/[\u4e00-\u9fff]/.test(text)) return text
-  try {
-    const cfg = resolveModelConfig({ userConfig: liveModelConfig.get(user.id) || {}, request: {} })
-    if (cfg.source === 'none') return ''
-    const result = await chatCompletion({
-      model: cfg.model,
-      apiKey: cfg.apiKey,
-      baseUrl: cfg.baseUrl,
-      timeoutMs: Math.min(cfg.timeoutMs, 15_000),
-      temperature: 0.1,
-      messages: [
-        {
-          role: 'system',
-          content: 'Translate the user image request into one concise English text-to-image prompt. Preserve subject, counts, colors, style, composition and any text requested. Do not add new subjects. Output only the English prompt, no quotes, no explanation.',
-        },
-        { role: 'user', content: text },
-      ],
-    })
-    const english = String(result.content || '').replace(/^["“']|["”']$/g, '').replace(/\s+/g, ' ').trim()
-    return /[A-Za-z]/.test(english) ? english.slice(0, 700) : ''
-  } catch {
-    return ''
-  }
-}
 function imageGenerationStatus(user, net) {
-  const enabled = net === 'inet' && user.id !== 'guest'
-  return {
-    enabled,
-    provider: IMAGE_GENERATION.provider,
-    model: IMAGE_GENERATION.model,
-    external: true,
-    reason: enabled
-      ? '提示词会发送到外部文本翻译与公共生图服务；政务网与涉密网不启用'
-      : net !== 'inet'
-        ? `当前为${networks[net]?.label || net}，外部生图服务不启用`
-        : '外部访客不能调用外部生图服务',
-  }
+  return imageModelStatus(user, net)
 }
 
 function newVisualId() {
@@ -7821,6 +7780,12 @@ const api = {
       return json(res, 500, { error: `文件写入失败：${error?.message || error}` })
     }
   },
+  'GET /api/images/models': (req, res) => {
+    const user = roleOf(req)
+    const net = netOf(req)
+    const status = imageGenerationStatus(user, net)
+    return json(res, 200, { ok: true, ...status })
+  },
   'POST /api/images/generate': async (req, res) => {
     const user = roleOf(req)
     const net = netOf(req)
@@ -7830,40 +7795,31 @@ const api = {
     const prompt = String(body.prompt || '').trim()
     if (!prompt) return json(res, 400, { error: '请先描述要生成的图像', code: 'IMAGE_PROMPT_REQUIRED' })
     if (prompt.length > 1200) return json(res, 400, { error: '提示词不能超过 1200 个字符', code: 'IMAGE_PROMPT_TOO_LONG' })
+    const modelId = String(body.modelId || status.defaultModelId || '').trim()
     const style = String(body.style || '写实').slice(0, 20)
     const ratio = IMAGE_RATIOS[String(body.ratio || '')] ? String(body.ratio) : '1:1'
     const [width, height] = IMAGE_RATIOS[ratio]
     const seed = Number.isInteger(Number(body.seed)) && Number(body.seed) > 0 ? Number(body.seed) : Math.floor(Math.random() * 2_147_483_647)
     const styleHint = IMAGE_STYLE_PROMPTS[style] || ''
     const cleanPrompt = normalizeImagePrompt(prompt)
-    const translatedPrompt = await translateImagePrompt(user, cleanPrompt)
-    const promptForService = translatedPrompt || cleanPrompt
-    const fullPrompt = styleHint ? `${promptForService}, ${styleHint}` : promptForService
-    const endpoint = IMAGE_GENERATION.endpoint.replace(/\/$/, '')
-    const remote = new URL(`${endpoint}/${encodeURIComponent(fullPrompt)}`)
-    remote.searchParams.set('width', String(width))
-    remote.searchParams.set('height', String(height))
-    remote.searchParams.set('model', IMAGE_GENERATION.model)
-    remote.searchParams.set('seed', String(seed))
-    remote.searchParams.set('nologo', 'true')
-    remote.searchParams.set('safe', 'true')
-    remote.searchParams.set('enhance', 'true')
+    const fullPrompt = styleHint ? `${cleanPrompt}, ${styleHint}` : cleanPrompt
     try {
-      const response = await fetch(remote, { signal: AbortSignal.timeout(IMAGE_GENERATION.timeoutMs), redirect: 'follow' })
-      if (!response.ok) throw new Error(`外部生图服务返回 HTTP ${response.status}`)
-      const mime = String(response.headers.get('content-type') || '').split(';')[0].trim()
-      if (!mime.startsWith('image/')) throw new Error(`外部生图服务返回了非图片内容：${mime || '未知类型'}`)
-      const buffer = Buffer.from(await response.arrayBuffer())
-      if (buffer.length < 8 * 1024) throw new Error('外部生图服务返回的图片过小，可能生成失败')
-      if (buffer.length > 24 * 1024 * 1024) throw new Error('外部生图服务返回的图片超过 24 MB')
-      const ext = mime === 'image/png' ? 'png' : mime === 'image/webp' ? 'webp' : 'jpg'
+      const image = await generateImage({
+        modelId,
+        prompt: fullPrompt,
+        ratio,
+        width,
+        height,
+        seed,
+      })
+      const ext = image.mime === 'image/png' ? 'png' : image.mime === 'image/webp' ? 'webp' : 'jpg'
       const id = newFileId('IMG')
       const name = `AI-${new Date().toISOString().slice(0, 19).replace(/[T:]/g, '')}-${seed}.${ext}`
       const meta = putFile({
-        id, name, mime, buffer, owner: user.name, net,
-        note: `imagegen:${IMAGE_GENERATION.provider}/${IMAGE_GENERATION.model};ratio=${ratio};style=${style};seed=${seed}`,
+        id, name, mime: image.mime, buffer: image.buffer, owner: user.name, net,
+        note: `imagegen:${image.provider}/${image.model};modelId=${image.modelId};ratio=${ratio};style=${style};seed=${seed}`,
       })
-      logAudit(user, 'image.generate', `${id}:${ratio}:${seed}`, `allow(${meta.size})`, net)
+      logAudit(user, 'image.generate', `${id}:${image.modelId}:${ratio}:${seed}`, `allow(${meta.size})`, net)
       return json(res, 200, {
         ok: true,
         image: {
@@ -7871,22 +7827,30 @@ const api = {
           name: meta.name,
           mime: meta.mime,
           size: meta.size,
-          width,
-          height,
+          width: image.width || width,
+          height: image.height || height,
           ratio,
           style,
           seed,
           prompt,
-          provider: IMAGE_GENERATION.provider,
-          model: IMAGE_GENERATION.model,
+          provider: image.provider,
+          providerLabel: image.providerLabel,
+          model: image.model,
+          modelId: image.modelId,
+          requestId: image.requestId || '',
           url: `/api/images/file?id=${encodeURIComponent(meta.id)}`,
         },
       })
     } catch (error) {
       const timedOut = error?.name === 'TimeoutError' || error?.name === 'AbortError'
-      const message = timedOut ? '外部生图服务超时，请稍后重试' : String(error?.message || error)
-      logAudit(user, 'image.generate', `${ratio}:${seed}`, 'deny', net)
-      return json(res, 502, { ok: false, error: `真实生图失败：${message}`, code: 'IMAGE_PROVIDER_ERROR' })
+      const message = timedOut ? '图像模型调用超时，请稍后重试' : String(error?.message || error)
+      logAudit(user, 'image.generate', `${modelId}:${ratio}:${seed}`, 'deny', net)
+      const statusCode = error instanceof ImageProviderError ? error.status : 502
+      return json(res, statusCode, {
+        ok: false,
+        error: `真实生图失败：${message}`,
+        code: error instanceof ImageProviderError ? error.code : 'IMAGE_PROVIDER_ERROR',
+      })
     }
   },
   'GET /api/images/file': (req, res, url) => {

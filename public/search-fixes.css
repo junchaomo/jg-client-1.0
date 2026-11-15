@@ -958,6 +958,25 @@ body.resizing { cursor: col-resize; user-select: none; }
 }
 .img-empty-title { font-size: var(--fs-sub); color: var(--text); font-weight: 500; }
 .img-empty-text { font-size: var(--fs-meta); max-width: 420px; line-height: 1.7; }
+.img-model-select {
+  flex: none;
+  max-width: 148px;
+  height: 32px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 0 24px 0 10px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: var(--fs-meta);
+  outline: none;
+  cursor: pointer;
+}
+.img-model-select:disabled { opacity: .62; cursor: default; }
+.img-model-select:focus-visible { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 16%, transparent); }
+@container (max-width: 520px) {
+  .img-model-select { max-width: 118px; }
+}
 
 /* ---------- 定时任务「更多」菜单：ChatGPT 式四项 + 快捷键 + 项目子菜单 ---------- */
 .conv-menu.tk-action-menu {

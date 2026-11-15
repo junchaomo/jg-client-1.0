@@ -122,7 +122,7 @@ const state = {
   ],
   cbW: 440,
   cbUserW: 0,
-  imagegen: { prompt: '', ratio: '1:1', count: 1, style: '写实', shots: [], busy: false },
+  imagegen: { prompt: '', ratio: '1:1', count: 1, style: '写实', shots: [], busy: false, modelId: '' },
 }
 
 const layout = new AppLayout(document.getElementById('app'))
@@ -466,6 +466,11 @@ async function loadBoot() {
   loadUsageSummary().catch(() => {})
   if (!state.conversation?.id) state.executionPolicy = state.runtimeSettings.defaultPolicy === 'manual' ? 'manual' : 'auto'
   state.agentPresets = body.agentPresets || []
+  const imageCap = body.imageGeneration || {}
+  const imageModels = Array.isArray(imageCap.models) ? imageCap.models : []
+  if (!imageModels.some((model) => model.id === state.imagegen.modelId && model.configured)) {
+    state.imagegen.modelId = imageCap.defaultModelId || imageModels.find((model) => model.configured)?.id || ''
+  }
   if (!state.agentPresets.some((p) => p.id === state.agentPresetId)) state.agentPresetId = ''
   if (body.settings?.defaultEffort) state.reasoningEffort = body.settings.defaultEffort
   state.tasks = body.tasks || []
@@ -2930,7 +2935,7 @@ function composerPlusItems() {
     { act: 'attach', ic: 'plus', label: '添加照片和文件', desc: '从计算机上传' },
     { act: 'deepThink', ic: 'spark', label: `${state.deepThink ? '✓ ' : ''}深度思索`, desc: state.deepThink ? '已开启 · 当前会话使用推理模型' : 'DeepSeek Reasoner · 更深层推理' },
     { act: 'library', ic: 'database', label: '从资料库添加', desc: '浏览数据中心的资源' },
-    { act: 'image', ic: 'image', label: '创建图像', desc: imagegenReady() ? `真实生图 · ${state.boot?.imageGeneration?.provider || '图像服务'} ${state.boot?.imageGeneration?.model || ''}` : (state.boot?.imageGeneration?.reason || '当前环境未启用真实生图'), off: !imagegenReady() },
+    { act: 'image', ic: 'image', label: '创建图像', desc: imagegenReady() ? `真实生图 · ${selectedImageModel()?.label || '图像服务'}` : (state.boot?.imageGeneration?.reason || '当前环境未启用真实生图'), off: !imagegenReady() },
     { act: 'web', ic: 'globe', label: '网页搜索', desc: state.webSearch ? '已启用 · 本轮会检索网页' : '使用平台 Web 搜索与抓取' },
     { act: 'project', ic: 'folder', label: '在项目中工作', desc: '在项目里开始对话' },
     { act: 'skillPicker', ic: 'layers', label: '技能', desc: skills.length ? `${skills.length} 项已启用 ›` : '暂无已启用技能 ›' },
@@ -7178,25 +7183,30 @@ function openNotebookSourcePicker(detail, opts = {}) {
 }
 
 
-function imageModel() {
-  const ms = state.boot?.models || []
-  return ms.find((m) => m.id === state.composerModel) || ms[0] || {}
+function selectedImageModel() {
+  const cap = state.boot?.imageGeneration || {}
+  const models = Array.isArray(cap.models) ? cap.models : []
+  const configured = models.filter((model) => model.configured)
+  const selected = configured.find((model) => model.id === state.imagegen.modelId)
+    || configured.find((model) => model.default)
+    || configured[0]
+  if (selected && state.imagegen.modelId !== selected.id) state.imagegen.modelId = selected.id
+  return selected || null
 }
 
 function imagegenReady() {
   const cap = state.boot?.imageGeneration
   if (cap) return Boolean(cap.enabled)
-  return Boolean(imageModel()?.image)
+  return false
 }
 
 function showImageGate() {
   const cap = state.boot?.imageGeneration
-  const m = imageModel()
-  const reason = cap?.reason || `当前绑定的模型 ${m.label || '未选择'} 没有声明图像生成能力`
+  const reason = cap?.reason || '当前环境没有可用的图像生成模型'
   const mask = openModal('图像功能暂不可用', `
     <div class="notice">当前环境没有可用的真实图像生成通道。</div>
     <div class="field" style="margin-top:10px"><div class="field-label">原因</div><div class="field-value">${esc(reason)}</div></div>
-    <div class="field"><div class="field-label">怎么解决</div><div class="field-value">图像生成与聊天模型解耦；在互联网网络下启用外部生图服务，或在服务端配置 JG_IMAGE_ENDPOINT / JG_IMAGE_API_KEY 指向企业图像模型。政务网与涉密网不启用外部生图。</div></div>
+    <div class="field"><div class="field-label">怎么解决</div><div class="field-value">图像模型与聊天模型解耦，当前只支持 Qwen-Image 与 Seedream。请由管理员在服务端配置 QWEN_IMAGE_API_KEY 或 SEEDREAM_IMAGE_API_KEY（可选配置对应 ENDPOINT / MODEL），重启服务后在图像页选择模型。没有配置 Key 的模型显示为未配置，不会回退到演示图。</div></div>
     <div class="form-note">能力由服务端 /api/bootstrap 的 imageGeneration 声明，前端只按真实服务状态决定入口是否可用。</div>`, {})
   const foot = document.createElement('div')
   foot.style.cssText = 'display:flex;gap:8px;margin-top:14px'
@@ -7208,18 +7218,18 @@ function showImageGate() {
 
 /* 生图模块仅展示真实图像服务返回的结果，不内置演示画面、示例卡片或假数据。 */
 async function renderImage(el) {
-  const models = state.boot.models || []
-  const m = imageModel()
   const g = state.imagegen
   const cap = state.boot?.imageGeneration || {}
+  const allModels = Array.isArray(cap.models) ? cap.models : []
+  const selectedModel = selectedImageModel()
 
-  if (!imagegenReady()) {
+  if (!imagegenReady() || !selectedModel) {
     el.innerHTML = `
       <div class="img-head"><div><div class="img-title">图像</div><div class="img-sub"></div></div></div>
       <div class="ig-blocked">
         <div class="ig-blocked-ico">${icon('image')}</div>
         <div class="ig-blocked-title">当前环境没有可用的真实生图通道</div>
-        <div class="ig-blocked-text">${esc(cap.reason || `当前模型 ${m.label || '未选择'} 未声明图像能力`)}</div>
+        <div class="ig-blocked-text">${esc(cap.reason || '尚未配置图像模型')}</div>
         <button class="btn primary" id="igGoSettings">检查网络与凭证</button>
       </div>`
     el.querySelector('#igGoSettings').addEventListener('click', () => { state.view = 'settings'; state.settingsTab = 'network'; render() })
@@ -7235,11 +7245,12 @@ async function renderImage(el) {
     url: s.url,
     meta: `${s.style} · ${s.ratio}`,
   }))
+  const modelOptions = allModels.map((model) => `<option value="${esc(model.id)}" ${model.id === g.modelId ? 'selected' : ''} ${model.configured ? '' : 'disabled'}>${esc(model.label)}${model.configured ? '' : '（未配置）'}</option>`).join('')
 
   el.innerHTML = `
     <div class="img-head">
       <div><div class="img-title">图像</div>
-        <div class="img-sub">${g.busy ? '正在生成真实图像…' : `真实生图 · ${esc(cap.provider || '图像模型')} ${esc(cap.model || '')} · ${cap.external ? '提示词会发送到外部服务' : '服务端内部模型'}`}</div></div>
+        <div class="img-sub">${g.busy ? '正在生成真实图像…' : `真实生图 · ${esc(selectedModel.label)} · ${esc(selectedModel.providerLabel || selectedModel.provider || '图像模型')} · ${cap.external ? '提示词会发送到外部服务' : '服务端内部模型'}`}</div></div>
     </div>
     <div class="img-gallery">
       ${cards.length ? cards.map((c) => `
@@ -7255,6 +7266,7 @@ async function renderImage(el) {
     </div>
     <div class="img-composer-wrap">
       <div class="img-composer">
+        <select class="img-model-select" id="igModel" aria-label="选择图像模型" title="选择图像模型" ${allModels.length <= 1 ? 'disabled' : ''}>${modelOptions}</select>
         <input class="img-input" id="igPrompt" placeholder="描述新图像" value="${esc(g.prompt)}">
         <div class="img-tools">
           <button class="img-send" id="igGen" title="生成" ${g.busy ? 'disabled' : ''}>${g.busy ? '…' : icon('up')}</button>
@@ -7265,6 +7277,10 @@ async function renderImage(el) {
   const input = el.querySelector('#igPrompt')
   input.addEventListener('input', (e) => { g.prompt = e.target.value })
   input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); el.querySelector('#igGen').click() } })
+  el.querySelector('#igModel')?.addEventListener('change', (e) => {
+    g.modelId = e.target.value
+    renderView()
+  })
 
   el.querySelectorAll('.img-card').forEach((b) => b.addEventListener('click', () => {
     const s = g.shots.find((x) => x.id === b.dataset.igid)
@@ -7272,7 +7288,7 @@ async function renderImage(el) {
     openModal('生成结果', `
       <div class="ig-preview"><img src="${s.url}" alt=""></div>
       <div class="field" style="margin-top:10px"><div class="field-label">提示词</div><div class="field-value">${esc(s.prompt)}</div></div>
-      <div class="field"><div class="field-label">参数</div><div class="field-value">${esc(s.style)} · ${esc(s.ratio)} · ${esc(s.provider || cap.provider || '图像模型')} ${esc(s.model || cap.model || '')}</div></div>
+      <div class="field"><div class="field-label">参数</div><div class="field-value">${esc(s.style)} · ${esc(s.ratio)} · ${esc(s.providerLabel || s.provider || selectedModel.providerLabel || '图像模型')} ${esc(s.model || selectedModel.model || '')}</div></div>
       <div style="display:flex;gap:8px;margin-top:12px"><button class="btn" data-dlg>下载原图</button><button class="btn primary" data-useimg>用于会话</button></div>
       <div class="form-note">由真实图像生成服务返回，图片已落盘到服务端文件存储；提示词、比例、服务商和种子随结果记录，便于复核。</div>`, { wide: true })
     const mask = document.querySelector('.jg-modal-mask')
@@ -7321,6 +7337,7 @@ async function renderImage(el) {
             prompt: g2.prompt.trim(),
             style: g2.style,
             ratio: g2.ratio,
+            modelId: g2.modelId || selectedModel.id,
             seed: Math.floor(Math.random() * 2_147_483_647),
           }),
         })
@@ -7337,7 +7354,9 @@ async function renderImage(el) {
           name: image.name,
           mime: image.mime,
           provider: image.provider,
+          providerLabel: image.providerLabel,
           model: image.model,
+          modelId: image.modelId,
           seed: image.seed,
           ts: new Date().toLocaleTimeString('zh-CN', { hour12: false }).slice(0, 5),
         })
@@ -7346,7 +7365,7 @@ async function renderImage(el) {
       }
       g2.busy = false
       renderView()
-      toast(`已生成 ${made} 张真实图像 · ${cap.provider || '图像服务'} ${cap.model || ''}`)
+      toast(`已生成 ${made} 张真实图像 · ${selectedModel.label}`)
     } catch (err) {
       g2.busy = false
       renderView()
