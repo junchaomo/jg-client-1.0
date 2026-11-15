@@ -15790,7 +15790,7 @@ async function renderAdmin(el) {
             </span>
           </div>`).join('')
       const wrap = document.createElement('div')
-      wrap.className = 'mc-block'
+      wrap.className = 'mc-block mc-span-2'
       wrap.innerHTML = `<div class="mc-block-head"><b>插件 / 技能上架管理</b><span class="spacer"></span><span class="mc-count">${listedPlugins} / ${pluginItems.length} 个插件 · ${listedSkills} / ${skillItems.length} 个技能已上架</span></div>
         <div style="display:flex;align-items:center;gap:8px;padding:8px 10px 4px"><b style="font-size:12px">插件市场</b><span class="mc-count">${pluginItems.length} 个条目</span></div>
         <div class="mc-table" style="--mc-cols:minmax(130px,1.7fr) minmax(100px,1fr) minmax(64px,.8fr)">

@@ -1892,3 +1892,6 @@ body.resizing { cursor: col-resize; user-select: none; }
 .mc-concept-v { color: #5b6067; font-size: 11px; line-height: 1.75; }
 .mc-concept .mc-tag { display: inline-flex; margin-top: 9px; }
 @media (max-width: 760px) { .mc-concept-grid { grid-template-columns: minmax(0,1fr); } }
+/* 管理中心：含多张宽表格的市场/台账区块跨满双栏 */
+.mc-block.mc-span-2 { grid-column: span 2; }
+@media (max-width: 760px) { .mc-block.mc-span-2 { grid-column: span 1; } }
