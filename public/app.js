@@ -9631,7 +9631,7 @@ function cloudAppHTML(tab) {
         <button class="btn sm subtle" data-cb-app-external="${esc(tab.url || '')}" ${!tab.url ? 'disabled' : ''}>外部打开</button>
       </div>
       <div id="cbAppSlot" style="flex:1;width:100%;min-height:0;background:#fff;position:relative">
-        <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:var(--fs-sub)">${tab.url ? '正在加载应用…' : '正在启动应用，请稍候…'}</div>
+        ${status === 'ready' || status === 'running' ? '' : `<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:var(--fs-sub)">${tab.url ? '正在加载应用…' : '正在启动应用，请稍候…'}</div>`}
       </div>
     </div>`
 }
