@@ -6,7 +6,15 @@ runtime/
 .run.err
 .run-admin.log
 .run-admin.err
+.run*.log
+.run*.err
 .m1.log
 .m1.err
 data/
 *.bak
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
