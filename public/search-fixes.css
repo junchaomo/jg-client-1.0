@@ -939,9 +939,25 @@ body.resizing { cursor: col-resize; user-select: none; }
   .kn-all-grid { grid-template-columns: 1fr; }
 }
 
-/* 图像示例卡片：浅色画面上的标签统一为白色，保证可读性 */
+/* 图像结果卡片：真实生成结果在浅色画面上的标签统一为白色 */
 .img-card-label { color: #fff; }
 .img-card-meta { color: #fff; }
+.img-empty {
+  grid-column: 1 / -1;
+  min-height: 220px;
+  border: 1px dashed var(--line);
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 28px;
+  text-align: center;
+  color: var(--muted);
+}
+.img-empty-title { font-size: var(--fs-sub); color: var(--text); font-weight: 500; }
+.img-empty-text { font-size: var(--fs-meta); max-width: 420px; line-height: 1.7; }
 
 /* ---------- 定时任务「更多」菜单：ChatGPT 式四项 + 快捷键 + 项目子菜单 ---------- */
 .conv-menu.tk-action-menu {

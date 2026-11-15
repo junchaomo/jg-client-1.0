@@ -122,7 +122,7 @@ const state = {
   ],
   cbW: 440,
   cbUserW: 0,
-  imagegen: { prompt: '', ratio: '1:1', count: 1, style: '写实', shots: [], busy: false, tab: 'hot' },
+  imagegen: { prompt: '', ratio: '1:1', count: 1, style: '写实', shots: [], busy: false },
 }
 
 const layout = new AppLayout(document.getElementById('app'))
@@ -7206,527 +7206,7 @@ function showImageGate() {
   foot.querySelector('[data-later]').addEventListener('click', () => mask.remove())
 }
 
-const IG_RATIO = { '1:1': [1024, 1024], '4:3': [1024, 768], '16:9': [1024, 576], '9:16': [576, 1024] }
-
-function hashStr(s) {
-  let h = 2166136261
-  for (let i = 0; i < s.length; i += 1) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619) }
-  return h >>> 0
-}
-
-function wrapText(g, text, x, y, maxW, lh, maxLines) {
-  const chars = [...text]
-  let line = ''
-  let n = 0
-  for (let i = 0; i < chars.length; i += 1) {
-    const test = line + chars[i]
-    if (g.measureText(test).width > maxW && line) {
-      g.fillText(line, x, y + n * lh)
-      n += 1
-      line = chars[i]
-      if (n >= maxLines - 1) break
-    } else line = test
-  }
-  if (line) g.fillText(line, x, y + n * lh)
-}
-
-/**
- * 原型不调用真实生图接口：按提示词与参数生成一张确定性的示意图，
- * 用于验证入口、能力判定、参数与结果流转；正式版替换为模型 API 返回的图片。
- */
-function paintShot(prompt, ratio, style, seed, opts = {}) {
-  const [w, h] = IG_RATIO[ratio] || IG_RATIO['1:1']
-  const c = document.createElement('canvas')
-  c.width = w; c.height = h
-  const g = c.getContext('2d')
-  const base = hashStr(`${prompt}|${style}|${seed}`)
-  const hue = base % 360
-  let r = base
-  const rnd = () => { r = (r * 1103515245 + 12345) & 0x7fffffff; return r / 0x7fffffff }
-  const line = style === '线稿'
-  const ink = style === '水墨'
-  const groundY = h * (0.62 + rnd() * 0.08)
-
-  // 天空 / 底色
-  const sky = g.createLinearGradient(0, 0, 0, groundY)
-  sky.addColorStop(0, line ? '#fbfbfa' : `hsl(${hue}, ${ink ? 18 : 38}%, ${ink ? 88 : 76}%)`)
-  sky.addColorStop(1, line ? '#f4f4f2' : `hsl(${(hue + 26) % 360}, ${ink ? 22 : 46}%, ${ink ? 78 : 62}%)`)
-  g.fillStyle = sky
-  g.fillRect(0, 0, w, h)
-
-  // 光源
-  if (!line) {
-    const gx = w * (0.55 + rnd() * 0.35)
-    const gy = groundY * (0.35 + rnd() * 0.3)
-    const glow = g.createRadialGradient(gx, gy, 0, gx, gy, w * 0.55)
-    glow.addColorStop(0, `hsla(${(hue + 40) % 360}, 70%, 82%, .55)`)
-    glow.addColorStop(1, 'rgba(255,255,255,0)')
-    g.fillStyle = glow
-    g.fillRect(0, 0, w, groundY)
-  }
-
-  // 远山 / 天际线
-  const layers = line ? 2 : 3
-  for (let L = 0; L < layers; L += 1) {
-    const yBase = groundY - h * (0.03 + L * 0.05)
-    g.beginPath()
-    g.moveTo(0, yBase)
-    const step = w / 14
-    for (let i = 0; i <= 14; i += 1) {
-      const bH = h * (0.04 + rnd() * 0.16) * (L === 0 ? 1 : 0.75)
-      g.lineTo(i * step, yBase - bH)
-      g.lineTo((i + 1) * step, yBase - bH)
-    }
-    g.lineTo(w, yBase); g.lineTo(w, groundY); g.lineTo(0, groundY); g.closePath()
-    g.fillStyle = line ? '#fff' : `hsla(${(hue + 200) % 360}, ${ink ? 12 : 20}%, ${ink ? 55 + L * 8 : 36 + L * 9}%, ${0.55 - L * 0.12})`
-    g.fill()
-    g.strokeStyle = line ? 'rgba(40,44,50,.6)' : `hsla(${(hue + 210) % 360}, 18%, 30%, .35)`
-    g.lineWidth = line ? 1.6 : 1
-    g.stroke()
-  }
-
-  // 地面 / 水面
-  const grd = g.createLinearGradient(0, groundY, 0, h)
-  grd.addColorStop(0, line ? '#fafaf8' : `hsl(${(hue + 190) % 360}, ${ink ? 10 : 22}%, ${ink ? 74 : 42}%)`)
-  grd.addColorStop(1, line ? '#f3f3f0' : `hsl(${(hue + 200) % 360}, ${ink ? 12 : 26}%, ${ink ? 58 : 24}%)`)
-  g.fillStyle = grd
-  g.fillRect(0, groundY, w, h - groundY)
-
-  // 水面反光 / 铺装纹理
-  for (let i = 0; i < 26; i += 1) {
-    const yy = groundY + rnd() * (h - groundY)
-    g.strokeStyle = line ? 'rgba(60,64,70,.18)' : `hsla(${(hue + 40) % 360}, 60%, 88%, ${0.05 + rnd() * 0.18})`
-    g.lineWidth = 1 + rnd() * 2
-    g.beginPath()
-    g.moveTo(rnd() * w * 0.5, yy)
-    g.lineTo(rnd() * w * 0.5 + w * 0.5, yy + rnd() * 4)
-    g.stroke()
-  }
-
-  // 前景树 / 体块
-  for (let i = 0; i < 5; i += 1) {
-    const x = rnd() * w
-    const y = groundY + (rnd() - 0.5) * h * 0.1
-    const rad = w * (0.03 + rnd() * 0.08)
-    g.beginPath()
-    g.ellipse(x, y, rad, rad * (0.7 + rnd() * 0.5), rnd(), 0, Math.PI * 2)
-    g.fillStyle = line ? 'rgba(255,255,255,.9)' : `hsla(${ink ? hue : (hue + 110) % 360}, ${ink ? 14 : 32}%, ${ink ? 46 : 30}%, ${0.18 + rnd() * 0.22})`
-    g.fill()
-    if (line) { g.strokeStyle = 'rgba(40,44,50,.55)'; g.lineWidth = 1.4; g.stroke() }
-  }
-
-  // 颗粒
-  if (!line) {
-    for (let i = 0; i < 1600; i += 1) {
-      g.fillStyle = `rgba(255,255,255,${rnd() * 0.06})`
-      g.fillRect(rnd() * w, rnd() * h, 1.2, 1.2)
-    }
-    const vg = g.createRadialGradient(w / 2, h / 2, h * 0.25, w / 2, h / 2, h * 0.78)
-    vg.addColorStop(0, 'rgba(0,0,0,0)')
-    vg.addColorStop(1, 'rgba(10,12,16,.22)')
-    g.fillStyle = vg
-    g.fillRect(0, 0, w, h)
-  }
-
-  if (!opts.plain) {
-    g.fillStyle = 'rgba(20,22,26,.62)'
-    g.fillRect(0, h - Math.round(h * 0.2), w, Math.round(h * 0.2))
-    g.fillStyle = '#fff'
-    g.font = `600 ${Math.round(h * 0.026)}px "PingFang SC","Microsoft YaHei",sans-serif`
-    wrapText(g, prompt || '未填写提示词', w * 0.05, h - Math.round(h * 0.14), w * 0.9, Math.round(h * 0.038), 2)
-    g.fillStyle = 'rgba(255,255,255,.72)'
-    g.font = `${Math.round(h * 0.019)}px "PingFang SC","Microsoft YaHei",sans-serif`
-    g.fillText(`${style} · ${ratio} · 九规智能中枢 图像（演示画面）`, w * 0.05, h - Math.round(h * 0.03))
-  }
-  return c.toDataURL('image/png')
-}
-
-/**
- * 图像模块热门/模板卡片的示意画面：按设计行业成果类型绘制可辨认的总图、体块、
- * 线稿、航拍与效果图，避免所有卡片都退化成同一种抽象渐变。仅用于原型示例数据。
- */
-function igPresetArt(motif, seed = 1) {
-  const w = 1024
-  const h = 1024
-  const c = document.createElement('canvas')
-  c.width = w; c.height = h
-  const g = c.getContext('2d')
-  let s = (hashStr(`${motif}|${seed}`) % 2147483647) || 7
-  const rnd = () => { s = (s * 1103515245 + 12345) & 0x7fffffff; return s / 0x7fffffff }
-  const r = (a, b) => a + rnd() * (b - a)
-  const poly = (pts, fill, stroke = '') => {
-    g.beginPath()
-    pts.forEach(([x, y], i) => { if (i) g.lineTo(x, y); else g.moveTo(x, y) })
-    g.closePath()
-    if (fill) { g.fillStyle = fill; g.fill() }
-    if (stroke) { g.strokeStyle = stroke; g.lineWidth = 2; g.stroke() }
-  }
-  const tree = (x, y, rad, dark = false) => {
-    g.beginPath(); g.arc(x, y, rad, 0, Math.PI * 2)
-    g.fillStyle = dark ? 'rgba(54,78,58,.58)' : 'rgba(66,98,70,.5)'; g.fill()
-    g.beginPath(); g.arc(x - rad * .2, y - rad * .2, rad * .55, 0, Math.PI * 2)
-    g.fillStyle = dark ? 'rgba(34,56,38,.5)' : 'rgba(94,126,84,.36)'; g.fill()
-  }
-
-  if (motif === 'waterfront') {
-    const sky = g.createLinearGradient(0, 0, 0, 640)
-    sky.addColorStop(0, '#c8dce3'); sky.addColorStop(.56, '#efd7b5'); sky.addColorStop(1, '#f3c690')
-    g.fillStyle = sky; g.fillRect(0, 0, w, h)
-    const sun = g.createRadialGradient(760, 318, 0, 760, 318, 250)
-    sun.addColorStop(0, 'rgba(255,245,214,.92)'); sun.addColorStop(.38, 'rgba(255,224,170,.4)'); sun.addColorStop(1, 'rgba(255,255,255,0)')
-    g.fillStyle = sun; g.fillRect(300, 0, 724, 640)
-    // 远处城市天际线
-    for (let i = 0; i < 26; i += 1) {
-      const bx = i * 46 - 20
-      const bh = r(24, 112)
-      g.fillStyle = `rgba(83,105,116,${r(.12, .28)})`
-      g.fillRect(bx, 604 - bh, r(24, 44), bh)
-    }
-    // 江面
-    const water = g.createLinearGradient(0, 620, 0, h)
-    water.addColorStop(0, '#9bb9c1'); water.addColorStop(.55, '#7fa5b0'); water.addColorStop(1, '#547b88')
-    g.fillStyle = water; g.fillRect(0, 620, w, h - 620)
-    // 滨江步道
-    g.beginPath(); g.moveTo(0, 584); g.bezierCurveTo(280, 548, 560, 610, 1024, 568)
-    g.lineTo(1024, 650); g.bezierCurveTo(650, 690, 320, 632, 0, 648); g.closePath()
-    g.fillStyle = '#e9dfcd'; g.fill()
-    g.beginPath(); g.moveTo(0, 608); g.bezierCurveTo(300, 570, 600, 638, 1024, 594)
-    g.strokeStyle = 'rgba(255,255,255,.72)'; g.lineWidth = 7; g.stroke()
-    // 旧厂房
-    g.fillStyle = '#965f4f'; g.fillRect(48, 430, 300, 168)
-    g.fillStyle = '#7e4a40'; g.fillRect(48, 430, 300, 20)
-    for (let i = 0; i < 6; i += 1) {
-      g.beginPath(); g.moveTo(48 + i * 50, 430); g.lineTo(73 + i * 50, 390); g.lineTo(98 + i * 50, 430)
-      g.closePath(); g.fillStyle = '#875044'; g.fill()
-    }
-    g.fillStyle = '#b6a697'; g.fillRect(330, 320, 24, 280)
-    g.fillStyle = 'rgba(245,245,240,.45)'
-    for (let i = 0; i < 6; i += 1) g.fillRect(66 + i * 46, 468, 26, 62)
-    // 新建文化建筑
-    g.fillStyle = '#f1eee7'; g.fillRect(486, 424, 300, 178)
-    g.fillStyle = '#d8ddd9'; g.fillRect(508, 454, 256, 118)
-    g.fillStyle = 'rgba(78,107,120,.55)'
-    for (let i = 0; i < 7; i += 1) g.fillRect(520 + i * 36, 462, 22, 108)
-    g.fillStyle = '#ffffff'; g.beginPath(); g.moveTo(470, 424); g.lineTo(640, 380); g.lineTo(808, 424); g.closePath(); g.fill()
-    // 步道树阵
-    for (let i = 0; i < 22; i += 1) tree(r(40, 980), r(562, 624), r(10, 22))
-    // 江面倒影
-    for (let i = 0; i < 22; i += 1) {
-      g.strokeStyle = `rgba(245,226,190,${r(.04, .14)})`; g.lineWidth = r(2, 6)
-      g.beginPath(); g.moveTo(r(40, 900), r(660, 1000)); g.lineTo(r(300, 990), r(660, 1000)); g.stroke()
-    }
-  } else if (motif === 'plan') {
-    g.fillStyle = '#f5f1e7'; g.fillRect(0, 0, w, h)
-    // 河道
-    g.beginPath(); g.moveTo(704, -40); g.bezierCurveTo(620, 250, 720, 520, 540, 1060)
-    g.lineWidth = 150; g.strokeStyle = '#b9d2d5'; g.stroke()
-    g.lineWidth = 4; g.strokeStyle = 'rgba(111,145,150,.55)'; g.stroke()
-    // 路网
-    const vx = [112, 318, 540, 760, 950]
-    const hy = [128, 344, 566, 786, 968]
-    g.lineCap = 'round'
-    vx.forEach((x) => { g.strokeStyle = '#fff'; g.lineWidth = 30; g.beginPath(); g.moveTo(x, 0); g.lineTo(x + r(-10, 10), h); g.stroke() })
-    hy.forEach((y) => { g.strokeStyle = '#fff'; g.lineWidth = 28; g.beginPath(); g.moveTo(0, y); g.lineTo(w, y + r(-12, 12)); g.stroke() })
-    // 地块
-    const palette = ['#d8c9a9', '#c7d3b5', '#b7c5cf', '#d7b9a9', '#e7d8b6', '#c9c2ad']
-    for (let ix = 0; ix < vx.length - 1; ix += 1) {
-      for (let iy = 0; iy < hy.length - 1; iy += 1) {
-        const x1 = vx[ix] + 24, x2 = vx[ix + 1] - 24, y1 = hy[iy] + 22, y2 = hy[iy + 1] - 22
-        const col = palette[Math.floor(rnd() * palette.length)]
-        g.fillStyle = col; g.fillRect(x1, y1, Math.max(10, x2 - x1), Math.max(10, y2 - y1))
-        g.strokeStyle = 'rgba(110,105,92,.28)'; g.lineWidth = 2; g.strokeRect(x1, y1, Math.max(10, x2 - x1), Math.max(10, y2 - y1))
-        if (rnd() > .35) {
-          g.strokeStyle = 'rgba(110,105,92,.26)'
-          g.beginPath(); g.moveTo(x1 + (x2 - x1) * .5, y1); g.lineTo(x1 + (x2 - x1) * .5, y2); g.stroke()
-        }
-        // 建筑肌理与绿地
-        for (let k = 0; k < 6; k += 1) {
-          const bw = r(18, 48), bh = r(18, 44)
-          g.fillStyle = `rgba(245,242,234,${r(.25, .7)})`
-          g.fillRect(r(x1 + 8, x2 - bw - 8), r(y1 + 8, y2 - bh - 8), bw, bh)
-        }
-        if (rnd() > .55) tree(r(x1 + 30, x2 - 30), r(y1 + 30, y2 - 30), r(8, 18), true)
-      }
-    }
-    // 轴线与节点
-    g.setLineDash([18, 12]); g.strokeStyle = 'rgba(186,91,67,.62)'; g.lineWidth = 5
-    g.beginPath(); g.moveTo(88, 860); g.lineTo(824, 250); g.stroke()
-    g.setLineDash([]);
-    [ [88, 860], [420, 566], [824, 250] ].forEach(([x, y]) => { g.beginPath(); g.arc(x, y, 18, 0, Math.PI * 2); g.strokeStyle = '#ba5b43'; g.lineWidth = 3; g.stroke() })
-    // 指北针
-    g.fillStyle = '#3b4148'; g.beginPath(); g.moveTo(924, 78); g.lineTo(944, 142); g.lineTo(924, 126); g.lineTo(904, 142); g.closePath(); g.fill()
-    g.font = '600 18px "PingFang SC","Microsoft YaHei",sans-serif'; g.fillStyle = '#56606a'; g.fillText('N', 916, 166)
-  } else if (motif === 'massing') {
-    const bg = g.createLinearGradient(0, 0, 0, h)
-    bg.addColorStop(0, '#f7f8f9'); bg.addColorStop(1, '#e3e7eb')
-    g.fillStyle = bg; g.fillRect(0, 0, w, h)
-    // 底图网格
-    g.strokeStyle = 'rgba(112,124,136,.12)'; g.lineWidth = 1
-    for (let i = 0; i < 20; i += 1) { g.beginPath(); g.moveTo(0, i * 54); g.lineTo(w, i * 54); g.stroke() }
-    // 底板
-    poly([[164, 692], [704, 540], [1002, 724], [448, 940]], '#dfe4e7', 'rgba(255,255,255,.8)')
-    poly([[202, 705], [700, 562], [950, 720], [470, 904]], '#9fc1c9')
-    // 体块
-    const blocks = []
-    const u = [102, 46], v = [-102, 46]
-    for (let i = 0; i < 5; i += 1) {
-      for (let j = 0; j < 5; j += 1) {
-        const x = 352 + i * u[0] + j * v[0] + r(-12, 12)
-        const y = 610 + i * u[1] + j * v[1] + r(-10, 10)
-        blocks.push({ x, y, hgt: r(32, 176), shade: r(.6, 1) })
-      }
-    }
-    blocks.sort((a, b) => a.y - b.y)
-    blocks.forEach((b) => {
-      const { x, y, hgt } = b
-      // 阴影
-      poly([[x, y], [x + 70, y + 34], [x + 18, y + 76], [x - 52, y + 38]], 'rgba(80,96,108,.14)')
-      // 右立面
-      poly([[x, y - hgt], [x, y + 68 - hgt], [x, y + 68], [x, y]], '', '')
-      // 左立面
-      poly([[x - 64, y], [x, y + 30], [x, y + 30 - hgt], [x - 64, y - hgt]], `rgba(209,216,221,${b.shade})`)
-      // 右立面
-      poly([[x, y + 30], [x + 64, y], [x + 64, y - hgt], [x, y + 30 - hgt]], `rgba(237,241,244,${b.shade})`)
-      // 顶面
-      poly([[x, y - hgt], [x + 64, y - hgt], [x, y + 30 - hgt], [x - 64, y - hgt]], '#ffffff', 'rgba(160,170,178,.24)')
-      g.strokeStyle = 'rgba(170,180,188,.2)'; g.lineWidth = 1
-      g.beginPath(); g.moveTo(x - 64, y - hgt); g.lineTo(x, y + 30 - hgt); g.stroke()
-    })
-  } else if (motif === 'renewal') {
-    g.fillStyle = '#e9e5dc'; g.fillRect(0, 0, w, h)
-    const sky = g.createLinearGradient(0, 0, 0, 620)
-    sky.addColorStop(0, '#d9e4e8'); sky.addColorStop(1, '#f2eadc')
-    g.fillStyle = sky; g.fillRect(0, 0, w, 620)
-    g.fillStyle = '#b7b0a4'; g.fillRect(0, 620, w, h - 620)
-    g.fillStyle = 'rgba(255,255,255,.5)'; g.fillRect(506, 0, 12, 620)
-    // 左侧旧厂房
-    g.fillStyle = '#a26a59'; g.fillRect(54, 356, 360, 238)
-    g.fillStyle = '#8b5447'; g.fillRect(54, 356, 360, 22)
-    for (let i = 0; i < 7; i += 1) {
-      g.beginPath(); g.moveTo(54 + i * 52, 356); g.lineTo(80 + i * 52, 316); g.lineTo(106 + i * 52, 356); g.closePath(); g.fillStyle = '#995b4d'; g.fill()
-    }
-    g.fillStyle = 'rgba(234,226,209,.4)'
-    for (let i = 0; i < 6; i += 1) g.fillRect(72 + i * 57, 396, 34, 76)
-    g.fillStyle = '#715f55'; g.fillRect(378, 250, 30, 344)
-    for (let i = 0; i < 7; i += 1) { g.beginPath(); g.arc(r(400, 470), r(230, 300), r(12, 28), 0, Math.PI * 2); g.fillStyle = 'rgba(190,190,185,.25)'; g.fill() }
-    // 右侧更新后
-    g.fillStyle = '#f1f1ec'; g.fillRect(550, 410, 236, 180)
-    g.fillStyle = 'rgba(106,133,144,.55)'; g.fillRect(572, 442, 192, 118)
-    g.fillStyle = '#ffffff'; g.beginPath(); g.moveTo(534, 410); g.lineTo(650, 366); g.lineTo(804, 410); g.closePath(); g.fill()
-    g.fillStyle = '#dedfd9'; g.fillRect(806, 480, 104, 110)
-    g.fillStyle = '#f7f5ee'; g.fillRect(842, 430, 96, 50)
-    g.fillStyle = '#cbd4cf'
-    for (let i = 0; i < 5; i += 1) g.fillRect(564 + i * 38, 452, 24, 106)
-    // 前场绿地
-    g.fillStyle = '#a9b99e'; g.beginPath(); g.ellipse(722, 628, 246, 58, 0, 0, Math.PI * 2); g.fill()
-    for (let i = 0; i < 12; i += 1) tree(r(520, 956), r(590, 660), r(10, 22))
-  } else if (motif === 'ink') {
-    g.fillStyle = '#f3eee3'; g.fillRect(0, 0, w, h)
-    for (let i = 0; i < 900; i += 1) { g.fillStyle = `rgba(90,80,62,${r(.008, .04)})`; g.fillRect(r(0, w), r(0, h), r(.5, 1.8), r(.5, 1.8)) }
-    const layers = [
-      { y: 742, amp: 180, color: 'rgba(89,99,95,.35)' },
-      { y: 790, amp: 148, color: 'rgba(66,77,75,.48)' },
-      { y: 848, amp: 112, color: 'rgba(45,55,54,.62)' },
-    ]
-    layers.forEach((L, li) => {
-      g.beginPath(); g.moveTo(-40, h)
-      g.lineTo(-40, L.y + r(20, 60))
-      for (let x = 0; x <= w + 80; x += 64) g.lineTo(x, L.y - Math.abs(Math.sin((x / 130) + li * 2 + rnd() * .4)) * L.amp * r(.38, 1))
-      g.lineTo(w + 40, h); g.closePath(); g.fillStyle = L.color; g.fill()
-      g.strokeStyle = 'rgba(35,44,44,.18)'; g.lineWidth = 6; g.stroke()
-    })
-    // 云雾
-    for (let i = 0; i < 4; i += 1) {
-      const yy = r(610, 860)
-      const mist = g.createLinearGradient(0, yy - 60, 0, yy + 60)
-      mist.addColorStop(0, 'rgba(244,239,227,0)'); mist.addColorStop(.5, 'rgba(244,239,227,.7)'); mist.addColorStop(1, 'rgba(244,239,227,0)')
-      g.fillStyle = mist; g.fillRect(0, yy - 60, w, 120)
-    }
-    // 城市天际线
-    for (let i = 0; i < 18; i += 1) {
-      const bx = 560 + i * 22, bh = r(16, 82)
-      g.fillStyle = 'rgba(70,82,82,.2)'; g.fillRect(bx, 716 - bh, r(12, 24), bh)
-    }
-    // 前景墨树
-    g.strokeStyle = 'rgba(32,40,40,.56)'; g.lineWidth = 5
-    g.beginPath(); g.moveTo(140, 1010); g.bezierCurveTo(150, 880, 214, 862, 238, 760); g.stroke()
-    for (let i = 0; i < 9; i += 1) { g.beginPath(); g.ellipse(r(160, 320), r(760, 880), r(20, 64), r(8, 24), r(-.6, .6), 0, Math.PI * 2); g.fillStyle = `rgba(35,46,46,${r(.12, .3)})`; g.fill() }
-    // 印章
-    g.fillStyle = 'rgba(168,68,55,.82)'; g.fillRect(884, 86, 54, 54)
-    g.strokeStyle = 'rgba(244,239,227,.85)'; g.lineWidth = 3; g.strokeRect(894, 96, 34, 34)
-  } else if (motif === 'sketch') {
-    g.fillStyle = '#fbfaf3'; g.fillRect(0, 0, w, h)
-    g.strokeStyle = 'rgba(90,100,106,.12)'; g.lineWidth = 1
-    for (let i = 0; i < 26; i += 1) { g.beginPath(); g.moveTo(i * 42, 0); g.lineTo(i * 42, h); g.stroke(); g.beginPath(); g.moveTo(0, i * 42); g.lineTo(w, i * 42); g.stroke() }
-    // 主路与支路
-    g.strokeStyle = 'rgba(48,54,60,.8)'; g.lineWidth = 5
-    g.beginPath(); g.moveTo(48, 906); g.bezierCurveTo(240, 760, 400, 580, 882, 292); g.stroke()
-    g.lineWidth = 3;
-    [[180, 960, 180, 650], [390, 900, 390, 440], [610, 850, 610, 230], [830, 760, 830, 96]].forEach(([x1, y1, x2, y2]) => { g.beginPath(); g.moveTo(x1, y1); g.lineTo(x2, y2); g.stroke() });
-    [[170, 650, 880, 700], [250, 790, 930, 840], [300, 430, 840, 470]].forEach(([x1, y1, x2, y2]) => { g.beginPath(); g.moveTo(x1, y1); g.lineTo(x2, y2); g.stroke() })
-    // 地块轮廓与排线
-    for (let i = 0; i < 8; i += 1) {
-      const x = r(60, 780), y = r(80, 840), ww = r(58, 160), hh = r(46, 138)
-      g.strokeStyle = 'rgba(48,54,60,.6)'; g.lineWidth = 2; g.strokeRect(x, y, ww, hh)
-      g.strokeStyle = 'rgba(48,54,60,.2)'; g.lineWidth = 1
-      for (let k = 6; k < ww; k += 10) { g.beginPath(); g.moveTo(x + k, y + 6); g.lineTo(x + k - 18, y + hh - 6); g.stroke() }
-    }
-    // 树与指北
-    for (let i = 0; i < 22; i += 1) {
-      const x = r(40, 960), y = r(40, 950), rad = r(7, 18)
-      g.beginPath(); g.arc(x, y, rad, 0, Math.PI * 2); g.strokeStyle = 'rgba(48,54,60,.75)'; g.lineWidth = 2; g.stroke()
-      g.beginPath(); g.moveTo(x - rad, y); g.lineTo(x + rad, y); g.moveTo(x, y - rad); g.lineTo(x, y + rad); g.stroke()
-    }
-    g.strokeStyle = 'rgba(48,54,60,.8)'; g.lineWidth = 4
-    g.beginPath(); g.moveTo(920, 130); g.lineTo(920, 58); g.lineTo(908, 84); g.moveTo(920, 58); g.lineTo(932, 84); g.stroke()
-    g.font = '500 20px "PingFang SC","Microsoft YaHei",sans-serif'; g.fillStyle = 'rgba(48,54,60,.8)'; g.fillText('N', 908, 154)
-  } else if (motif === 'aerial') {
-    g.fillStyle = '#7f8f74'; g.fillRect(0, 0, w, h)
-    // 地块与道路
-    for (let i = 0; i < 9; i += 1) {
-      for (let j = 0; j < 9; j += 1) {
-        const x = i * 118 + r(-12, 12), y = j * 118 + r(-12, 12)
-        g.fillStyle = `rgba(${Math.round(r(100, 148))},${Math.round(r(106, 136))},${Math.round(r(92, 112))},.9)`
-        g.fillRect(x + 14, y + 14, 94, 94)
-        g.strokeStyle = 'rgba(210,205,190,.5)'; g.lineWidth = 5; g.strokeRect(x + 14, y + 14, 94, 94)
-        for (let k = 0; k < 5; k += 1) { g.fillStyle = 'rgba(60,66,60,.35)'; g.fillRect(x + r(20, 88), y + r(20, 88), r(8, 26), r(8, 22)) }
-      }
-    }
-    // 河道
-    g.beginPath(); g.moveTo(760, -60); g.bezierCurveTo(660, 220, 800, 540, 580, 1080)
-    g.lineWidth = 190; g.strokeStyle = '#7899a2'; g.stroke()
-    g.lineWidth = 8; g.strokeStyle = 'rgba(222,232,229,.45)'; g.stroke()
-    // 主路
-    g.strokeStyle = '#d8d5c7'; g.lineWidth = 18
-    g.beginPath(); g.moveTo(0, 730); g.bezierCurveTo(300, 700, 540, 760, 1024, 670); g.stroke()
-    g.beginPath(); g.moveTo(320, 0); g.lineTo(360, 1024); g.stroke()
-    // 树冠
-    for (let i = 0; i < 90; i += 1) tree(r(20, 1000), r(20, 1000), r(4, 11), true)
-    // 影像噪点
-    for (let i = 0; i < 600; i += 1) { g.fillStyle = `rgba(255,255,255,${r(.01, .04)})`; g.fillRect(r(0, w), r(0, h), 2, 2) }
-  } else if (motif === 'icons') {
-    g.fillStyle = '#f7f7f4'; g.fillRect(0, 0, w, h)
-    g.strokeStyle = '#363b42'; g.lineWidth = 6; g.lineCap = 'round'; g.lineJoin = 'round'
-    const s0 = 58
-    const cell = (w - s0 * 4) / 3
-    const centers = []
-    for (let i = 0; i < 3; i += 1) for (let j = 0; j < 3; j += 1) centers.push([s0 + cell * i + cell / 2, s0 + cell * j + cell / 2])
-    centers.forEach(([x, y], idx) => {
-      if (idx === 0) { g.strokeRect(x - 46, y - 22, 34, 64); g.strokeRect(x + 2, y - 48, 42, 90); g.beginPath(); g.moveTo(x - 46, y + 42); g.lineTo(x + 46, y + 42); g.stroke() }
-      if (idx === 1) { g.beginPath(); g.moveTo(x, y + 56); g.lineTo(x, y + 8); g.stroke(); g.beginPath(); g.arc(x, y - 8, 34, 0, Math.PI * 2); g.stroke(); g.beginPath(); g.arc(x, y - 8, 16, 0, Math.PI * 2); g.stroke() }
-      if (idx === 2) { g.beginPath(); g.moveTo(x - 56, y + 44); g.lineTo(x - 10, y + 8); g.lineTo(x + 20, y + 30); g.lineTo(x + 56, y - 20); g.stroke(); g.setLineDash([14, 12]); g.beginPath(); g.moveTo(x - 56, y + 44); g.lineTo(x + 56, y - 20); g.stroke(); g.setLineDash([]) }
-      if (idx === 3) { for (let k = 0; k < 3; k += 1) { g.beginPath(); g.moveTo(x - 58, y - 22 + k * 26); g.bezierCurveTo(x - 30, y - 40 + k * 26, x + 28, y - 6 + k * 26, x + 58, y - 22 + k * 26); g.stroke() } }
-      if (idx === 4) { g.beginPath(); g.arc(x, y, 46, 0, Math.PI * 2); g.stroke(); g.beginPath(); g.moveTo(x - 56, y); g.lineTo(x + 56, y); g.moveTo(x, y - 56); g.lineTo(x, y + 56); g.stroke() }
-      if (idx === 5) { for (let k = 0; k < 3; k += 1) { g.beginPath(); g.arc(x - 34 + k * 34, y - 24, 12, 0, Math.PI * 2); g.stroke(); g.beginPath(); g.moveTo(x - 50 + k * 34, y + 38); g.quadraticCurveTo(x - 12 + k * 34, y + 20, x - 18 + k * 34, y + 38); g.stroke() } }
-      if (idx === 6) { g.beginPath(); g.moveTo(x - 54, y - 26); g.lineTo(x - 18, y - 42); g.lineTo(x + 18, y - 20); g.lineTo(x + 54, y - 36); g.stroke(); g.beginPath(); g.moveTo(x - 54, y - 26); g.lineTo(x - 54, y + 38); g.lineTo(x - 18, y + 20); g.lineTo(x - 18, y - 42); g.stroke(); g.beginPath(); g.moveTo(x + 18, y - 20); g.lineTo(x + 18, y + 40); g.lineTo(x + 54, y + 24); g.lineTo(x + 54, y - 36); g.stroke() }
-      if (idx === 7) { g.beginPath(); g.arc(x, y, 22, 0, Math.PI * 2); g.stroke(); for (let k = 0; k < 8; k += 1) { const a = k * Math.PI / 4; g.beginPath(); g.moveTo(x + Math.cos(a) * 34, y + Math.sin(a) * 34); g.lineTo(x + Math.cos(a) * 56, y + Math.sin(a) * 56); g.stroke() } }
-      if (idx === 8) { [[-50, 24, 54], [-26, -26, 60], [10, -6, 70], [34, 28, 50]].forEach(([xx, yy, hh]) => { g.strokeRect(x + xx, y + yy - hh, 28, hh) }) ; g.beginPath(); g.moveTo(x - 60, y + 42); g.lineTo(x + 60, y + 42); g.stroke() }
-    })
-  } else if (motif === 'cover') {
-    const sky = g.createLinearGradient(0, 0, 0, 760)
-    sky.addColorStop(0, '#1f2a35'); sky.addColorStop(.55, '#6b6d68'); sky.addColorStop(1, '#c48962')
-    g.fillStyle = sky; g.fillRect(0, 0, w, h)
-    const sun = g.createRadialGradient(740, 560, 0, 740, 560, 260)
-    sun.addColorStop(0, 'rgba(255,214,164,.5)'); sun.addColorStop(1, 'rgba(255,255,255,0)')
-    g.fillStyle = sun; g.fillRect(420, 300, 604, 420)
-    // 城市剪影
-    for (let i = 0; i < 30; i += 1) {
-      const bx = i * 38 - 10, bh = r(60, 260)
-      g.fillStyle = `rgba(28,34,40,${r(.55, .9)})`
-      g.fillRect(bx, 824 - bh, r(28, 38), bh)
-      g.fillStyle = 'rgba(245,208,161,.18)'; g.fillRect(bx + 8, 824 - bh + 12, 12, 8)
-    }
-    g.fillStyle = 'rgba(35,42,48,.78)'; g.fillRect(0, 824, w, h - 824)
-    g.fillStyle = 'rgba(240,196,145,.12)'; g.fillRect(0, 824, w, 8)
-  } else if (motif === 'location') {
-    g.fillStyle = '#f1eee4'; g.fillRect(0, 0, w, h)
-    g.beginPath(); g.moveTo(830, -40); g.bezierCurveTo(690, 260, 850, 560, 620, 1080)
-    g.lineWidth = 170; g.strokeStyle = '#adc9cd'; g.stroke()
-    // 道路放射
-    const cx = 500, cy = 480
-    for (let i = 0; i < 12; i += 1) {
-      const a = i * Math.PI / 6
-      g.strokeStyle = i % 3 === 0 ? '#d9b177' : 'rgba(255,255,255,.85)'; g.lineWidth = i % 3 === 0 ? 8 : 18
-      g.beginPath(); g.moveTo(cx + Math.cos(a) * 70, cy + Math.sin(a) * 70); g.lineTo(cx + Math.cos(a) * 560, cy + Math.sin(a) * 560); g.stroke()
-    };
-    [90, 180, 280, 390].forEach((rad) => { g.beginPath(); g.arc(cx, cy, rad, 0, Math.PI * 2); g.strokeStyle = 'rgba(255,255,255,.75)'; g.lineWidth = 10; g.stroke() })
-    g.beginPath(); g.arc(cx, cy, 26, 0, Math.PI * 2); g.fillStyle = '#3d444a'; g.fill()
-    for (let i = 0; i < 16; i += 1) { g.beginPath(); g.arc(r(80, 900), r(80, 900), r(4, 10), 0, Math.PI * 2); g.fillStyle = 'rgba(62,72,76,.35)'; g.fill() }
-  } else if (motif === 'transit') {
-    g.fillStyle = '#f4f2ea'; g.fillRect(0, 0, w, h)
-    for (let i = 0; i < 7; i += 1) { g.strokeStyle = 'rgba(255,255,255,.9)'; g.lineWidth = 24; g.beginPath(); g.moveTo(i * 170, 0); g.lineTo(i * 170 + r(-40, 40), h); g.stroke() }
-    for (let i = 0; i < 7; i += 1) { g.strokeStyle = 'rgba(255,255,255,.9)'; g.lineWidth = 22; g.beginPath(); g.moveTo(0, i * 160); g.lineTo(w, i * 160 + r(-30, 30)); g.stroke() }
-    // 轨道线
-    g.setLineDash([26, 14]); g.lineWidth = 12
-    g.strokeStyle = '#7d9b85'; g.beginPath(); g.moveTo(60, 920); g.bezierCurveTo(280, 700, 560, 500, 960, 160); g.stroke()
-    g.strokeStyle = '#b98068'; g.beginPath(); g.moveTo(90, 160); g.bezierCurveTo(380, 320, 640, 620, 940, 880); g.stroke()
-    g.setLineDash([])
-    // 节点
-    for (let i = 0; i < 10; i += 1) { g.beginPath(); g.arc(r(100, 920), r(100, 920), 12, 0, Math.PI * 2); g.fillStyle = '#ffffff'; g.fill(); g.strokeStyle = '#4c5656'; g.lineWidth = 3; g.stroke() }
-    // 箭头
-    g.strokeStyle = '#4c5656'; g.lineWidth = 5;
-    [[700, 420, 780, 450], [430, 720, 510, 750], [860, 300, 920, 260]].forEach(([x1, y1, x2, y2]) => { g.beginPath(); g.moveTo(x1, y1); g.lineTo(x2, y2); g.lineTo(x2 - 18, y2 + 2); g.moveTo(x2, y2); g.lineTo(x2 - 14, y2 - 16); g.stroke() })
-  } else if (motif === 'steps') {
-    g.fillStyle = '#f6f4ed'; g.fillRect(0, 0, w, h)
-    const cards = [
-      { x: 68, y: 126, n: '01', c: '#b9c9bd' },
-      { x: 348, y: 330, n: '02', c: '#c8b8a4' },
-      { x: 684, y: 574, n: '03', c: '#adbfc9' },
-    ]
-    cards.forEach((cd, idx) => {
-      g.fillStyle = '#ffffff'; g.fillRect(cd.x, cd.y, 240, 240)
-      g.strokeStyle = 'rgba(80,88,96,.16)'; g.lineWidth = 3; g.strokeRect(cd.x, cd.y, 240, 240)
-      g.fillStyle = cd.c; g.fillRect(cd.x, cd.y, 240, 10)
-      g.font = '600 40px "PingFang SC","Microsoft YaHei",sans-serif'; g.fillStyle = 'rgba(60,68,76,.62)'; g.fillText(cd.n, cd.x + 22, cd.y + 66)
-      if (idx === 0) { g.strokeStyle = '#56616a'; g.lineWidth = 4; g.strokeRect(cd.x + 92, cd.y + 100, 70, 70); g.beginPath(); g.moveTo(cd.x + 128, cd.y + 100); g.lineTo(cd.x + 128, cd.y + 170); g.stroke() }
-      if (idx === 1) { g.beginPath(); g.arc(cd.x + 120, cd.y + 132, 46, 0, Math.PI * 2); g.strokeStyle = '#56616a'; g.lineWidth = 4; g.stroke(); g.beginPath(); g.moveTo(cd.x + 120, cd.y + 84); g.lineTo(cd.x + 120, cd.y + 180); g.stroke() }
-      if (idx === 2) { g.beginPath(); g.moveTo(cd.x + 80, cd.y + 168); g.lineTo(cd.x + 96, cd.y + 124); g.lineTo(cd.x + 120, cd.y + 142); g.lineTo(cd.x + 160, cd.y + 102); g.strokeStyle = '#56616a'; g.lineWidth = 4; g.stroke() }
-    })
-    g.strokeStyle = 'rgba(110,118,124,.5)'; g.lineWidth = 4; g.setLineDash([20, 12])
-    g.beginPath(); g.moveTo(300, 236); g.lineTo(380, 356); g.stroke()
-    g.beginPath(); g.moveTo(584, 446); g.lineTo(714, 596); g.stroke()
-    g.setLineDash([])
-  } else {
-    g.fillStyle = '#edf0f2'; g.fillRect(0, 0, w, h)
-  }
-  return c.toDataURL('image/png')
-}
-
-const igPresetCache = new Map()
-function igPresetThumb(motif, seed) {
-  const key = `${motif}|${seed}`
-  if (!igPresetCache.has(key)) igPresetCache.set(key, igPresetArt(motif, seed))
-  return igPresetCache.get(key)
-}
-
-const IG_PRESETS = {
-  hot: [
-    { label: '滨水住区方案', prompt: '滨水住区建筑方案，立体绿化与公共平台，傍晚光线', style: '效果图', img: './ig/ig-01.jpg' },
-    { label: '建筑方案模型', prompt: '现代文化建筑方案手工模型，浅木色体块与悬挑屋面', style: '模型', img: './ig/ig-02.jpg' },
-    { label: '滨水会所效果', prompt: '滨水会所夜景效果，玻璃体量与高层背景，暖光', style: '效果图', img: './ig/ig-03.jpg' },
-    { label: '住区航拍影像', prompt: '住区规划航拍影像，绿地与街区肌理', style: '影像', img: './ig/ig-04.jpg?v=3' },
-    { label: '室内空间方案', prompt: '住宅室内公共空间，木饰面与自然采光', style: '室内', img: './ig/ig-05.jpg' },
-    { label: '林中民宿方案', prompt: '山林民宿建筑方案，深色坡屋顶与溪流环境', style: '效果图', img: './ig/ig-06.jpg' },
-    { label: '企业办公楼方案', prompt: '企业办公楼立面方案，竖向格栅与玻璃幕墙', style: '效果图', img: './ig/ig-07.jpg' },
-    { label: '街角咖啡更新', prompt: '街角咖啡店更新改造，木构檐廊与玻璃界面', style: '效果图', img: './ig/ig-08.jpg' },
-  ],
-  tpl: [
-    { label: '方案汇报封面', prompt: '规划方案汇报封面底图，滨水建筑夜景与标题留白', style: '封面', img: './ig/ig-03.jpg' },
-    { label: '建筑方案模型', prompt: '建筑方案手工模型，浅木色体块与场地关系', style: '模型', img: './ig/ig-02.jpg' },
-    { label: '住区航拍分析', prompt: '住区规划航拍分析底图，街区与绿地肌理', style: '影像', img: './ig/ig-04.jpg' },
-    { label: '室内空间效果', prompt: '室内公共空间效果，木饰面与自然采光', style: '室内', img: './ig/ig-05.jpg' },
-    { label: '庭院景观效果', prompt: '庭院景观效果，木质平台与绿化围合', style: '效果图', img: './ig/ig-09.jpg' },
-    { label: '企业立面效果', prompt: '企业办公楼立面效果，竖向格栅与玻璃幕墙', style: '效果图', img: './ig/ig-07.jpg' },
-  ],
-}
-
-const igThumbCache = new Map()
-function igThumb(prompt, style, seed) {
-  const key = `${prompt}|${style}|${seed}`
-  if (!igThumbCache.has(key)) igThumbCache.set(key, paintShot(prompt, '1:1', style, seed, { plain: true }))
-  return igThumbCache.get(key)
-}
-
+/* 生图模块仅展示真实图像服务返回的结果，不内置演示画面、示例卡片或假数据。 */
 async function renderImage(el) {
   const models = state.boot.models || []
   const m = imageModel()
@@ -7746,35 +7226,37 @@ async function renderImage(el) {
     return
   }
 
-  const cards = [
-    ...g.shots.map((s, i) => ({ kind: 'shot', id: s.id, label: '最近生成', prompt: s.prompt, style: s.style, url: s.url, meta: `${s.style} · ${s.ratio}` })),
-    ...(IG_PRESETS[g.tab] || IG_PRESETS.hot).map((p, i) => ({ kind: 'preset', id: `p${i}`, label: p.label, prompt: p.prompt, style: p.style, url: p.img || (p.art ? igPresetThumb(p.art, i + 3) : igThumb(p.prompt, p.style, i + 3)), meta: p.style })),
-  ]
+  const cards = g.shots.map((s) => ({
+    kind: 'shot',
+    id: s.id,
+    label: '最近生成',
+    prompt: s.prompt,
+    style: s.style,
+    url: s.url,
+    meta: `${s.style} · ${s.ratio}`,
+  }))
 
   el.innerHTML = `
     <div class="img-head">
       <div><div class="img-title">图像</div>
         <div class="img-sub">${g.busy ? '正在生成真实图像…' : `真实生图 · ${esc(cap.provider || '图像模型')} ${esc(cap.model || '')} · ${cap.external ? '提示词会发送到外部服务' : '服务端内部模型'}`}</div></div>
     </div>
-    <div class="img-tabs">
-      <button class="img-tab${g.tab === 'hot' ? ' on' : ''}" data-igtab="hot">热门</button>
-      <button class="img-tab${g.tab === 'tpl' ? ' on' : ''}" data-igtab="tpl">模板</button>
-    </div>
     <div class="img-gallery">
-      ${cards.map((c) => `
-        <button class="img-card" data-igkind="${c.kind}" data-igid="${c.id}">
-          <img src="${c.url}" alt="${esc(c.label)}" loading="lazy">
+      ${cards.length ? cards.map((c) => `
+        <button class="img-card" data-igid="${esc(c.id)}" title="${esc(c.label)} · ${esc(c.prompt)}">
+          <img src="${c.url}" alt="${esc(c.prompt)}" loading="lazy">
           <span class="img-card-label">${esc(c.label)}</span>
           <span class="img-card-meta">${esc(c.meta)}</span>
-        </button>`).join('')}
+        </button>`).join('') : `
+        <div class="img-empty">
+          <div class="img-empty-title">还没有生成图像</div>
+          <div class="img-empty-text">在下方描述画面，真实生图结果会显示在这里；不会展示示例图片或演示数据。</div>
+        </div>`}
     </div>
     <div class="img-composer-wrap">
       <div class="img-composer">
-        <button class="img-plus" id="igPlus" title="添加参考图">${icon('plus')}</button>
         <input class="img-input" id="igPrompt" placeholder="描述新图像" value="${esc(g.prompt)}">
         <div class="img-tools">
-          <button class="hc-lang" id="igLang">中 <span class="ico hc-caret">${icon('chevron')}</span></button>
-          <button class="hc-mic" id="igMic" title="语音输入">${icon('mic')}</button>
           <button class="img-send" id="igGen" title="生成" ${g.busy ? 'disabled' : ''}>${g.busy ? '…' : icon('up')}</button>
         </div>
       </div>
@@ -7783,23 +7265,10 @@ async function renderImage(el) {
   const input = el.querySelector('#igPrompt')
   input.addEventListener('input', (e) => { g.prompt = e.target.value })
   input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); el.querySelector('#igGen').click() } })
-  el.querySelectorAll('[data-igtab]').forEach((b) => b.addEventListener('click', () => { g.tab = b.dataset.igtab; renderView() }))
-  el.querySelector('#igPlus').addEventListener('click', () => toast('参考图按网络与模型外发规则校验后加入（演示）'))
-  el.querySelector('#igLang')?.addEventListener('click', () => toast('提示词语言：中文'))
-  el.querySelector('#igMic')?.addEventListener('click', () => toast('按住说话，转写为提示词（演示）'))
 
-  el.querySelectorAll('[data-igkind]').forEach((b) => b.addEventListener('click', () => {
-    const c = cards.find((x) => x.id === b.dataset.igid && x.kind === b.dataset.igkind)
-    if (!c) return
-    if (c.kind === 'preset') {
-      g.prompt = c.prompt
-      g.style = c.style
-      renderView()
-      const next = document.getElementById('igPrompt')
-      if (next) { next.focus(); next.setSelectionRange(next.value.length, next.value.length) }
-      return
-    }
-    const s = g.shots.find((x) => x.id === c.id)
+  el.querySelectorAll('.img-card').forEach((b) => b.addEventListener('click', () => {
+    const s = g.shots.find((x) => x.id === b.dataset.igid)
+    if (!s) return
     openModal('生成结果', `
       <div class="ig-preview"><img src="${s.url}" alt=""></div>
       <div class="field" style="margin-top:10px"><div class="field-label">提示词</div><div class="field-value">${esc(s.prompt)}</div></div>
