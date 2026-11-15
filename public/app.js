@@ -7194,6 +7194,11 @@ function selectedImageModel() {
   return selected || null
 }
 
+function imageEditModel() {
+  const models = Array.isArray(state.boot?.imageGeneration?.models) ? state.boot.imageGeneration.models : []
+  return models.find((model) => model.configured && model.capabilities?.edit) || null
+}
+
 function imagegenReady() {
   const cap = state.boot?.imageGeneration
   if (cap) return Boolean(cap.enabled)
@@ -7348,11 +7353,63 @@ function deleteImageAsset(shot) {
   })
 }
 
+function editImageAsset(shot) {
+  const model = imageEditModel()
+  if (!model) return toast('当前没有可用的图像编辑模型', true)
+  const mask = openModal('编辑图像', `
+    <div class="img-edit-preview"><img src="${shot.url}" alt=""></div>
+    <div class="field" style="margin-top:10px">
+      <label class="field-label" for="igEditPrompt">编辑要求</label>
+      <textarea class="img-edit-input" id="igEditPrompt" maxlength="1200" placeholder="例如：把建筑外墙改为浅色石材，保留现有构图、树木和天空"></textarea>
+    </div>
+    <div class="form-note">以当前图片为输入，由 ${esc(model.label)} 生成一个新版本；原图保留在版本历史中，不会覆盖。</div>
+    <div class="img-edit-err" id="igEditErr"></div>
+    <div class="img-edit-foot">
+      <button class="btn" data-igeditcancel>返回</button>
+      <button class="btn primary" id="igEditGo">生成新版本</button>
+    </div>`, { wide: true })
+  const input = mask.querySelector('#igEditPrompt')
+  const err = mask.querySelector('#igEditErr')
+  const go = mask.querySelector('#igEditGo')
+  input.focus()
+  mask.querySelector('[data-igeditcancel]').addEventListener('click', () => mask.remove())
+  go.addEventListener('click', async () => {
+    const prompt = input.value.trim()
+    if (!prompt) {
+      err.textContent = '请先填写编辑要求'
+      input.focus()
+      return
+    }
+    go.disabled = true
+    go.textContent = '生成中…'
+    err.textContent = ''
+    try {
+      const res = await api('/api/images/edit', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ assetId: shot.id, prompt, modelId: model.id }),
+      })
+      if (!res.ok || !res.body?.image) {
+        throw new Error(res.body?.error || `图像编辑失败（HTTP ${res.status}）`)
+      }
+      mask.remove()
+      toast(`已生成新版本 v${res.body.image.revision}`)
+      await loadRecentImages({ force: true })
+    } catch (error) {
+      go.disabled = false
+      go.textContent = '生成新版本'
+      err.textContent = error?.message || '图像编辑失败'
+    }
+  })
+}
+
 function openImageMenu(anchor, shot) {
   closeImageMenu()
+  const editModel = imageEditModel()
   const menu = document.createElement('div')
   menu.className = 'img-menu'
   menu.innerHTML = `
+    ${editModel ? '<button type="button" data-imenu="edit">编辑</button>' : ''}
     <button type="button" data-imenu="download">下载原图</button>
     <button type="button" data-imenu="copy">复制提示词</button>
     <button type="button" data-imenu="versions">版本历史</button>
@@ -7377,7 +7434,8 @@ function openImageMenu(anchor, shot) {
     e.stopPropagation()
     menu.remove()
     const action = btn.dataset.imenu
-    if (action === 'download') downloadImageAsset(shot)
+    if (action === 'edit') editImageAsset(shot)
+    else if (action === 'download') downloadImageAsset(shot)
     else if (action === 'copy') copyImagePrompt(shot)
     else if (action === 'versions') openImageVersions(shot)
     else if (action === 'delete') deleteImageAsset(shot)

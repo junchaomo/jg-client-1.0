@@ -104,6 +104,39 @@ test('Seedream 适配器按官方方舟形态提交并解析 data[].url', async 
   assert.equal(result.requestId, 'seedream-request-1')
 })
 
+test('Qwen 编辑适配器把当前图片作为 Base64 输入提交并生成新图', async () => {
+  const result = await imageProviders.editImage({
+    modelId: 'qwen-image',
+    prompt: '把天空改成黄昏，保留建筑和树木',
+    imageBuffer: IMAGE_BYTES,
+    imageMime: 'image/png',
+    width: 1024,
+    height: 1024,
+    seed: 7,
+    timeoutMs: 5000,
+  })
+  assert.equal(qwenRequest.input.messages[0].content[0].image.startsWith('data:image/png;base64,'), true)
+  assert.equal(qwenRequest.input.messages[0].content[1].text, '把天空改成黄昏，保留建筑和树木')
+  assert.equal(qwenRequest.parameters.seed, 7)
+  assert.equal(qwenRequest.parameters.prompt_extend, false)
+  assert.equal(result.provider, 'qwen')
+  assert.equal(result.modelId, 'qwen-image')
+  assert.ok(result.buffer.length >= 8 * 1024)
+})
+
+test('Seedream 编辑未接入时明确拒绝，不会回退到 Qwen', async () => {
+  await assert.rejects(
+    () => imageProviders.editImage({
+      modelId: 'seedream-5.5',
+      prompt: '把天空改成黄昏',
+      imageBuffer: IMAGE_BYTES,
+      imageMime: 'image/png',
+      timeoutMs: 5000,
+    }),
+    (error) => error.code === 'IMAGE_EDIT_UNSUPPORTED' && error.status === 400,
+  )
+})
+
 test('未知图像模型被拒绝，不会回退到其他 Provider', async () => {
   await assert.rejects(
     () => imageProviders.generateImage({ modelId: 'not-a-model', prompt: '测试', timeoutMs: 5000 }),

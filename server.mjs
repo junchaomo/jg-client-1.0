@@ -16,7 +16,7 @@ import {
   createImageAsset, createImageJob, createImageRevision, deleteFile, getImageAsset, imageRevisionCount, listImageAssets, listImageRevisions,
   dataDirPath, deleteSession, expirePendingApprovalDecisions, getAccount, getAccountByRole, getAccountByUsername, getFile, getSession, latestApprovalDecisions, latestAudit,
   listAccounts, listFiles, loadState, putFile, readFileBuffer, saveState, touchSession,
-  softDeleteImageAsset, updateImageJob,
+  softDeleteImageAsset, updateImageAssetLatest, updateImageJob,
   updateAccountSecret, updateApprovalDecision, updateSessionNet, upsertAccount, setAccountPassword, setAccountUsername,
   attachVisualMessage, createVisualArtifact, getVisualArtifact, listVisualArtifacts, listVisualVersions,
   saveVisualArtifact, updateVisualArtifact, restoreVisualVersion,
@@ -41,7 +41,7 @@ import { checkProjectDeliverables } from './deliverable-check.mjs'
 import { inspectGeoFiles } from './gis-datasets.mjs'
 import { HARNESS_BASE_SERVICES, runHarnessService } from './harness-services.mjs'
 import { ModelError, chatCompletion, resolveModelConfig, routeModel } from './model.mjs'
-import { ImageProviderError, generateImage, imageModelStatus } from './image-providers.mjs'
+import { ImageProviderError, editImage, generateImage, imageModelStatus } from './image-providers.mjs'
 import { prepareSpeech, modelStatus, transcribeSpeech } from './speech.mjs'
 import { pinyin } from 'pinyin-pro'
 import { HarnessError, cancelRun, closeHarness, closeHarnessForHome, dshBin, runAgent, stopBackgroundRuntime } from './harness.mjs'
@@ -1892,6 +1892,7 @@ const GUEST_GUARD = {
   'GET /api/projects': 'projects',
   'POST /api/settings': 'home',
   'POST /api/images/generate': 'home',
+  'POST /api/images/edit': 'home',
   'GET /api/images/models': 'home',
   'GET /api/images/recent': 'home',
   'GET /api/images/asset': 'home',
@@ -7956,6 +7957,158 @@ const api = {
       return json(res, statusCode, {
         ok: false,
         error: `真实生图失败：${message}`,
+        code: error instanceof ImageProviderError ? error.code : 'IMAGE_PROVIDER_ERROR',
+      })
+    }
+  },
+  'POST /api/images/edit': async (req, res) => {
+    const user = roleOf(req)
+    const net = netOf(req)
+    const status = imageGenerationStatus(user, net)
+    if (!status.enabled) return json(res, 403, { error: status.reason, code: 'IMAGE_DISABLED' })
+    const body = JSON.parse(req.__body || '{}')
+    const assetId = String(body.assetId || body.id || '').trim()
+    const prompt = String(body.prompt || '').trim()
+    if (!assetId) return json(res, 400, { error: '缺少要编辑的图像资产', code: 'IMAGE_ASSET_REQUIRED' })
+    if (!prompt) return json(res, 400, { error: '请先描述要如何修改这张图像', code: 'IMAGE_EDIT_PROMPT_REQUIRED' })
+    if (prompt.length > 1200) return json(res, 400, { error: '编辑要求不能超过 1200 个字符', code: 'IMAGE_EDIT_PROMPT_TOO_LONG' })
+    const asset = getImageAsset(assetId)
+    if (!asset || asset.deletedAt != null || asset.owner !== user.name) {
+      return json(res, 404, { error: '图像资产不存在或无权编辑', code: 'IMAGE_ASSET_NOT_FOUND' })
+    }
+    const sourceMeta = getFile(asset.fileId)
+    const sourceBuffer = readFileBuffer(asset.fileId)
+    if (!sourceMeta || !sourceBuffer || sourceMeta.deletedAt != null) {
+      return json(res, 404, { error: '待编辑的图像文件不存在或已失效', code: 'IMAGE_FILE_NOT_FOUND' })
+    }
+    const requestedModelId = String(body.modelId || '').trim()
+    const editModel = status.models.find((model) => model.configured && model.capabilities?.edit && (!requestedModelId || model.id === requestedModelId || model.model === requestedModelId))
+    if (!editModel) {
+      const selected = requestedModelId ? status.models.find((model) => model.id === requestedModelId || model.model === requestedModelId) : null
+      if (selected && !selected.configured) {
+        return json(res, 503, { error: `${selected.label} 尚未配置，无法编辑图像`, code: 'IMAGE_MODEL_NOT_CONFIGURED' })
+      }
+      if (selected && !selected.capabilities?.edit) {
+        return json(res, 400, { error: `${selected.label} 暂未开放图像编辑`, code: 'IMAGE_EDIT_UNSUPPORTED' })
+      }
+      return json(res, 400, { error: '当前没有可用的图像编辑模型', code: 'IMAGE_EDIT_UNAVAILABLE' })
+    }
+    const style = asset.style || '写实'
+    const ratio = IMAGE_RATIOS[asset.ratio] ? asset.ratio : '1:1'
+    const [width, height] = IMAGE_RATIOS[ratio]
+    const seed = Number.isInteger(Number(body.seed)) && Number(body.seed) > 0 ? Number(body.seed) : Math.floor(Math.random() * 2_147_483_647)
+    const jobId = newFileId('IJOB')
+    createImageJob({
+      id: jobId,
+      owner: user.name,
+      net,
+      assetId: asset.id,
+      kind: 'edit',
+      provider: editModel.provider,
+      modelId: editModel.id,
+      prompt,
+      params: { ratio, style, seed, width, height, sourceFileId: asset.fileId, sourceRevision: asset.revision },
+    })
+    try {
+      const image = await editImage({
+        modelId: editModel.id,
+        prompt,
+        imageBuffer: sourceBuffer,
+        imageMime: sourceMeta.mime,
+        ratio,
+        width,
+        height,
+        seed,
+      })
+      const ext = image.mime === 'image/png' ? 'png' : image.mime === 'image/webp' ? 'webp' : 'jpg'
+      const fileId = newFileId('IMG')
+      const name = `AI-${new Date().toISOString().slice(0, 19).replace(/[T:]/g, '')}-${seed}.${ext}`
+      const meta = putFile({
+        id: fileId, name, mime: image.mime, buffer: image.buffer, owner: user.name, net,
+        note: `imageedit:${image.provider}/${image.model};modelId=${image.modelId};source=${asset.id}:v${asset.revision};ratio=${ratio};style=${style};seed=${seed}`,
+      })
+      const revision = Number(asset.revision || 1) + 1
+      createImageRevision({
+        assetId: asset.id,
+        revision,
+        fileId: meta.id,
+        prompt,
+        style,
+        ratio,
+        provider: image.provider,
+        providerLabel: image.providerLabel,
+        model: image.model,
+        modelId: image.modelId,
+        seed,
+        params: {
+          sourceFileId: asset.fileId,
+          sourceRevision: asset.revision,
+          width,
+          height,
+          requestId: image.requestId || '',
+        },
+        note: `编辑生成 v${revision}`,
+        createdBy: user.name,
+      })
+      updateImageAssetLatest(asset.id, user.name, {
+        prompt,
+        style,
+        ratio,
+        provider: image.provider,
+        providerLabel: image.providerLabel,
+        model: image.model,
+        modelId: image.modelId,
+        seed,
+        fileId: meta.id,
+        revision,
+      })
+      updateImageJob(jobId, {
+        status: 'completed',
+        assetId: asset.id,
+        provider: image.provider,
+        modelId: image.modelId,
+        finishedAt: Date.now(),
+      })
+      logAudit(user, 'image.edit', `${asset.id}:v${revision}:${image.modelId}`, `allow(${meta.size})`, net)
+      return json(res, 200, {
+        ok: true,
+        image: {
+          id: asset.id,
+          assetId: asset.id,
+          fileId: meta.id,
+          name: meta.name,
+          mime: meta.mime,
+          size: meta.size,
+          width: image.width || width,
+          height: image.height || height,
+          ratio,
+          style,
+          seed,
+          prompt,
+          provider: image.provider,
+          providerLabel: image.providerLabel,
+          model: image.model,
+          modelId: image.modelId,
+          requestId: image.requestId || '',
+          revision,
+          versions: imageRevisionCount(asset.id),
+          jobId,
+          url: imageFileUrl(meta.id),
+        },
+      })
+    } catch (error) {
+      const timedOut = error?.name === 'TimeoutError' || error?.name === 'AbortError'
+      const message = timedOut ? '图像编辑模型调用超时，请稍后重试' : String(error?.message || error)
+      updateImageJob(jobId, {
+        status: 'failed',
+        error: message,
+        finishedAt: Date.now(),
+      })
+      logAudit(user, 'image.edit', `${asset.id}:${editModel.id}`, 'deny', net)
+      const statusCode = error instanceof ImageProviderError ? error.status : 502
+      return json(res, statusCode, {
+        ok: false,
+        error: `真实图像编辑失败：${message}`,
         code: error instanceof ImageProviderError ? error.code : 'IMAGE_PROVIDER_ERROR',
       })
     }

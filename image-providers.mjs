@@ -8,6 +8,7 @@
 
 const DEFAULT_TIMEOUT_MS = 120_000
 const MAX_IMAGE_BYTES = 24 * 1024 * 1024
+const MAX_EDIT_INPUT_BYTES = 10 * 1024 * 1024
 const MIN_IMAGE_BYTES = 8 * 1024
 const ALLOWED_MIME = new Set(['image/png', 'image/jpeg', 'image/webp'])
 
@@ -32,7 +33,7 @@ function createDefinitions() {
       endpoint: configuredValue('QWEN_IMAGE_ENDPOINT', 'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation'),
       apiKey: envValue('QWEN_IMAGE_API_KEY'),
       keyEnv: 'QWEN_IMAGE_API_KEY',
-      capabilities: { generate: true, edit: false },
+      capabilities: { generate: true, edit: true },
     },
     {
       id: 'seedream-5.5',
@@ -257,7 +258,10 @@ async function callProvider(def, options) {
   }
 }
 
-async function callQwen(def, { prompt, width, height, seed, timeoutMs }) {
+async function callQwen(def, { prompt, width, height, seed, timeoutMs, sourceImage = '', operation = '生图', promptExtend = true }) {
+  const content = []
+  if (sourceImage) content.push({ image: sourceImage })
+  content.push({ text: prompt })
   const response = await callProvider(def, {
     method: 'POST',
     headers: {
@@ -269,13 +273,13 @@ async function callQwen(def, { prompt, width, height, seed, timeoutMs }) {
       input: {
         messages: [{
           role: 'user',
-          content: [{ text: prompt }],
+          content,
         }],
       },
       parameters: {
         n: 1,
         size: qwenSize(width, height),
-        prompt_extend: true,
+        prompt_extend: promptExtend,
         watermark: false,
         ...(Number.isInteger(seed) && seed > 0 ? { seed } : {}),
       },
@@ -285,14 +289,14 @@ async function callQwen(def, { prompt, width, height, seed, timeoutMs }) {
   const payload = await responseJson(response)
   if (!response.ok || payload.code) {
     const message = String(payload.message || payload.code || `HTTP ${response.status}`)
-    throw new ImageProviderError(`Qwen 生图失败：${message}`, {
+    throw new ImageProviderError(`Qwen ${operation}失败：${message}`, {
       code: 'IMAGE_PROVIDER_ERROR',
       status: response.status >= 400 && response.status < 500 ? 400 : 502,
     })
   }
   const url = contentImageUrl(payload)
   if (!url) {
-    throw new ImageProviderError('Qwen 未返回图像地址', {
+    throw new ImageProviderError(`Qwen ${operation}未返回图像地址`, {
       code: 'IMAGE_PROVIDER_NO_IMAGE',
       status: 502,
     })
@@ -395,6 +399,71 @@ export async function generateImage({ modelId = '', prompt = '', ratio = '1:1', 
   }
   throw new ImageProviderError(`未实现的图像 Provider：${def.provider}`, {
     code: 'IMAGE_PROVIDER_UNSUPPORTED',
+    status: 501,
+  })
+}
+
+export async function editImage({
+  modelId = '',
+  prompt = '',
+  imageBuffer = null,
+  imageMime = 'image/png',
+  ratio = '1:1',
+  width = 1024,
+  height = 1024,
+  seed = 0,
+  timeoutMs = Number(process.env.JG_IMAGE_EDIT_TIMEOUT_MS || 240_000),
+} = {}) {
+  refreshDefinitions()
+  const def = getImageModel(modelId)
+  if (!def.capabilities.edit) {
+    throw new ImageProviderError(`图像模型 ${def.label} 尚未开放图像编辑`, {
+      code: 'IMAGE_EDIT_UNSUPPORTED',
+      status: 400,
+    })
+  }
+  const cleanPrompt = String(prompt || '').trim()
+  if (!cleanPrompt) {
+    throw new ImageProviderError('请先描述要如何修改这张图像', { code: 'IMAGE_EDIT_PROMPT_REQUIRED', status: 400 })
+  }
+  if (cleanPrompt.length > 1200) {
+    throw new ImageProviderError('编辑要求不能超过 1200 个字符', { code: 'IMAGE_EDIT_PROMPT_TOO_LONG', status: 400 })
+  }
+  if (!imageBuffer || !Buffer.isBuffer(imageBuffer) || imageBuffer.length < MIN_IMAGE_BYTES) {
+    throw new ImageProviderError('待编辑图像不存在或内容过小', {
+      code: 'IMAGE_EDIT_SOURCE_MISSING',
+      status: 400,
+    })
+  }
+  if (imageBuffer.length > MAX_EDIT_INPUT_BYTES) {
+    throw new ImageProviderError('待编辑图像超过 10 MB，无法提交给图像编辑模型', {
+      code: 'IMAGE_EDIT_INPUT_TOO_LARGE',
+      status: 413,
+    })
+  }
+  const mime = String(imageMime || '').split(';')[0].trim().toLowerCase()
+  if (!ALLOWED_MIME.has(mime)) {
+    throw new ImageProviderError(`待编辑图像格式不支持：${mime || '未知类型'}`, {
+      code: 'IMAGE_EDIT_SOURCE_MIME_UNSUPPORTED',
+      status: 400,
+    })
+  }
+  const sourceImage = `data:${mime};base64,${imageBuffer.toString('base64')}`
+  const effectiveTimeout = Math.max(30_000, Math.min(300_000, Number(timeoutMs) || DEFAULT_TIMEOUT_MS))
+  if (def.provider === 'qwen') {
+    return callQwen(def, {
+      prompt: cleanPrompt,
+      width,
+      height,
+      seed,
+      timeoutMs: effectiveTimeout,
+      sourceImage,
+      operation: '编辑',
+      promptExtend: false,
+    })
+  }
+  throw new ImageProviderError(`图像模型 ${def.label} 的图像编辑尚未接入`, {
+    code: 'IMAGE_EDIT_PROVIDER_UNSUPPORTED',
     status: 501,
   })
 }

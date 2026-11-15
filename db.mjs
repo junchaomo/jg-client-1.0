@@ -384,6 +384,12 @@ const stmt = {
     UPDATE image_assets SET deleted_at = ?, updated_at = ?, status = 'deleted'
     WHERE id = ? AND owner = ? AND deleted_at IS NULL
   `),
+  updateImageAssetLatest: db.prepare(`
+    UPDATE image_assets SET
+      prompt = ?, style = ?, ratio = ?, provider = ?, provider_label = ?, model = ?, model_id = ?,
+      seed = ?, file_id = ?, revision = ?, updated_at = ?
+    WHERE id = ? AND owner = ? AND deleted_at IS NULL
+  `),
   insertImageRevision: db.prepare(`
     INSERT INTO image_revisions (
       asset_id, revision, file_id, prompt, style, ratio, provider, provider_label, model, model_id,
@@ -1015,6 +1021,29 @@ export function softDeleteImageAsset(id, owner) {
   const result = stmt.softDeleteImageAsset.run(Date.now(), Date.now(), String(id || ''), String(owner || ''))
   if (!Number(result.changes || 0)) return null
   return imageAssetOf(stmt.getImageAsset.get(String(id || '')))
+}
+
+export function updateImageAssetLatest(id, owner, patch = {}) {
+  const current = getImageAsset(id)
+  if (!current || current.owner !== String(owner || '') || current.deletedAt != null) return null
+  const next = { ...current, ...patch }
+  const result = stmt.updateImageAssetLatest.run(
+    String(next.prompt || ''),
+    String(next.style || ''),
+    String(next.ratio || ''),
+    String(next.provider || ''),
+    String(next.providerLabel || ''),
+    String(next.model || ''),
+    String(next.modelId || ''),
+    Number(next.seed || 0),
+    String(next.fileId || ''),
+    Number(next.revision || 1),
+    Date.now(),
+    String(id || ''),
+    String(owner || '')
+  )
+  if (!Number(result.changes || 0)) return null
+  return getImageAsset(id)
 }
 
 export function createImageRevision(input = {}) {
