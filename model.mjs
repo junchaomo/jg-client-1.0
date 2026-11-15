@@ -4,6 +4,42 @@
  * 不在这里保存任何密钥明文到数据库或日志。
  */
 
+/**
+ * 轻量模型路由：只做能力兜底，不替代用户配置。
+ * - 图片请求：当前模型没有图片输入能力时，回退到声明了 text+image 的 deepseek-flash。
+ * - 深度思索：固定使用 deepseek-reasoner。
+ * - 其余任务保留用户配置的模型；分类结果只用于 trace 和预算观察。
+ */
+const MODEL_CAPABILITIES = {
+  'deepseek-flash': { images: true, label: 'DeepSeek-V4.1-Flash' },
+  'deepseek-chat': { images: false, label: 'DeepSeek-Chat' },
+  'deepseek-v4-pro': { images: false, label: 'DeepSeek-V4-Pro' },
+  'deepseek-reasoner': { images: false, label: 'DeepSeek-Reasoner' },
+}
+
+export function modelSupportsImages(model) {
+  return Boolean(MODEL_CAPABILITIES[String(model || '').trim()]?.images)
+}
+
+export function classifyTask(text, { mode = 'chat', projectId = '', images = [] } = {}) {
+  const input = String(text || '')
+  if (Array.isArray(images) && images.length) return 'vision'
+  if (projectId || mode === 'work' || /代码|脚本|报错|调试|构建|测试|部署|接口|函数|文件|目录|写入|创建|修改|删除|命令|执行/i.test(input)) return 'work'
+  if (/查询|搜索|检索|资料|公告|通知|资源|数据|通讯录/i.test(input)) return 'retrieval'
+  if (input.length <= 48 && !/[?？]/i.test(input)) return 'quick'
+  return 'chat'
+}
+
+export function routeModel({ baseModel = 'deepseek-flash', text = '', mode = 'chat', projectId = '', images = [], deepThink = false } = {}) {
+  const base = String(baseModel || 'deepseek-flash').trim() || 'deepseek-flash'
+  const taskClass = classifyTask(text, { mode, projectId, images })
+  if (Array.isArray(images) && images.length && !modelSupportsImages(base)) {
+    return { model: 'deepseek-flash', taskClass: 'vision', reason: 'image-capability-fallback', imageFallback: true }
+  }
+  if (deepThink) return { model: 'deepseek-reasoner', taskClass, reason: 'deep-think', imageFallback: false }
+  return { model: base, taskClass, reason: 'configured-model', imageFallback: false }
+}
+
 export class ModelError extends Error {
   constructor(message, { code = 'MODEL_ERROR', status = 502, detail = '' } = {}) {
     super(message)
@@ -36,7 +72,7 @@ export function resolveModelConfig({ userConfig = {}, request = {}, env = proces
   const userModel = String(userConfig.defaultModel || '').trim()
   // defaultModel 在界面上是展示名（可能含中文与空格），只有看起来像模型 ID 时才直接使用。
   const usableUserModel = /^[A-Za-z0-9._:\-/]+$/.test(userModel) ? userModel : ''
-  const model = String(requestModel || usableUserModel || env.JG_MODEL_NAME || env.DEEPSEEK_MODEL || 'deepseek-chat').trim()
+  const model = String(requestModel || usableUserModel || env.JG_MODEL_NAME || env.DEEPSEEK_MODEL || 'deepseek-flash').trim()
   const timeoutMs = Math.max(8000, Math.min(180000, Number(env.JG_MODEL_TIMEOUT_MS || 60000)))
   return { apiKey, baseUrl, model, timeoutMs, source: requestKey ? 'request' : storedKey ? 'user-config' : envKey ? 'env' : 'none' }
 }

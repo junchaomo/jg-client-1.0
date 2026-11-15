@@ -11,12 +11,12 @@ export const consoleNav = [
 ]
 
 export const consoleModules = {
-  overview: { no: '01', label: '管理总览', desc: '运行概况、待办审批、风险告警、平台使用分析' },
+  overview: { no: '01', label: '管理总览', desc: '待办审批、运行概况、风险告警；先处理事项，再看指标' },
   org: { no: '02', label: '组织与权限', desc: '组织架构、人员账号、角色权限、授权审批、账号生命周期' },
   ai: { no: '03', label: 'AI 能力管理', desc: '运行基线、模型网关、Agent 与 MCP、插件与技能市场' },
-  data: { no: '04', label: '数据治理', desc: '数据源、资源、元数据、质量、索引、存储、数据服务、数据授权' },
-  apps: { no: '05', label: '应用与集成', desc: '应用注册、审核发布、版本管理、接口连接、系统集成' },
-  ops: { no: '06', label: '运维监控', desc: '服务监控、服务器资源、任务调度、告警、备份、故障管理' },
+  data: { no: '04', label: '数据与资源', desc: '资源台账、登记与元数据、版本、授权、数据服务、下载与导出' },
+  apps: { no: '05', label: '应用与集成', desc: 'AS 应用、业务应用、应用数据权限、版本与发布、接口连接' },
+  ops: { no: '06', label: '运行与运维', desc: '服务健康、AS 进程与租约、DSH 与模型网关、任务调度、备份告警' },
   security: { no: '07', label: '安全与审计', desc: '安全策略、敏感访问、权限复核、操作日志、安全事件（对接深信服）' },
   service: { no: '08', label: '服务与工单', desc: '员工报障、人员变动、权限申请、反馈、问题处理' },
   settings: { no: '09', label: '系统设置', desc: '基础配置、客户端版本与环境配置' },
@@ -27,13 +27,13 @@ export const consoleModules = {
 export const consoleSections = {
   overview: {
     title: '管理总览',
-    meta: '运行概况只展示当前运行时实际计数；未接入监控的指标不展示',
+    meta: '先处理待办，再看运行概况；计数全部来自当前运行时接口',
     kpis: [],
     blocks: [],
   },
   org: {
     title: '组织与权限',
-    meta: '人事主数据与账号目录尚未接入；本模块暂不展示演示数据',
+    meta: '组织主数据为空时显示真实账号目录；职责配置写入运行时并记录审计',
     kpis: [],
     blocks: [],
   },
@@ -44,32 +44,32 @@ export const consoleSections = {
     blocks: [],
   },
   data: {
-    title: '数据治理',
-    meta: '数据源、质量、索引与授权指标尚未接入；当前只展示数据中心真实资源计数',
+    title: '数据与资源',
+    meta: '资源台账与数据服务来自数据中心真实接口；无资源时保持空态',
     kpis: [],
     blocks: [],
   },
   apps: {
     title: '应用与集成',
-    meta: '应用审核、版本与接口健康尚未接入；当前只展示应用注册的真实数量',
+    meta: 'AS 应用、业务应用、能力声明与审核动作来自真实接口',
     kpis: [],
     blocks: [],
   },
   ops: {
-    title: '运维监控',
-    meta: '服务监控、服务器资源与告警尚未接入；本模块暂不展示演示数据',
+    title: '运行与运维',
+    meta: '服务健康、AS 进程与租约、任务来自真实接口',
     kpis: [],
     blocks: [],
   },
   security: {
     title: '安全与审计',
-    meta: '安全策略、敏感访问与审计日志尚未接入；本模块暂不展示演示数据',
+    meta: '审批决策、安全异常、审计日志与工具台账来自真实接口',
     kpis: [],
     blocks: [],
   },
   service: {
     title: '服务与工单',
-    meta: '工单与服务级别数据尚未接入管理中心；本模块暂不展示演示数据',
+    meta: '工单与反馈来自服务台真实接口；无数据时保持空态',
     kpis: [],
     blocks: [],
   },

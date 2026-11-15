@@ -1,0 +1,60 @@
+/* 绘图全屏画布：工具栏、形状面板、颜色盘与纵向粗细滑轨 */
+.jg-draw-mask{position:fixed;inset:0;z-index:220;display:flex;align-items:center;justify-content:center;padding:16px;background:rgba(36,40,46,.26);backdrop-filter:blur(2px)}
+.jg-draw-panel{position:relative;width:100%;height:100%;max-width:1600px;background:#fff;border-radius:20px;overflow:hidden;box-shadow:0 30px 90px rgba(18,21,25,.22)}
+.jg-draw-canvas{position:absolute;inset:0;display:block;width:100%;height:100%;touch-action:none;z-index:1}
+.jg-draw-panel[data-tool="pen"] .jg-draw-canvas,
+.jg-draw-panel[data-tool="shape"] .jg-draw-canvas{cursor:crosshair}
+.jg-draw-panel[data-tool="select"] .jg-draw-canvas{cursor:default}
+.jg-draw-panel[data-tool="text"] .jg-draw-canvas{cursor:text}
+.jg-draw-panel[data-tool="eraser"] .jg-draw-canvas{cursor:cell}
+.jg-draw-close{position:absolute;top:16px;left:16px;z-index:12;width:34px;height:34px;border:0;border-radius:50%;background:transparent;color:#5c626b;display:inline-flex;align-items:center;justify-content:center;cursor:pointer}
+.jg-draw-close:hover{background:#f2f4f6;color:#1b1d21}
+.jg-draw-close svg{width:20px;height:20px}
+.jg-draw-toolbar{position:absolute;top:14px;left:50%;transform:translateX(-50%);z-index:12;display:flex;align-items:center;gap:2px;padding:5px;background:rgba(255,255,255,.93);border:1px solid #eceef1;border-radius:999px;box-shadow:0 8px 30px rgba(20,22,26,.08)}
+.jg-draw-tool{width:40px;height:40px;border:0;border-radius:50%;background:transparent;color:#30353b;display:inline-flex;align-items:center;justify-content:center;cursor:pointer;padding:0}
+.jg-draw-tool:hover{background:#f2f4f6}
+.jg-draw-tool.on{background:#eceff3}
+.jg-draw-tool svg{width:21px;height:21px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+.jg-draw-text-tool span{font:400 22px/1 Georgia,serif;color:#30353b}
+.jg-draw-topright{position:absolute;top:16px;right:18px;z-index:12;display:flex;gap:2px}
+.jg-draw-topbtn{width:38px;height:38px;border:0;border-radius:50%;background:transparent;color:#9aa1aa;display:inline-flex;align-items:center;justify-content:center;cursor:pointer}
+.jg-draw-topbtn:not(:disabled):hover{background:#f2f4f6;color:#30353b}
+.jg-draw-topbtn:disabled{opacity:.4;cursor:default}
+.jg-draw-topbtn svg{width:21px;height:21px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+.jg-draw-shapes{position:absolute;top:68px;left:50%;transform:translateX(-50%);z-index:14;display:grid;grid-template-columns:repeat(4,44px);gap:5px;padding:10px;background:rgba(255,255,255,.97);border:1px solid #eceef1;border-radius:16px;box-shadow:0 12px 36px rgba(20,22,26,.12)}
+.jg-draw-shapes[hidden]{display:none}
+.jg-draw-shape{width:44px;height:44px;border:0;border-radius:10px;background:transparent;color:#3e444b;display:inline-flex;align-items:center;justify-content:center;cursor:pointer}
+.jg-draw-shape:hover{background:#f2f4f6;color:#171a1e}
+.jg-draw-shape svg{width:22px;height:22px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
+.jg-draw-size{position:absolute;left:14px;bottom:44px;z-index:12;width:34px;height:240px}
+.jg-draw-panel[data-tool="pen"] .jg-draw-size{top:61%;bottom:auto;height:150px}
+.jg-draw-panel[data-tool="pen"] .jg-draw-size input{width:150px}
+.jg-draw-size::before{content:"";position:absolute;left:50%;top:0;width:34px;height:var(--jg-fill,86%);transform:translateX(-50%);background:#cbd0d6;clip-path:polygon(0 0,100% 0,50% 100%);opacity:0;pointer-events:none;transition:height .1s linear}
+.jg-draw-panel[data-tool="pen"] .jg-draw-size::before{opacity:1}
+.jg-draw-panel[data-tool="pen"] .jg-draw-size input::-webkit-slider-runnable-track{background:transparent}
+.jg-draw-panel[data-tool="pen"] .jg-draw-size input::-moz-range-track{background:transparent}
+.jg-draw-size input{position:absolute;left:50%;top:50%;width:240px;height:24px;margin:0;transform:translate(-50%,-50%) rotate(-90deg);appearance:none;-webkit-appearance:none;background:transparent;cursor:pointer}
+.jg-draw-size input::-webkit-slider-runnable-track{height:2px;background:#d7dbe0;border-radius:2px}
+.jg-draw-size input::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:18px;height:18px;margin-top:-8px;border:1px solid #d5d9de;border-radius:50%;background:#fff;box-shadow:0 2px 6px rgba(20,22,26,.16)}
+.jg-draw-size input::-moz-range-track{height:2px;background:#d7dbe0;border-radius:2px}
+.jg-draw-size input::-moz-range-thumb{width:18px;height:18px;border:1px solid #d5d9de;border-radius:50%;background:#fff;box-shadow:0 2px 6px rgba(20,22,26,.16)}
+.jg-draw-colors{position:absolute;bottom:16px;left:50%;transform:translateX(-50%);z-index:12;display:flex;align-items:center;gap:8px;max-width:calc(100% - 140px);padding:8px 12px;overflow-x:auto;background:rgba(255,255,255,.93);border:1px solid #eceef1;border-radius:999px;box-shadow:0 8px 26px rgba(20,22,26,.08)}
+.jg-draw-color{flex:none;width:24px;height:24px;border:2px solid #fff;border-radius:50%;box-shadow:0 0 0 1px #e2e5e9;padding:0;cursor:pointer}
+.jg-draw-color.on{box-shadow:0 0 0 2px #fff,0 0 0 4px #1f2328}
+.jg-draw-color.rainbow{background:conic-gradient(#ff4d4d,#f5a623,#1f9d55,#13b5d6,#4f46e5,#d92d9b,#ff4d4d)}
+.jg-draw-confirm{position:absolute;right:16px;bottom:14px;z-index:12;width:48px;height:48px;border:0;border-radius:50%;background:#b9d0fa;color:#fff;display:inline-flex;align-items:center;justify-content:center;cursor:default;transition:background .15s}
+.jg-draw-confirm:not(:disabled){background:#2563eb;cursor:pointer;box-shadow:0 6px 18px rgba(37,99,235,.28)}
+.jg-draw-confirm svg{width:24px;height:24px;fill:none;stroke:#fff;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.jg-draw-text-input{position:absolute;z-index:20;width:250px;min-height:38px;max-height:140px;padding:2px 6px;border:1px dashed #9aa1aa;border-radius:6px;outline:none;resize:none;overflow:hidden;background:rgba(255,255,255,.7);font:500 28px/1.25 "PingFang SC","Microsoft YaHei",sans-serif;box-shadow:0 4px 16px rgba(20,22,26,.08)}
+@media (max-width:760px){
+  .jg-draw-mask{padding:10px}
+  .jg-draw-panel{border-radius:16px}
+  .jg-draw-toolbar{top:10px;padding:4px}
+  .jg-draw-tool{width:36px;height:36px}
+  .jg-draw-topright{top:10px;right:8px}
+  .jg-draw-close{top:10px;left:8px}
+  .jg-draw-size{left:2px;bottom:34px;height:220px}
+  .jg-draw-colors{max-width:calc(100% - 28px);gap:6px;padding:7px 9px}
+  .jg-draw-color{width:20px;height:20px}
+  .jg-draw-confirm{right:10px;bottom:10px;width:44px;height:44px}
+}

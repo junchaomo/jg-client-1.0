@@ -15,7 +15,7 @@ const state = {
   pluginKind: 'enterprise',
   selectedPlugin: null,
   market: [],
-  skillTab: 'plugin',
+  skillTab: 'app',
   skillScope: 'public',
   skillQuery: '',
   projects: [],
@@ -487,7 +487,12 @@ async function loadBoot() {
   const entries = await api('/api/agent-entries')
   if (entries.ok) state.agentEntries = entries.body.items || []
   const prj = await api('/api/projects')
-  if (prj.ok) state.sidebarProjects = (prj.body.items || []).slice(0, 3)
+  if (prj.ok) {
+    const prjItems = prj.body.items || []
+    const prjPinned = prjItems.filter((p) => p.pinned)
+    const prjRest = prjItems.filter((p) => !p.pinned)
+    state.sidebarProjects = [...prjPinned, ...prjRest].slice(0, 3)
+  }
   const mcp = await api('/api/mcp/resources')
   if (mcp.ok) {
     state.mcpResources = mcp.body.items || []
@@ -697,6 +702,12 @@ async function setProjectPinned(p, next) {
   Object.assign(p, body.item)
   const mirror = (state.projects || []).find((x) => x.id === p.id)
   if (mirror) Object.assign(mirror, body.item)
+  const sideMirror = (state.sidebarProjects || []).find((x) => x.id === p.id)
+  if (sideMirror) Object.assign(sideMirror, body.item)
+  else if (p.pinned) state.sidebarProjects = [body.item, ...(state.sidebarProjects || [])].slice(0, 3)
+  const set = new Set(state.pinnedProjects || [])
+  if (p.pinned) set.add(p.id); else set.delete(p.id)
+  state.pinnedProjects = [...set]
   renderSidebar()
   toast(p.pinned ? `已置顶项目「${p.name}」` : `已取消置顶项目「${p.name}」`)
 }
@@ -1420,6 +1431,18 @@ function renderSidebar() {
       </div>
     </div>`
 
+  const projBlock = (p) => {
+    if (state.projMerge) return projRow(p)
+    const kids = projConvs(p)
+    return `${projRow(p)}
+      <div class="sb-sub" style="${state.projFolds?.[p.id] ? 'display:none' : ''}">
+        ${kids.length ? kids.map((c) => convRow(c, false, ' sub')).join('') : '<div class="sb-empty sub">暂无聊天</div>'}
+      </div>`
+  }
+
+  const pinnedProjects = projects.filter((p) => p.pinned || (state.pinnedProjects || []).includes(p.id))
+  const workspaceProjects = projects.filter((p) => !pinnedProjects.includes(p))
+
   sidebar.innerHTML = `
     <div class="brand">
       <button class="brand-name" id="brandMenu" title="九规智能中枢">九规智能中枢</button>
@@ -1434,20 +1457,15 @@ function renderSidebar() {
     </div>
     <div class="sidebar-scroll">
       <div class="sb-label sb-section-head">置顶</div>
-      ${pins.map((c) => convRow(c, true)).join('') || '<div class="sb-empty">暂无置顶会话</div>'}
+      ${pinnedProjects.map((p) => projBlock(p)).join('')}
+      ${pins.map((c) => convRow(c, true)).join('')}
+      ${pinnedProjects.length || pins.length ? '' : '<div class="sb-empty">暂无置顶内容</div>'}
       ${state.showProjects ? `<div class="sb-label sb-label-row"><span>工作区</span>
         <button class="sb-collapse" id="projNew" title="新建工作区"><span class="ico">${icon('plus')}</span></button>
         <button class="sb-collapse" id="projMore" title="工作区显示设置"><span class="ico">${icon('dots')}</span></button>
       </div>
       <div class="sb-projects${state.projMerge ? ' merged' : ''}">
-        ${projects.map((p) => {
-          const kids = projConvs(p)
-          if (state.projMerge) return projRow(p)
-          return `${projRow(p)}
-            <div class="sb-sub" style="${state.projFolds?.[p.id] ? 'display:none' : ''}">
-              ${kids.length ? kids.map((c) => convRow(c, false, ' sub')).join('') : '<div class="sb-empty sub">暂无聊天</div>'}
-            </div>`
-        }).join('') || '<div class="sb-empty">暂无项目</div>'}
+        ${workspaceProjects.map((p) => projBlock(p)).join('') || (pinnedProjects.length ? '' : '<div class="sb-empty">暂无项目</div>')}
       </div>` : ''}
       ${(state.sidebarSections || []).map((sec) => {
         const kids = convs.filter((c) => sectionOf[c.id] === sec.id && !pins.includes(c))
@@ -2888,6 +2906,7 @@ async function renderViewInner() {
 
 /** 所有模块统一从这里进入渲染，渲染完由 AppLayout 接管侧栏挂载。 */
 async function renderView() {
+  if (asPaneAppId && state.view !== asPaneView) hideAsPane()
   await renderViewInner()
   mountPageSidebar()
   requestAnimationFrame(syncPaneScrollbars)
@@ -4212,16 +4231,13 @@ async function renderProjects(el) {
     ev.stopPropagation()
     openProjectRowMenu(b, b.dataset.pmore)
   }))
-  el.querySelectorAll('[data-ppin]').forEach((b) => b.addEventListener('click', (ev) => {
+  el.querySelectorAll('[data-ppin]').forEach((b) => b.addEventListener('click', async (ev) => {
     ev.stopPropagation()
     const p = state.projects.find((x) => x.id === b.dataset.ppin)
-    if (!p) return
-    p.pinned = !p.pinned
-    const set = new Set(state.pinnedProjects || [])
-    if (p.pinned) set.add(p.id); else set.delete(p.id)
-    state.pinnedProjects = [...set]
+    if (!p || b.disabled) return
+    b.disabled = true
+    await setProjectPinned(p, !p.pinned)
     renderView()
-    toast(p.pinned ? `已置顶「${p.name}」` : `已取消置顶「${p.name}」`)
   }))
   el.querySelectorAll('.prj-row').forEach((row) => row.addEventListener('click', () => openProject(row.dataset.project)))
 }
@@ -5792,18 +5808,32 @@ async function renderSkills(el) {
   state.market = marketBody.items || []
   state.plugins = plugBody.items || []
   const subs = subBody.items || []
-  const tab = state.skillTab || 'plugin'
+  const tab = state.skillTab || 'app'
   const scop = state.skillScope || 'public'
 
   const isOfficialBaseline = (p) => String(p.scope || '') === '平台官方基线'
+  /* 兜底去重：同一个 appId 只显示一个应用卡片。数据侧在服务启动时已合并重复条目，
+     这里再按 appId 去一次，避免历史数据或并发写回让界面出现两个一模一样的应用。 */
+  const dedupeApps = (list) => {
+    const seen = new Set()
+    return list.filter((m) => {
+      if (m.kind !== 'app') return true
+      const key = String(m.appId || m.id)
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+  }
   const installed = tab === 'plugin'
     ? state.market.filter((m) => (m.type === 'plugin' || m.kind === 'bundle') && m.installed)
-    : state.plugins.filter((p) => p.kind === 'personal' && !isOfficialBaseline(p))
+    : tab === 'app'
+      ? dedupeApps(state.market.filter((m) => m.kind === 'app' && m.installed))
+      : state.plugins.filter((p) => p.kind === 'personal' && !isOfficialBaseline(p))
 
   const tone = (i) => 't' + (i % 8)
-  const marketType = (m) => m.type || (m.kind === 'bundle' ? 'plugin' : 'skill')
-  const typeLabel = (t) => (t === 'plugin' ? '插件' : '技能')
-  const typeIcon = (t) => (t === 'plugin' ? 'plugin' : 'spark')
+  const marketType = (m) => m.type || (m.kind === 'app' ? 'app' : m.kind === 'bundle' ? 'plugin' : 'skill')
+  const typeLabel = (t) => (t === 'plugin' ? '插件' : t === 'app' ? '应用' : '技能')
+  const typeIcon = (t) => (t === 'plugin' ? 'plugin' : t === 'app' ? 'grid' : 'spark')
 
   const marketCard = (m, i) => {
     const t = marketType(m)
@@ -5811,6 +5841,8 @@ async function renderSkills(el) {
     <div class="pl-item pl-card" data-mopen="${esc(m.id)}" data-search="${esc(`${m.name} ${m.desc} ${m.publisher || ''}`.toLowerCase())}" style="cursor:pointer">
       <span class="pl-ico ${tone(i)}">${icon(typeIcon(t))}</span>
       <div class="pl-item-main"><div class="pl-item-name">${esc(m.name)}</div><div class="pl-item-desc">${esc(m.desc)}</div></div>
+      ${t === 'app' && m.runtime?.running ? '<span class="tag ok" style="font-size:10px">运行中</span>' : ''}
+      ${t === 'app' && (m.appCapabilities?.tools || []).filter((tool) => !tool.sideEffect).length ? `<span class="tag" style="font-size:10px">AI · ${(m.appCapabilities.tools || []).filter((tool) => !tool.sideEffect).length}</span>` : ''}
       ${m.installed
         ? `<button class="pl-act" data-mmenu="${esc(m.id)}" data-mname="${esc(m.name)}" title="已安装，更多操作">${icon('dots')}</button>`
         : m.available === false
@@ -5833,7 +5865,7 @@ async function renderSkills(el) {
       <div class="pl-grid"${cols ? ` style="grid-template-columns:${cols}"` : ''}>${cards}</div>
     </section>` : ''
 
-  const filterMarket = (type) => state.market.filter((m) => marketType(m) === type).filter((m) => {
+  const filterMarket = (type) => dedupeApps(state.market).filter((m) => marketType(m) === type).filter((m) => {
     const q = String(state.skillQuery || '').trim().toLowerCase()
     if (!q) return true
     return `${m.name} ${m.desc} ${m.publisher || ''}`.toLowerCase().includes(q)
@@ -5850,8 +5882,9 @@ async function renderSkills(el) {
     return [...groups.entries()].map(([name, cards]) => sec(name, cards.map(marketCard).join(''))).join('')
   }
 
+  const pluginSubs = subs.filter((x) => x.kind !== 'skill' && x.kind !== 'app')
   const personalSections = `
-    ${sec('我创建的插件', subs.length ? subs.map((x, i) => {
+    ${sec('我创建的插件', pluginSubs.length ? pluginSubs.map((x, i) => {
       const st = { pending: ['warn', '待审核'], approved: ['ok', '已上架'], rejected: ['bad', '已退回'] }[x.status] || ['', x.status]
       const t = x.kind === 'skill' ? 'skill' : 'plugin'
       return `<div class="pl-item">
@@ -5867,6 +5900,20 @@ async function renderSkills(el) {
     : `<section class="pl-sec"><h2 class="pl-sec-title">插件市场<span class="pl-arrow">›</span></h2><div class="pl2-empty">${state.skillQuery ? `没有找到与“${esc(state.skillQuery)}”匹配的插件` : '暂无公开插件。员工提交并通过安全审核的插件会出现在这里。'}</div></section>`
 
   const skillMarketSections = filterMarket('skill').length ? marketSections('skill') : '<section class="pl-sec"><h2 class="pl-sec-title">技能市场<span class="pl-arrow">›</span></h2><div class="sk-empty">当前没有可安装的技能；官方与员工创建的上架技能都会出现在这里</div></section>'
+  const appMarketSections = filterMarket('app').length
+    ? marketSections('app')
+    : `<section class="pl-sec"><h2 class="pl-sec-title">应用市场<span class="pl-arrow">›</span></h2><div class="sk-empty">当前没有可安装的应用。带 app.json 的应用包通过审核后，会由 AS Runtime 以机器级单例进程运行。</div></section>`
+  const appSubs = subs.filter((x) => x.kind === 'app')
+  const appPersonalSections = `
+    ${sec('我创建的应用', appSubs.length ? appSubs.map((x, i) => {
+      const st = { pending: ['warn', '待审核'], approved: ['ok', '已上架'], rejected: ['bad', '已退回'] }[x.status] || ['', x.status]
+      return `<div class="pl-item">
+        <span class="pl-ico ${tone(i)}">${icon('grid')}</span>
+        <div class="pl-item-main"><div class="pl-item-name">${esc(x.name)} <span class="tag" style="font-size:10px">应用</span></div><div class="pl-item-desc">${esc(x.file)} · v${esc(x.version)} · ${esc(x.scope)} · ${esc(x.submitted)}</div></div>
+        <span class="tag ${st[0]}">${st[1]}</span>
+        <button class="pl-act" data-subreport="${x.id}" title="查看检测报告">${icon('doc')}</button>
+      </div>`
+    }).join('') : '<div class="sk-empty">当前账号还没有创建应用，点右上「添加」上传带 app.json 的应用包</div>')}`
   const skillSubs = subs.filter((x) => x.kind === 'skill')
   const skillPersonalSections = `
     ${sec('我创建的技能', skillSubs.length ? skillSubs.map((x, i) => {
@@ -5879,11 +5926,13 @@ async function renderSkills(el) {
       </div>`
     }).join('') : '<div class="sk-empty">当前账号还没有创建技能，点右上「添加」开始创建</div>')}`
 
-  const instAttr = (x) => (tab === 'plugin' ? `data-mopen="${x.id}"` : `data-plug="${x.id}"`)
-  const title = tab === 'plugin' ? '插件' : '技能'
+  const instAttr = (x) => (tab === 'plugin' || tab === 'app' ? `data-mopen="${x.id}"` : `data-plug="${x.id}"`)
+  const title = tab === 'plugin' ? '插件' : tab === 'app' ? '应用' : '技能'
   const sub = tab === 'plugin'
     ? (scop === 'personal' ? '只显示你自己创建的插件与提交审核记录' : '员工开发的插件通过市场提交、审核和安装')
-    : (scop === 'personal' ? '只显示你自己创建的技能与提交审核记录' : '技能定义模型可以完成的任务流程，同样通过市场提交、审核和安装')
+    : tab === 'app'
+      ? (scop === 'personal' ? '只显示你自己创建的应用与提交审核记录' : '带 app.json 的应用包由 AS Runtime 托管；一台机器一个进程，数据按账号隔离')
+      : (scop === 'personal' ? '只显示你自己创建的技能与提交审核记录' : '技能定义模型可以完成的任务流程，同样通过市场提交、审核和安装')
 
   el.innerHTML = `
     <div class="sk-wrap pl-wrap${state.sbPinned ? '' : ' sb-off'}">
@@ -5893,6 +5942,7 @@ async function renderSkills(el) {
           <button class="pl2-side-search" id="skSideSearchBtn" title="搜索插件或技能">${icon('search')}</button>
         </div>
         <nav class="pl-nav">
+          <button class="pl-nav-item${tab === 'app' ? ' on' : ''}" data-sktab="app"><span class="pl-nav-ico">${icon('grid')}</span>应用</button>
           <button class="pl-nav-item${tab === 'plugin' ? ' on' : ''}" data-sktab="plugin"><span class="pl-nav-ico">${icon('plugin')}</span>插件</button>
           <button class="pl-nav-item${tab === 'skill' ? ' on' : ''}" data-sktab="skill"><span class="pl-nav-ico">${icon('spark')}</span>技能</button>
         </nav>
@@ -5901,12 +5951,12 @@ async function renderSkills(el) {
           ${installed.map((x, i) => {
             const mid = x.marketId || (state.market.find((m) => m.name === x.name)?.id) || (tab === 'plugin' ? x.id : '')
             return `<div class="pl-inst" ${instAttr(x)} role="button" tabindex="0">
-              <span class="pl-inst-ico ${tone(i)}">${icon(tab === 'plugin' ? 'plugin' : 'spark')}</span><span class="pl-inst-name">${esc(x.name)}</span>
+              <span class="pl-inst-ico ${tone(i)}">${icon(tab === 'plugin' ? 'plugin' : tab === 'app' ? 'grid' : 'spark')}</span><span class="pl-inst-name">${esc(x.name)}</span>
               ${mid ? `<button class="pl-inst-more" data-mi-menu="${esc(mid)}" data-mi-name="${esc(x.name)}" title="更多操作" type="button">${icon('dots')}</button>` : ''}
             </div>`
-          }).join('') || `<div class="pl2-inst-empty">${tab === 'plugin' ? '暂无已安装插件' : '暂无已安装技能'}</div>`}
+          }).join('') || `<div class="pl2-inst-empty">${tab === 'plugin' ? '暂无已安装插件' : tab === 'app' ? '暂无已安装应用' : '暂无已安装技能'}</div>`}
         </div>
-        <div class="pl-foot">插件与技能经安全审核后上架；个人安装只在本账号生效。</div>
+        <div class="pl-foot">${tab === 'app' ? '应用由 AS Runtime 托管：机器级进程、账号级数据；关闭面板不立即杀共享进程。' : '插件与技能经安全审核后上架；个人安装只在本账号生效。'}</div>
       </aside>
       <div class="sk-main pl-main">
         <div class="pl-head pl2-head">
@@ -5914,7 +5964,7 @@ async function renderSkills(el) {
           <div class="pl2-toolbar">
             <label class="pl2-search">
               <span class="pl2-search-ico">${icon('search')}</span>
-              <input id="skSearch" placeholder="搜索${tab === 'plugin' ? '插件' : '技能'}" value="${esc(state.skillQuery || '')}" />
+              <input id="skSearch" placeholder="搜索${tab === 'plugin' ? '插件' : tab === 'app' ? '应用' : '技能'}" value="${esc(state.skillQuery || '')}" />
             </label>
             <button class="pl-ico-btn pl2-tool" id="skRefresh" title="刷新">${icon('refresh')}</button>
             <button class="pl-add pl2-add" id="skAddLeft">添加</button>
@@ -5930,6 +5980,8 @@ async function renderSkills(el) {
           ${tab === 'plugin' && scop === 'personal' ? personalSections : ''}
           ${tab === 'skill' && scop === 'public' ? skillMarketSections : ''}
           ${tab === 'skill' && scop === 'personal' ? skillPersonalSections : ''}
+          ${tab === 'app' && scop === 'public' ? appMarketSections : ''}
+          ${tab === 'app' && scop === 'personal' ? appPersonalSections : ''}
           <div class="pl2-noresult" id="plNoResult" hidden>没有找到匹配的内容，换个关键词试试。</div>
         </div>
       </div>
@@ -6099,28 +6151,52 @@ function openPluginSurface(m) {
 }
 
 function openPluginSlide(id) {
+  /* 抽屉与应用工作区互斥：原生视图会把抽屉压在底下，所以先收起工作区。
+     但只收视图、不动租约——「看一眼详情」不该把正在跑的应用回收，
+     智能中枢客户端运行期间进程一直保留（显式「停止应用」除外）。 */
+  if (asPaneAppId) { const prevId = asPaneAppId; hideAsPane(); armIdleRelease(prevId) }
   const m = (state.market || []).find((x) => x.id === id)
   if (!m) return
-  const surface = pluginSurfaceFor(m)
+  const isApp = m.kind === 'app'
+  const appRuntime = m.runtime || {}
+  const appCaps = isApp ? (m.appCapabilities || null) : null
+  const surface = isApp ? null : pluginSurfaceFor(m)
+  /* “已安装”与“待上架”并列出现的唯一成因：安装台账还在、物理包被删了（按账号卸载/删除同 appId 条目都会整包删）。
+     这种情况合并成一个可解释的单一状态，不把两个互斥标签并排放给用户。 */
+  const appPkgStale = isApp && m.available === false && Boolean(m.installed)
   const slide = ensureSlide()
   slide.innerHTML = `
     <div class="slide-head"><div><div class="slide-title">${esc(m.name)}</div><div class="slide-sub">${esc(m.publisher)} · ${esc(m.section)} · ID ${esc(m.id)}</div></div><span class="spacer"></span><button class="btn subtle" data-close>${icon('close')}</button></div>
     <div class="slide-body">
-      <div style="display:flex;gap:6px;margin-bottom:12px"><span class="tag ${m.installed ? 'ok' : ''}">${m.installed ? '已安装' : '未安装'}</span><span class="tag ${m.available === false ? 'warn' : ''}">${m.available === false ? '待上架' : m.locked ? '系统内置' : '可安装'}</span><span class="tag">${m.origin === 'community' ? '社区提交' : '官方/内置'}</span><span class="tag">${esc(m.scope)}</span></div>
+      <div style="display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap"><span class="tag ${m.installed ? 'ok' : ''}">${m.installed ? '已安装' : '未安装'}</span><span class="tag ${m.available === false ? 'warn' : ''}">${m.available === false ? (appPkgStale ? '包缺失 · 待重新入库' : '待上架') : m.locked ? '系统内置' : '可安装'}</span><span class="tag">${isApp ? '应用' : m.origin === 'community' ? '社区提交' : '官方/内置'}</span>${isApp ? `<span class="tag ${appRuntime.running ? 'ok' : ''}" data-as-state>${appRuntime.running ? `运行中 · ${appRuntime.port || ''}` : '未运行'}</span>` : ''}<span class="tag">${esc(m.scope)}</span></div>
       <div class="field"><div class="field-label">功能说明</div><div class="field-value">${esc(m.desc)}</div></div>
-      <div class="field"><div class="field-label">来源</div><div class="field-value">${m.origin === 'community' ? `${esc(m.submittedUnit || '')} · 提交人 ${esc(m.submittedBy || '')} · v${esc(m.version || '1.0.0')}` : `DSH 官方 / 产品内置 · v${esc(m.version || '1.0.0')}`}</div></div>
-      <div class="field"><div class="field-label">权限与数据</div><div class="field-value">按当前授权与网络范围返回数据；敏感字段最小必要展示，读取与调用进审计。写操作需人工确认。</div></div>
-      <div class="field"><div class="field-label">安装状态</div><div class="field-value">${m.locked ? (m.product ? '该插件由平台内置，随平台统一维护；无需按账号安装或卸载。' : '该技能已作为全客户端基线安装，由平台统一维护，不能按单个账号卸载。') : m.available === false ? '该插件尚未提供可安装的技能包，暂不能安装。上架后会显示安装入口。' : `安装到${esc(m.installScope || '当前账号或项目技能目录')}；安装或卸载后，下一轮对话生效。`}</div></div>
-      ${(m.kind !== 'bundle' && !m.locked && m.available !== false && !m.installed) ? `<div class="field"><div class="field-label">安装范围</div><div class="field-value">
+      <div class="field"><div class="field-label">来源</div><div class="field-value">${m.origin === 'community' ? `${esc(m.submittedUnit || '')} · 提交人 ${esc(m.submittedBy || '')} · v${esc(m.version || '1.0.0')}` : `${isApp ? 'AS 应用包' : 'DSH 官方 / 产品内置'} · v${esc(m.version || '1.0.0')}`}</div></div>
+      <div class="field"><div class="field-label">权限与数据</div><div class="field-value">${isApp ? '应用进程由 AS Runtime 托管；版本目录只读，账号数据写入独立目录；网络与文件权限按 app.json 声明审核。' : '按当前授权与网络范围返回数据；敏感字段最小必要展示，读取与调用进审计。写操作需人工确认。'}</div></div>
+      ${isApp ? `<div class="field"><div class="field-label">AI 可调用</div><div class="field-value">${
+        (appCaps?.tools || []).length || (appCaps?.resources || []).length
+          ? `${(appCaps.tools || []).map((tool) => `<div style="padding:7px 0;border-bottom:1px solid var(--line,#eceff3)"><div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap"><span class="mono">${esc(tool.name)}</span><span class="tag">${esc(tool.method)}</span>${tool.sideEffect ? '<span class="tag warn">写操作</span>' : ''}<span class="spacer"></span>${tool.sideEffect ? `<button class="linkbtn" data-as-approve="${esc(tool.name)}">审批执行</button>` : `<button class="linkbtn" data-as-call="${esc(tool.name)}">试调用</button>`}</div><div style="color:var(--muted,#6b7280);font-size:12px;margin-top:3px">${esc(tool.description || '未填写说明')}</div><div class="mono" style="font-size:10px;color:#9aa1aa;margin-top:2px">${esc(tool.path)}</div></div>`).join('')}${(appCaps.resources || []).length ? `<div style="font-size:11px;color:var(--muted,#6b7280);margin-top:6px">资源：${(appCaps.resources || []).map((r) => `<span class="mono">${esc(r.name)}</span>`).join('、')}</div>` : ''}`
+          : (appCaps?.declared ? `capabilities 已声明，但当前没有可调用工具。${appCaps.note ? `<div style="font-size:11px;color:var(--muted,#6b7280);margin-top:4px">${esc(appCaps.note)}</div>` : ''}` : 'app.json 尚未声明 capabilities；应用可以启动，但中枢 AI 暂时看不到它的业务工具。')
+      }</div></div>` : ''}
+      <div class="field"><div class="field-label">安装状态</div><div class="field-value">${isApp ? (appPkgStale ? '本账号仍有安装记录，但应用包已从本机缺失——同一 appId 的其它市场条目被删除时会连带删除整包。重新上传应用包并通过审核即可恢复，账号安装记录无需重做。' : m.available === false ? '应用包尚未入库，暂不能安装。' : '安装只登记当前账号；启动时按机器级单例进程运行，账号数据目录彼此隔离。') : m.locked ? (m.product ? '该插件由平台内置，随平台统一维护；无需按账号安装或卸载。' : '该技能已作为全客户端基线安装，由平台统一维护，不能按单个账号卸载。') : m.available === false ? '该插件尚未提供可安装的技能包，暂不能安装。上架后会显示安装入口。' : `安装到${esc(m.installScope || '当前账号或项目技能目录')}；安装或卸载后，下一轮对话生效。`}</div></div>
+      ${isApp && m.installed ? `<div class="field"><div class="field-label">运行态</div><div class="field-value">${appRuntime.running ? `PID ${esc(appRuntime.pid || '—')} · 端口 ${esc(appRuntime.port || '—')} · 租约 ${esc(appRuntime.leaseCount ?? 0)} · 健康 ${esc(appRuntime.health || 'running')}` : '当前未运行；点击「启动并打开」后由 AS Runtime 分配动态端口并做健康检查。'}${appRuntime.lastError ? `<br><span class="mono">${esc(appRuntime.lastError)}</span>` : ''}</div></div>` : ''}
+      ${(m.kind !== 'bundle' && m.kind !== 'app' && !m.locked && m.available !== false && !m.installed) ? `<div class="field"><div class="field-label">安装范围</div><div class="field-value">
         <select class="text-input" id="mktInstallScope"><option value="user">仅当前账号</option><option value="project">当前项目（仅该项目会话可见）</option></select>
         <select class="text-input" id="mktInstallProject" style="display:none;margin-top:6px">${(state.projects || []).filter((p) => p.cwd).map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('')}</select>
       </div></div>` : ''}
       ${m.installed && m.installedScope ? `<div class="field"><div class="field-label">安装位置</div><div class="field-value">${m.installedScope === 'project' ? `项目 ${esc((state.projects || []).find((p) => p.id === m.installedProjectId)?.name || m.installedProjectId)}` : '当前账号'}</div></div>` : ''}
-      <div class="field"><div class="field-label">安装要求</div><div class="field-value">${m.locked ? (m.product ? '产品内置插件，随平台统一维护；无需安装，也不占用账号技能目录。' : '平台官方基线技能，无需安装；按当前网络与授权范围生效。') : m.scope === '需授权' ? '需部门负责人授权后安装，授权范围按岗位与项目参与关系核定。' : m.kind === 'bundle' ? 'Bundle 会安装到当前账号的 DSH 运行时，只对该账号生效。' : '官方技能，可直接安装；账号范围与其他账号互不可见，项目范围仅该项目会话可见。'}</div></div>
+      <div class="field"><div class="field-label">安装要求</div><div class="field-value">${isApp ? '应用包必须包含合法 app.json；审核通过后由 AS Runtime 启动，不进入 skill/bundle 运行时。' : m.locked ? (m.product ? '产品内置插件，随平台统一维护；无需安装，也不占用账号技能目录。' : '平台官方基线技能，无需安装；按当前网络与授权范围生效。') : m.scope === '需授权' ? '需部门负责人授权后安装，授权范围按岗位与项目参与关系核定。' : m.kind === 'bundle' ? 'Bundle 会安装到当前账号的 DSH 运行时，只对该账号生效。' : '官方技能，可直接安装；账号范围与其他账号互不可见，项目范围仅该项目会话可见。'}</div></div>
     </div>
     <div class="slide-foot">
       ${surface ? `<button class="btn" data-open-surface>${esc(surface.label)}</button>` : ''}
-      ${m.locked ? `<button class="btn primary" disabled>${m.product ? '产品内置' : '全客户端基线'}</button>` : m.available === false ? '<button class="btn primary" disabled>尚未提供安装包</button>' : `<button class="btn primary" data-toggle>${m.installed ? '卸载' : '安装'}</button>`}
+      ${isApp
+        ? (appPkgStale
+          ? '<button class="btn primary" disabled>应用包缺失 · 请重新上传</button>'
+          : m.available === false
+          ? '<button class="btn primary" disabled>尚未完成入库</button>'
+          : m.installed
+            ? `<button class="btn primary" data-as-start>${appRuntime.running ? '打开应用' : '启动并打开'}</button>${appRuntime.running ? '<button class="btn" data-as-stop>停止应用</button>' : ''}<button class="btn" data-toggle>卸载</button>`
+            : '<button class="btn primary" data-toggle>安装</button>')
+        : m.locked ? `<button class="btn primary" disabled>${m.product ? '产品内置' : '全客户端基线'}</button>` : m.available === false ? '<button class="btn primary" disabled>尚未提供安装包</button>' : `<button class="btn primary" data-toggle>${m.installed ? '卸载' : '安装'}</button>`}
       ${m.downloadUrl ? '<button class="btn" data-download>下载原始包</button>' : ''}
       <button class="btn" data-log>调用记录</button>
     </div>`
@@ -6133,6 +6209,124 @@ function openPluginSlide(id) {
     })
   }
   slide.querySelector('[data-open-surface]')?.addEventListener('click', () => openPluginSurface(m))
+  slide.querySelectorAll('[data-as-approve]').forEach((btn) => btn.addEventListener('click', () => {
+    const toolName = btn.dataset.asApprove
+    const tool = (appCaps?.tools || []).find((item) => item.name === toolName)
+    if (!tool) return toast('应用工具不存在', true)
+    const mask = openModal(`写操作审批 · ${esc(tool.name)}`, `
+      <div class="field"><div class="field-label">工具</div><div class="field-value"><span class="mono">${esc(tool.name)}</span> · ${esc(tool.method)} ${esc(tool.path)}</div></div>
+      <div class="field"><div class="field-label">输入参数</div><div class="field-value"><div style="font-size:11px;color:var(--muted,#6b7280);margin-bottom:6px">按 inputSchema 填写 JSON；审批单会绑定这份参数，执行时参数必须一致。</div><textarea class="text-input" data-as-args rows="5" style="width:100%;font-family:ui-monospace,SFMono-Regular,Menlo,monospace">{}</textarea><div class="mono" style="font-size:10px;color:#9aa1aa;margin-top:4px">${esc(JSON.stringify(tool.inputSchema || {}, null, 2))}</div></div></div>
+      <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px"><button class="btn primary" data-as-confirm>批准并执行一次</button></div>
+    `)
+    const confirmBtn = mask.querySelector('[data-as-confirm]')
+    confirmBtn.addEventListener('click', async () => {
+      let args = {}
+      try {
+        args = JSON.parse(mask.querySelector('[data-as-args]').value || '{}')
+        if (!args || typeof args !== 'object' || Array.isArray(args)) throw new Error('参数必须是 JSON 对象')
+      } catch (error) {
+        return toast(`参数不是合法 JSON：${String(error?.message || error)}`, true)
+      }
+      confirmBtn.disabled = true
+      try {
+        const created = await api('/api/as/approvals', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: m.id, tool: tool.name, args }) })
+        const approval = created.body?.approval
+        if (!approval?.approvalId) return toast(created.body?.error || '审批单创建失败', true)
+        const decided = await api('/api/as/approvals/decide', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ approvalId: approval.approvalId, decision: 'approved' }) })
+        if (!decided.ok) return toast(decided.body?.error || '审批未通过', true)
+        const called = await api('/api/as/call', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: m.id, tool: tool.name, args, approvalId: approval.approvalId }) })
+        if (!called.ok) return toast(called.body?.error || '应用写操作执行失败', true)
+        mask.remove()
+        const data = called.body.result?.result ?? called.body.result
+        const value = data && typeof data === 'object' ? JSON.stringify(data).slice(0, 180) : String(data ?? '')
+        toast(`${tool.name} 已执行：${value}`)
+      } catch (error) {
+        toast(String(error?.message || error), true)
+      } finally {
+        confirmBtn.disabled = false
+      }
+    })
+  }))
+  slide.querySelectorAll('[data-as-call]').forEach((btn) => btn.addEventListener('click', async () => {
+    const tool = btn.dataset.asCall
+    btn.disabled = true
+    try {
+      const { ok, body } = await api('/api/as/call', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: m.id, tool, args: {} }) })
+      if (!ok) return toast(body.error || '应用工具调用失败', true)
+      const data = body.result?.result ?? body.result
+      const value = data && typeof data === 'object' ? JSON.stringify(data).slice(0, 180) : String(data ?? '')
+      toast(`${tool} 返回：${value}`)
+    } catch (error) {
+      toast(String(error?.message || error), true)
+    } finally {
+      btn.disabled = false
+    }
+  }))
+  const startAsApp = async () => {
+    const btn = slide.querySelector('[data-as-start]')
+    if (btn?.disabled) return
+    if (btn) btn.disabled = true
+    const useElectron = Boolean(window.jgClient?.browser?.open)
+    const popup = useElectron ? null : window.open('', '_blank')
+    try {
+      /* 先开容器，再等启动：应用进程是冷启动（交通的 Python 侧实测 import 就要 13.5s），
+         等 /api/as/start 返回才开窗，等于把这十几秒变成“点了没反应”。
+         先把容器挂出来并显示“启动中”，拿到 url 后立刻导航进去。 */
+      const paneUp = useElectron ? showAsPane(m, '') : false
+      const { ok, body } = await api('/api/as/start', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: m.id }) })
+      if (!ok) {
+        popup?.close()
+        if (paneUp) hideAsPane()
+        return toast(body.error || '应用启动失败', true)
+      }
+      state.asLeases = state.asLeases || {}
+      if (state.asLeases[m.id]?.timer) clearInterval(state.asLeases[m.id].timer)
+      const leaseId = body.leaseId
+      const timer = setInterval(async () => {
+        const hb = await api('/api/as/heartbeat', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: m.id, leaseId }) })
+        if (!hb.ok) {
+          clearInterval(timer)
+          if (state.asLeases[m.id]?.leaseId === leaseId) delete state.asLeases[m.id]
+          toast('应用租约已失效，进程会在宽限期后回收', true)
+        }
+      }, 15000)
+      state.asLeases[m.id] = { leaseId, timer, url: body.url }
+      if (state.asLeases[m.id].idleTimer) { clearTimeout(state.asLeases[m.id].idleTimer); state.asLeases[m.id].idleTimer = null }
+      if (paneUp) {
+        const origin = document.getElementById('asPaneOrigin')
+        if (origin) origin.textContent = asPaneOrigin(body.url)
+        window.jgClient.browser.open(body.url)
+        /* 容器先行时 rAF 里的 bounds 早于视图创建，会被主进程丢弃；
+           open 之后再推一次，否则视图以默认 0 尺寸出现，表现为一片空白。 */
+        requestAnimationFrame(() => sendNativeBounds('asWebSlot'))
+      } else if (useElectron && showAsPane(m, body.url)) window.jgClient.browser.open(body.url)
+      else if (popup && !popup.closed) popup.location.href = body.url
+      else window.open(body.url, '_blank', 'noopener,noreferrer')
+      toast(useElectron ? `已启动「${m.name}」` : `已启动「${m.name}」，界面已在新窗口打开`)
+      const st = await api(`/api/as/status?id=${encodeURIComponent(m.id)}`)
+      if (st.ok) m.runtime = st.body.runtime
+      /* 界面打开时抽屉已由 showAsPane 收起，停止入口在工作区条带上。 */
+      if (!useElectron) openPluginSlide(m.id)
+    } catch (error) {
+      popup?.close()
+      toast(String(error?.message || error), true)
+    } finally {
+      if (btn) btn.disabled = false
+    }
+  }
+  slide.querySelector('[data-as-start]')?.addEventListener('click', startAsApp)
+  slide.querySelector('[data-as-stop]')?.addEventListener('click', async () => {
+    const leaseId = state.asLeases?.[m.id]?.leaseId || ''
+    const { ok, body } = await api('/api/as/stop', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: m.id, leaseId, force: true }) })
+    if (!ok) return toast(body.error || '停止失败', true)
+    if (state.asLeases?.[m.id]?.timer) clearInterval(state.asLeases[m.id].timer)
+    delete state.asLeases?.[m.id]
+    hideAsPane()
+    toast('应用已停止')
+    const st = await api(`/api/as/status?id=${encodeURIComponent(m.id)}`)
+    if (st.ok) m.runtime = st.body.runtime
+    openPluginSlide(m.id)
+  })
   slide.querySelector('[data-toggle]')?.addEventListener('click', async () => {
     const scopeEl = slide.querySelector('#mktInstallScope')
     const projectEl = slide.querySelector('#mktInstallProject')
@@ -6146,6 +6340,7 @@ function openPluginSlide(id) {
     }
     const { ok, body } = await api('/api/plugin-market/install', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) })
     if (!ok) return toast(body.error, true)
+    if (m.installed) { hideAsPane(); releaseAsLease(m.id) }
     const plugins = await api('/api/plugins')
     if (plugins.ok) state.plugins = plugins.body.items || []
     slide.classList.remove('open')
@@ -6191,12 +6386,13 @@ function openSkillSlide(id) {
 
 function openPluginPublish() {
   const mask = openModal('上传插件或技能', `
-    <div class="form-note">支持两种 ZIP：技能包（根目录含 SKILL.md）与 DSH Bundle（含 package.json 与 dsh.bundle 指定的 cordis.patch.yml）。插件与技能都通过同一市场提交、审核、上架，审核通过后用户可一键安装。</div>
+    <div class="form-note">支持三种 ZIP：应用包（根目录含 app.json）、技能包（根目录含 SKILL.md）与 DSH Bundle（含 package.json 与 dsh.bundle 指定的 cordis.patch.yml）。应用包由 AS Runtime 托管，技能与 Bundle 仍由 DSH 运行时加载。插件、技能与应用都通过同一市场提交、审核、上架。</div>
+    <div class="form-note">应用包：代码单文件 ≤8MB、代码总量 ≤64MB；图片/字体/种子数据等资源放 <span class="mono">assets/</span>，单文件 ≤64MB，总解压 ≤256MB。技能/Bundle 仍为 48MB 总解压、8MB 单文件。</div>
     <div class="up-spec"><span>不确定包结构？</span><button class="linkbtn" id="pubSpec">查看《插件开发规范》</button></div>
     <div class="up-zone" id="pubZone">
       <span class="up-ico">${icon('upload')}</span>
-      <b>点击选择或拖入 ZIP 插件 / 技能包</b>
-      <span>单个 ZIP 文件（.zip），包含完整插件或技能目录</span>
+      <b>点击选择或拖入 ZIP 应用 / 插件 / 技能包</b>
+      <span>单个 ZIP 文件（.zip），应用包需包含 app.json</span>
       <input type="file" id="pubFile" accept=".zip" hidden />
     </div>
     <div class="up-file" id="pubFileLine" hidden><span class="ico">${icon('doc')}</span><b id="pubFileName"></b><span class="mono" id="pubFileSize"></span></div>
@@ -9508,10 +9704,10 @@ function renderCloudPanel() {
 var nativeWebUrl = ''
 var nativeWebObserver = null
 
-function sendNativeBounds() {
+function sendNativeBounds(slotId = 'cbWebSlot') {
   const bridge = window.jgClient?.browser
-  const slot = document.getElementById('cbWebSlot')
-  if (!bridge || !slot) return
+  const slot = document.getElementById(slotId)
+  if (!bridge || !slot || !slot.getClientRects().length) return
   const r = slot.getBoundingClientRect()
   bridge.bounds({
     x: Math.round(r.left),
@@ -9520,6 +9716,105 @@ function sendNativeBounds() {
     height: Math.round(r.height),
   })
 }
+
+/* ---------- 应用工作区：AS Runtime 应用的原生视图槽位 ----------
+   browser:open 只负责把页面加载进 WebContentsView，窗口位置与尺寸由这里按
+   #asWebSlot 的矩形推送；不推送就是 0×0，表现为“只有 toast、没有界面”。 */
+var asPaneAppId = ''
+var asPaneView = ''
+var asWebObserver = null
+
+function asPaneOrigin(url) {
+  try { return new URL(String(url)).origin } catch (_) { return String(url || '').split('?')[0] }
+}
+
+function showAsPane(app, url) {
+  const pane = document.getElementById('asPane')
+  const slot = document.getElementById('asWebSlot')
+  if (!pane || !slot) return false
+  const nextId = app?.id || ''
+  /* 同屏只保留一个应用界面：切换时只收视图，不释放上一个应用的租约。
+     只要智能中枢客户端还在运行，各应用进程就继续保留并心跳。 */
+  if (asPaneAppId && asPaneAppId !== nextId) {
+    hideAsPane()
+  }
+  asPaneAppId = nextId
+  asPaneView = state.view || ''
+  const title = document.getElementById('asPaneTitle')
+  if (title) title.textContent = app?.name || '应用'
+  const origin = document.getElementById('asPaneOrigin')
+  if (origin) origin.textContent = url ? asPaneOrigin(url) : '正在启动…'
+  /* 重新打开时取消空闲回收倒计时，避免“刚点开就被回收”。 */
+  const lease = state.asLeases?.[nextId]
+  if (lease?.idleTimer) { clearTimeout(lease.idleTimer); lease.idleTimer = null }
+  pane.hidden = false
+  /* 不要用 ensureSlide()：它内部会 add('open')，等于把抽屉重新弹出来。 */
+  document.getElementById('slide')?.classList.remove('open')
+  requestAnimationFrame(() => sendNativeBounds('asWebSlot'))
+  if (window.ResizeObserver) {
+    if (!asWebObserver) asWebObserver = new ResizeObserver(() => sendNativeBounds('asWebSlot'))
+    asWebObserver.disconnect()
+    asWebObserver.observe(slot)
+  }
+  return true
+}
+
+function hideAsPane() {
+  const pane = document.getElementById('asPane')
+  const wasOpen = Boolean(pane && !pane.hidden)
+  if (pane) pane.hidden = true
+  if (asWebObserver) { asWebObserver.disconnect(); asWebObserver = null }
+  asPaneAppId = ''
+  asPaneView = ''
+  if (wasOpen) window.jgClient?.browser?.close()
+}
+
+function releaseAsLease(appId) {
+  const lease = state.asLeases?.[appId]
+  if (lease?.timer) clearInterval(lease.timer)
+  if (lease) delete state.asLeases[appId]
+}
+
+/* 退出界面 ≠ 停止应用：智能中枢客户端运行期间不释放租约，进程一直保留；
+   关闭客户端后前端心跳停止，租约过期才由运行时宽限期回收。 */
+var AS_IDLE_KEEP_MS = 0
+function armIdleRelease(appId) {
+  const lease = state.asLeases?.[appId]
+  if (!lease) return
+  if (lease.idleTimer) clearTimeout(lease.idleTimer)
+  if (!AS_IDLE_KEEP_MS) {
+    lease.idleTimer = null
+    return
+  }
+  lease.idleTimer = setTimeout(() => {
+    if (asPaneAppId === appId) return
+    releaseAsLease(appId)
+    toast('应用界面已离开设定时长，进程开始回收')
+  }, AS_IDLE_KEEP_MS)
+}
+
+document.getElementById('asPaneClose')?.addEventListener('click', () => {
+  const appId = asPaneAppId
+  hideAsPane()
+  if (appId) armIdleRelease(appId)
+  toast('已退出应用界面；智能中枢运行期间进程会继续保留')
+})
+
+document.getElementById('asPaneStop')?.addEventListener('click', async () => {
+  const appId = asPaneAppId
+  if (!appId) return
+  const leaseId = state.asLeases?.[appId]?.leaseId || ''
+  const { ok, body } = await api('/api/as/stop', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: appId, leaseId, force: true }) })
+  if (!ok) return toast(body.error || '停止失败', true)
+  hideAsPane()
+  releaseAsLease(appId)
+  toast('应用已停止，进程已回收')
+  renderView()
+})
+
+window.addEventListener('resize', () => {
+  if (asPaneAppId) sendNativeBounds('asWebSlot')
+})
 
 function closeNativeWeb() {
   nativeWebUrl = ''
@@ -15245,6 +15540,510 @@ function renderAdminSettings(blocks, sec = {}) {
   blocks.appendChild(envWrap)
 }
 
+function adminModuleBlock(title, count, inner, note = '') {
+  const wrap = document.createElement('div')
+  wrap.className = 'mc-block'
+  wrap.innerHTML = `<div class="mc-block-head"><b>${esc(title)}</b><span class="spacer"></span><span class="mc-count">${esc(count)}</span></div>
+    ${inner || '<div class="mc-row">暂无数据</div>'}
+    ${note ? `<div class="mc-block-note">${esc(note)}</div>` : ''}`
+  return wrap
+}
+
+function adminEmpty(text, action = '') {
+  return `<div class="mc-empty" style="padding:18px 12px;line-height:1.7">${esc(text)}${action ? `<div style="margin-top:10px">${action}</div>` : ''}</div>`
+}
+
+function adminTag(text, tone = '') {
+  return `<span class="mc-tag ${tone}">${esc(text || '—')}</span>`
+}
+
+function adminStatusTone(text) {
+  const s = String(text || '')
+  if (/已通过|通过|已发布|已上架|已闭环|运行中|正常|可用|已修复|已授权|已完成|启用|在线|当前/.test(s)) return 'ok'
+  if (/待|审核|审批|复核|处理中|分派|草稿|暂停|维护|未声明|未接入|风险/.test(s)) return 'warn'
+  if (/失败|退回|拒绝|异常|缺失|停用|离线|不可用/.test(s)) return 'bad'
+  return ''
+}
+
+function adminTable(cols, rows, empty = '暂无数据', note = '') {
+  const n = Math.max(1, cols.length)
+  return `<div class="mc-table" style="--mc-cols:${cols.map(() => 'minmax(0,1fr)').join(' ')}">
+    <div class="mc-thead"><span>${cols.map((c) => esc(c)).join('</span><span>')}</span></div>
+    ${rows.length ? rows.join('') : `<div class="mc-row">${esc(empty)}</div>`}
+  </div>${note ? `<div class="mc-block-note">${esc(note)}</div>` : ''}`
+}
+
+async function renderAdminOverview(blocks) {
+  const { ok, body } = await api('/api/admin/pending')
+  if (!ok) {
+    blocks.appendChild(adminModuleBlock('待办读取失败', '—', adminEmpty(body?.error || '无法读取管理中心待办')))
+    return
+  }
+  const items = body.items || []
+  const counts = body.counts || {}
+  const rows = items.map((x) => `<div class="mc-trow">
+    <span class="mc-first"><b>${esc(x.label)}</b><span class="mc-dim" style="display:block;font-size:10px;font-weight:400;margin-top:3px">${esc(x.note)}</span></span>
+    <span><span class="mc-tag ${x.count ? 'warn' : 'ok'}">${esc(String(x.count || 0))}</span></span>
+    <span class="mc-dim">${x.count ? '等待处理' : '当前无待办'}</span>
+    <span class="mc-acts"><button class="btn sm${x.count ? ' primary' : ''}" data-admin-go="${esc(x.target)}">${x.count ? '去处理' : '查看'}</button></span>
+  </div>`).join('')
+  const wrap = adminModuleBlock('待我处理', `${body.total || 0} 项`, `<div class="mc-table" style="--mc-cols:minmax(150px,1.6fr) minmax(48px,.45fr) minmax(100px,.9fr) minmax(70px,.6fr)">
+    <div class="mc-thead"><span>事项</span><span>数量</span><span>状态</span><span>操作</span></div>
+    ${rows || '<div class="mc-row">当前没有待处理事项</div>'}
+  </div>`, '待办按对象聚合，详情回到对应治理模块处理；会话内的工具审批仍保留在对话中。')
+  blocks.appendChild(wrap)
+  const quick = adminModuleBlock('运行概况', '当前真实计数', `<div class="mc-kpis" style="margin:0">
+    <div class="mc-kpi"><div class="mc-kpi-k">数据资源</div><div class="mc-kpi-v">${esc(String(counts.resources || 0))}</div><div class="mc-kpi-note">数据中心实际 Resource</div></div>
+    <div class="mc-kpi"><div class="mc-kpi-k">业务应用</div><div class="mc-kpi-v">${esc(String(counts.apps || 0))}</div><div class="mc-kpi-note">应用注册接口实际数量</div></div>
+    <div class="mc-kpi"><div class="mc-kpi-k">AS 应用</div><div class="mc-kpi-v">${esc(String(counts.asApps || 0))}</div><div class="mc-kpi-note">应用市场中的 Runtime 应用</div></div>
+    <div class="mc-kpi"><div class="mc-kpi-k">工单 / 反馈</div><div class="mc-kpi-v">${esc(`${counts.tickets || 0} / ${counts.feedback || 0}`)}</div><div class="mc-kpi-note">服务台待处理记录</div></div>
+    <div class="mc-kpi"><div class="mc-kpi-k">审批决策</div><div class="mc-kpi-v">${esc(String(counts.approvalDecisions || 0))}</div><div class="mc-kpi-note">最近 50 条运行时决策</div></div>
+  </div>`)
+  blocks.appendChild(quick)
+  wrap.querySelectorAll('[data-admin-go]').forEach((b) => b.addEventListener('click', () => {
+    state.consoleTab = b.dataset.adminGo
+    renderView()
+  }))
+}
+
+async function renderAdminOrg(blocks) {
+  const [{ body: org }, { body: boot }] = await Promise.all([api('/api/org'), api('/api/bootstrap')])
+  const units = org.units || []
+  const members = org.members || []
+  const roles = boot.allRoles || []
+  const dutyCatalog = org.dutyCatalog || []
+  const unitRows = units.flatMap((u) => (u.departments || []).map((d) => `<div class="mc-trow">
+    <span class="mc-first">${esc(u.name)} <span class="mc-dim">${esc(d.name)}</span></span>
+    <span>${esc(d.head || '—')}</span>
+    <span>${esc(u.kind || '组织')}</span>
+    <span>${esc(d.id || '—')}</span>
+  </div>`))
+  blocks.appendChild(adminModuleBlock('组织单元', `${unitRows.length} 个部门`, adminTable(['单位 / 部门', '负责人', '类型', '标识'], unitRows, '组织主数据尚未接入'), '组织架构、部门负责人和法人单位来自 /api/org；未接入人事主数据前不填充演示组织。'))
+  const memberRows = members.map((m) => {
+    const duties = Array.isArray(m.duties) ? m.duties : []
+    return `<div class="mc-trow">
+      <span class="mc-first"><b>${esc(m.name)}</b><span class="mc-dim" style="display:block;font-size:10px;font-weight:400;margin-top:2px">${esc(m.unit || '—')} · ${esc(m.dept || '—')}</span></span>
+      <span>${(m.posts || []).map((p) => esc(p.title)).join(' / ') || '—'}</span>
+      <span>${duties.length ? duties.map((d) => adminTag(dutyCatalog.find((x) => x.code === d)?.label || d, 'ok')).join(' ') : '<span class="mc-dim">未授予管理职责</span>'}</span>
+      <span>${m.role ? `<button class="btn sm" data-duty-member="${esc(m.id)}" data-duty-role="${esc(m.role)}">配置职责</button>` : '<span class="mc-dim">未绑定演示角色</span>'}</span>
+    </div>`
+  })
+  const accountRows = roles.map((r) => `<div class="mc-trow">
+    <span class="mc-first"><b>${esc(r.name || r.label || '—')}</b><span class="mc-dim" style="display:block;font-size:10px;font-weight:400;margin-top:2px">${esc(r.username || r.accountId || '')}</span></span>
+    <span>${esc(r.unit || '—')}</span>
+    <span>${esc(r.duty || r.label || r.role || '—')}</span>
+    <span class="mono" style="font-size:10px">${esc(r.accountId || r.id || '—')}</span>
+  </div>`)
+  const memberBlock = adminModuleBlock('人员与职责', members.length ? `${members.length} 人` : `${roles.length} 个账号`,
+    members.length
+      ? adminTable(['人员', '岗位', '管理职责', '操作'], memberRows, '暂无人员')
+      : adminTable(['账号', '单位', '身份 / 职责', '账号 ID'], accountRows, '组织成员尚未接入；当前只显示账号目录'),
+    members.length ? '职责变更通过 /api/org/duty 写入；只对具备演示角色的成员开放。' : '组织成员尚未接入，当前显示真实账号目录，不伪造人员信息。')
+  blocks.appendChild(memberBlock)
+  const dutyRows = dutyCatalog.map((d) => `<div class="mc-trow">
+    <span class="mc-first"><b>${esc(d.label)}</b><span class="mc-dim" style="display:block;font-size:10px;font-weight:400;margin-top:2px">${esc(d.code)}</span></span>
+    <span>${esc(d.scope || '—')}</span>
+    <span>${esc(d.entry || '—')}</span>
+  </div>`)
+  blocks.appendChild(adminModuleBlock('职责目录', `${dutyCatalog.length} 项`, adminTable(['职责', '授权范围', '管理入口'], dutyRows, '职责目录尚未接入')))
+  memberBlock.querySelectorAll('[data-duty-member]').forEach((b) => b.addEventListener('click', () => {
+    const member = members.find((x) => x.id === b.dataset.dutyMember)
+    if (!member || !dutyCatalog.length) return toast('职责目录为空，无法配置', true)
+    const current = Array.isArray(member.duties) ? member.duties : []
+    const modal = openModal(`配置职责 · ${member.name}`, `<div class="form-note">只授予该成员实际承担的管理职责；保存后写入运行时职责表并记录审计。</div>
+      <div style="display:grid;gap:8px;margin-top:10px">${dutyCatalog.map((d) => `<label style="display:flex;gap:9px;align-items:flex-start;padding:9px 10px;border:1px solid #e7ebf1;border-radius:8px;cursor:pointer">
+        <input type="checkbox" data-duty-code="${esc(d.code)}" ${current.includes(d.code) ? 'checked' : ''}>
+        <span><b style="font-size:12px">${esc(d.label)}</b><span style="display:block;color:#7b828b;font-size:10px;margin-top:2px">${esc(d.scope || '')}</span></span>
+      </label>`).join('')}</div>
+      <div class="form-foot"><span class="spacer"></span><button class="btn" data-mclose>取消</button><button class="btn primary" id="dutySave">保存职责</button></div>`)
+    modal.querySelector('[data-mclose]').addEventListener('click', () => modal.remove())
+    modal.querySelector('#dutySave').addEventListener('click', async () => {
+      const save = modal.querySelector('#dutySave')
+      save.disabled = true
+      const picks = [...modal.querySelectorAll('[data-duty-code]')].map((x) => ({ code: x.dataset.dutyCode, on: x.checked }))
+      for (const pick of picks) {
+        const was = current.includes(pick.code)
+        if (was === pick.on) continue
+        const { ok, body } = await api('/api/org/duty', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ memberId: member.id, memberRole: member.role, duty: pick.code, allow: pick.on }) })
+        if (!ok) { save.disabled = false; return toast(body.error || '职责保存失败', true) }
+      }
+      modal.remove()
+      toast('职责已更新并写入审计')
+      renderView()
+    })
+  }))
+}
+
+async function openAdminResourceDetail(id) {
+  const { ok, body } = await api(`/api/resource?id=${encodeURIComponent(id)}`)
+  if (!ok) return toast(body.error || '资源详情读取失败', true)
+  const r = body.item || {}
+  const workflow = r.workflow
+  const edit = body.editRequest
+  const download = body.downloadRequest
+  const stageActions = []
+  if (workflow && workflow.stage === 'dept') stageActions.push(['workflow:dept-approve', '部门负责人同意'], ['workflow:reject', '退回'])
+  if (workflow && workflow.stage === 'qc') stageActions.push(['workflow:qc-pass', '质检通过'], ['workflow:qc-fail', '质检退回'])
+  if (workflow && workflow.stage === 'data') stageActions.push(['workflow:data-approve', '数据管理员通过'], ['workflow:reject', '退回'])
+  if (edit && edit.status === 'pending' && edit.stage === 'dept') stageActions.push(['edit:dept-approve', '部门负责人同意'], ['edit:reject', '退回编辑'])
+  if (edit && edit.status === 'pending' && edit.stage === 'ops') stageActions.push(['edit:ops-approve', '运维管理同意'], ['edit:reject', '退回编辑'])
+  if (download && download.status === 'pending') stageActions.push(['download:approve', '批准下载'], ['download:reject', '退回下载'])
+  const actionHtml = stageActions.length ? `<div class="mc-acts" style="margin-top:12px">${stageActions.map(([code, label]) => `<button class="btn sm ${code.endsWith('approve') || code.endsWith('pass') ? 'primary' : ''}" data-res-action="${esc(code)}">${esc(label)}</button>`).join('')}</div>` : '<div class="form-note">当前没有可在管理中心处理的动作。</div>'
+  const steps = (workflow?.steps || edit?.steps || []).map((s) => `<span class="mc-tag ${s.state === 'done' ? 'ok' : s.state === 'active' ? 'warn' : s.state === 'rejected' ? 'bad' : ''}">${esc(s.label || s.key)}${s.by ? ` · ${esc(s.by)}` : ''}</span>`).join(' ')
+  const modal = openModal(`资源详情 · ${r.name || id}`, `<div class="form-note">${esc(r.id || id)} · ${esc(r.source || '')} · ${esc(r.owner || '')}</div>
+    <div class="mc-kpis" style="margin:8px 0"><div class="mc-kpi"><div class="mc-kpi-k">状态</div><div class="mc-kpi-v">${esc(r.status || '—')}</div></div><div class="mc-kpi"><div class="mc-kpi-k">密级</div><div class="mc-kpi-v">${esc(r.security || '—')}</div></div><div class="mc-kpi"><div class="mc-kpi-k">格式</div><div class="mc-kpi-v">${esc(r.format || '—')}</div></div><div class="mc-kpi"><div class="mc-kpi-k">网络</div><div class="mc-kpi-v">${esc((r.nets || []).join(' / ') || '—')}</div></div></div>
+    <div class="form-note">授权范围：${esc(Array.isArray(r.scope) ? r.scope.join(' / ') : (r.scope || '—'))}</div>
+    ${steps ? `<div style="margin:10px 0;line-height:1.9">${steps}</div>` : ''}
+    ${edit && edit.status === 'pending' ? `<div class="mc-block-note">编辑申请：${esc(edit.by || '')} · ${esc(edit.stage || '')} · ${esc(edit.at || '')}</div>` : ''}
+    ${download && download.status === 'pending' ? `<div class="mc-block-note">下载申请：${esc(download.by || '')} · ${esc(download.at || '')} · ${esc(download.approval || '')}</div>` : ''}
+    ${actionHtml}
+    <div class="form-foot"><span class="spacer"></span><button class="btn" data-mclose>关闭</button></div>`, { wide: true })
+  modal.querySelector('[data-mclose]').addEventListener('click', () => modal.remove())
+  modal.querySelectorAll('[data-res-action]').forEach((b) => b.addEventListener('click', async () => {
+    const [kind, action] = b.dataset.resAction.split(':')
+    const url = kind === 'workflow' ? '/api/resources/approval' : kind === 'edit' ? '/api/resources/edit-approval' : '/api/resources/download/approval'
+    b.disabled = true
+    const { ok, body: result } = await api(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id, action }) })
+    if (!ok) { b.disabled = false; return toast(result.error || '审批操作失败', true) }
+    modal.remove()
+    toast(result.message || '审批状态已更新')
+    renderView()
+  }))
+}
+
+async function renderAdminData(blocks) {
+  const [{ body: resBody }, { body: svcBody }] = await Promise.all([api('/api/resources'), api('/api/dataservices')])
+  const resources = resBody.items || []
+  const services = svcBody.items || []
+  const pending = resources.filter((r) => /待|pending|review/i.test(String(r.status || ''))).length
+  const resourceRows = resources.map((r) => `<div class="mc-trow">
+    <span class="mc-first"><b>${esc(r.name)}</b><span class="mc-dim" style="display:block;font-size:10px;font-weight:400;margin-top:2px">${esc(r.id)} · ${esc(r.businessCategory || '其他')}</span></span>
+    <span>${esc(r.type || '—')} / ${esc(r.format || '—')}</span>
+    <span>${adminTag(r.security || '—', r.security === 'secret' ? 'warn' : '')}</span>
+    <span>${adminTag(r.status || '—', adminStatusTone(r.status))}</span>
+    <span>${esc(r.owner || r.dataOwner || '—')}</span>
+    <span class="mc-acts"><button class="btn sm" data-res-detail="${esc(r.id)}">详情</button></span>
+  </div>`)
+  blocks.appendChild(adminModuleBlock('资源台账', `${resources.length} 项`, `<div class="mc-table" style="--mc-cols:minmax(160px,1.8fr) minmax(70px,.7fr) minmax(52px,.5fr) minmax(64px,.62fr) minmax(80px,.8fr) minmax(52px,.5fr)">
+    <div class="mc-thead"><span>资源</span><span>类型 / 格式</span><span>密级</span><span>状态</span><span>数据负责人</span><span>操作</span></div>
+    ${resourceRows.join('') || `<div class="mc-row">当前没有数据资源${pending ? `；${pending} 项待审批` : ''}</div>`}
+  </div>`, resources.length ? '资源详情中的登记、编辑、下载审批动作会写回数据中心状态并记录审计。' : '数据中心当前没有资源；这里保持空态，不填充演示数据。'))
+  if (!resources.length) {
+    const dc = document.createElement('div')
+    dc.className = 'mc-block'
+    dc.innerHTML = `<div class="mc-block-head"><b>下一步</b><span class="spacer"></span><span class="mc-count">真实入口</span></div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:12px"><span class="mc-dim">数据资源为空时，登记、授权和下载审批都没有对象。</span><span class="spacer"></span><button class="btn sm primary" id="adminGoDatacenter">去数据中心登记</button></div>`
+    blocks.appendChild(dc)
+    dc.querySelector('#adminGoDatacenter')?.addEventListener('click', () => { state.view = 'datacenter'; renderView() })
+  }
+  const serviceRows = services.map((s) => `<div class="mc-trow">
+    <span class="mc-first"><b>${esc(s.name || s.id)}</b><span class="mc-dim" style="display:block;font-size:10px;font-weight:400;margin-top:2px">${esc(s.endpoint || s.path || '')}</span></span>
+    <span>${esc(s.method || 'GET')}</span>
+    <span>${adminTag(s.status || '—', adminStatusTone(s.status))}</span>
+    <span>${esc(String(s.calls ?? '—'))}</span>
+  </div>`)
+  blocks.appendChild(adminModuleBlock('数据服务', `${services.length} 个`, adminTable(['服务', '方法', '状态', '调用量'], serviceRows, '当前没有数据服务')))
+  blocks.querySelectorAll('[data-res-detail]').forEach((b) => b.addEventListener('click', () => openAdminResourceDetail(b.dataset.resDetail)))
+}
+
+async function openAppDataGrantModal(appId = '') {
+  const [{ body: asBody }, { body: resBody }, { body: bootBody }] = await Promise.all([
+    api('/api/as/status'), api('/api/resources'), api('/api/bootstrap'),
+  ])
+  const byApp = new Map()
+  for (const item of (asBody.items || [])) {
+    const key = item.appId || item.id
+    const prev = byApp.get(key)
+    if (!prev || String(item.runtime?.version || '') >= String(prev.runtime?.version || '')) byApp.set(key, item)
+  }
+  const apps = [...byApp.values()]
+  const resources = resBody.items || []
+  const accounts = bootBody.allRoles || []
+  const current = state.boot?.user || {}
+  const currentId = current.accountId || current.id || ''
+  const appOptions = apps.map((a) => `<option value="${esc(a.appId || a.id)}"${String(a.appId || a.id) === String(appId) ? ' selected' : ''}>${esc(a.name)} · ${esc(a.appId || a.id)}</option>`).join('')
+  const accountOptions = [current, ...accounts]
+    .filter((a, i, list) => a && (a.accountId || a.id) && list.findIndex((x) => (x.accountId || x.id) === (a.accountId || a.id)) === i)
+    .map((a) => {
+      const id = a.accountId || a.id
+      return `<option value="${esc(id)}"${id === currentId ? ' selected' : ''}>${esc(a.name || id)} · ${esc(a.unit || '')}</option>`
+    }).join('')
+  const resourceOptions = [
+    `<option value="*"${resources.length ? '' : ' selected'}>全部当前可见资源（试点用，权限较宽）</option>`,
+    ...resources.map((r) => `<option value="${esc(r.id)}"${resources.length ? ' selected' : ''}>${esc(r.name)} · ${esc(r.type || '')}</option>`),
+  ].join('')
+  const modal = openModal('应用数据授权', `<div class="form-note">选择应用、用户和资源范围后签发一条真实授权。应用仍需用当前用户上下文换取 5 分钟短期令牌，不能直接读资源接口。</div>
+    <div class="form-label" style="margin-top:10px">应用</div><select class="form-input" id="adgApp">${appOptions || '<option value="">当前没有 AS 应用</option>'}</select>
+    <div class="form-label" style="margin-top:10px">授权用户</div><select class="form-input" id="adgUser">${accountOptions}</select>
+    <div class="form-label" style="margin-top:10px">资源范围</div><select class="form-input" id="adgResources" multiple size="6" style="height:auto">${resourceOptions}</select>
+    <div class="form-note">${resources.length ? '可多选具体资源；选择“全部当前可见资源”会覆盖当前和未来可见资源。' : '数据中心当前没有资源；选择全部可见资源后查询会返回空集合。'}</div>
+    <div class="form-label" style="margin-top:10px">数据范围</div>
+    <label style="display:flex;gap:8px;align-items:center;margin:5px 0"><input type="checkbox" checked disabled> 读取（列表与统计）</label>
+    <label style="display:flex;gap:8px;align-items:center;margin:5px 0"><input type="checkbox" id="adgDetail"> 资源详情（字段与元数据）</label>
+    <div class="form-label" style="margin-top:10px">用途</div><input class="form-input" id="adgPurpose" value="${esc(`为 ${appId || '应用'} 提供业务数据`)}">
+    <div class="form-label" style="margin-top:10px">有效期（天）</div><input class="form-input" id="adgDays" type="number" min="1" max="90" value="7">
+    <div class="form-foot"><span class="spacer"></span><button class="btn" data-mclose>取消</button><button class="btn primary" id="adgSave">签发授权</button></div>`, { wide: true })
+  modal.querySelector('[data-mclose]').addEventListener('click', () => modal.remove())
+  modal.querySelector('#adgSave').addEventListener('click', async () => {
+    const save = modal.querySelector('#adgSave')
+    save.disabled = true
+    const select = modal.querySelector('#adgResources')
+    const picked = [...select.selectedOptions].map((x) => x.value)
+    const resourceIds = picked.includes('*') ? ['*'] : picked
+    if (!resourceIds.length) { save.disabled = false; return toast('请选择资源范围', true) }
+    const scopes = ['read', ...(modal.querySelector('#adgDetail').checked ? ['detail'] : [])]
+    const { ok, body } = await api('/api/app-data/grants', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        appId: modal.querySelector('#adgApp').value,
+        userId: modal.querySelector('#adgUser').value,
+        resourceIds,
+        scopes,
+        purpose: modal.querySelector('#adgPurpose').value,
+        days: Number(modal.querySelector('#adgDays').value || 7),
+        replace: true,
+      }),
+    })
+    if (!ok) { save.disabled = false; return toast(body.error || '授权创建失败', true) }
+    modal.remove(); toast('应用数据授权已签发'); renderView()
+  })
+}
+
+async function renderAdminApps(blocks) {
+  const [{ body: bizBody }, { body: statusBody }, { body: capBody }, { body: grantBody }, { body: resBody }] = await Promise.all([
+    api('/api/apps'), api('/api/as/status'), api('/api/as/capabilities'), api('/api/app-data/grants'), api('/api/resources'),
+  ])
+  const biz = bizBody.items || []
+  const rawAs = statusBody.items || []
+  const byApp = new Map()
+  for (const item of rawAs) {
+    const key = item.appId || item.id
+    const prev = byApp.get(key)
+    const version = String(item.runtime?.version || '')
+    if (!prev || version >= String(prev.runtime?.version || '')) byApp.set(key, item)
+  }
+  const asApps = [...byApp.values()]
+  const caps = new Map((capBody.apps || []).map((x) => [x.appId, x]))
+  const grants = grantBody.items || []
+  const resources = resBody.items || []
+  const me = state.boot?.user?.accountId || state.boot?.user?.id || ''
+  const myGrant = (appId) => grants.find((g) => String(g.appId) === String(appId) && String(g.userId) === String(me) && g.status === 'active' && !g.expired)
+  const asRows = asApps.map((x) => {
+    const rt = x.runtime || {}
+    const cap = caps.get(x.appId) || {}
+    const declared = cap.declared
+    return `<div class="mc-trow">
+      <span class="mc-first"><b>${esc(x.name)}</b><span class="mc-dim" style="display:block;font-size:10px;font-weight:400;margin-top:2px">${esc(x.appId || x.id)} · v${esc(rt.version || '—')}</span></span>
+      <span>${adminTag(rt.running ? '运行中' : '已停止', rt.running ? 'ok' : '')}${rt.port ? `<span class="mc-dim mono" style="font-size:10px"> :${esc(String(rt.port))}</span>` : ''}</span>
+      <span>${declared ? `${(cap.tools || []).length} 工具 / ${(cap.resources || []).length} 资源` : adminTag('未声明 capabilities', 'warn')}</span>
+      <span>${adminTag(rt.leaseCount ? `租约 ${rt.leaseCount}` : '无租约', rt.leaseCount ? 'ok' : '')}</span>
+      <span class="mc-acts">${rt.running ? `<button class="btn sm" data-as-stop="${esc(x.id)}">停止</button>` : `<button class="btn sm primary" data-as-start="${esc(x.id)}">启动</button>`}<button class="btn sm" data-as-cap="${esc(x.appId || x.id)}">能力</button></span>
+    </div>`
+  })
+  blocks.appendChild(adminModuleBlock('AS 应用', `${asApps.length} 个`, `<div class="mc-table" style="--mc-cols:minmax(150px,1.7fr) minmax(80px,.8fr) minmax(120px,1.1fr) minmax(70px,.65fr) minmax(100px,.9fr)">
+    <div class="mc-thead"><span>应用</span><span>运行</span><span>能力声明</span><span>租约</span><span>操作</span></div>
+    ${asRows.join('') || '<div class="mc-row">应用市场没有 AS 应用</div>'}
+  </div>`, 'AS 应用按机器级单例进程运行；停用只释放当前租约，强制停止仅管理员可用。'))
+  const bizRows = biz.map((a) => `<div class="mc-trow">
+    <span class="mc-first"><b>${esc(a.name)}</b><span class="mc-dim" style="display:block;font-size:10px;font-weight:400;margin-top:2px">${esc(a.id)} · ${esc(a.maintainer || '')}</span></span>
+    <span>v${esc(a.version || '—')}</span>
+    <span>${esc((a.nets || []).join(' / ') || '—')}</span>
+    <span>${adminTag(a.status || '—', adminStatusTone(a.status))}</span>
+    <span class="mc-acts">${a.status === 'review' ? `<button class="btn sm primary" data-app-act="approve" data-appid="${esc(a.id)}">通过</button><button class="btn sm" data-app-act="reject" data-appid="${esc(a.id)}">退回</button>` : a.status === 'published' ? `<button class="btn sm" data-app-act="offline" data-appid="${esc(a.id)}">下架</button>` : ''}</span>
+  </div>`)
+  blocks.appendChild(adminModuleBlock('业务应用', `${biz.length} 个`, `<div class="mc-table" style="--mc-cols:minmax(180px,1.9fr) minmax(60px,.6fr) minmax(80px,.75fr) minmax(70px,.65fr) minmax(100px,.9fr)">
+    <div class="mc-thead"><span>应用</span><span>版本</span><span>网络</span><span>状态</span><span>操作</span></div>
+    ${bizRows.join('') || '<div class="mc-row">当前没有业务应用注册记录</div>'}
+  </div>`, '业务应用接入审核走 /api/apps/action；AS 应用与业务应用分开管理。'))
+  const permissionRows = asApps.map((x) => {
+    const cap = caps.get(x.appId) || {}
+    const grant = myGrant(x.appId)
+    const scopeText = grant ? (grant.resourceIds.includes('*') ? '全部当前可见资源' : `${grant.resourceIds.length} 项指定资源`) : '无'
+    return `<div class="mc-trow">
+      <span class="mc-first"><b>${esc(x.name)}</b><span class="mc-dim mono" style="display:block;font-size:10px;font-weight:400;margin-top:2px">${esc(x.appId || x.id)}</span></span>
+      <span>${cap.declared ? `${(cap.tools || []).length} 工具 / ${(cap.resources || []).length} 资源` : adminTag('未声明', 'warn')}</span>
+      <span>${grant ? adminTag(scopeText, 'ok') : adminTag('无（未授权）', 'bad')}</span>
+      <span>${grant ? adminTag(`已授权 · ${grant.scopes.join('+')}`, 'ok') : adminTag('未配置短期令牌', 'warn')}</span>
+      <span>${grant ? adminTag(new Date(grant.expiresAt).toLocaleDateString('zh-CN'), 'ok') : adminTag('待授权', 'warn')}</span>
+      <span class="mc-acts"><button class="btn sm ${grant ? '' : 'primary'}" data-app-grant="${esc(x.appId || x.id)}">${grant ? '续期 / 调整' : '授权'}</button></span>
+    </div>`
+  })
+  const activeGrantCount = grants.filter((g) => !g.expired).length
+  const permissionBlock = adminModuleBlock('应用数据权限', `${asApps.length} 个 AS 应用 · ${activeGrantCount} 条生效授权`, `<div class="mc-table" style="--mc-cols:minmax(140px,1.5fr) minmax(90px,.85fr) minmax(120px,1.2fr) minmax(115px,1.08fr) minmax(80px,.8fr) minmax(82px,.8fr)">
+    <div class="mc-thead"><span>应用</span><span>能力声明</span><span>授权范围</span><span>令牌状态</span><span>到期</span><span>操作</span></div>
+    ${permissionRows.join('') || '<div class="mc-row">当前没有 AS 应用</div>'}
+  </div>`, '应用进程不再继承主进程令牌；已授权应用用当前用户上下文换取 5 分钟短期数据令牌，再走代理读取。')
+  blocks.appendChild(permissionBlock)
+  const ledgerRows = grants.map((g) => `<div class="mc-trow">
+    <span class="mc-first"><b>${esc(g.appName || g.appId)}</b><span class="mc-dim mono" style="display:block;font-size:10px;font-weight:400;margin-top:2px">${esc(g.grantId)}</span></span>
+    <span>${esc(g.userName || g.userId)}</span>
+    <span>${esc(g.resourceIds.includes('*') ? '全部可见资源' : g.resourceIds.join('、'))}</span>
+    <span>${esc(g.scopes.join('+'))}</span>
+    <span>${adminTag(g.expired ? '已失效' : '生效中', g.expired ? 'bad' : 'ok')}</span>
+    <span>${esc(new Date(g.expiresAt).toLocaleDateString('zh-CN'))}</span>
+    <span class="mc-acts">${!g.expired ? `<button class="btn sm" data-grant-revoke="${esc(g.grantId)}">撤销</button>` : ''}</span>
+  </div>`)
+  blocks.appendChild(adminModuleBlock('授权台账', `${grants.length} 条`, `<div class="mc-table" style="--mc-cols:minmax(150px,1.5fr) minmax(70px,.65fr) minmax(150px,1.45fr) minmax(70px,.65fr) minmax(62px,.58fr) minmax(62px,.58fr) minmax(60px,.55fr)">
+    <div class="mc-thead"><span>应用 / 授权单</span><span>用户</span><span>资源范围</span><span>数据范围</span><span>状态</span><span>到期</span><span>操作</span></div>
+    ${ledgerRows.join('') || '<div class="mc-row">尚未创建应用数据授权</div>'}
+  </div>`, '授权台账落 SQLite；撤销后该应用已签发的短期令牌立即失效。'))
+  blocks.querySelectorAll('[data-app-grant]').forEach((b) => b.addEventListener('click', () => openAppDataGrantModal(b.dataset.appGrant)))
+  blocks.querySelectorAll('[data-grant-revoke]').forEach((b) => b.addEventListener('click', async () => {
+    b.disabled = true
+    const { ok, body } = await api('/api/app-data/grants/revoke', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ grantId: b.dataset.grantRevoke }) })
+    if (!ok) { b.disabled = false; return toast(body.error || '撤销失败', true) }
+    toast('授权已撤销，相关短期令牌已失效'); renderView()
+  }))
+  blocks.querySelectorAll('[data-app-act]').forEach((b) => b.addEventListener('click', async () => {
+    b.disabled = true
+    const { ok, body } = await api('/api/apps/action', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: b.dataset.appid, action: b.dataset.appAct }) })
+    if (!ok) { b.disabled = false; return toast(body.error || '应用操作失败', true) }
+    toast(b.dataset.appAct === 'approve' ? '应用已通过并发布' : b.dataset.appAct === 'reject' ? '应用已退回' : '应用已下架')
+    renderView()
+  }))
+  blocks.querySelectorAll('[data-as-start]').forEach((b) => b.addEventListener('click', async () => {
+    b.disabled = true
+    const { ok, body } = await api('/api/as/start', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: b.dataset.asStart }) })
+    if (!ok) { b.disabled = false; return toast(body.error || '应用启动失败', true) }
+    toast('应用已启动')
+    renderView()
+  }))
+  blocks.querySelectorAll('[data-as-stop]').forEach((b) => b.addEventListener('click', async () => {
+    b.disabled = true
+    const { ok, body } = await api('/api/as/stop', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: b.dataset.asStop, force: true }) })
+    if (!ok) { b.disabled = false; return toast(body.error || '应用停止失败', true) }
+    toast('应用已停止并释放租约')
+    renderView()
+  }))
+  blocks.querySelectorAll('[data-as-cap]').forEach((b) => b.addEventListener('click', async () => {
+    const cap = caps.get(b.dataset.asCap)
+    if (!cap) return toast('当前账号看不到该应用能力', true)
+    const tools = (cap.tools || []).map((t) => `<div class="mc-trow"><span class="mc-first">${esc(t.name)}</span><span>${esc(t.method)}</span><span>${esc(t.sideEffect ? '写操作' : '只读')}</span><span class="mono" style="font-size:10px">${esc(t.path)}</span></div>`).join('')
+    const resources = (cap.resources || []).map((t) => `<div class="mc-trow"><span class="mc-first">${esc(t.name)}</span><span>${esc(t.method)}</span><span>只读</span><span class="mono" style="font-size:10px">${esc(t.path)}</span></div>`).join('')
+    openModal(`应用能力 · ${cap.name || cap.appId}`, `<div class="form-note">${esc(cap.note || '')}</div>
+      <div class="mc-block-note" style="margin:9px 0">${esc(cap.verdict || '')}</div>
+      <div class="mc-table" style="--mc-cols:minmax(120px,1.3fr) minmax(46px,.45fr) minmax(60px,.55fr) minmax(130px,1.2fr)"><div class="mc-thead"><span>工具</span><span>方法</span><span>类型</span><span>路径</span></div>${tools || '<div class="mc-row">无已声明工具</div>'}</div>
+      <div style="height:8px"></div>
+      <div class="mc-table" style="--mc-cols:minmax(120px,1.3fr) minmax(46px,.45fr) minmax(60px,.55fr) minmax(130px,1.2fr)"><div class="mc-thead"><span>资源</span><span>方法</span><span>类型</span><span>路径</span></div>${resources || '<div class="mc-row">无已声明资源</div>'}</div>`, { wide: true })
+  }))
+}
+
+async function renderAdminOps(blocks) {
+  const [{ body: monitor }, { body: asBody }, { body: taskBody }] = await Promise.all([api('/api/monitor'), api('/api/as/status'), api('/api/tasks')])
+  const services = monitor.services || []
+  const failures = monitor.failures || []
+  const asApps = []
+  const byApp = new Map()
+  for (const item of (asBody.items || [])) {
+    const key = item.appId || item.id
+    const prev = byApp.get(key)
+    if (!prev || String(item.runtime?.version || '') >= String(prev.runtime?.version || '')) byApp.set(key, item)
+  }
+  for (const item of byApp.values()) asApps.push(item)
+  const serviceRows = services.map((s) => `<div class="mc-trow">
+    <span class="mc-first">${esc(s.name)}</span><span>${adminTag(s.status === 'ok' ? '正常' : '异常', s.status === 'ok' ? 'ok' : 'warn')}</span>
+    <span>${esc(s.latency || '—')}</span><span>${esc(s.uptime || '—')}</span><span>${esc(s.note || '')}</span>
+  </div>`)
+  blocks.appendChild(adminModuleBlock('服务健康', `${services.length} 个服务`, `<div class="mc-table" style="--mc-cols:minmax(150px,1.5fr) minmax(58px,.55fr) minmax(58px,.55fr) minmax(56px,.52fr) minmax(120px,1.1fr)"><div class="mc-thead"><span>服务</span><span>状态</span><span>延迟</span><span>可用率</span><span>说明</span></div>${serviceRows.join('') || '<div class="mc-row">监控服务尚未接入</div>'}</div>`,
+    monitor.storage ? `存储：${monitor.storage.used} / ${monitor.storage.total} ${monitor.storage.unit} · ${monitor.storage.note || ''}` : '监控数据来自 /api/monitor。'))
+  const asRows = asApps.map((x) => {
+    const rt = x.runtime || {}
+    return `<div class="mc-trow"><span class="mc-first"><b>${esc(x.name)}</b><span class="mc-dim" style="display:block;font-size:10px;font-weight:400;margin-top:2px">${esc(x.appId || x.id)}</span></span><span>${adminTag(rt.running ? '运行中' : '已停止', rt.running ? 'ok' : '')}</span><span>${esc(rt.port ? `:${rt.port}` : '—')}</span><span>${esc(String(rt.leaseCount || 0))}</span><span>${esc(rt.lastError || '—')}</span></div>`
+  })
+  blocks.appendChild(adminModuleBlock('AS 进程与租约', `${asApps.length} 个`, `<div class="mc-table" style="--mc-cols:minmax(150px,1.5fr) minmax(64px,.62fr) minmax(58px,.55fr) minmax(44px,.42fr) minmax(140px,1.3fr)"><div class="mc-thead"><span>应用</span><span>状态</span><span>端口</span><span>租约</span><span>最近错误</span></div>${asRows.join('') || '<div class="mc-row">暂无 AS 应用</div>'}</div>`, '进程由服务端持有；应用模块负责生命周期，运维模块只读运行态与错误。'))
+  const failuresRows = failures.map((f) => `<div class="mc-trow"><span class="mc-first">${esc(f.task)}</span><span>${esc(f.reason)}</span><span>${esc(f.at)}</span><span>${adminTag(f.retry || '—', /失败|异常/.test(f.retry || '') ? 'bad' : 'warn')}</span></div>`).join('')
+  blocks.appendChild(adminModuleBlock('故障与任务', `${failures.length} 条故障 · ${monitor.tasks || 0} 个失败任务`, adminTable(['任务', '原因', '时间', '处置'], failuresRows, '当前没有故障记录')))
+}
+
+async function renderAdminService(blocks) {
+  const [{ body: tBody }, { body: fBody }] = await Promise.all([api('/api/tickets'), api('/api/feedback')])
+  const tickets = tBody.items || []
+  const feedback = fBody.items || []
+  const openTickets = tickets.filter((t) => t.status !== '已闭环')
+  blocks.appendChild(adminModuleBlock('工单', `${openTickets.length} 项待处理 / ${tickets.length} 项`, `<div class="mc-table" style="--mc-cols:minmax(90px,.85fr) minmax(170px,1.8fr) minmax(65px,.65fr) minmax(80px,.78fr) minmax(85px,.8fr) minmax(110px,1fr)"><div class="mc-thead"><span>编号</span><span>事项</span><span>类型</span><span>负责人</span><span>状态</span><span>操作</span></div>
+    ${tickets.map((t) => `<div class="mc-trow"><span class="mc-first mono" style="font-size:10px">${esc(t.id)}</span><span>${esc(t.subject)}<span class="mc-dim" style="display:block;font-size:10px">${esc(t.created || '')} · ${esc(t.net || '')}</span></span><span>${esc(t.type || '—')}</span><span>${esc(t.owner || '—')}</span><span>${adminTag(t.status || '—', adminStatusTone(t.status))}</span><span class="mc-acts">${t.status === '待分派' ? `<button class="btn sm" data-ticket-act="assign" data-ticket="${esc(t.id)}">分派</button>` : t.status === '处理中' ? `<button class="btn sm" data-ticket-act="done" data-ticket="${esc(t.id)}">完成</button>` : t.status === '待复核' ? `<button class="btn sm primary" data-ticket-act="verify" data-ticket="${esc(t.id)}">复核</button>` : ''}</span></div>`).join('') || '<div class="mc-row">当前没有工单</div>'}
+  </div>`, '工单流转与账号变更分开；账号最终变更落组织与权限。') )
+  const tool = blocks.lastChild
+  const newBtn = document.createElement('button')
+  newBtn.className = 'btn sm primary'
+  newBtn.textContent = '新建工单'
+  const head = tool.querySelector('.mc-block-head')
+  if (head) { const spacer = head.querySelector('.spacer'); if (spacer) spacer.after(newBtn) }
+  newBtn.addEventListener('click', () => {
+    const modal = openModal('新建工单', `<div class="form-label">类型</div><select class="form-input" id="tkType"><option>入职</option><option>调岗</option><option>离职</option><option>权限</option><option>故障</option></select><div class="form-label" style="margin-top:10px">事项</div><input class="form-input" id="tkSubject" placeholder="例如：王磊 · 规划一所 · 助理规划师"><div class="form-foot"><span class="spacer"></span><button class="btn" data-mclose>取消</button><button class="btn primary" id="tkCreate">创建</button></div>`)
+    modal.querySelector('[data-mclose]').addEventListener('click', () => modal.remove())
+    modal.querySelector('#tkCreate').addEventListener('click', async () => {
+      const subject = modal.querySelector('#tkSubject').value.trim()
+      if (!subject) return toast('请填写事项', true)
+      const { ok, body } = await api('/api/tickets', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ type: modal.querySelector('#tkType').value, subject }) })
+      if (!ok) return toast(body.error || '工单创建失败', true)
+      modal.remove(); toast('工单已创建'); renderView()
+    })
+  })
+  blocks.querySelectorAll('[data-ticket-act]').forEach((b) => b.addEventListener('click', async () => {
+    b.disabled = true
+    const { ok, body } = await api('/api/tickets/action', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: b.dataset.ticket, action: b.dataset.ticketAct }) })
+    if (!ok) { b.disabled = false; return toast(body.error || '工单操作失败', true) }
+    toast('工单状态已更新'); renderView()
+  }))
+  const feedbackRows = feedback.map((f) => `<div class="mc-trow"><span class="mc-first"><b>${esc(f.subject)}</b><span class="mc-dim" style="display:block;font-size:10px;font-weight:400;margin-top:2px">${esc(f.app || '')} · ${esc(f.actor || '')}</span></span><span>${esc(f.kind || '—')}</span><span>${adminTag(f.status || '—', adminStatusTone(f.status))}</span><span>${esc(f.time || '—')}</span></div>`)
+  blocks.appendChild(adminModuleBlock('反馈与建议', `${feedback.length} 条`, adminTable(['反馈', '类型', '状态', '时间'], feedbackRows, '当前没有反馈')))
+}
+
+async function renderAdminSecurityExtras(blocks) {
+  const [{ body: sec }, { body: auditBody }, { body: ledgerBody }, { body: asBody }, { body: asStatus }, { body: adgBody }] = await Promise.all([
+    api('/api/security'), api('/api/audit'), api('/api/tool-ledger'), api('/api/as/approvals'), api('/api/as/status'), api('/api/app-data/grants'),
+  ])
+  const anomalies = sec.anomalies || []
+  const denies = sec.denies || []
+  const reviews = sec.reviews || []
+  const auditItems = auditBody.items || []
+  const tools = ledgerBody.items || []
+  const approvals = asBody.items || []
+  blocks.appendChild(adminModuleBlock('安全异常与权限复核', `${anomalies.length + denies.length} 条异常`, `<div style="padding:10px 12px;display:grid;gap:8px">
+    ${denies.map((d) => `<div style="display:flex;gap:8px;align-items:flex-start"><span class="mc-tag bad">拒绝</span><span style="font-size:11px;line-height:1.55">${esc(d.time || '')} · ${esc(d.actor || '')} · ${esc(d.action || '')} · ${esc(d.object || '')} <span class="mc-dim">${esc(d.result || '')}</span></span></div>`).join('')}
+    ${reviews.map((r) => `<div style="display:flex;gap:8px;align-items:flex-start"><span class="mc-tag ${r.result === '通过' ? 'ok' : 'warn'}">${esc(r.result || '复核')}</span><span style="font-size:11px;line-height:1.55">${esc(r.name)} · ${esc(r.owner)} · ${esc(r.at)} <span class="mc-dim">${esc(r.note || '')}</span></span></div>`).join('')}
+    ${!denies.length && !reviews.length ? '<div class="mc-row">当前没有安全异常或复核记录</div>' : ''}
+  </div>`, '拒绝记录与权限复核来自安全后台；高敏动作进入审计，不在这里直接放行。'))
+  const auditRows = auditItems.map((a) => `<div class="mc-trow"><span class="mono" style="font-size:10px">${esc(a.time || '')}</span><span>${esc(a.actor || '')}</span><span>${esc(a.action || '')}</span><span style="word-break:break-all">${esc(a.object || '')}</span><span>${adminTag(a.result || '—', /deny|拒绝|失败/.test(a.result || '') ? 'bad' : 'ok')}</span></div>`)
+  blocks.appendChild(adminModuleBlock('审计日志', `${auditItems.length} 条`, `<div class="mc-table" style="--mc-cols:minmax(52px,.5fr) minmax(70px,.65fr) minmax(110px,1.1fr) minmax(160px,1.8fr) minmax(54px,.5fr)"><div class="mc-thead"><span>时间</span><span>操作人</span><span>动作</span><span>对象</span><span>结果</span></div>${auditRows.join('') || '<div class="mc-row">暂无审计记录</div>'}</div>`, '管理角色可见全量审计；普通角色只可见本人当前网络记录。'))
+  const toolRows = tools.map((t) => `<div class="mc-trow"><span class="mc-first"><b>${esc(t.name)}</b><span class="mc-dim mono" style="display:block;font-size:10px;font-weight:400;margin-top:2px">${esc(t.id)} · ${esc(t.endpoint || '')}</span></span><span>${esc(t.risk || '—')}</span><span>${adminTag(t.confirm ? '强制确认' : '无需确认', t.confirm ? 'warn' : 'ok')}</span><span class="mc-acts"><button class="btn sm" data-tool-confirm="${esc(t.id)}" data-next="${t.confirm ? 'false' : 'true'}">${t.confirm ? '取消确认' : '设为确认'}</button></span></div>`)
+  blocks.appendChild(adminModuleBlock('工具台账', `${tools.length} 个工具`, `<div class="mc-table" style="--mc-cols:minmax(170px,1.7fr) minmax(48px,.45fr) minmax(75px,.7fr) minmax(80px,.75fr)"><div class="mc-thead"><span>工具</span><span>风险</span><span>确认策略</span><span>操作</span></div>${toolRows.join('') || '<div class="mc-row">当前没有工具台账</div>'}</div>`, '高风险工具必须保留二次确认；策略变更写入审计。'))
+  const asApps = [...new Set((asStatus.items || []).map((x) => x.appId || x.id))]
+  const activeGrants = (adgBody.items || []).filter((g) => g.status === 'active' && !g.expired)
+  blocks.appendChild(adminModuleBlock('凭据与令牌', `${asApps.length} 个 AS 应用 · ${activeGrants.length} 条数据授权`, `<div style="padding:11px 12px;line-height:1.7;font-size:12px;color:#4b5056">
+    <b>无常驻应用级令牌。</b> 应用子进程已剥离主进程 MCP 令牌与模型密钥；只有存在有效数据授权时，应用才能用当前用户上下文换取 5 分钟短期数据令牌。
+    <div style="margin-top:6px;color:#7b828b">${asApps.map((x) => esc(x)).join(' · ') || '当前没有 AS 应用'} · 生效授权 ${activeGrants.length} 条</div>
+    </div>`, '授权撤销会立即清除该授权已签发的短期令牌；应用不能因为持有进程环境而被视为已接入数据中心。'))
+  const appRows = approvals.map((a) => `<div class="mc-trow"><span class="mc-first"><b>${esc(a.appName || a.appId)}</b><span class="mc-dim mono" style="display:block;font-size:10px;font-weight:400;margin-top:2px">${esc(a.tool || '')}</span></span><span>${adminTag(a.status || '—', adminStatusTone(a.status))}</span><span>${esc(a.createdAt ? new Date(a.createdAt).toLocaleString('zh-CN', { hour12: false }) : '—')}</span><span class="mc-acts">${a.status === 'pending' ? `<button class="btn sm primary" data-as-approve="${esc(a.approvalId)}">通过</button><button class="btn sm" data-as-reject="${esc(a.approvalId)}">拒绝</button>` : ''}</span></div>`)
+  blocks.appendChild(adminModuleBlock('AS 写操作审批', `${approvals.length} 条`, adminTable(['应用 / 工具', '状态', '时间', '操作'], appRows, '当前没有 AS 写操作审批'), '会话内的写操作审批仍保留在对话中；这里只处理已提交到管理中心的审批单。'))
+  blocks.querySelectorAll('[data-tool-confirm]').forEach((b) => b.addEventListener('click', async () => {
+    b.disabled = true
+    const { ok, body } = await api('/api/tool-ledger', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: b.dataset.toolConfirm, confirm: b.dataset.next === 'true' }) })
+    if (!ok) { b.disabled = false; return toast(body.error || '工具策略更新失败', true) }
+    toast('工具确认策略已更新'); renderView()
+  }))
+  blocks.querySelectorAll('[data-as-approve], [data-as-reject]').forEach((b) => b.addEventListener('click', async () => {
+    b.disabled = true
+    const decision = b.dataset.asApprove ? 'approved' : 'rejected'
+    const id = b.dataset.asApprove || b.dataset.asReject
+    const { ok, body } = await api('/api/as/approvals/decide', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ approvalId: id, decision }) })
+    if (!ok) { b.disabled = false; return toast(body.error || '审批决策失败', true) }
+    toast(decision === 'approved' ? '已通过应用写操作' : '已拒绝应用写操作'); renderView()
+  }))
+}
+
+async function renderAdminManagedModule(tab, blocks) {
+  if (!blocks) return
+  blocks.querySelectorAll('.mc-empty').forEach((node) => node.remove())
+  if (tab === 'overview') return renderAdminOverview(blocks)
+  if (tab === 'org') return renderAdminOrg(blocks)
+  if (tab === 'data') return renderAdminData(blocks)
+  if (tab === 'apps') return renderAdminApps(blocks)
+  if (tab === 'ops') return renderAdminOps(blocks)
+  if (tab === 'service') return renderAdminService(blocks)
+}
+
 async function renderAdmin(el) {
   const { body } = await api('/api/console')
   state.console = body
@@ -15264,7 +16063,7 @@ async function renderAdmin(el) {
     { id: 'baseline', no: '01', label: '运行基线', note: '系统内核只读；平台公共能力可停用；官方技能在市场按需安装' },
     { id: 'models', no: '02', label: '模型与网关', note: 'DeepSeek 首页默认；Qwen-Image / Seedream 图像生成二选一；三个共享模型统一由模型网关管理' },
     { id: 'agents', no: '03', label: 'Agent 与 MCP', note: '运行时实际加载的 Agent、MCP、技能与调度模块' },
-    { id: 'plugins', no: '04', label: '插件与技能', note: '员工提交的插件与技能、审核与分类上架管理' },
+    { id: 'plugins', no: '04', label: '应用、插件与技能', note: '员工提交的应用、插件与技能，审核与分类上架管理' },
   ]
   const aiTab = AI_SEGMENTS.some((s) => s.id === state.aiTab) ? state.aiTab : 'baseline'
   state.aiTab = aiTab
@@ -15356,6 +16155,10 @@ async function renderAdmin(el) {
     renderView()
   })
 
+  if (['overview', 'org', 'data', 'apps', 'ops', 'service'].includes(tab)) {
+    await renderAdminManagedModule(tab, blocks)
+  }
+
   if (tab === 'security') {
     const { body: approvalBody } = await api('/api/approval-decisions?limit=50')
     const items = approvalBody.items || []
@@ -15403,6 +16206,7 @@ async function renderAdmin(el) {
         <div class="mc-block-note">PTC 嵌套调用无法回传精确参数时，摘要来自运行时升级原因，不冒充完整参数。</div>`
       blocks.appendChild(wrap)
     }
+    if (blocks) await renderAdminSecurityExtras(blocks)
   }
 
   if (tab === 'ai') {
@@ -15663,14 +16467,19 @@ async function renderAdmin(el) {
     const { body: marketAdmin } = await api('/api/admin/plugin-market')
     if (blocks) {
       const items = marketAdmin.items || []
-      const pluginItems = items.filter((x) => x.type !== 'skill')
+      /* 三类分开：应用（AS Runtime 托管的进程）/ 插件（DSH Bundle）/ 技能（SKILL.md 包）。
+         之前把应用并进插件表，管理端看不出谁在占机器资源。 */
       const skillItems = items.filter((x) => x.type === 'skill')
+      const appItems = items.filter((x) => x.kind === 'app')
+      const pluginItems = items.filter((x) => x.kind !== 'app' && x.type !== 'skill')
+      const appRunning = appItems.filter((x) => x.runtime?.running).length
+      const listedApps = appItems.filter((x) => x.listed !== false).length
       const listedPlugins = pluginItems.filter((x) => x.listed !== false).length
       const listedSkills = skillItems.filter((x) => x.listed !== false).length
       const marketRows = (rows, len) => rows.map((x, i) => `<div class="mc-trow">
-            <span class="mc-first">${esc(x.name)} <span class="mc-dim mono">${esc(x.id)}</span></span>
+            <span class="mc-first">${esc(x.name)} <span class="mc-dim mono">${esc(x.id)}</span>${x.kind === 'app' && x.runtime?.running ? `<span class="mc-dim mono"> · PID ${esc(x.runtime.pid || '—')} · 租约 ${esc(x.runtime.leaseCount ?? 0)}</span>` : ''}</span>
             <span>${esc(x.publisher || '')}</span>
-            <span><span class="mc-tag ${x.listed === false ? 'warn' : 'ok'}">${x.listed === false ? '已下架' : '已上架'}</span>${x.installed ? ` <span class="mc-tag ok">${(x.installUsers || []).length && x.installUsers[0]?.scope === 'baseline' ? '基线' : '已安装'}</span>` : ''}</span>
+            <span><span class="mc-tag ${x.listed === false ? 'warn' : 'ok'}">${x.listed === false ? '已下架' : '已上架'}</span>${x.installed ? ` <span class="mc-tag ok">${(x.installUsers || []).length && x.installUsers[0]?.scope === 'baseline' ? '基线' : '已安装'}</span>` : ''}${x.kind === 'app' && x.installed ? (x.runtime?.running ? ` <span class="mc-tag ok">运行中 · ${esc(x.runtime.port || '')}</span>` : ` <span class="mc-tag${x.runtime?.lastError ? ' warn' : ''}">${x.runtime?.lastError ? '运行异常' : '未运行'}</span>`) : ''}</span>
             <span class="mc-acts" style="grid-column:1/-1;flex-wrap:wrap">
               <button class="btn sm" data-mkt-sort="${esc(x.id)}" data-dir="up" ${i === 0 ? 'disabled' : ''}>↑</button>
               <button class="btn sm" data-mkt-sort="${esc(x.id)}" data-dir="down" ${i === len - 1 ? 'disabled' : ''}>↓</button>
@@ -15684,13 +16493,18 @@ async function renderAdmin(el) {
           </div>`).join('')
       const wrap = document.createElement('div')
       wrap.className = 'mc-block mc-span-2'
-      wrap.innerHTML = `<div class="mc-block-head"><b>插件 / 技能上架管理</b><span class="spacer"></span><span class="mc-count">${listedPlugins} / ${pluginItems.length} 个插件 · ${listedSkills} / ${skillItems.length} 个技能已上架</span></div>
-        <div style="display:flex;align-items:center;gap:8px;padding:8px 10px 4px"><b style="font-size:12px">插件市场</b><span class="mc-count">${pluginItems.length} 个条目</span></div>
+      wrap.innerHTML = `<div class="mc-block-head"><b>应用 / 插件 / 技能上架管理</b><span class="spacer"></span><span class="mc-count">${listedApps} / ${appItems.length} 个应用（运行中 ${appRunning} 个）· ${listedPlugins} / ${pluginItems.length} 个插件 · ${listedSkills} / ${skillItems.length} 个技能已上架</span></div>
+        <div style="display:flex;align-items:center;gap:8px;padding:8px 10px 4px"><b style="font-size:12px">应用市场</b><span class="mc-count">${appItems.length} 个条目 · AS Runtime 托管，机器级单例进程、账号级数据目录</span></div>
+        <div class="mc-table" style="--mc-cols:minmax(130px,1.7fr) minmax(100px,1fr) minmax(64px,.8fr)">
+          <div class="mc-thead"><span>应用</span><span>发布单位</span><span>状态</span></div>
+          ${marketRows(appItems, appItems.length) || '<div class="mc-row">市场还没有应用</div>'}
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;padding:12px 10px 4px"><b style="font-size:12px">插件市场</b><span class="mc-count">${pluginItems.length} 个条目 · 由当前账号的 DSH 运行时加载</span></div>
         <div class="mc-table" style="--mc-cols:minmax(130px,1.7fr) minmax(100px,1fr) minmax(64px,.8fr)">
           <div class="mc-thead"><span>插件</span><span>发布单位</span><span>状态</span></div>
           ${marketRows(pluginItems, pluginItems.length) || '<div class="mc-row">市场还没有插件</div>'}
         </div>
-        <div style="display:flex;align-items:center;gap:8px;padding:12px 10px 4px"><b style="font-size:12px">技能市场</b><span class="mc-count">${skillItems.length} 个条目</span></div>
+        <div style="display:flex;align-items:center;gap:8px;padding:12px 10px 4px"><b style="font-size:12px">技能市场</b><span class="mc-count">${skillItems.length} 个条目 · 装进账号或项目技能目录</span></div>
         <div class="mc-table" style="--mc-cols:minmax(130px,1.7fr) minmax(100px,1fr) minmax(64px,.8fr)">
           <div class="mc-thead"><span>技能</span><span>发布单位</span><span>状态</span></div>
           ${marketRows(skillItems, skillItems.length) || '<div class="mc-row">市场还没有技能</div>'}

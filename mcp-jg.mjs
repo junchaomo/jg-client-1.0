@@ -158,6 +158,25 @@ const tools = [
     description: '创建一个待办任务（当前为产品任务接口登记）。',
     inputSchema: { type: 'object', properties: { title: { type: 'string' } } },
   },
+  {
+    name: 'app_list',
+    description: '列出当前账号已安装 AS 应用暴露的可调用工具、入参 schema 与运行状态。',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'app_call',
+    description: '调用当前账号已安装 AS 应用的业务工具；AS 负责懒启动、账号上下文、租约和回收。先调用 app_list 获取 appId/tool。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        appId: { type: 'string', description: '应用 ID，例如 as-sample' },
+        tool: { type: 'string', description: 'app_list 返回的工具名，例如 sample.get_state' },
+        args: { type: 'object', description: '工具入参对象，按 app_list 返回的 inputSchema 填写' },
+        approvalId: { type: 'string', description: '写操作审批单 ID；sideEffect 工具首次调用返回 202 时由 AS 创建' },
+      },
+      required: ['appId', 'tool'],
+    },
+  },
 ]
 
 function reply(id, result) {

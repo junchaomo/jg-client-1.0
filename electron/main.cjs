@@ -41,6 +41,9 @@ let mainWindow = null
 let browserView = null
 let browserAttached = false
 let browserUrl = ''
+/* 最近一次渲染进程推来的槽位矩形。容器先行（应用启动期间先挂壳、后建视图）时，
+   这次 bounds 会早于视图创建到达，先存下来、建视图时立刻应用，避免 0 尺寸白屏。 */
+let browserBounds = null
 let serverProcess = null
 let serverPort = null
 let quitting = false
@@ -236,6 +239,7 @@ function ensureBrowserView() {
     mainWindow.contentView.addChildView(browserView)
     browserAttached = true
   }
+  if (browserBounds) browserView.setBounds(browserBounds)
   browserView.setVisible(true)
   return browserView
 }
@@ -269,6 +273,8 @@ function createWindow() {
       nodeIntegration: false,
       sandbox: true,
       spellcheck: false,
+      // 应用进程租约靠前端心跳续期；窗口最小化/被遮挡时不能把计时器节流到 1 分钟。
+      backgroundThrottling: false,
     },
   })
 
@@ -359,12 +365,13 @@ ipcMain.on('browser:open', (_event, url) => {
 })
 
 ipcMain.on('browser:bounds', (_event, rect = {}) => {
-  if (!browserView || !browserAttached) return
   const x = Math.max(0, Math.round(Number(rect.x) || 0))
   const y = Math.max(0, Math.round(Number(rect.y) || 0))
   const width = Math.max(1, Math.round(Number(rect.width) || 1))
   const height = Math.max(1, Math.round(Number(rect.height) || 1))
-  browserView.setBounds({ x, y, width, height })
+  browserBounds = { x, y, width, height }
+  if (!browserView || !browserAttached) return
+  browserView.setBounds(browserBounds)
 })
 
 ipcMain.on('browser:reload', () => {

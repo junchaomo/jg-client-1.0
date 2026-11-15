@@ -80,7 +80,7 @@ function number(value) {
 }
 
 /** 从真实 SDK 结果计算本轮统计；不产生任何估算以外的演示值。 */
-export function buildRunStats({ startedAt, endedAt, model, contextText, steps, usage, events }) {
+export function buildRunStats({ startedAt, endedAt, model, contextText, steps, usage, events, taskClass = '', imageCount = 0, modelReason = '', replyChars = 0, finishReason = '' }) {
   const durationMs = Math.max(0, number(endedAt) - number(startedAt))
   const stepRows = Array.isArray(steps) ? steps : []
   const eventRows = Array.isArray(events) ? events : []
@@ -108,6 +108,11 @@ export function buildRunStats({ startedAt, endedAt, model, contextText, steps, u
     toolCalls,
     toolFailures,
     eventCount: eventRows.length,
+    taskClass: String(taskClass || ''),
+    imageCount: Number(imageCount) || 0,
+    modelReason: String(modelReason || ''),
+    replyChars: Number(replyChars) || 0,
+    finishReason: String(finishReason || ''),
     startedAt: number(startedAt),
     endedAt: number(endedAt),
   }

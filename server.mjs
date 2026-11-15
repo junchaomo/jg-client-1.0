@@ -45,7 +45,13 @@ import { ImageProviderError, editImage, editImageWithMask, generateImage, imageM
 import { prepareSpeech, modelStatus, transcribeSpeech } from './speech.mjs'
 import { pinyin } from 'pinyin-pro'
 import { HarnessError, cancelRun, closeHarness, closeHarnessForHome, dshBin, runAgent, stopBackgroundRuntime } from './harness.mjs'
-import { extractBundlePackage, extractSkillPackage, inspectPluginZip } from './plugin-scan.mjs'
+import { extractAppPackage, extractBundlePackage, extractSkillPackage, inspectPluginZip } from './plugin-scan.mjs'
+import {
+  AS_APPS_ROOT, appAvailable, appCapabilities, appManifest, appRoot, appVersionDir, callAppTool, currentAppInfo,
+  heartbeatApp, reconcileAppsOnBoot, releaseApp, runtimeState, setCurrentAppVersion,
+  shutdownApps, startApp, sweepApps, uninstallApp, verifyAppContext,
+} from './as-runtime.mjs'
+import { activeGrantFor, createGrant, grantView, listGrants, mintDataToken, revokeGrant, verifyDataToken } from './app-data-grants.mjs'
 import { buildRunStats, buildSessionLogArchive, listTraces, newTraceId as makeTraceId, readTrace, writeTrace } from './trace.mjs'
 import { execTerminal, resetTerminal, terminalStatus } from './terminal.mjs'
 import { consoleRoles, consoleNav, consoleModules, consoleSections, consoleScopeOptions } from './console.mjs'
@@ -77,7 +83,7 @@ const port = Number(process.env.PORT || 4173)
 // 运维/回归可用一个统一上限覆盖默认预算；不设置时按会话类型分配。
 const forcedMaxToolCalls = Number(process.env.JG_MAX_TOOL_CALLS || 0) > 0 ? Number(process.env.JG_MAX_TOOL_CALLS) : 0
 const downloadSecret = process.env.JG_DOWNLOAD_SECRET || randomBytes(32).toString('hex')
-const UPLOAD_LIMIT_BYTES = Math.max(1024 * 1024, Number(process.env.JG_UPLOAD_LIMIT_MB || 200) * 1024 * 1024)
+const UPLOAD_LIMIT_BYTES = Math.max(1024 * 1024, Number(process.env.JG_UPLOAD_LIMIT_MB || 300) * 1024 * 1024)
 // 生图模型独立于聊天模型：Provider 与 Key 由 image-providers.mjs 管理。
 const IMAGE_RATIOS = {
   '1:1': [1024, 1024],
@@ -1128,6 +1134,10 @@ const activeRuns = new Set()
 // 模型在工具调用前发起的审批/提问，等前端卡片回填。只保留本轮，进程重启即丢弃。
 const pendingInteractions = new Map()
 
+// AS 应用写操作的审批单：按账号 / 应用 / 工具 / 参数指纹绑定，批准后一次性消费。
+const APP_APPROVALS = new Map()
+const APP_APPROVAL_TTL_MS = Math.max(60 * 1000, Number(process.env.AS_APPROVAL_TTL_MS || 10 * 60 * 1000))
+
 function createPendingInteraction(kind, conversationId, payload) {
   return new Promise((resolve) => {
     const id = `${kind === 'approval' ? 'AP' : 'AQ'}-${randomBytes(6).toString('hex')}`
@@ -1724,6 +1734,38 @@ function hydratePersistentState() {
   liveOfficialUninstalledSkills.clear()
   for (const dir of snap.officialUninstalledSkills || []) liveOfficialUninstalledSkills.add(dir)
   replaceMap(liveMarketInstalls, Object.fromEntries(snap.marketInstalls || []))
+  /* 同一个 appId 在应用市场只保留一个条目。同一个包被重复提交过审会留下多条共用同一物理包的
+     条目：界面上出现两个一模一样的应用，删其中任何一条还会连带影响另一条。
+     启动时合并：优先保留有安装记录的那条，其次保留 id 更大（入库更晚）的那条；
+     被合并掉的只移除市场条目，审核记录（pluginSubs）保留下来作为台账。 */
+  {
+    const keptApp = new Map()
+    /* 谁留谁走：安装人数多的优先；人数相同比最近一次安装时间；都一样才比 id（入库更晚的优先）。 */
+    const appScore = (m) => {
+      const list = Array.isArray(liveMarketInstalls.get(m.id)) ? liveMarketInstalls.get(m.id) : []
+      return {
+        count: list.length,
+        at: list.reduce((max, e) => Math.max(max, Number(e?.installedAt) || 0), 0),
+        id: String(m.id),
+      }
+    }
+    for (const m of liveMarket) {
+      if (m.kind !== 'app') continue
+      const key = String(m.appId || m.id)
+      const prev = keptApp.get(key)
+      if (!prev) { keptApp.set(key, m); continue }
+      const a = appScore(prev)
+      const b = appScore(m)
+      const preferNext = b.count > a.count || (b.count === a.count && (b.at > a.at || (b.at === a.at && b.id > a.id)))
+      if (preferNext) keptApp.set(key, m)
+    }
+    const keptIds = new Set([...keptApp.values()].map((m) => m.id))
+    const dupAppIds = liveMarket.filter((m) => m.kind === 'app' && !keptIds.has(m.id)).map((m) => m.id)
+    if (dupAppIds.length) {
+      replaceArray(liveMarket, liveMarket.filter((m) => !dupAppIds.includes(m.id)))
+      console.log(`[market] 合并重复应用条目：${dupAppIds.join(',')}`)
+    }
+  }
   replaceMap(marketVersions, Object.fromEntries(snap.marketVersions || []))
   const marketIds = new Set(liveMarket.map((m) => m.id))
   for (const id of [...liveMarketInstalls.keys()]) {
@@ -1969,7 +2011,7 @@ const GUEST_GUARD = {
   'POST /api/conversation/policy': 'home',
   'POST /api/conversation/feedback': 'home',
   'GET /api/plugins': 'skills',
-  'POST /api/plugin-toggle': 'skills',
+  'POST /api/plugins/toggle': 'skills',
   'GET /api/plugin-review': 'admin',
   'POST /api/plugins/review': 'admin',
   'GET /api/audit': 'admin',
@@ -1982,6 +2024,11 @@ const GUEST_GUARD = {
   'POST /api/feedback/create': 'admin',
   'POST /api/ai/invoke': 'ai',
   'POST /api/mcp/approval': 'ai',
+  'GET /api/as/capabilities': 'skills',
+  'POST /api/as/call': 'skills',
+  'GET /api/as/approvals': 'skills',
+  'POST /api/as/approvals': 'skills',
+  'POST /api/as/approvals/decide': 'skills',
   'GET /api/apps': 'apps',
 }
 
@@ -2016,6 +2063,12 @@ function stamp() {
   const d = new Date()
   const p = (n) => String(n).padStart(2, '0')
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+}
+
+function uploadedFilePath(meta) {
+  const rel = String(meta && meta.path ? meta.path : '').replace(/\\/g, '/').replace(/^\/+/, '')
+  if (!rel || rel.split('/').includes('..') || /^[A-Za-z]:/.test(rel)) return ''
+  return join(dataDirPath(), ...rel.split('/'))
 }
 
 // 设备标识用于“项目 → 本地设备 → 授权目录”的绑定关系。
@@ -4211,6 +4264,10 @@ function marketBundleAvailable(id) {
 const MARKET_BACKUP_ROOT = join(dataDirPath(), 'market-backups')
 function marketPackageDir(item) {
   if (!item || !item.id) return ''
+  if (item.kind === 'app') {
+    const info = currentAppInfo(item.appId || item.id)
+    return info ? appVersionDir(item.appId || item.id, info.version) : ''
+  }
   return item.kind === 'skill' ? join(MARKET_PACKAGE_ROOT, item.id) : bundlePackageDir(item.id)
 }
 function marketVersionsOf(id) {
@@ -4224,7 +4281,11 @@ function backupMarketPackage(item, note = '') {
   const dir = join(MARKET_BACKUP_ROOT, item.id, stamp)
   mkdirSync(dir, { recursive: true })
   cpSync(target, dir, { recursive: true })
-  const pkg = item.kind === 'bundle' ? bundlePackageManifest(item.id) : null
+  const pkg = item.kind === 'bundle'
+    ? bundlePackageManifest(item.id)
+    : item.kind === 'app'
+      ? currentAppInfo(item.appId || item.id)?.manifest
+      : null
   const entry = {
     id: `${item.id}-${stamp}`,
     version: String(pkg?.version || item.version || ''),
@@ -4334,37 +4395,342 @@ async function uninstallMarketBundle(item, home) {
   setProfileBundle(home, pkg.name, false)
   await closeHarnessForHome(home)
 }
+function marketAppAvailable(item) {
+  return Boolean(item && item.kind === 'app' && appAvailable(item.appId || item.id))
+}
+
+function marketAppInfo(item) {
+  return item && item.kind === 'app' ? currentAppInfo(item.appId || item.id) : null
+}
+
+function appAccessibleForUser(item, user) {
+  if (!item || item.kind !== 'app' || !user) return false
+  return marketInstallRecords(item.id).some((r) => r.userId === user.id) || canManage(user)
+}
+
+function appAiToolName(appId, tool) {
+  return `app__${appId}__${tool}`
+}
+
+function parseAppAiToolName(name) {
+  if (!name.startsWith('app__')) return null
+  const rest = name.slice('app__'.length)
+  const sep = rest.lastIndexOf('__')
+  if (sep <= 0) return null
+  return { appId: rest.slice(0, sep), tool: rest.slice(sep + 2) }
+}
+
+function appToolSpec(appId, tool) {
+  const capabilities = appCapabilities(appId)
+  if (!capabilities) return null
+  return [...capabilities.tools, ...capabilities.resources].find((item) => item.name === String(tool || '')) || null
+}
+
+function appApprovalFingerprint(args) {
+  const stable = (value) => {
+    if (Array.isArray(value)) return `[${value.map(stable).join(',')}]`
+    if (value && typeof value === 'object') {
+      return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stable(value[key])}`).join(',')}}`
+    }
+    return JSON.stringify(value)
+  }
+  return stable(args && typeof args === 'object' ? args : {})
+}
+
+function appApprovalView(record) {
+  if (!record) return null
+  return {
+    approvalId: record.approvalId,
+    decisionId: record.decisionId,
+    appId: record.appId,
+    appName: record.appName,
+    tool: record.tool,
+    status: record.status,
+    summary: record.summary,
+    createdAt: record.createdAt,
+    expiresAt: record.expiresAt,
+    approver: record.approver,
+    decidedAt: record.decidedAt,
+  }
+}
+
+function requestAppApproval({ appId, tool, args, user, net = 'inet' }) {
+  const info = currentAppInfo(appId)
+  if (!info) {
+    const error = new Error('应用未安装或缺少 app.json')
+    error.code = 'AS_APP_NOT_FOUND'
+    throw error
+  }
+  const spec = appToolSpec(appId, tool)
+  if (!spec) {
+    const error = new Error(`应用未声明工具：${tool}`)
+    error.code = 'AS_TOOL_NOT_FOUND'
+    throw error
+  }
+  if (!spec.sideEffect) {
+    const error = new Error(`工具 ${tool} 不是写操作，无需审批`)
+    error.code = 'AS_NOT_SIDE_EFFECT'
+    throw error
+  }
+  const argsHash = appApprovalFingerprint(args)
+  const summary = `${String(info.manifest.name || appId)}.${tool} ${appApprovalFingerprint(args).slice(0, 200)}`
+  const approvalId = `AA-${randomBytes(6).toString('hex')}`
+  const decisionId = recordApprovalDecision({
+    tool: appAiToolName(appId, tool),
+    operation: 'write',
+    summary,
+    decision: 'pending',
+    rule: 'app-side-effect',
+    risk: 'high',
+    actor: user?.name || '',
+    approver: 'pending',
+    net,
+  })
+  const record = {
+    approvalId,
+    decisionId,
+    userId: user?.id || '',
+    appId,
+    appName: String(info.manifest.name || appId),
+    tool,
+    argsHash,
+    summary,
+    status: 'pending',
+    requester: user?.name || '',
+    createdAt: Date.now(),
+    expiresAt: Date.now() + APP_APPROVAL_TTL_MS,
+  }
+  APP_APPROVALS.set(approvalId, record)
+  return record
+}
+
+function decideAppApproval({ approvalId, decision, user }) {
+  const record = APP_APPROVALS.get(String(approvalId || ''))
+  if (!record) {
+    const error = new Error('审批单不存在或已过期')
+    error.code = 'AS_APPROVAL_NOT_FOUND'
+    error.status = 404
+    throw error
+  }
+  if (record.userId !== (user?.id || '')) {
+    const error = new Error('无权处理其他账号的审批单')
+    error.code = 'AS_APPROVAL_FORBIDDEN'
+    error.status = 403
+    throw error
+  }
+  if (record.status !== 'pending') {
+    const error = new Error(`审批单状态为 ${record.status}，不能重复处理`)
+    error.code = 'AS_APPROVAL_STATE'
+    error.status = 409
+    throw error
+  }
+  if (Date.now() > record.expiresAt) {
+    record.status = 'expired'
+    throw Object.assign(new Error('审批单已过期'), { code: 'AS_APPROVAL_EXPIRED', status: 410 })
+  }
+  const outcome = decision === 'approved' ? 'approved' : 'rejected'
+  record.status = outcome
+  record.approver = user?.name || ''
+  record.decidedAt = Date.now()
+  try {
+    updateApprovalDecision(record.decisionId, {
+      decision: outcome === 'approved' ? 'allowed' : 'rejected',
+      approver: record.approver,
+      decidedAt: record.decidedAt,
+    })
+  } catch (error) {
+    console.error('[jg-server] app approval update failed:', error && error.message ? error.message : error)
+  }
+  return record
+}
+
+function consumeAppApproval({ approvalId, appId, tool, args, user }) {
+  const record = APP_APPROVALS.get(String(approvalId || ''))
+  if (!record) {
+    const error = new Error('写操作审批单不存在或已过期')
+    error.code = 'AS_APPROVAL_NOT_FOUND'
+    error.status = 403
+    throw error
+  }
+  if (record.userId !== (user?.id || '')) {
+    const error = new Error('写操作审批单不属于当前账号')
+    error.code = 'AS_APPROVAL_FORBIDDEN'
+    error.status = 403
+    throw error
+  }
+  if (record.appId !== appId || record.tool !== tool) {
+    const error = new Error('审批单与应用或工具不匹配')
+    error.code = 'AS_APPROVAL_MISMATCH'
+    error.status = 403
+    throw error
+  }
+  if (record.status !== 'approved') {
+    const error = new Error(`写操作审批单状态为 ${record.status}，未获批准`)
+    error.code = 'AS_APPROVAL_NOT_APPROVED'
+    error.status = 403
+    throw error
+  }
+  if (Date.now() > record.expiresAt) {
+    record.status = 'expired'
+    throw Object.assign(new Error('写操作审批单已过期'), { code: 'AS_APPROVAL_EXPIRED', status: 410 })
+  }
+  if (record.argsHash !== appApprovalFingerprint(args)) {
+    const error = new Error('写操作参数与审批单不一致，拒绝执行')
+    error.code = 'AS_APPROVAL_ARG_MISMATCH'
+    error.status = 409
+    throw error
+  }
+  record.status = 'consumed'
+  record.consumedAt = Date.now()
+  try {
+    updateApprovalDecision(record.decisionId, {
+      decision: 'allowed',
+      approver: record.approver || user?.name || '',
+      decidedAt: record.decidedAt || Date.now(),
+    })
+  } catch (error) {
+    console.error('[jg-server] app approval consume update failed:', error && error.message ? error.message : error)
+  }
+  return record
+}
+
+function appToolCatalog(user) {
+  const items = []
+  for (const item of liveMarket.filter((x) => x.kind === 'app')) {
+    if (!appAccessibleForUser(item, user)) continue
+    const capabilities = appCapabilities(item.appId || item.id)
+    if (!capabilities) continue
+    items.push({
+      marketId: item.id,
+      appId: capabilities.appId,
+      name: capabilities.appName,
+      version: capabilities.version,
+      installed: marketInstallRecords(item.id).some((r) => r.userId === user.id),
+      declared: capabilities.declared,
+      tools: capabilities.tools,
+      resources: capabilities.resources,
+      verdict: capabilities.verdict,
+      note: capabilities.note,
+    })
+  }
+  return items
+}
+
+function appAiToolEntries(user) {
+  const entries = []
+  for (const app of appToolCatalog(user)) {
+    for (const tool of app.tools.filter((x) => !x.sideEffect)) {
+      entries.push({
+        name: appAiToolName(app.appId, tool.name),
+        label: `${app.name} · ${tool.description || tool.name}`,
+        target: '应用',
+        args: '{}',
+        desc: `${tool.description || tool.name}（来自应用 ${app.name}；${tool.method} ${tool.path}）`,
+        appId: app.appId,
+        appTool: tool.name,
+        inputSchema: tool.inputSchema,
+      })
+    }
+  }
+  return entries
+}
+
+const APP_AI_GENERIC_TOOLS = [
+  {
+    name: 'app_list',
+    label: '列出应用能力',
+    target: '应用',
+    args: '{}',
+    desc: '列出当前账号已安装应用暴露的可调用工具、入参 schema 和运行状态。',
+  },
+  {
+    name: 'app_call',
+    label: '调用应用能力',
+    target: '应用',
+    args: '{"appId":"as-sample","tool":"sample.get_state","args":{}}',
+    desc: '按 appId + tool 调用已安装应用的能力；AS 负责懒启动、账号上下文、租约与回收。',
+  },
+]
+
+
+async function installMarketApp(item, user) {
+  const info = marketAppInfo(item)
+  if (!info) throw new Error('该应用尚未完成入库，暂不能安装')
+  addMarketInstallRecord(item.id, {
+    userId: user.id,
+    userName: user.name,
+    scope: 'account',
+    projectId: '',
+    installedAt: Date.now(),
+  })
+  return { version: info.version, appId: item.appId || item.id }
+}
+
+async function uninstallMarketApp(item, user) {
+  const appId = item.appId || item.id
+  removeMarketInstallRecord(item.id, { userId: user.id, scope: 'account', projectId: '' })
+  const remaining = marketInstallRecords(item.id).filter((r) => r.userId !== user.id)
+  if (!remaining.length) {
+    // 机器级单例：没有其它账号持有安装记录时才释放进程；有活跃租约仍会进入宽限期。
+    releaseApp({ id: appId, leaseId: '', force: false })
+  }
+  return { appId }
+}
+
 function marketItemState(item, ctx = {}) {
   const sub = item.subId ? pluginSubs.find((s) => s.id === item.subId) : null
   const isBundle = item.kind === 'bundle'
-  const globalBaseline = !isBundle && marketSkillGlobalBaseline(item.id)
+  const isApp = item.kind === 'app'
+  const appId = isApp ? String(item.appId || item.id) : ''
+  const appInfo = isApp ? currentAppInfo(appId) : null
+  const appCaps = isApp ? appCapabilities(appId) : null
+  const appLive = isApp ? runtimeState(appId) : null
+  const globalBaseline = !isBundle && !isApp && marketSkillGlobalBaseline(item.id)
   const records = marketInstallRecords(item.id)
   const userRecord = records.find((r) => r.userId === ctx.userId)
   const home = ctx.userId ? userDshHome(ctx.userId) : ''
   const bundleUsers = isBundle ? bundleInstallUsers(item.id) : []
-  const installed = isBundle
-    ? (ctx.any ? anyUserBundleInstalled(item.id) : Boolean(home && marketBundleInstalled(item.id, home)))
-    : ctx.any
-      ? (globalBaseline || records.length > 0)
-      : (globalBaseline || Boolean(userRecord))
+  const installed = isApp
+    ? (ctx.any ? records.length > 0 : Boolean(userRecord))
+    : isBundle
+      ? (ctx.any ? anyUserBundleInstalled(item.id) : Boolean(home && marketBundleInstalled(item.id, home)))
+      : ctx.any
+        ? (globalBaseline || records.length > 0)
+        : (globalBaseline || Boolean(userRecord))
   return {
     ...item,
-    type: isBundle || item.kind === 'plugin' ? 'plugin' : 'skill',
+    appId,
+    type: isApp ? 'app' : (isBundle || item.kind === 'plugin' ? 'plugin' : 'skill'),
     listed: item.listed !== false,
     origin: sub ? 'community' : 'builtin',
     submittedBy: sub ? sub.author : '',
     submittedUnit: sub ? sub.unit : '',
-    available: isBundle ? marketBundleAvailable(item.id) : marketSkillAvailable(item.id),
+    available: isApp ? marketAppAvailable(item) : isBundle ? marketBundleAvailable(item.id) : marketSkillAvailable(item.id),
     installed,
     locked: globalBaseline,
-    installedScope: isBundle ? (installed ? 'account' : '') : (userRecord ? userRecord.scope : ''),
-    installedProjectId: isBundle ? '' : (userRecord ? userRecord.projectId || '' : ''),
-    installScope: isBundle ? '当前账号的 DSH 运行时（其他账号不可见）' : '当前账号或项目技能目录（互不可见）',
-    installUsers: isBundle
-      ? bundleUsers
-      : globalBaseline
-        ? [{ userId: '*', userName: '全客户端基线', scope: 'baseline', projectId: '', installedAt: 0 }]
-        : records,
+    installedScope: isApp
+      ? (installed ? 'account' : '')
+      : isBundle ? (installed ? 'account' : '') : (userRecord ? userRecord.scope : ''),
+    installedProjectId: isApp || isBundle ? '' : (userRecord ? userRecord.projectId || '' : ''),
+    installScope: isApp
+      ? '机器级单例进程 · 账号级数据目录'
+      : isBundle ? '当前账号的 DSH 运行时（其他账号不可见）' : '当前账号或项目技能目录（互不可见）',
+    installUsers: isApp
+      ? records
+      : isBundle
+        ? bundleUsers
+        : globalBaseline
+          ? [{ userId: '*', userName: '全客户端基线', scope: 'baseline', projectId: '', installedAt: 0 }]
+          : records,
+    runtime: appLive || null,
+    appCapabilities: appCaps ? {
+      declared: appCaps.declared,
+      tools: appCaps.tools,
+      resources: appCaps.resources,
+      verdict: appCaps.verdict,
+      note: appCaps.note,
+    } : null,
+    version: appInfo?.version || item.version,
     downloadUrl: sub && sub.fileId ? `/api/plugin-market/download?id=${encodeURIComponent(item.id)}` : '',
     versions: marketVersionsOf(item.id).map((v) => ({ version: v.version, at: v.at, note: v.note || '' })),
     canRollback: Boolean(sub && marketVersionsOf(item.id).length),
@@ -5507,12 +5873,15 @@ const api = {
   'GET /api/plugin-market': (req, res) => {
     const user = roleOf(req)
     const net = netOf(req)
+    /* 网络域可见性：条目声明了 nets 就按声明过滤；没声明的视为全域可见。
+       市场条目目前都不带 nets，所以对现有数据是行为不变，只为将来"仅内网可见"留出开关。 */
+    const netVisible = (m) => !Array.isArray(m.nets) || !m.nets.length || m.nets.includes(net)
     const items = [...liveMarket]
-      .filter((m) => m.listed !== false)
+      .filter((m) => m.listed !== false && netVisible(m))
       .sort((a, b) => Number(a.order || 0) - Number(b.order || 0))
       .map((m) => marketItemState(m, { userId: user.id }))
-      .concat(PRODUCT_MARKET_PLUGINS.map((m) => ({ ...m, origin: 'builtin', installed: true, locked: true, available: true, type: 'plugin' })))
-    json(res, 200, { items, network: networks[net]?.label || '', installScope: '当前账号或项目技能目录；Bundle 按账号独立 DSH_HOME' })
+      .concat(PRODUCT_MARKET_PLUGINS.filter(netVisible).map((m) => ({ ...m, origin: 'builtin', installed: true, locked: true, available: true, type: 'plugin' })))
+    json(res, 200, { items, network: networks[net]?.label || '', installScope: '技能/插件按账号或项目安装；应用按机器级单例进程 + 账号数据目录' })
   },
   'GET /api/plugin-market/download': (req, res, url) => {
     const id = String(url.searchParams.get('id') || '')
@@ -5533,12 +5902,157 @@ const api = {
     })
     res.end(buffer)
   },
+  'POST /api/as/start': async (req, res) => {
+    const user = roleOf(req)
+    const body = JSON.parse(req.__body || '{}')
+    const id = String(body.id || '').trim()
+    const item = liveMarket.find((x) => x.id === id && x.kind === 'app')
+    if (!item) return json(res, 404, { error: '应用不存在', code: 'AS_APP_NOT_FOUND' })
+    if (!marketInstallRecords(item.id).some((r) => r.userId === user.id) && !canManage(user)) {
+      return json(res, 403, { error: '当前账号尚未安装该应用', code: 'AS_NOT_INSTALLED' })
+    }
+    try {
+      const result = await startApp({ id: item.appId || item.id, userId: user.id })
+      logAudit(user, 'as.start', item.id, `port=${result.port}`, netOf(req))
+      return json(res, 200, { ok: true, ...result, runtime: runtimeState(item.appId || item.id) })
+    } catch (error) {
+      return json(res, 409, { error: error.message || '应用启动失败', code: 'AS_START_FAILED' })
+    }
+  },
+  'POST /api/as/heartbeat': (req, res) => {
+    const body = JSON.parse(req.__body || '{}')
+    const result = heartbeatApp({ id: String(body.id || ''), leaseId: String(body.leaseId || '') })
+    if (!result.ok) return json(res, 409, result)
+    return json(res, 200, { ok: true, ...result })
+  },
+  'POST /api/as/stop': (req, res) => {
+    const user = roleOf(req)
+    const body = JSON.parse(req.__body || '{}')
+    const id = String(body.id || '').trim()
+    const item = liveMarket.find((x) => x.id === id && x.kind === 'app')
+    if (!item) return json(res, 404, { error: '应用不存在', code: 'AS_APP_NOT_FOUND' })
+    const result = releaseApp({ id: item.appId || item.id, leaseId: String(body.leaseId || ''), force: Boolean(body.force) && canManage(user) })
+    logAudit(user, 'as.stop', item.id, `force=${Boolean(body.force) && canManage(user)}`, netOf(req))
+    return json(res, 200, { ok: true, ...result, runtime: runtimeState(item.appId || item.id) })
+  },
+  'GET /api/as/status': (req, res, url) => {
+    const id = String(url.searchParams.get('id') || '').trim()
+    if (id) {
+      const item = liveMarket.find((x) => x.id === id && x.kind === 'app')
+      if (!item) return json(res, 404, { error: '应用不存在', code: 'AS_APP_NOT_FOUND' })
+      return json(res, 200, { ok: true, runtime: runtimeState(item.appId || item.id) })
+    }
+    const items = liveMarket.filter((x) => x.kind === 'app').map((x) => ({ id: x.id, appId: x.appId || x.id, name: x.name, runtime: runtimeState(x.appId || x.id) }))
+    return json(res, 200, { ok: true, items })
+  },
+  'GET /api/as/capabilities': (req, res, url) => {
+    const user = roleOf(req)
+    const id = String(url.searchParams.get('id') || '').trim()
+    const all = appToolCatalog(user)
+    if (id) {
+      const app = all.find((x) => x.marketId === id || x.appId === id)
+      if (!app) return json(res, 404, { error: '应用能力不可见或应用未安装', code: 'AS_APP_NOT_VISIBLE' })
+      return json(res, 200, { ok: true, app })
+    }
+    return json(res, 200, { ok: true, apps: all })
+  },
+  'GET /api/as/approvals': (req, res, url) => {
+    const user = roleOf(req)
+    const status = String(url.searchParams.get('status') || '').trim()
+    const items = [...APP_APPROVALS.values()]
+      .filter((record) => record.userId === user.id)
+      .filter((record) => (status ? record.status === status : true))
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .map(appApprovalView)
+    return json(res, 200, { ok: true, items, ttlMs: APP_APPROVAL_TTL_MS })
+  },
+  'POST /api/as/approvals': (req, res) => {
+    const user = roleOf(req)
+    const body = JSON.parse(req.__body || '{}')
+    const id = String(body.id || '').trim()
+    const item = liveMarket.find((x) => x.kind === 'app' && (x.id === id || x.appId === id))
+    if (!item) return json(res, 404, { error: '应用不存在', code: 'AS_APP_NOT_FOUND' })
+    if (!appAccessibleForUser(item, user)) return json(res, 403, { error: '当前账号尚未安装该应用', code: 'AS_NOT_INSTALLED' })
+    try {
+      const args = body.args && typeof body.args === 'object' ? body.args : {}
+      const approval = requestAppApproval({ appId: item.appId || item.id, tool: String(body.tool || ''), args, user, net: netOf(req) })
+      logAudit(user, 'as.approval.request', item.id, `${approval.tool} ${approval.approvalId}`, netOf(req))
+      return json(res, 202, { ok: false, code: 'AS_APPROVAL_REQUIRED', approval: appApprovalView(approval) })
+    } catch (error) {
+      return json(res, Number(error?.status) || 422, { error: String(error?.message || error), code: error?.code || 'AS_APPROVAL_FAILED' })
+    }
+  },
+  'POST /api/as/approvals/decide': (req, res) => {
+    const user = roleOf(req)
+    const body = JSON.parse(req.__body || '{}')
+    try {
+      const approval = decideAppApproval({ approvalId: String(body.approvalId || ''), decision: String(body.decision || ''), user })
+      logAudit(user, 'as.approval.decide', approval.approvalId, `${approval.status} ${approval.appName}.${approval.tool}`, netOf(req))
+      return json(res, 200, { ok: true, approval: appApprovalView(approval) })
+    } catch (error) {
+      return json(res, Number(error?.status) || 422, { error: String(error?.message || error), code: error?.code || 'AS_APPROVAL_DECIDE_FAILED' })
+    }
+  },
+  'POST /api/as/call': async (req, res) => {
+    const user = roleOf(req)
+    const body = JSON.parse(req.__body || '{}')
+    const id = String(body.id || '').trim()
+    const item = liveMarket.find((x) => x.id === id && x.kind === 'app')
+    if (!item) return json(res, 404, { error: '应用不存在', code: 'AS_APP_NOT_FOUND' })
+    if (!appAccessibleForUser(item, user)) return json(res, 403, { error: '当前账号尚未安装该应用', code: 'AS_NOT_INSTALLED' })
+    const appId = item.appId || item.id
+    const tool = String(body.tool || '')
+    const args = { ...(body.args && typeof body.args === 'object' ? body.args : {}) }
+    const approvalId = String(body.approvalId || args.approvalId || '')
+    delete args.approvalId
+    try {
+      const spec = appToolSpec(appId, tool)
+      let allowSideEffect = false
+      if (spec?.sideEffect) {
+        if (!approvalId) {
+          const approval = requestAppApproval({ appId, tool, args, user, net: netOf(req) })
+          logAudit(user, 'as.approval.request', item.id, `${tool} ${approval.approvalId}`, netOf(req))
+          return json(res, 202, { ok: false, code: 'AS_APPROVAL_REQUIRED', approval: appApprovalView(approval) })
+        }
+        consumeAppApproval({ approvalId, appId, tool, args, user })
+        allowSideEffect = true
+      }
+      const result = await callAppTool({
+        id: appId,
+        userId: user.id,
+        tool,
+        args,
+        allowSideEffect,
+      })
+      logAudit(user, 'as.call', item.id, `${result.tool} ${result.httpStatus}${approvalId ? ` approval(${approvalId})` : ''}`, netOf(req))
+      return json(res, 200, { ok: true, ...result })
+    } catch (error) {
+      logAudit(user, 'as.call', item.id, `deny(${String(error?.message || error).slice(0, 240)})`, netOf(req))
+      return json(res, Number(error?.status) || 422, { error: String(error?.message || error), code: error?.code || 'AS_CALL_FAILED' })
+    }
+  },
   'POST /api/plugin-market/install': async (req, res) => {
     const user = roleOf(req)
     const body = JSON.parse(req.__body || '{}')
     const item = liveMarket.find((x) => x.id === body.id)
     if (!item) return json(res, 404, { error: '插件不存在' })
     if (item.kind === 'plugin') return json(res, 409, { error: '该插件随客户端内置，不支持单独安装或卸载', code: 'PLUGIN_LOCKED' })
+    if (item.kind === 'app') {
+      if (!marketAppAvailable(item)) return json(res, 409, { error: '该应用尚未完成入库，暂不能安装', code: 'MARKET_PACKAGE_NOT_READY' })
+      const has = marketInstallRecords(item.id).some((r) => r.userId === user.id)
+      try {
+        if (has) await uninstallMarketApp(item, user)
+        else await installMarketApp(item, user)
+      } catch (error) {
+        return json(res, 409, { error: error.message || (has ? '应用卸载失败' : '应用安装失败') })
+      }
+      logAudit(user, has ? 'app.uninstall' : 'app.install', item.id, `account(${user.id})`, netOf(req))
+      return json(res, 200, {
+        ok: true,
+        item: { ...marketItemState(item, { userId: user.id }), installed: !has },
+        message: has ? '已从当前账号卸下；应用进程由 AS Runtime 按租约回收' : '已安装到当前账号；应用进程按机器级单例启动，数据按账号隔离',
+      })
+    }
     const isBundle = item.kind === 'bundle'
     if (isBundle ? !marketBundleAvailable(item.id) : !marketSkillAvailable(item.id)) {
       return json(res, 409, {
@@ -5699,12 +6213,22 @@ const api = {
       if (!item.subId) return json(res, 400, { error: '内置市场条目不能删除，只能下架' })
       const index = liveMarket.findIndex((x) => x.id === item.id)
       if (index >= 0) liveMarket.splice(index, 1)
-      rmSync(item.kind === 'bundle' ? bundlePackageDir(item.id) : join(MARKET_PACKAGE_ROOT, item.id), { recursive: true, force: true })
+      let deleteNote = 'allow'
+      if (item.kind === 'app') {
+        /* 同一个应用包可能被多个市场条目共用（同一个 zip 被重复上架）。
+           只要还有别的条目引用这个 appId，就只删条目、绝不动物理包，
+           否则另一个还装着它的条目会当场变成「包缺失 · 未运行」。
+           没有别的条目引用时才移除版本目录；账号数据由 uninstallApp 默认保留。 */
+        const appId = item.appId || item.id
+        const stillReferenced = liveMarket.some((x) => x.kind === 'app' && (x.appId || x.id) === appId)
+        if (stillReferenced) deleteNote = `keep-package appId=${appId}`
+        else uninstallApp(appId)
+      } else rmSync(item.kind === 'bundle' ? bundlePackageDir(item.id) : join(MARKET_PACKAGE_ROOT, item.id), { recursive: true, force: true })
       const sub = pluginSubs.findIndex((s) => s.id === item.subId)
       if (sub >= 0) pluginSubs.splice(sub, 1)
       liveMarketInstalls.delete(item.id)
       persistPersistentState()
-      logAudit(user, 'plugin-market.delete', item.id, 'allow', netOf(req))
+      logAudit(user, 'plugin-market.delete', item.id, deleteNote, netOf(req))
       return json(res, 200, { ok: true, deleted: item.id })
     }
     return json(res, 400, { error: '未知的市场管理操作' })
@@ -5725,18 +6249,22 @@ const api = {
     const meta = getFile(fileId)
     if (!meta) return json(res, 400, { error: '插件包不存在或已失效，请重新上传', code: 'PLUGIN_FILE_MISSING' })
     if (meta.owner !== user.name && !canManage(user)) return json(res, 403, { error: '只能提交本人上传的插件包' })
-    let buffer
-    try { buffer = readFileBuffer(fileId) } catch { return json(res, 400, { error: '插件包读取失败，请重新上传' }) }
-    const scan = inspectPluginZip(buffer)
+    const filePath = uploadedFilePath(meta)
+    if (!filePath || !existsSync(filePath)) return json(res, 400, { error: '插件包读取失败，请重新上传' })
+    let scan
+    try { scan = inspectPluginZip(filePath) } catch { return json(res, 400, { error: '插件包读取或解析失败，请检查 ZIP 是否完整' }) }
     const hasFail = (scan.checks || []).some((c) => c[1] === '不通过')
     const id = `SUB-${Date.now().toString(36).toUpperCase()}`
     const sizeText = meta.size >= 1024 ** 2 ? `${(meta.size / 1024 ** 2).toFixed(1)} MB` : `${Math.max(1, Math.round(meta.size / 1024))} KB`
     const sub = {
-      id, name, version: body.version || '0.1.0', file: meta.name, size: sizeText,
+      id, name, version: body.version || scan.appVersion || '0.1.0', file: meta.name, size: sizeText,
       fileId, sha256: meta.sha256, kind: scan.kind || 'bundle',
+      appId: scan.appId || '', appName: scan.appName || '', appVersion: scan.appVersion || '',
+      appDir: scan.appDir || '', entry: scan.entry || '', runtime: scan.runtime || '',
+      packagePolicy: scan.packagePolicy || null,
       author: user.name, unit: user.unit, scope: body.scope || '全集团',
       status: hasFail ? 'rejected' : 'pending', submitted: stamp(),
-      desc: body.desc || '企业自研插件，按插件开发规范打包，经平台检测与审核后上架',
+      desc: body.desc || (scan.kind === 'app' ? '企业自研应用，按 AS app.json 清单打包，经平台审核后由 AS Runtime 托管' : '企业自研插件，按插件开发规范打包，经平台检测与审核后上架'),
       checks: scan.checks,
       reason: hasFail ? '自动检测未通过：' + scan.checks.filter((c) => c[1] === '不通过').map((c) => `${c[0]}（${c[2]}）`).join('；') : '',
     }
@@ -5757,37 +6285,68 @@ const api = {
     let packageReady = false
     if (action === 'approve') {
       const kind = sub.kind || 'bundle'
-      const marketId = sub.marketId || (kind === 'skill' ? `PLG-${sub.id.replace(/^SUB-/, '')}` : `M-${Date.now()}`)
-      if (kind === 'skill' || kind === 'bundle') {
+      let marketId = sub.marketId || (kind === 'skill' ? `PLG-${sub.id.replace(/^SUB-/, '')}` : `M-${Date.now()}`)
+      let reusedAppEntry = null
+      if (kind === 'skill' || kind === 'bundle' || kind === 'app') {
         const meta = getFile(sub.fileId)
         if (!meta) return json(res, 409, { error: '插件包文件已失效，请让提交人重新上传' })
+        const filePath = uploadedFilePath(meta)
+        if (!filePath || !existsSync(filePath)) return json(res, 409, { error: '插件包文件已失效，请让提交人重新上传' })
         try {
-          const buffer = readFileBuffer(sub.fileId)
-          const target = kind === 'skill' ? join(MARKET_PACKAGE_ROOT, marketId) : bundlePackageDir(marketId)
-          const existing = liveMarket.find((m) => m.id === marketId)
-          if (existing) backupMarketPackage(existing, `审核替换 ${sub.version || ''}`.trim())
-          rmSync(target, { recursive: true, force: true })
-          mkdirSync(target, { recursive: true })
-          if (kind === 'skill') {
-            extractSkillPackage(buffer, target)
+          if (kind === 'app') {
+            const appId = String(sub.appId || '').trim()
+            if (!appId) throw new Error('app.json 缺少 id，无法入库')
+            const appVersion = String(sub.appVersion || sub.version || '').trim()
+            if (!appVersion) throw new Error('app.json 缺少 version，无法入库')
+            /* 同一个 appId 在市场上已有一条条目（同一个应用被重复提交 / 包缺失后重传恢复）：
+               复用那条条目，不再新建第二条。两个条目共用一份 app 包时，删任意一条都会把另一条打成「包缺失」。 */
+            const dupEntry = liveMarket.find((m) => m.kind === 'app' && m.id !== marketId && String(m.appId || m.id) === appId)
+            if (dupEntry) { marketId = dupEntry.id; reusedAppEntry = dupEntry }
+            const target = appVersionDir(appId, appVersion)
+            const existing = liveMarket.find((m) => m.id === marketId)
+            if (existing) backupMarketPackage(existing, `审核替换 ${appVersion}`)
+            rmSync(target, { recursive: true, force: true })
+            mkdirSync(target, { recursive: true })
+            extractAppPackage(filePath, target)
+            const manifest = JSON.parse(readFileSync(join(target, 'app.json'), 'utf8'))
+            if (String(manifest.id || '') !== appId) throw new Error('app.json 的 id 与审核记录不一致')
+            setCurrentAppVersion(appId, appVersion)
+            sub.marketId = marketId
+            sub.appId = appId
+            sub.appVersion = appVersion
+            sub.version = appVersion
+            packageReady = true
           } else {
-            extractBundlePackage(buffer, target)
-            const pkg = bundlePackageManifest(marketId)
-            if (!pkg || !pkg.name || !pkg.dsh || !pkg.dsh.bundle) throw new Error('Bundle 的 package.json 缺少 name 或 dsh.bundle')
-            sub.packageName = pkg.name
+            const target = kind === 'skill' ? join(MARKET_PACKAGE_ROOT, marketId) : bundlePackageDir(marketId)
+            const existing = liveMarket.find((m) => m.id === marketId)
+            if (existing) backupMarketPackage(existing, `审核替换 ${sub.version || ''}`.trim())
+            rmSync(target, { recursive: true, force: true })
+            mkdirSync(target, { recursive: true })
+            if (kind === 'skill') {
+              extractSkillPackage(filePath, target)
+            } else {
+              extractBundlePackage(filePath, target)
+              const pkg = bundlePackageManifest(marketId)
+              if (!pkg || !pkg.name || !pkg.dsh || !pkg.dsh.bundle) throw new Error('Bundle 的 package.json 缺少 name 或 dsh.bundle')
+              sub.packageName = pkg.name
+            }
+            sub.marketId = marketId
+            packageReady = true
           }
-          sub.marketId = marketId
-          packageReady = true
         } catch (error) {
-          return json(res, 409, { error: `${kind === 'skill' ? '技能包' : 'Bundle'}入库失败：${error.message}` })
+          return json(res, 409, { error: `${kind === 'app' ? '应用包' : kind === 'skill' ? '技能包' : 'Bundle'}入库失败：${error.message}` })
         }
       }
-      if (!liveMarket.some((m) => m.subId === sub.id)) {
+      if (!reusedAppEntry && !liveMarket.some((m) => m.subId === sub.id)) {
         liveMarket.unshift({
           id: marketId, subId: sub.id, section: '企业内部', name: sub.name, desc: sub.desc,
           publisher: sub.unit, installed: false, scope: sub.scope, version: sub.version,
-          kind, packageId: packageReady ? marketId : '',
+          kind, appId: sub.appId || '', packageId: packageReady ? marketId : '',
         })
+      }
+      if (reusedAppEntry) {
+        reusedAppEntry.version = sub.version
+        reusedAppEntry.packageId = marketId
       }
     }
     logAudit(user, 'plugin.review.' + action, sub.id, 'allow', netOf(req))
@@ -7148,6 +7707,174 @@ const api = {
     logAudit(user, 'automation.run', a.id, 'allow', netOf(req))
     json(res, 200, { ok: true, item: a, task: result.task })
   },
+  'GET /api/admin/pending': (req, res) => {
+    const user = roleOf(req)
+    if (!canManage(user)) return json(res, 403, { error: '仅管理角色可查看管理中心待办' })
+    const dataPending = liveResources.filter((r) => {
+      if (r.workflow && !['done', 'rejected'].includes(String(r.workflow.stage || ''))) return true
+      return ['pending-dept', 'pending-qc', 'pending-data', 'pending-review'].includes(String(r.status || ''))
+    })
+    const appPending = liveApps.filter((a) => String(a.status || '') === 'review')
+    const pluginPending = pluginSubs.filter((s) => String(s.status || '') === 'pending')
+    const ticketPending = liveTickets.filter((t) => String(t.status || '') !== '已闭环')
+    const feedbackPending = liveFeedback.filter((f) => String(f.status || '') !== '已修复')
+    const decisions = latestApprovalDecisions(50)
+    const approvalPending = decisions.filter((d) => String(d.decision || '') === 'pending')
+    const asPending = [...APP_APPROVALS.values()].filter((r) => String(r.userId) === String(user.id) && String(r.status || '') === 'pending')
+    const items = [
+      { type: 'data', label: '数据资源审批', count: dataPending.length, target: 'data', note: '登记、编辑、下载与授权' },
+      { type: 'apps', label: '应用接入审核', count: appPending.length, target: 'apps', note: '接入验证、发布与版本' },
+      { type: 'plugins', label: '插件与技能上架', count: pluginPending.length, target: 'ai', note: '提交包检测与上架' },
+      { type: 'service', label: '工单与反馈', count: ticketPending.length + feedbackPending.length, target: 'service', note: '待分派、待复核与待受理' },
+      { type: 'runtime', label: '运行时审批', count: approvalPending.length + asPending.length, target: 'security', note: '工具调用与应用写操作' },
+    ]
+    return json(res, 200, {
+      ok: true,
+      items,
+      total: items.reduce((n, x) => n + Number(x.count || 0), 0),
+      counts: {
+        resources: liveResources.length,
+        apps: liveApps.length,
+        asApps: liveMarket.filter((x) => x.kind === 'app').length,
+        tickets: liveTickets.length,
+        feedback: liveFeedback.length,
+        approvalDecisions: decisions.length,
+      },
+    })
+  },
+  'GET /api/app-data/grants': (req, res) => {
+    const user = roleOf(req)
+    if (!canManage(user)) return json(res, 403, { error: '仅管理角色可查看应用数据授权' })
+    const items = listGrants().map((grant) => ({
+      ...grantView(grant),
+      userName: getAccount(grant.userId)?.name || grant.userId,
+      accountId: grant.userId,
+    }))
+    return json(res, 200, { ok: true, items })
+  },
+  'POST /api/app-data/grants': (req, res) => {
+    const user = roleOf(req)
+    if (!canManage(user)) return json(res, 403, { error: '仅管理角色可授予应用数据权限' })
+    const body = JSON.parse(req.__body || '{}')
+    const appId = String(body.appId || '').trim()
+    const app = liveMarket.find((x) => (x.appId || x.id) === appId && x.kind === 'app')
+    if (!app) return json(res, 404, { error: '应用不存在', code: 'APP_NOT_FOUND' })
+    const targetUserId = String(body.userId || user.accountId || user.id || '').trim()
+    if (!targetUserId) return json(res, 400, { error: '缺少授权用户' })
+    const days = Math.max(1, Math.min(90, Number(body.days || 7)))
+    try {
+      if (body.replace === true) {
+        for (const old of listGrants({ appId, userId: targetUserId, status: 'active' })) {
+          if (Number(old.expiresAt || 0) > Date.now()) revokeGrant(old.grantId, user.name || user.accountId || '')
+        }
+      }
+      const grant = createGrant({
+        appId,
+        appName: app.name || appId,
+        userId: targetUserId,
+        resourceIds: Array.isArray(body.resourceIds) ? body.resourceIds : ['*'],
+        scopes: Array.isArray(body.scopes) ? body.scopes : ['read'],
+        purpose: String(body.purpose || ''),
+        expiresAt: Date.now() + days * 24 * 60 * 60 * 1000,
+        createdBy: user.accountId || user.id || '',
+        net: body.net === 'gov' ? 'gov' : 'inet',
+      })
+      logAudit(user, 'app.data.grant', grant.grantId, `${appId}:${targetUserId}:${grant.scopes.join('+')}`, grant.net)
+      return json(res, 200, { ok: true, grant: { ...grantView(grant), userName: getAccount(targetUserId)?.name || targetUserId } })
+    } catch (error) {
+      return json(res, 422, { error: error.message || '授权创建失败', code: 'APP_DATA_GRANT_FAILED' })
+    }
+  },
+  'POST /api/app-data/grants/revoke': (req, res) => {
+    const user = roleOf(req)
+    if (!canManage(user)) return json(res, 403, { error: '仅管理角色可撤销应用数据授权' })
+    const body = JSON.parse(req.__body || '{}')
+    try {
+      const grant = revokeGrant(String(body.grantId || ''), user.name || user.accountId || '')
+      logAudit(user, 'app.data.revoke', grant.grantId, `${grant.appId}:${grant.userId}`, grant.net)
+      return json(res, 200, { ok: true, grant: grantView(grant) })
+    } catch (error) {
+      return json(res, 422, { error: error.message || '撤销失败', code: 'APP_DATA_REVOKE_FAILED' })
+    }
+  },
+  'POST /api/app-data/token': (req, res) => {
+    const body = JSON.parse(req.__body || '{}')
+    const appId = String(body.appId || req.headers['x-as-app-id'] || '').trim()
+    const contextToken = String(body.contextToken || req.headers['x-as-context'] || '').trim()
+    if (!appId || !contextToken) return json(res, 401, { error: '缺少应用上下文', code: 'APP_CONTEXT_REQUIRED' })
+    const context = verifyAppContext(contextToken, appId)
+    if (!context) return json(res, 401, { error: '应用上下文无效或已过期', code: 'APP_CONTEXT_INVALID' })
+    const grant = activeGrantFor(appId, context.userId)
+    if (!grant) return json(res, 403, { error: '当前用户尚未授予该应用数据权限', code: 'APP_DATA_GRANT_REQUIRED' })
+    try {
+      const issued = mintDataToken({ grantId: grant.grantId, appId, userId: context.userId })
+      const account = getAccount(context.userId)
+      logAudit({ id: context.userId, name: account?.name || context.userId, accountId: context.userId }, 'app.data.token', grant.grantId, `${appId}:${grant.purpose}`, grant.net)
+      return json(res, 200, {
+        ok: true,
+        token: issued.token,
+        tokenType: 'Bearer',
+        expiresAt: issued.expiresAt,
+        grantId: issued.grantId,
+        scopes: issued.scopes,
+        resourceIds: grant.resourceIds,
+        purpose: grant.purpose,
+      })
+    } catch (error) {
+      return json(res, 422, { error: error.message || '数据令牌签发失败', code: 'APP_DATA_TOKEN_FAILED' })
+    }
+  },
+  'POST /api/app-data/query': (req, res) => {
+    const body = JSON.parse(req.__body || '{}')
+    const token = String(req.headers.authorization || body.token || '').trim()
+    const record = verifyDataToken(token)
+    if (!record) return json(res, 401, { error: '数据令牌无效、已过期或授权已撤销', code: 'APP_DATA_TOKEN_INVALID' })
+    const grant = record.grant
+    const account = getAccount(grant.userId)
+    const user = account ? userOfAccount(account) : { id: grant.userId, name: grant.userId, role: 'employee', scopes: [] }
+    const all = liveResources.filter((r) => canSee(user, r, grant.net || 'inet'))
+    const allowedIds = grant.resourceIds.includes('*') ? null : new Set(grant.resourceIds)
+    const scoped = all.filter((r) => !allowedIds || allowedIds.has(r.id))
+    const action = String(body.action || 'list')
+    const audit = (result) => logAudit(user, 'app.data.query', grant.grantId, `${grant.appId}:${result}`, grant.net || 'inet')
+    if (action === 'overview') {
+      const byType = {}
+      for (const r of scoped) byType[r.type || '其他'] = (byType[r.type || '其他'] || 0) + 1
+      audit(`overview:${scoped.length}`)
+      return json(res, 200, { ok: true, grantId: grant.grantId, scopes: grant.scopes, count: scoped.length, byType })
+    }
+    if (action === 'get') {
+      if (!grant.scopes.includes('detail')) return json(res, 403, { error: '当前授权不包含资源详情', code: 'APP_DATA_DETAIL_FORBIDDEN' })
+      const id = String(body.resourceId || '').trim()
+      const item = scoped.find((r) => String(r.id) === id)
+      if (!item) return json(res, 404, { error: '资源不在授权范围内或不存在', code: 'APP_DATA_RESOURCE_NOT_FOUND' })
+      audit(`get:${id}`)
+      return json(res, 200, {
+        ok: true,
+        grantId: grant.grantId,
+        scopes: grant.scopes,
+        item: {
+          ...pickResource(item),
+          description: String(item.description || ''),
+          fields: Object.keys(item.dataStandard || {}).slice(0, 30),
+        },
+      })
+    }
+    if (action === 'list') {
+      const limit = Math.max(1, Math.min(100, Number(body.limit || 50)))
+      const items = scoped.slice(0, limit).map(pickResource)
+      audit(`list:${items.length}`)
+      return json(res, 200, {
+        ok: true,
+        grantId: grant.grantId,
+        scopes: grant.scopes,
+        total: scoped.length,
+        items,
+      })
+    }
+    if (action === 'export') return json(res, 403, { error: '导出未在本次授权中开放', code: 'APP_DATA_EXPORT_FORBIDDEN' })
+    return json(res, 400, { error: '未知查询动作', code: 'APP_DATA_ACTION_UNKNOWN' })
+  },
   'GET /api/console': (req, res) => {
     const user = roleOf(req)
     const installed = installedSkillPlugins()
@@ -7171,7 +7898,7 @@ const api = {
       ...consoleSections,
       overview: {
         ...consoleSections.overview,
-        meta: '运行概况只展示当前运行时实际计数；未接入监控的指标不展示',
+        meta: consoleSections.overview.meta,
         kpis: [
           { k: '平台服务', v: `${capabilityCount} / ${totalCaps}`, note: '运行时实际启用的公共能力', tone: 'ok' },
           { k: '已安装技能', v: `${skillCount}`, note: '当前账号实际安装的个人技能', tone: '' },
@@ -7180,11 +7907,7 @@ const api = {
           { k: '业务应用', v: `${liveApps.length}`, note: '应用注册接口实际数量', tone: '' },
           { k: '待审核', v: `${pendingCount}`, note: pendingCount ? '插件市场待审核提交' : '暂无待审核提交', tone: pendingCount ? 'warn' : 'ok' },
         ],
-        blocks: pendingCount ? [{
-          type: 'rows',
-          title: '待处理事项',
-          items: [[`插件审核 ${pendingCount} 项`, '员工提交的插件 / 技能', '插件市场', '待审核']],
-        }] : [],
+        blocks: [],
       },
       ai: {
         ...consoleSections.ai,
@@ -9390,8 +10113,9 @@ const api = {
     json(res, 200, { ok: true, item })
   },
   'GET /api/ai/tools': (req, res) => {
+    const user = roleOf(req)
     json(res, 200, {
-      items: aiTools,
+      items: [...aiTools, ...APP_AI_GENERIC_TOOLS, ...appAiToolEntries(user)],
       identity: '工具以“当前登录员工 + 当前网络”为调用身份，每次调用按模块授权判定并写审计',
     })
   },
@@ -9470,6 +10194,48 @@ const api = {
     const body = JSON.parse(req.__body || '{}')
     const name = String(body.tool || '')
     const args = body.args && typeof body.args === 'object' ? body.args : {}
+    const appDynamic = parseAppAiToolName(name)
+    const appArgs = { ...(args.args && typeof args.args === 'object' ? args.args : {}) }
+    const appApprovalId = String(args.approvalId || appArgs.approvalId || '')
+    delete appArgs.approvalId
+    if (name === 'app_list') {
+      const result = { apps: appToolCatalog(user) }
+      logAudit(user, 'ai.invoke', name, 'allow', netOf(req))
+      return json(res, 200, { ok: true, tool: name, actor: `${user.name}（${user.unit}）`, result })
+    }
+    if (name === 'app_call' || appDynamic) {
+      const appKey = name === 'app_call' ? String(args.appId || '') : appDynamic.appId
+      const toolName = name === 'app_call' ? String(args.tool || '') : appDynamic.tool
+      const item = liveMarket.find((x) => x.kind === 'app' && (x.appId === appKey || x.id === appKey))
+      if (!item) return json(res, 404, { error: '应用不存在', code: 'AS_APP_NOT_FOUND' })
+      if (!appAccessibleForUser(item, user)) return json(res, 403, { error: '当前账号尚未安装该应用', code: 'AS_NOT_INSTALLED' })
+      const appId = item.appId || item.id
+      try {
+        const spec = appToolSpec(appId, toolName)
+        let allowSideEffect = false
+        if (spec?.sideEffect) {
+          if (!appApprovalId) {
+            const approval = requestAppApproval({ appId, tool: toolName, args: appArgs, user, net: netOf(req) })
+            logAudit(user, 'ai.invoke', name, `approval-required ${toolName} ${approval.approvalId}`, netOf(req))
+            return json(res, 202, {
+              ok: false,
+              tool: name,
+              code: 'AS_APPROVAL_REQUIRED',
+              error: '该应用工具声明为写操作，需要先由当前账号确认审批单',
+              approval: appApprovalView(approval),
+            })
+          }
+          consumeAppApproval({ approvalId: appApprovalId, appId, tool: toolName, args: appArgs, user })
+          allowSideEffect = true
+        }
+        const call = await callAppTool({ id: appId, userId: user.id, tool: toolName, args: appArgs, allowSideEffect })
+        logAudit(user, 'ai.invoke', name, `${toolName} allow${appApprovalId ? ` approval(${appApprovalId})` : ''}`, netOf(req))
+        return json(res, 200, { ok: true, tool: name, actor: `${user.name}（${user.unit}）`, result: call })
+      } catch (error) {
+        logAudit(user, 'ai.invoke', name, `deny(${String(error?.message || error).slice(0, 240)})`, netOf(req))
+        return json(res, 422, { error: String(error?.message || error), code: error?.code || 'AS_CALL_FAILED' })
+      }
+    }
     const tool = aiTools.find((t) => t.name === name)
     if (!tool) return json(res, 404, { error: '工具不存在', hint: '先调用 GET /api/ai/tools 获取可用工具' })
     const TOOL_MODULE = { 云空间: 'drive', 通知公告: 'notice', 教学园地: 'academy', 通讯录: 'contacts', 即时通讯: 'im', 任务: 'tasks', 智能笔记本: 'knowledge', 数据中心: 'datacenter' }
@@ -9953,9 +10719,10 @@ const server = createServer(async (req, res) => {
 
     // 保留登录前的三个入口：读取引导、选网络、选角色；其余 API 必须先有服务端会话。
     const publicApi = new Set(['GET /api/captcha', 'GET /api/bootstrap', 'POST /api/login', 'POST /api/network', 'POST /api/logout'])
+    const appDataApi = new Set(['POST /api/app-data/token', 'POST /api/app-data/query'])
     const mcpToken = process.env.JG_MCP_TOKEN || ''
     const viaMcp = Boolean(mcpToken) && String(req.headers['x-jg-mcp-token'] || '') === mcpToken
-    if (!publicApi.has(key) && !viaMcp && !sessionOf(req)) {
+    if (!publicApi.has(key) && !appDataApi.has(key) && !viaMcp && !sessionOf(req)) {
       return json(res, 401, { error: '未登录或会话已过期，请重新选择身份', code: 'AUTH_REQUIRED' })
     }
     if (!publicApi.has(key) && !viaMcp && key !== 'POST /api/account/password') {
@@ -10025,12 +10792,28 @@ const server = createServer(async (req, res) => {
   }
 })
 
+/* 端口被占用时给出可执行的提示：默认 4173 常被本地开发服务（如材料工作台）占用，
+   单跑 server.mjs 撞上时原生只会抛 EADDRINUSE，很难看出是端口冲突。 */
+server.on('error', (err) => {
+  if (err && err.code === 'EADDRINUSE') {
+    console.error(`[九规智能中枢] 端口 ${port} 已被占用。请换端口启动，例如：set PORT=4180 && node server.mjs`)
+    process.exit(1)
+  }
+  throw err
+})
+
 server.listen(port, '127.0.0.1', () => {
   cleanupSessions()
   ensureNativeSessionSearch()
   refreshRuntimeConfigDump()
+  reconcileAppsOnBoot().catch((err) => console.error('[as-runtime] reconcile failed:', err && err.message ? err.message : err))
+  const asSweepTimer = setInterval(() => {
+    try { sweepApps() } catch (err) { console.error('[as-runtime] sweep failed:', err && err.message ? err.message : err) }
+  }, 5000)
+  if (typeof asSweepTimer.unref === 'function') asSweepTimer.unref()
   console.log(`[jg-hub] http://127.0.0.1:${port}`)
   console.log(`[jg-server] sqlite: ${dataDirPath()}`)
+  console.log(`[jg-server] as apps: ${AS_APPS_ROOT}`)
   try {
     const first = backupNow('启动备份')
     console.log(`[jg-server] backup: ${first.path}`)
@@ -10051,6 +10834,7 @@ server.listen(port, '127.0.0.1', () => {
 process.on('exit', () => closeStore())
 for (const signal of ['SIGTERM', 'SIGINT']) {
   process.on(signal, async () => {
+    try { await shutdownApps() } catch {}
     try { await closeHarness() } catch {}
     try { closeStore() } catch {}
     process.exit(0)
