@@ -126,6 +126,7 @@ function imageTemplatePublic(template) {
     ratio: template.ratio,
     prompt: template.prompt,
     description: template.description,
+    sourceAssetId: template.sourceAssetId,
     applicant: template.applicant,
     status: template.status,
     reviewer: template.reviewer,
@@ -8813,32 +8814,33 @@ const api = {
     const body = JSON.parse(req.__body || '{}')
     const title = String(body.title || '').trim()
     const category = String(body.category || '').trim()
-    const ratio = String(body.ratio || '').trim()
     const prompt = String(body.prompt || '').trim()
     const description = String(body.description || '').trim()
+    const sourceAssetId = String(body.sourceAssetId || '').trim()
     if (!title || title.length > 40) return json(res, 400, { error: '模板名称必填，且在 40 个字符以内' })
     if (!prompt || prompt.length > 2000) return json(res, 400, { error: '模板提示词必填，且在 2000 个字符以内' })
     if (description.length > 800) return json(res, 400, { error: '模板说明不能超过 800 个字符' })
     if (!IMAGE_TEMPLATE_CATEGORY_VALUES.includes(category)) return json(res, 400, { error: '模板分类不受支持' })
-    if (!['1:1', '3:4', '9:16', '4:3', '16:9'].includes(ratio)) return json(res, 400, { error: '宽高比例不受支持' })
-    if (!body.previewDataUrl) return json(res, 400, { error: '请上传模板预览图' })
-    let preview
-    try {
-      preview = imageDataUrlBuffer(body.previewDataUrl)
-    } catch (error) {
-      return json(res, 400, { error: String(error?.message || '模板预览图无效') })
-    }
-    if (preview.buffer.length > 8 * 1024 * 1024) return json(res, 400, { error: '模板预览图不能超过 8 MB' })
-    const ext = preview.mime === 'image/webp' ? 'webp' : preview.mime === 'image/jpeg' ? 'jpg' : 'png'
+    if (!sourceAssetId) return json(res, 400, { error: '只能从自己生成的图像发起模板申请' })
+    const source = getImageAsset(sourceAssetId)
+    if (!source || source.deletedAt != null) return json(res, 404, { error: '来源图像不存在或已删除' })
+    if (source.owner !== user.name) return json(res, 403, { error: '只能申请自己生成的图像' })
+    const sourceFile = getFile(source.fileId)
+    if (!sourceFile || sourceFile.deletedAt != null) return json(res, 404, { error: '来源图像文件已失效' })
+    let sourceBuffer
+    try { sourceBuffer = readFileBuffer(source.fileId) } catch { return json(res, 400, { error: '来源图像读取失败' }) }
+    if (sourceBuffer.length > 8 * 1024 * 1024) return json(res, 400, { error: '模板来源图像不能超过 8 MB' })
+    const ratio = ['1:1', '3:4', '9:16', '4:3', '16:9'].includes(source.ratio) ? source.ratio : '1:1'
+    const ext = sourceFile.mime === 'image/webp' ? 'webp' : sourceFile.mime === 'image/jpeg' ? 'jpg' : 'png'
     const previewFileId = newFileId('TPF')
     const previewMeta = putFile({
       id: previewFileId,
       name: `template-preview-${Date.now()}.${ext}`,
-      mime: preview.mime,
-      buffer: preview.buffer,
+      mime: sourceFile.mime || 'image/png',
+      buffer: sourceBuffer,
       owner: user.name,
       net,
-      note: `image-template preview; applicant=${user.name}`,
+      note: `image-template preview; applicant=${user.name}; source=${sourceAssetId}`,
     })
     const id = newFileId('TPL')
     const template = createImageTemplate({
@@ -8849,10 +8851,11 @@ const api = {
       prompt,
       description,
       previewFileId: previewMeta.id,
+      sourceAssetId: source.id,
       applicant: user.name,
       status: 'pending',
     })
-    logAudit(user, 'image.template.apply', `${id}:${category}`, 'pending', net)
+    logAudit(user, 'image.template.apply', `${id}:${source.id}`, 'pending', net)
     return json(res, 200, { ok: true, application: imageTemplatePublic(template) })
   },
   'POST /api/images/template-review': (req, res) => {

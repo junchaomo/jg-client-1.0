@@ -6254,6 +6254,7 @@ function openPluginPublish() {
       desc: mask.querySelector('#pubDesc').value.trim() || '—',
     }
     const { ok, body } = await api('/api/plugin-subs', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) })
+    if (ok) state.reviewProgressLoaded = false
     if (!ok) return toast(body.error || '上传失败', true)
     mask.remove()
     openPluginReport(body.item)
@@ -7300,35 +7301,6 @@ async function loadImageTemplates({ force = false } = {}) {
   }
 }
 
-async function loadImageTemplateApplications({ force = false } = {}) {
-  const g = state.imagegen
-  if (g.templateAppsLoading) return
-  if (g.templateAppsLoaded && !force) return
-  g.templateAppsLoading = true
-  try {
-    const res = await api('/api/images/template-applications')
-    if (!res.ok) throw new Error(res.body?.error || `读取模板申请失败（HTTP ${res.status}）`)
-    g.templateApps = Array.isArray(res.body?.applications) ? res.body.applications : []
-    g.templateAppsLoaded = true
-  } catch (err) {
-    g.templateApps = []
-    g.templateAppsLoaded = true
-    toast(err.message || '读取模板申请失败', true)
-  } finally {
-    g.templateAppsLoading = false
-    if (state.view === 'imagegen') renderView()
-  }
-}
-
-function imageTemplateAdminVisible() {
-  return Boolean((state.boot?.user?.visibleModules || []).includes('admin'))
-}
-
-function imageTemplatePendingCount() {
-  return (state.imagegen.templateApps || []).filter((item) => item.status === 'pending').length
-}
-
-
 function renderImageReferenceChips(g) {
   const refs = Array.isArray(g.references) ? g.references : []
   if (!refs.length) return ''
@@ -7419,70 +7391,6 @@ async function addLocalImageReference(file) {
   }
 }
 
-function openImageCompare() {
-  const g = state.imagegen
-  const shots = (g.shots || []).filter((shot) => shot.url)
-  if (shots.length < 2) return toast('至少需要两张图像才能并排对比', true)
-  const selected = new Set(shots.slice(0, 2).map((shot) => shot.id))
-  const mask = openModal('选择对比图像', `
-    <div class="form-note">选择 2–3 张图像并排查看。对比不会生成新图，只读取当前已落库的版本文件。</div>
-    <div class="img-ref-picker">
-      ${shots.map((shot) => `
-        <button type="button" class="img-ref-choice${selected.has(shot.id) ? ' on' : ''}" data-cmp-pick="${esc(shot.id)}" aria-pressed="${selected.has(shot.id)}">
-          <img src="${shot.url}" alt="">
-          <span>${esc(shot.style)} · ${esc(shot.ratio)}</span>
-        </button>`).join('')}
-    </div>
-    <div class="img-edit-err" id="igCmpErr"></div>
-    <div class="img-edit-foot">
-      <button class="btn" data-igcmpcancel>返回</button>
-      <button class="btn primary" id="igCmpGo">开始对比</button>
-    </div>`, { wide: true })
-  const err = mask.querySelector('#igCmpErr')
-  const choices = [...mask.querySelectorAll('[data-cmp-pick]')]
-  const paint = () => choices.forEach((btn) => {
-    const on = selected.has(btn.dataset.cmpPick)
-    btn.classList.toggle('on', on)
-    btn.setAttribute('aria-pressed', on ? 'true' : 'false')
-  })
-  choices.forEach((btn) => btn.addEventListener('click', () => {
-    const id = btn.dataset.cmpPick
-    if (selected.has(id)) {
-      if (selected.size <= 1) {
-        err.textContent = '至少保留一张图像'
-        return
-      }
-      selected.delete(id)
-    } else if (selected.size >= 3) {
-      err.textContent = '最多对比 3 张图像'
-      return
-    } else selected.add(id)
-    err.textContent = ''
-    paint()
-  }))
-  mask.querySelector('[data-igcmpcancel]').addEventListener('click', () => mask.remove())
-  mask.querySelector('#igCmpGo').addEventListener('click', () => {
-    if (selected.size < 2) {
-      err.textContent = '请至少选择两张图像'
-      return
-    }
-    const chosen = shots.filter((shot) => selected.has(shot.id))
-    mask.remove()
-    openModal('并排对比', `
-      <div class="img-compare-grid" style="grid-template-columns:repeat(${chosen.length},minmax(0,1fr))">
-        ${chosen.map((shot) => `
-          <figure class="img-compare-card">
-            <img src="${shot.url}" alt="">
-            <figcaption>
-              <div class="img-compare-title">${esc(shot.style)} · ${esc(shot.ratio)} · v${Number(shot.revision || 1)}</div>
-              <div class="img-compare-prompt">${esc(shot.prompt || '')}</div>
-            </figcaption>
-          </figure>`).join('')}
-      </div>
-      <div class="form-note">对比只展示已落库版本，不改变当前版本，也不会生成新图。</div>`, { wide: true })
-  })
-}
-
 function closeImageMenu() {
   document.querySelectorAll('.img-menu').forEach((menu) => menu.remove())
 }
@@ -7516,32 +7424,89 @@ async function copyImagePrompt(shot) {
 
 async function openImageVersions(shot) {
   const res = await api(`/api/images/asset?id=${encodeURIComponent(shot.id)}`)
-  if (!res.ok) return toast(res.body?.error || '读取版本历史失败', true)
+  if (!res.ok) return toast(res.body?.error || '读取版本历史对比失败', true)
   const asset = res.body?.asset
   const revisions = Array.isArray(asset?.revisions) ? asset.revisions : []
   if (!revisions.length) return toast('这张图片还没有版本记录', true)
-  const mask = openModal('版本历史', `
-    <div class="img-ver-head">${esc(asset.prompt)}</div>
+  const current = revisions.find((rev) => rev.revision === asset.revision) || revisions[0]
+  const previous = revisions.find((rev) => rev.revision !== current.revision) || current
+  const revLabel = (rev) => `v${rev.revision}${rev.revision === asset.revision ? ' · 当前' : ''}`
+  const options = revisions.map((rev) => `<option value="${rev.revision}">${esc(revLabel(rev))}</option>`).join('')
+  const mask = openModal('版本历史对比', `
+    <div class="img-ver-head">${esc(asset.prompt || '')}</div>
+    <div class="img-ver-cmp">
+      <div class="img-ver-cmp-col">
+        <div class="img-ver-cmp-bar"><label for="igCmpLeft">版本 A</label><select id="igCmpLeft">${options}</select></div>
+        <div class="img-ver-cmp-frame" id="igCmpLeftFrame"></div>
+      </div>
+      <div class="img-ver-cmp-col">
+        <div class="img-ver-cmp-bar"><label for="igCmpRight">版本 B</label><select id="igCmpRight"${revisions.length < 2 ? ' disabled' : ''}>${options}</select></div>
+        <div class="img-ver-cmp-frame" id="igCmpRightFrame"></div>
+      </div>
+    </div>
+    <div class="img-ver-cmp-hint" id="igCmpHint"></div>
+    <div class="img-ver-cmp-note">只比较同一张图像的不同历史版本，不跨图像选择；查看与下载不会改变当前版本。</div>
+    <div class="img-ver-list-title">全部版本 · ${revisions.length}</div>
     <div class="img-ver-list">
       ${revisions.map((rev) => `
         <div class="img-ver-row${rev.revision === asset.revision ? ' on' : ''}">
-          <div class="img-ver-thumb"><img src="${rev.url}" alt="v${rev.revision}"></div>
+          <div class="img-ver-thumb"><img src="${esc(rev.url)}" alt="v${rev.revision}"></div>
           <div class="img-ver-main">
-            <div class="img-ver-title">v${rev.revision}${rev.revision === asset.revision ? ' · 当前版本' : ''}</div>
+            <div class="img-ver-title">${esc(revLabel(rev))}</div>
             <div class="img-ver-meta">${esc(rev.style || '')} · ${esc(rev.ratio || '')} · ${esc(rev.providerLabel || rev.provider || '图像模型')} ${esc(rev.model || '')}</div>
             <div class="img-ver-prompt">${esc(rev.prompt || '')}</div>
           </div>
           <div class="img-ver-actions">
+            <button class="btn sm" data-ver-set="${rev.revision}">对比</button>
             <button class="btn sm" data-ver-dl="${rev.revision}">下载</button>
             ${rev.revision !== asset.revision ? `<button class="btn sm primary" data-ver-restore="${rev.revision}">恢复</button>` : ''}
           </div>
         </div>`).join('')}
     </div>
     <div class="form-note">恢复历史版本会创建一个新的当前版本，原版本记录不会被覆盖；局部选区编辑仍需模型原生 Mask 能力。</div>`, { wide: true })
-  const current = revisions.find((rev) => rev.revision === asset.revision) || revisions[0]
+  const left = mask.querySelector('#igCmpLeft')
+  const right = mask.querySelector('#igCmpRight')
+  const hint = mask.querySelector('#igCmpHint')
+  const leftFrame = mask.querySelector('#igCmpLeftFrame')
+  const rightFrame = mask.querySelector('#igCmpRightFrame')
+  left.value = String(current.revision)
+  right.value = String(previous.revision)
+  const paintFrame = (target, rev, side) => {
+    if (!rev) {
+      target.innerHTML = '<div class="img-ver-cmp-empty">只有一个版本，暂无可对比的历史版本</div>'
+      return
+    }
+    target.innerHTML = `
+      <figure class="img-ver-cmp-figure">
+        <img src="${esc(rev.url)}" alt="${esc(revLabel(rev))}">
+        <figcaption>
+          <div class="img-ver-cmp-cap"><b>${esc(revLabel(rev))}</b><span>${esc(rev.providerLabel || rev.provider || '图像模型')} ${esc(rev.model || '')}</span></div>
+          <div class="img-ver-cmp-prompt">${esc(rev.prompt || '')}</div>
+        </figcaption>
+      </figure>`
+    target.dataset.side = side
+  }
+  const paintCompare = () => {
+    const a = revisions.find((rev) => rev.revision === Number(left.value))
+    const b = revisions.find((rev) => rev.revision === Number(right.value))
+    paintFrame(leftFrame, a, 'left')
+    paintFrame(rightFrame, revisions.length < 2 ? null : b, 'right')
+    hint.textContent = revisions.length < 2
+      ? '这张图只有一个版本，编辑、局部选区或标注后会形成新的历史版本。'
+      : (a?.revision === b?.revision ? '两侧选择的是同一版本，请选择不同版本查看差异。' : '')
+  }
+  left.addEventListener('change', paintCompare)
+  right.addEventListener('change', paintCompare)
+  paintCompare()
   mask.querySelectorAll('[data-ver-dl]').forEach((btn) => btn.addEventListener('click', () => {
     const rev = revisions.find((item) => item.revision === Number(btn.dataset.verDl))
     if (rev) downloadImageAsset({ id: `v${rev.revision}`, url: rev.url, name: `jg-image-${shot.id}-v${rev.revision}.png` })
+  }))
+  mask.querySelectorAll('[data-ver-set]').forEach((btn) => btn.addEventListener('click', () => {
+    if (revisions.length < 2) return
+    right.value = btn.dataset.verSet
+    paintCompare()
+    mask.querySelector('.img-ver-cmp')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }))
   mask.querySelectorAll('[data-ver-restore]').forEach((btn) => btn.addEventListener('click', async () => {
     const rev = revisions.find((item) => item.revision === Number(btn.dataset.verRestore))
@@ -7562,7 +7527,6 @@ async function openImageVersions(shot) {
     toast(`已恢复到 v${rev.revision}，并生成新的当前版本`)
     await loadRecentImages({ force: true })
   }))
-  if (current?.url) mask.querySelector('.img-ver-thumb img')?.setAttribute('alt', `v${current.revision}`)
 }
 
 function deleteImageAsset(shot) {
@@ -7602,7 +7566,7 @@ function editImageAsset(shot) {
       <label class="field-label" for="igEditPrompt">编辑要求</label>
       <textarea class="img-edit-input" id="igEditPrompt" maxlength="1200" placeholder="例如：把建筑外墙改为浅色石材，保留现有构图、树木和天空"></textarea>
     </div>
-    <div class="form-note">以当前图片为输入，由 ${esc(model.label)} 生成一个新版本；原图保留在版本历史中，不会覆盖。</div>
+    <div class="form-note">以当前图片为输入，由 ${esc(model.label)} 生成一个新版本；原图保留在版本历史对比中，不会覆盖。</div>
     <div class="img-edit-err" id="igEditErr"></div>
     <div class="img-edit-foot">
       <button class="btn" data-igeditcancel>返回</button>
@@ -7653,7 +7617,8 @@ function openImageMenu(anchor, shot) {
     <button type="button" data-imenu="mask">局部选区</button>
     <button type="button" data-imenu="download">下载原图</button>
     <button type="button" data-imenu="copy">复制提示词</button>
-    <button type="button" data-imenu="versions">版本历史</button>
+    <button type="button" data-imenu="template">申请成为模板</button>
+    <button type="button" data-imenu="versions">版本历史对比</button>
     <button type="button" data-imenu="delete" class="danger">删除</button>`
   document.body.appendChild(menu)
   const rect = anchor.getBoundingClientRect()
@@ -7679,6 +7644,7 @@ function openImageMenu(anchor, shot) {
     else if (action === 'mask') openImageMaskEditor(shot)
     else if (action === 'download') downloadImageAsset(shot)
     else if (action === 'copy') copyImagePrompt(shot)
+    else if (action === 'template') openImageTemplateApplication(shot)
     else if (action === 'versions') openImageVersions(shot)
     else if (action === 'delete') deleteImageAsset(shot)
   }))
@@ -7687,7 +7653,7 @@ function openImageMenu(anchor, shot) {
 function openImageMaskEditor(shot, opts = {}) {
   const erase = Boolean(opts.erase)
   const mask = openModal(erase ? '擦除' : '局部选区编辑', `
-    <div class="form-note">${erase ? '涂抹要移除的物体或文字，白笔为擦除区、未涂抹为保留区。提交后由万相局部重绘用周围画面自然补全，并创建新版本。' : '用画笔涂抹要修改的区域，白色为编辑区、未涂抹为保留区。提交后由万相局部重绘生成新版本，原图保留在版本历史；这不是用提示词模拟的局部编辑。'}</div>
+    <div class="form-note">${erase ? '涂抹要移除的物体或文字，白笔为擦除区、未涂抹为保留区。提交后由万相局部重绘用周围画面自然补全，并创建新版本。' : '用画笔涂抹要修改的区域，白色为编辑区、未涂抹为保留区。提交后由万相局部重绘生成新版本，原图保留在版本历史对比中；这不是用提示词模拟的局部编辑。'}</div>
     <div class="img-mask-wrap">
       <div class="img-mask-stage">
         <img id="igMaskImg" src="${shot.url}" alt="">
@@ -7885,20 +7851,6 @@ function imageTemplateTabs(g) {
     </div>`
 }
 
-function imageTemplateActions() {
-  const g = state.imagegen
-  const userName = String(state.boot?.user?.name || '')
-  const mine = (g.templateApps || []).filter((item) => item.applicant === userName)
-  const pending = imageTemplatePendingCount()
-  const admin = imageTemplateAdminVisible()
-  return `
-    <div class="img-tpl-actions">
-      <button type="button" class="btn sm" id="igTplApply">申请成为模板</button>
-      <button type="button" class="btn sm" id="igTplMine">我的申请${mine.length ? ` · ${mine.length}` : ''}</button>
-      ${admin ? `<button type="button" class="btn sm img-tpl-review-open" id="igTplReview">审核申请${pending ? ` · ${pending}` : ''}</button>` : ''}
-    </div>`
-}
-
 function imageTemplateGrid(g) {
   const templates = Array.isArray(g.templates) ? g.templates : []
   if (g.templatesLoading || !g.templatesLoaded) {
@@ -7909,7 +7861,7 @@ function imageTemplateGrid(g) {
       <div class="img-tpl-empty">
         <div class="img-tpl-empty-icon">${icon('grid')}</div>
         <div class="img-tpl-empty-title">还没有已上线的模板</div>
-        <div class="img-tpl-empty-text">模板由用户提交提示词与预览图，经管理员审核通过后才会出现在这里。你可以在右上方申请成为模板。</div>
+        <div class="img-tpl-empty-text">模板由用户提交提示词与来源图像，经运维管理员审核通过后才会出现在这里。请在“我的图像”中打开图片的横向三点菜单，选择“申请成为模板”。</div>
       </div>`
   }
   return `
@@ -7926,34 +7878,27 @@ function imageTemplateGrid(g) {
 
 function bindImageTemplateActions(root) {
   root.querySelectorAll('[data-tpl]').forEach((btn) => btn.addEventListener('click', () => openImageTemplate(btn.dataset.tpl)))
-  root.querySelector('#igTplApply')?.addEventListener('click', () => openImageTemplateApplication())
-  root.querySelector('#igTplMine')?.addEventListener('click', () => openImageTemplateApplications('mine'))
-  root.querySelector('#igTplReview')?.addEventListener('click', () => openImageTemplateApplications('review'))
 }
 
-function openImageTemplateApplication() {
-  let previewDataUrl = ''
-  let previewName = ''
+function openImageTemplateApplication(shot) {
+  if (!shot?.id || !shot.url) return toast('只能从自己生成的图像申请成为模板', true)
+  const categoryDefault = IMAGE_TEMPLATE_CATEGORIES.includes(shot.style) ? shot.style : IMAGE_TEMPLATE_CATEGORIES[0]
+  const ratio = ['1:1', '3:4', '9:16', '4:3', '16:9'].includes(shot.ratio) ? shot.ratio : '1:1'
   const mask = openModal('申请成为模板', `
-    <div class="form-note">提交后进入管理员审核队列，审核通过后才会出现在模板页。请填写真实的提示词，并上传一张能代表模板效果的预览图。</div>
+    <div class="form-note">只允许从你自己生成的图像发起申请；来源图像和宽高比例固定，提示词可按模板用途调整。提交后由运维管理员在管理中心统一判定。</div>
     <div class="img-tpl-app-form">
-      <label>模板名称<input id="igTplAppName" maxlength="40" placeholder="例如：城市夜景海报"></label>
-      <label>分类<select id="igTplAppCategory">${IMAGE_TEMPLATE_CATEGORIES.map((item) => `<option value="${esc(item)}">${esc(item)}</option>`).join('')}</select></label>
-      <label>宽高比例<select id="igTplAppRatio">${['1:1', '3:4', '9:16', '4:3', '16:9'].map((item) => `<option value="${item}">${item}</option>`).join('')}</select></label>
-      <label class="img-tpl-app-wide">提示词<textarea id="igTplAppPrompt" maxlength="2000" placeholder="描述模板的构图、主体、风格、光线和画面用途"></textarea></label>
-      <label class="img-tpl-app-wide">说明（可选）<textarea id="igTplAppDesc" maxlength="800" placeholder="说明这个模板适合什么场景"></textarea></label>
       <div class="img-tpl-app-wide">
-        <div class="img-tpl-upload-label">预览图 <span>必填</span></div>
-        <div class="img-tpl-upload-wrap">
-          <button type="button" class="img-tpl-upload" id="igTplAppUpload" aria-label="上传模板预览图">+</button>
-          <div class="img-tpl-ref" id="igTplAppPreview" hidden>
-            <img id="igTplAppPreviewImg" alt="模板预览图">
-            <button type="button" class="img-tpl-ref-x" id="igTplAppPreviewX" aria-label="移除预览图">×</button>
-          </div>
+        <div class="img-tpl-upload-label">来源图像 <span>本人生成</span></div>
+        <div class="img-tpl-source">
+          <img src="${esc(shot.url)}" alt="">
+          <div><b>${esc(shot.style || '图像')} · ${esc(ratio)}</b><div>${esc(shot.prompt || '')}</div></div>
         </div>
-        <input id="igTplAppFile" type="file" accept="image/png,image/jpeg,image/webp" hidden>
-        <div class="img-tpl-note">预览图会用于模板卡片；建议使用与模板效果一致的竖版或方版画面。</div>
       </div>
+      <label>模板名称<input id="igTplAppName" maxlength="40" placeholder="例如：城市夜景海报"></label>
+      <label>分类<select id="igTplAppCategory">${IMAGE_TEMPLATE_CATEGORIES.map((item) => `<option value="${esc(item)}"${item === categoryDefault ? ' selected' : ''}>${esc(item)}</option>`).join('')}</select></label>
+      <div class="img-tpl-app-wide"><div class="img-tpl-upload-label">宽高比例</div><div class="img-tpl-fixed">${esc(ratio)} · 与来源图像一致</div></div>
+      <label class="img-tpl-app-wide">提示词<textarea id="igTplAppPrompt" maxlength="2000" placeholder="描述模板的构图、主体、风格、光线和画面用途">${esc(shot.prompt || '')}</textarea></label>
+      <label class="img-tpl-app-wide">说明（可选）<textarea id="igTplAppDesc" maxlength="800" placeholder="说明这个模板适合什么场景"></textarea></label>
     </div>
     <div class="img-edit-err" id="igTplAppErr"></div>
     <div class="img-edit-foot">
@@ -7962,57 +7907,16 @@ function openImageTemplateApplication() {
     </div>`, { wide: true })
   const name = mask.querySelector('#igTplAppName')
   const category = mask.querySelector('#igTplAppCategory')
-  const ratio = mask.querySelector('#igTplAppRatio')
   const prompt = mask.querySelector('#igTplAppPrompt')
   const desc = mask.querySelector('#igTplAppDesc')
-  const file = mask.querySelector('#igTplAppFile')
-  const upload = mask.querySelector('#igTplAppUpload')
-  const preview = mask.querySelector('#igTplAppPreview')
-  const previewImg = mask.querySelector('#igTplAppPreviewImg')
   const err = mask.querySelector('#igTplAppErr')
   const go = mask.querySelector('#igTplAppGo')
-  upload.addEventListener('click', () => file.click())
-  file.addEventListener('change', () => {
-    const chosen = file.files?.[0]
-    if (!chosen) return
-    if (!['image/png', 'image/jpeg', 'image/webp'].includes(chosen.type)) {
-      err.textContent = '预览图只支持 PNG、JPEG 或 WebP'
-      file.value = ''
-      return
-    }
-    if (chosen.size > 10 * 1024 * 1024) {
-      err.textContent = '预览图不能超过 10 MB'
-      file.value = ''
-      return
-    }
-    readTemplateReference(chosen).then((result) => {
-      previewDataUrl = result.dataUrl
-      previewName = chosen.name || '模板预览图'
-      previewImg.src = previewDataUrl
-      preview.hidden = false
-      upload.classList.add('has-ref')
-      err.textContent = ''
-    }).catch((error) => {
-      err.textContent = error?.message || '读取预览图失败，请重试'
-    }).finally(() => { file.value = '' })
-  })
-  mask.querySelector('#igTplAppPreviewX').addEventListener('click', () => {
-    previewDataUrl = ''
-    previewName = ''
-    preview.hidden = true
-    previewImg.removeAttribute('src')
-    upload.classList.remove('has-ref')
-    file.value = ''
-  })
   mask.querySelector('[data-tplappcancel]').addEventListener('click', () => mask.remove())
   go.addEventListener('click', async () => {
     const title = name.value.trim()
-    const cat = category.value
-    const ratioValue = ratio.value
     const promptValue = prompt.value.trim()
     if (!title) { err.textContent = '请填写模板名称'; name.focus(); return }
     if (!promptValue) { err.textContent = '请填写模板提示词'; prompt.focus(); return }
-    if (!previewDataUrl) { err.textContent = '请上传一张模板预览图'; return }
     go.disabled = true
     go.textContent = '提交中…'
     try {
@@ -8021,86 +7925,27 @@ function openImageTemplateApplication() {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           title,
-          category: cat,
-          ratio: ratioValue,
+          category: category.value,
+          ratio,
           prompt: promptValue,
           description: desc.value.trim(),
-          previewDataUrl,
-          previewName,
+          sourceAssetId: shot.id,
         }),
       })
       if (!res.ok || !res.body?.application) throw new Error(res.body?.error || `提交申请失败（HTTP ${res.status}）`)
       const g = state.imagegen
       g.templateApps = [res.body.application, ...(g.templateApps || [])]
       g.templateAppsLoaded = true
+      state.reviewProgressLoaded = false
       mask.remove()
       renderView()
-      toast('模板申请已提交，管理员审核通过后会上线')
+      toast('模板申请已提交，可在 设置 · 审核进度 查看')
     } catch (error) {
       go.disabled = false
       go.textContent = '提交审核'
       err.textContent = error?.message || '提交申请失败'
     }
   })
-}
-
-async function openImageTemplateApplications(mode = 'mine') {
-  const g = state.imagegen
-  if (!g.templateAppsLoaded) await loadImageTemplateApplications()
-  const apps = Array.isArray(g.templateApps) ? g.templateApps : []
-  const admin = mode === 'review' && imageTemplateAdminVisible()
-  const statusText = { pending: '待审核', approved: '已通过', rejected: '已驳回' }
-  const visibleApps = admin ? apps : apps.filter((item) => item.applicant === state.boot?.user?.name)
-  const mask = openModal(admin ? '模板申请审核' : '我的模板申请', `
-    <div class="form-note">${admin ? '审核通过后模板会立即对所有人上线；驳回时可填写原因，申请人可在“我的申请”中查看。' : '这里显示你提交过的模板申请及审核状态。'}</div>
-    ${visibleApps.length ? visibleApps.map((item) => `
-      <article class="img-tpl-app" data-tpl-app-row="${esc(item.id)}">
-        <img src="${esc(item.previewUrl)}" alt="${esc(item.title)}预览">
-        <div class="img-tpl-app-main">
-          <div class="img-tpl-app-head"><b>${esc(item.title)}</b><span class="img-tpl-app-status ${esc(item.status)}">${esc(statusText[item.status] || item.status)}</span></div>
-          <div class="img-tpl-app-meta">${esc(item.applicant)} · ${esc(item.category)} · ${esc(item.ratio)} · ${esc(new Date(item.createdAt).toLocaleString('zh-CN', { hour12: false }).slice(0, 16))}</div>
-          <div class="img-tpl-app-prompt">${esc(item.prompt)}</div>
-          ${item.description ? `<div class="img-tpl-app-desc">${esc(item.description)}</div>` : ''}
-          ${item.status === 'rejected' && item.reviewNote ? `<div class="img-edit-err">驳回原因：${esc(item.reviewNote)}</div>` : ''}
-          ${admin && item.status === 'pending' ? `
-            <div class="img-tpl-app-review">
-              <input data-tpl-note placeholder="驳回原因（可选）" maxlength="300">
-              <button type="button" class="btn sm" data-tpl-review="reject">驳回</button>
-              <button type="button" class="btn primary sm" data-tpl-review="approve">通过</button>
-            </div>` : ''}
-        </div>
-      </article>`).join('') : '<div class="img-tpl-empty"><div class="img-tpl-empty-title">还没有模板申请</div><div class="img-tpl-empty-text">去模板页提交第一个申请。</div></div>'}
-    `, { wide: true })
-  mask.querySelectorAll('[data-tpl-review]').forEach((btn) => btn.addEventListener('click', async () => {
-    const row = btn.closest('[data-tpl-app-row]')
-    const id = row?.dataset.tplAppRow
-    if (!id) return
-    const note = row.querySelector('[data-tpl-note]')?.value.trim() || ''
-    const decision = btn.dataset.tplReview
-    row.querySelectorAll('[data-tpl-review]').forEach((item) => { item.disabled = true })
-    try {
-      const res = await api('/api/images/template-review', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ id, decision, note }),
-      })
-      if (!res.ok || !res.body?.application) throw new Error(res.body?.error || `审核失败（HTTP ${res.status}）`)
-      const updated = res.body.application
-      g.templateApps = (g.templateApps || []).map((item) => item.id === updated.id ? updated : item)
-      mask.remove()
-      if (decision === 'approve') {
-        g.templatesLoaded = false
-        await loadImageTemplates({ force: true })
-        toast(`模板「${updated.title}」已上线`)
-      } else {
-        renderView()
-        toast('已驳回模板申请')
-      }
-    } catch (error) {
-      row.querySelectorAll('[data-tpl-review]').forEach((item) => { item.disabled = false })
-      toast(error?.message || '审核失败', true)
-    }
-  }))
 }
 
 function openImageTemplate(templateId) {
@@ -8273,7 +8118,8 @@ function openImageWorkbench(shot) {
       </div>
       <div class="img-wb-more" id="imgWbMore" hidden>
         <button type="button" data-wbmore="edit">提示词编辑</button>
-        <button type="button" data-wbmore="versions">版本历史</button>
+        <button type="button" data-wbmore="template">申请成为模板</button>
+        <button type="button" data-wbmore="versions">版本历史对比</button>
         <button type="button" data-wbmore="download">下载原图</button>
         <button type="button" data-wbmore="usechat">用于会话</button>
         <button type="button" data-wbmore="delete" class="danger">删除</button>
@@ -8374,6 +8220,7 @@ function openImageWorkbench(shot) {
     const action = btn.dataset.wbmore
     mask.remove()
     if (action === 'edit') editImageAsset(shot)
+    else if (action === 'template') openImageTemplateApplication(shot)
     else if (action === 'versions') openImageVersions(shot)
     else if (action === 'download') downloadImageAsset(shot)
     else if (action === 'usechat') useImageInChat(shot)
@@ -8403,7 +8250,7 @@ async function useImageInChat(shot) {
 
 function openImageAnnotator(shot) {
   const mask = openModal('标注', `
-    <div class="form-note">在图片上画红色标记，保存后会与当前版本合成并创建新版本；原版本保留在版本历史中。</div>
+    <div class="form-note">在图片上画红色标记，保存后会与当前版本合成并创建新版本；原版本保留在版本历史对比中。</div>
     <div class="img-annot-stage">
       <div class="img-annot-frame">
         <img id="imgAnnotImg" src="${shot.url}" alt="">
@@ -8653,8 +8500,6 @@ function bindImageComposer(el, g, selectedModel) {
     g.references = (g.references || []).filter((item) => item.id !== btn.dataset.refRemove)
     renderView()
   }))
-  el.querySelector('#igCompare')?.addEventListener('click', () => openImageCompare())
-
   el.querySelector('#igGen').addEventListener('click', async () => {
     if (!g.prompt.trim()) { toast('请先描述要生成的图像', true); input.focus(); return }
     if (g.busy) return
@@ -8735,26 +8580,23 @@ async function renderImage(el) {
   }
   if (!g.assetsLoaded && !g.assetsLoading) loadRecentImages()
   if (tab === 'templates' && !g.templatesLoaded && !g.templatesLoading) loadImageTemplates()
-  if (!g.templateAppsLoaded && !g.templateAppsLoading) loadImageTemplateApplications()
 
   const cards = g.shots || []
   const modelOptions = allModels.map((model) => `<option value="${esc(model.id)}" ${model.id === g.modelId ? 'selected' : ''} ${model.configured ? '' : 'disabled'}>${esc(model.label)}${model.configured ? '' : '（未配置）'}</option>`).join('')
   const headSub = tab === 'templates'
-    ? '真实模板 · 由用户申请、管理员审核后上线；选择模板后可上传参考照片，或直接试一试'
+    ? '真实模板 · 由用户从本人图像申请、运维管理员审核后上线；选择模板后可上传参考照片，或直接试一试'
     : `真实生图 · ${esc(selectedModel.label)} · ${esc(selectedModel.providerLabel || selectedModel.provider || '图像模型')} · ${cap.external ? '提示词会发送到外部服务' : '服务端内部模型'}`
 
   const head = `
     <div class="img-head">
       <div><div class="img-title">图像</div><div class="img-sub">${g.busy ? '正在生成真实图像…' : headSub}</div></div>
-      ${tab === 'mine' ? `<button class="btn sm img-compare-open" id="igCompare" ${cards.length < 2 ? 'disabled' : ''}>并排对比</button>` : ''}
     </div>
     ${imageTemplateTabs(g)}`
 
   if (tab === 'templates') {
     el.innerHTML = `${head}
-      ${imageTemplateActions()}
       ${imageTemplateGrid(g)}
-      <div class="img-tpl-footnote">模板是用户提交、管理员审核后上线的真实提示词；选择模板后可上传一张参考照片，或直接点“试一试”。</div>
+      <div class="img-tpl-footnote">模板是用户提交、运维管理员审核后上线的真实提示词；选择模板后可上传一张参考照片，或直接点“试一试”。</div>
       ${imageComposerHtml(g, modelOptions, allModels)}`
     bindImageTabs(el)
     bindImageTemplateActions(el)
@@ -15564,14 +15406,16 @@ async function renderAdmin(el) {
   }
 
   if (tab === 'ai') {
-    const [{ body: sub }, { body: runtimeInfo }, { body: modelCfg }] = await Promise.all([
+    const [{ body: sub }, { body: runtimeInfo }, { body: modelCfg }, { body: tplBody }] = await Promise.all([
       api('/api/plugin-subs'),
       api('/api/runtime/plugins'),
       api('/api/model/config'),
+      api('/api/images/template-applications'),
     ])
     const pending = (sub.items || []).filter((x) => x.status === 'pending')
     const pendingPlugins = pending.filter((x) => x.kind !== 'skill')
     const pendingSkills = pending.filter((x) => x.kind === 'skill')
+    const pendingTemplates = (tplBody.applications || []).filter((x) => x.status === 'pending')
     const runtimePlugins = runtimeInfo.plugins || []
     if (blocks) {
       const reviewRows = (items, emptyText, type) => items.map((x) => {
@@ -15582,7 +15426,7 @@ async function renderAdmin(el) {
       }).join('') || `<div class="mc-row">${emptyText}</div>`
       const wrap = document.createElement('div')
       wrap.className = 'mc-block'
-      wrap.innerHTML = `<div class="mc-block-head"><b>插件 / 技能审核</b><span class="spacer"></span><span class="mc-count">${pending.length} 项待处理</span></div>
+      wrap.innerHTML = `<div class="mc-block-head"><b>插件 / 技能 / 图像模板审核</b><span class="spacer"></span><span class="mc-count">${pending.length + pendingTemplates.length} 项待处理</span></div>
         <div style="display:flex;align-items:center;gap:8px;padding:8px 10px 4px"><b style="font-size:12px">插件审核</b><span class="mc-count">${pendingPlugins.length} 项待处理</span></div>
         <div class="mc-table" style="--mc-cols:1.4fr 1fr 1.2fr 1fr">
           <div class="mc-thead"><span>插件</span><span>提交人</span><span>自动检测</span><span>操作</span></div>
@@ -15592,13 +15436,26 @@ async function renderAdmin(el) {
         <div class="mc-table" style="--mc-cols:1.4fr 1fr 1.2fr 1fr">
           <div class="mc-thead"><span>技能</span><span>提交人</span><span>自动检测</span><span>操作</span></div>
           ${reviewRows(pendingSkills, '当前没有待审核技能', '技能')}
-        </div>`
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;padding:12px 10px 4px"><b style="font-size:12px">图像模板审核</b><span class="mc-count">${pendingTemplates.length} 项待处理</span></div>
+        <div class="mc-table" style="--mc-cols:1.3fr .9fr .8fr 1.1fr">
+          <div class="mc-thead"><span>模板与提示词</span><span>申请人</span><span>规格</span><span>操作</span></div>
+          ${pendingTemplates.map((item) => `
+            <div class="mc-trow">
+              <span class="mc-first mc-tpl-first"><img class="mc-thumb" src="${esc(item.previewUrl)}" alt=""><span><b>${esc(item.title)}</b><span class="mc-dim mc-tpl-prompt">${esc(item.prompt || '')}</span></span></span>
+              <span>${esc(item.applicant)}</span>
+              <span>${esc(item.category)} · ${esc(item.ratio)}</span>
+              <span class="mc-acts"><button class="btn sm" data-tplpreview="${esc(item.id)}">预览</button><button class="btn sm" data-tplreview="reject" data-tplid="${esc(item.id)}">退回</button><button class="btn sm primary" data-tplreview="approve" data-tplid="${esc(item.id)}">通过上线</button></span>
+            </div>`).join('') || '<div class="mc-row">当前没有待审核图像模板</div>'}
+        </div>
+        <div class="mc-block-note">模板审核由运维人员判定：通过后模板立即上线；退回时填写原因，申请人可在 设置 · 审核进度 查看。</div>`
       blocks.appendChild(wrap)
       wrap.querySelectorAll('[data-review]').forEach((b) => b.addEventListener('click', async () => {
         const id = b.dataset.subid
         if (b.dataset.review === 'approve') {
           const { ok, body } = await api('/api/plugin-subs/review', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id, action: 'approve' }) })
           if (!ok) return toast(body.error || '审核失败', true)
+          state.reviewProgressLoaded = false
           toast(body.packageReady ? '已通过并上架，技能包可安装' : '已通过并上架；该包不是技能包，当前不可一键安装')
           renderView()
           return
@@ -15614,7 +15471,43 @@ async function renderAdmin(el) {
           const { ok, body } = await api('/api/plugin-subs/review', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id, action: 'reject', reason }) })
           m2.remove()
           if (!ok) return toast(body.error || '退回失败', true)
+          state.reviewProgressLoaded = false
           toast('已退回，提交人会收到检测报告与原因')
+          renderView()
+        })
+      }))
+      wrap.querySelectorAll('[data-tplpreview]').forEach((b) => b.addEventListener('click', () => {
+        const item = pendingTemplates.find((x) => x.id === b.dataset.tplpreview)
+        if (!item) return
+        openModal(`模板预览：${item.title}`, `<div class="form-note">申请人 ${esc(item.applicant)} · ${esc(item.category)} · ${esc(item.ratio)}</div><img src="${esc(item.previewUrl)}" alt="" style="display:block;width:100%;max-height:62vh;object-fit:contain;border-radius:12px;background:#f3f4f6"><div class="form-note" style="margin-top:10px">${esc(item.prompt || '')}</div>`, { wide: true })
+      }))
+      wrap.querySelectorAll('[data-tplreview]').forEach((b) => b.addEventListener('click', async () => {
+        const id = b.dataset.tplid
+        const item = pendingTemplates.find((x) => x.id === id)
+        if (!item) return
+        if (b.dataset.tplreview === 'approve') {
+          b.disabled = true
+          const { ok, body } = await api('/api/images/template-review', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id, decision: 'approve' }) })
+          if (!ok) { b.disabled = false; return toast(body.error || '模板审核失败', true) }
+          state.imagegen.templatesLoaded = false
+          state.reviewProgressLoaded = false
+          toast(`模板「${item.title}」已通过并上线`)
+          renderView()
+          return
+        }
+        const m2 = openModal('退回图像模板', `
+          <div class="form-note">退回后申请人可在 设置 · 审核进度 查看原因，并重新从本人图像发起申请。</div>
+          <div class="form-label">退回原因</div>
+          <textarea class="form-area" id="tplReviewReason" rows="3" placeholder="例如：来源图像与模板用途不一致，请调整提示词或更换图像"></textarea>
+          <div class="form-foot"><span class="spacer"></span><button class="btn" data-mclose>取消</button><button class="btn primary" id="tplReviewReject">确认退回</button></div>`)
+        m2.querySelector('[data-mclose]').addEventListener('click', () => m2.remove())
+        m2.querySelector('#tplReviewReject').addEventListener('click', async () => {
+          const note = m2.querySelector('#tplReviewReason').value.trim()
+          const { ok, body } = await api('/api/images/template-review', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id, decision: 'reject', note }) })
+          m2.remove()
+          if (!ok) return toast(body.error || '退回失败', true)
+          state.reviewProgressLoaded = false
+          toast('已退回该模板申请')
           renderView()
         })
       }))
@@ -16276,6 +16169,7 @@ function renderSettings(el) {
     ? settingsTabs.filter((t) => `${t.label}${t.kw}`.includes(q))
     : settingsTabs
   const active = tabs.some((t) => t.id === state.settingsTab) ? state.settingsTab : (tabs[0]?.id || 'general')
+  if (active === 'reviews' && !state.reviewProgressLoaded && !state.reviewProgressLoading) loadReviewProgress()
   const body = settingsBody(active)
 
   const navGroups = ['个人', '安全与数据', '集成', '关于']
@@ -16305,6 +16199,7 @@ function renderSettings(el) {
   el.querySelectorAll('[data-set-tab]').forEach((b) => {
     b.addEventListener('click', () => {
       state.settingsTab = b.dataset.setTab
+      if (state.settingsTab === 'reviews') state.reviewProgressLoaded = false
       renderView()
     })
   })
@@ -16458,6 +16353,11 @@ function renderSettings(el) {
   el.querySelectorAll('[data-act]').forEach((b) => {
     b.addEventListener('click', async () => {
       const act = b.dataset.act
+      if (act === 'refreshReviews') {
+        state.reviewProgressLoaded = false
+        loadReviewProgress()
+        return
+      }
       if (act === 'saveKey' || act === 'clearKey') {
         const input = el.querySelector('#set-key')
         const key = act === 'clearKey' ? '' : String(input?.value || '').trim()
@@ -16528,6 +16428,30 @@ function renderSettings(el) {
   })
 }
 
+
+async function loadReviewProgress() {
+  if (state.reviewProgressLoading) return
+  state.reviewProgressLoading = true
+  try {
+    const [pluginRes, templateRes] = await Promise.all([
+      api('/api/plugin-subs?mine=1'),
+      api('/api/images/template-applications'),
+    ])
+    if (!pluginRes.ok) throw new Error(pluginRes.body?.error || '读取插件与技能审核进度失败')
+    if (!templateRes.ok) throw new Error(templateRes.body?.error || '读取图像模板审核进度失败')
+    state.reviewProgress = {
+      plugins: Array.isArray(pluginRes.body?.items) ? pluginRes.body.items : [],
+      templates: Array.isArray(templateRes.body?.applications) ? templateRes.body.applications : [],
+    }
+    state.reviewProgressLoaded = true
+  } catch (error) {
+    state.reviewProgress = { plugins: [], templates: [], error: error?.message || '读取审核进度失败' }
+    state.reviewProgressLoaded = true
+  } finally {
+    state.reviewProgressLoading = false
+    if (state.view === 'settings' && state.settingsTab === 'reviews') renderView()
+  }
+}
 
 function settingsBody(tab) {
   const { user, counts, models } = state.boot
@@ -16858,6 +16782,55 @@ function settingsBody(tab) {
         sgroup('口径', [
           srow('数据来源', '本机会话库中的助手消息 usageAt / usage 字段，刷新后从服务端重新聚合', '<span class="set-value">会话持久化</span>'),
           srow('不计入项', '历史轮次未返回 usage 的部分、失败且无 usage 的请求、客户端本地估算', '<span class="set-value">不估算</span>'),
+        ]),
+      ],
+    }
+  }
+
+  if (tab === 'reviews') {
+    const rp = state.reviewProgress || { plugins: [], templates: [] }
+    if (!state.reviewProgressLoaded) {
+      return {
+        title: '审核进度',
+        groups: [sgroup('读取中', [srow('正在读取审核进度', '读取你提交的图像模板、插件与技能记录', '<span class="set-value">请稍候…</span>')])],
+      }
+    }
+    if (rp.error) {
+      return {
+        title: '审核进度',
+        groups: [sgroup('读取失败', [srow('审核进度暂不可用', rp.error, `<span class="set-value">${sbtn('refreshReviews', '重新读取')}</span>`)])],
+      }
+    }
+    const statusText = { pending: '待审核', approved: '已通过', rejected: '已退回' }
+    const timeText = (value) => {
+      if (!value) return ''
+      const date = new Date(value)
+      return Number.isNaN(date.getTime()) ? '' : date.toLocaleString('zh-CN', { hour12: false }).slice(0, 16)
+    }
+    const statusChip = (status) => `<span class="set-review-status ${esc(status)}">${esc(statusText[status] || status)}</span>`
+    const templateRows = (rp.templates || []).map((item) => srow(
+      item.title,
+      [item.category, item.ratio, timeText(item.createdAt)].filter(Boolean).join(' · ') + (item.reviewNote ? ` · 退回原因：${item.reviewNote}` : ''),
+      statusChip(item.status)
+    ))
+    const pluginItems = (rp.plugins || []).filter((item) => item.kind !== 'skill')
+    const skillItems = (rp.plugins || []).filter((item) => item.kind === 'skill')
+    const pluginRows = (items) => items.map((item) => srow(
+      `${item.name}${item.version ? ` v${item.version}` : ''}`,
+      [item.author || item.unit, timeText(item.submitted), item.reason ? `退回原因：${item.reason}` : ''].filter(Boolean).join(' · '),
+      statusChip(item.status)
+    ))
+    return {
+      title: '审核进度',
+      groups: [
+        sgroup('说明', [srow('审核位置', '这里只展示你提交的模板、插件与技能的当前状态；通过或退回由运维人员在 管理中心 · AI 能力管理 判定。', '<span class="set-value">只读</span>')]),
+        sgroup('图像模板', templateRows.length ? templateRows : [srow('暂无模板申请', '从“我的图像”横向三点菜单申请成为模板', '<span class="set-value">—</span>')]),
+        sgroup('插件', pluginRows(pluginItems).length ? pluginRows(pluginItems) : [srow('暂无插件提交', '在插件市场提交插件包后，这里显示审核状态', '<span class="set-value">—</span>')]),
+        sgroup('技能', pluginRows(skillItems).length ? pluginRows(skillItems) : [srow('暂无技能提交', '在技能页提交技能包后，这里显示审核状态', '<span class="set-value">—</span>')]),
+        sgroup('流转规则', [
+          srow('待审核', '已提交，等待运维人员判定；期间不可重复提交同名版本', '<span class="set-value">pending</span>'),
+          srow('已通过', '已上线；图像模板可从模板页使用，插件与技能可安装', '<span class="set-value">approved</span>'),
+          srow('已退回', '按退回原因修改后重新提交；模板需重新从本人图像发起', '<span class="set-value">rejected</span>'),
         ]),
       ],
     }
@@ -17422,6 +17395,7 @@ const settingsTabs = [
   { id: 'usage', label: '用量与配额', group: '安全与数据', scope: 'personal', kw: 'token 用量 配额 账单 超额 模型' },
   { id: 'data', label: '数据管理', group: '安全与数据', scope: 'personal', kw: '保留 导出 缓存 归档' },
   { id: 'integrations', label: '插件与工具', group: '集成', scope: 'personal', kw: '插件 技能 MCP 工具 地址' },
+  { id: 'reviews', label: '审核进度', group: '集成', scope: 'personal', kw: '审核 进度 图像模板 插件 技能 通过 驳回 待审核' },
   { id: 'runtime', label: 'Agent 运行时', group: '集成', scope: 'personal', kw: '设置中心 运行时 Agent loop 模型路由 shell subagent 会话日志 配置 执行策略 推理强度' },
   { id: 'mcp', label: 'MCP 资源', group: '集成', scope: 'personal', kw: 'MCP 资源 数据中心 通知 服务器 工具 健康 订阅' },
   { id: 'about', label: '关于', group: '其他', scope: 'personal', kw: '版本 基线 更新 帮助' },

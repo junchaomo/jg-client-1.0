@@ -1895,3 +1895,41 @@ body.resizing { cursor: col-resize; user-select: none; }
 /* 管理中心：含多张宽表格的市场/台账区块跨满双栏 */
 .mc-block.mc-span-2 { grid-column: span 2; }
 @media (max-width: 760px) { .mc-block.mc-span-2 { grid-column: span 1; } }
+/* 图像：同一资产的历史版本对比 */
+.img-ver-cmp { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 10px; }
+.img-ver-cmp-col { min-width: 0; border: 1px solid #e6e9ee; border-radius: 12px; background: #fbfbfc; overflow: hidden; }
+.img-ver-cmp-bar { display: flex; align-items: center; gap: 8px; padding: 8px 9px; border-bottom: 1px solid #eceff3; background: #fff; }
+.img-ver-cmp-bar label { flex: none; color: #5f6670; font-size: 10.5px; font-weight: 600; }
+.img-ver-cmp-bar select { min-width: 0; flex: 1; height: 30px; padding: 0 8px; border: 1px solid #e1e5ea; border-radius: 8px; background: #fff; color: #202124; font: inherit; font-size: 11px; outline: none; }
+.img-ver-cmp-frame { min-height: 170px; display: flex; align-items: center; justify-content: center; background: #f4f5f7; }
+.img-ver-cmp-figure { width: 100%; margin: 0; background: #fff; }
+.img-ver-cmp-figure img { display: block; width: 100%; max-height: 46vh; object-fit: contain; background: #f4f5f7; }
+.img-ver-cmp-figure figcaption { padding: 8px 9px 9px; }
+.img-ver-cmp-cap { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.img-ver-cmp-cap b { color: #202124; font-size: 11px; font-weight: 600; }
+.img-ver-cmp-cap span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #9aa1aa; font-size: 9.5px; }
+.img-ver-cmp-prompt { margin-top: 4px; max-height: 46px; overflow: hidden; color: #5f6670; font-size: 10px; line-height: 1.55; }
+.img-ver-cmp-empty { padding: 18px 14px; color: #98a0aa; font-size: 11px; text-align: center; }
+.img-ver-cmp-hint { margin-top: 7px; color: #9a6700; font-size: 10.5px; }
+.img-ver-cmp-note { margin-top: 5px; color: #8b929b; font-size: 10px; line-height: 1.6; }
+.img-ver-list-title { margin-top: 14px; color: #30343a; font-size: 11.5px; font-weight: 600; }
+/* 图像：模板申请的来源图像 */
+.img-tpl-source { display: flex; gap: 10px; align-items: flex-start; padding: 9px; border: 1px solid #e7eaf0; border-radius: 10px; background: #fbfbfc; }
+.img-tpl-source > img { flex: none; width: 92px; height: 92px; border-radius: 8px; object-fit: cover; background: #f1f3f5; }
+.img-tpl-source > div { min-width: 0; color: #737a84; font-size: 10.5px; line-height: 1.6; }
+.img-tpl-source b { display: block; margin-bottom: 3px; color: #202124; font-size: 12px; font-weight: 600; }
+.img-tpl-fixed { padding: 8px 10px; border: 1px solid #e7eaf0; border-radius: 9px; background: #fbfbfc; color: #5f6670; font-size: 11px; }
+/* 管理中心：图像模板待审行 */
+.mc-tpl-first { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.mc-thumb { flex: none; width: 38px; height: 38px; border-radius: 7px; object-fit: cover; background: #f2f3f5; }
+.mc-tpl-first > span { min-width: 0; }
+.mc-tpl-prompt { display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 3px; }
+/* 设置：审核进度 */
+.set-review-status { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 999px; background: #f3f4f6; color: #6b7280; font-size: 10px; white-space: nowrap; }
+.set-review-status.pending { background: #fff7e8; color: #9a6700; }
+.set-review-status.approved { background: #edf7ef; color: #1f7a3a; }
+.set-review-status.rejected { background: #fef0ef; color: #b42318; }
+@media (max-width: 620px) {
+  .img-ver-cmp { grid-template-columns: minmax(0,1fr); }
+  .img-tpl-source > img { width: 72px; height: 72px; }
+}
