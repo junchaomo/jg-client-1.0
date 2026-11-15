@@ -1680,7 +1680,14 @@ body.resizing { cursor: col-resize; user-select: none; }
 .sidebar.fly{width:var(--pane-w,25%)!important;min-width:var(--pane-w,25%)!important}
 .tk-left.fly-sb,.sk-left.fly-sb{width:var(--pane-w,25%)!important}
 
+/* ---------- 首页 + 菜单：居中紧凑浮层 ---------- */
+.plus-mask { padding: 24px; }
+.plus-mask .plus-modal { width: min(520px, calc(100vw - 48px)); max-height: min(600px, 72vh); margin: 0; border-radius: 16px; }
+.plus-mask .plus-modal .jg-modal-body { padding: 8px 10px; }
+
 /* ---------- 图像输入条：大胶囊 + 图像能力菜单 ---------- */
+.main-body > .view:has(.img-composer-wrap) { display: flex; flex-direction: column; }
+.main-body > .view:has(.img-composer-wrap) .img-composer-wrap { margin-top: auto; flex: none; }
 .img-composer-wrap { padding: 10px 0 6px; }
 .img-composer {
   position: relative;

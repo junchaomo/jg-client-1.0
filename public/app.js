@@ -9,7 +9,7 @@ const state = {
   resourcePageSize: 10,
   resourceQuery: '',
   resourceList: [],
-  selectedResource: null,
+  dataCenterResourceCount: null,  selectedResource: null,
   satellite: null,
   plugins: [],
   pluginKind: 'enterprise',
@@ -2931,13 +2931,18 @@ function composerPlusItems() {
   const installed = (state.plugins || []).filter((p) => p.status === 'enabled')
   const skills = installed.filter((p) => p.kind === 'personal')
   const plugins = installed.filter((p) => p.kind !== 'personal')
+  const dcCount = typeof state.dataCenterResourceCount === 'number' ? state.dataCenterResourceCount : null
   return [
-    { act: 'attach', ic: 'plus', label: '添加照片和文件', desc: '从计算机上传' },
+    { act: 'attach', ic: 'plus', label: '添加图片', desc: '从计算机上传图片或文件' },
     { act: 'deepThink', ic: 'spark', label: `${state.deepThink ? '✓ ' : ''}深度思索`, desc: state.deepThink ? '已开启 · 当前会话使用推理模型' : 'DeepSeek Reasoner · 更深层推理' },
-    { act: 'library', ic: 'database', label: '从资料库添加', desc: '浏览数据中心的资源' },
-    { act: 'image', ic: 'image', label: '创建图像', desc: imagegenReady() ? `真实生图 · ${selectedImageModel()?.label || '图像服务'}` : (state.boot?.imageGeneration?.reason || '当前环境未启用真实生图'), off: !imagegenReady() },
+    {
+      act: 'library',
+      ic: 'database',
+      label: '从数据中心添加',
+      desc: dcCount === null ? '正在读取数据中心…' : (dcCount > 0 ? `${dcCount} 项资源可引用` : '数据中心暂无内容'),
+      off: dcCount === null || dcCount === 0,
+    },
     { act: 'web', ic: 'globe', label: '网页搜索', desc: state.webSearch ? '已启用 · 本轮会检索网页' : '使用平台 Web 搜索与抓取' },
-    { act: 'project', ic: 'folder', label: '在项目中工作', desc: '在项目里开始对话' },
     { act: 'skillPicker', ic: 'layers', label: '技能', desc: skills.length ? `${skills.length} 项已启用 ›` : '暂无已启用技能 ›' },
     { act: 'pluginPicker', ic: 'plugin', label: '插件', desc: plugins.length ? `${plugins.length} 项已启用 ›` : '暂无已启用插件 ›' },
     { act: 'presetPicker', ic: 'target', label: 'Agent 预设', desc: state.agentPresets.length ? `${state.agentPresetId ? (state.agentPresets.find((x) => x.id === state.agentPresetId)?.name || '已选择') : `${state.agentPresets.length} 个`} ›` : '未创建 ›' },
@@ -2993,6 +2998,7 @@ function composerPresetPickerItems() {
 }
 
 function paintComposerPlus(pop, items, pickerKind) {
+  pop.classList.toggle('is-picker', !!pickerKind)
   pop.innerHTML = items.map((it) => (it.act === 'sep'
     ? '<div class="pp-sep"></div>'
     : `<button class="pp-row${it.off ? ' off' : ''}" data-plus="${it.act}"${it.plugin ? ` data-plugin="${esc(it.plugin)}"` : ''}${it.entry ? ` data-entry="${esc(it.entry)}"` : ''}${it.preset !== undefined ? ` data-preset="${esc(it.preset)}"` : ''}${it.off ? ' disabled' : ''}>
@@ -3000,6 +3006,11 @@ function paintComposerPlus(pop, items, pickerKind) {
         <span class="pp-label">${esc(it.label)}</span>
         <span class="pp-desc">${esc(it.desc || '')}</span>
       </button>`)).join('')
+  const closePop = () => {
+    const owner = pop.closest('.jg-modal-mask') || pop
+    owner.remove()
+    if (window.__plusPop === owner) window.__plusPop = null
+  }
   pop.querySelectorAll('[data-plus]:not([disabled])').forEach((b) => b.addEventListener('click', (e) => {
     e.stopPropagation()
     const act = b.dataset.plus
@@ -3026,7 +3037,7 @@ function paintComposerPlus(pop, items, pickerKind) {
         state.executionPolicy = p.defaultPolicy === 'manual' ? 'manual' : 'auto'
         state.reasoningEffort = p.defaultEffort || state.reasoningEffort
       }
-      pop.remove()
+      closePop()
       render()
       toast(p ? `已应用 Agent 预设「${p.name}」` : '已取消 Agent 预设')
       return
@@ -3047,11 +3058,9 @@ function paintComposerPlus(pop, items, pickerKind) {
       }
       return
     }
-    pop.remove()
-    window.__plusPop = null
+    closePop()
     if (act === 'attach') openChatAttachment()
     if (act === 'library') openLibraryPicker()
-    if (act === 'image') { state.view = 'imagegen'; render() }
     if (act === 'draw') openDrawingBoard()
     if (act === 'web') {
       state.webSearch = !state.webSearch
@@ -3322,26 +3331,23 @@ function bindComposerPaste(draft) {
   })
 }
 
-function openComposerPlus(anchor) { if (window.__plusPop) { window.__plusPop.remove(); window.__plusPop = null; return }
+function openComposerPlus(anchor) {
+  if (window.__plusPop) { window.__plusPop.remove(); window.__plusPop = null; return }
   document.querySelectorAll('.conv-menu, .plus-pop').forEach((p) => p.remove())
-  const pop = document.createElement('div')
-  pop.className = 'plus-pop'
-  document.body.appendChild(pop)
-  window.__plusPop = pop
-  const r = anchor.getBoundingClientRect()
-  const composer = anchor.closest('.hh-composer, .chat-composer, .img-composer') || anchor.parentElement
-  const cr = composer.getBoundingClientRect()
-  pop.style.width = `${Math.max(360, Math.round(cr.width))}px`
-  pop.style.left = `${Math.round(Math.max(12, cr.left))}px`
-  pop.style.maxHeight = `${Math.min(560, window.innerHeight - 16)}px`
-  paintComposerPlus(pop, composerPlusItems(), null)
-  const ph = pop.offsetHeight
-  const wantTop = r.bottom + 10
-  const top = wantTop + ph <= window.innerHeight - 8 ? wantTop : Math.max(8, r.top - 10 - ph)
-  pop.style.top = `${Math.round(top)}px`
-  setTimeout(() => document.addEventListener('click', function close(e) {
-    if (!pop.contains(e.target)) { pop.remove(); document.removeEventListener('click', close) }
-  }), 0)
+  const mask = openModal('更多能力', '<div class="plus-panel" id="composerPlusPanel"></div>')
+  mask.classList.add('plus-mask')
+  mask.querySelector('.jg-modal')?.classList.add('plus-modal')
+  const panel = mask.querySelector('#composerPlusPanel')
+  window.__plusPop = mask
+  paintComposerPlus(panel, composerPlusItems(), null)
+  api('/api/resources').then(({ ok, body } = {}) => {
+    if (window.__plusPop !== mask || !panel.isConnected) return
+    const count = ok ? ((body?.items || []).length) : 0
+    if (state.dataCenterResourceCount === count) return
+    state.dataCenterResourceCount = count
+    // 仍停留在根菜单时刷新可引用数量；进入技能/插件子列表后不打断。
+    if (panel.querySelector('[data-plus="library"]')) paintComposerPlus(panel, composerPlusItems(), null)
+  }).catch(() => {})
 }
 
 async function openChatAttachment() {
@@ -3962,7 +3968,7 @@ async function renderHome(el) {
       </div>` : ''}
       <div class="hh-composer" style="width:100%;max-width:820px;margin:0 auto;box-sizing:border-box">
         <div style="display:flex;align-items:center;gap:6px;flex:none">
-          <button class="hc-plus" id="attachBtn" title="添加照片、文件或工具"><span class="ico">${icon('plus')}</span></button>
+          <button class="hc-plus" id="attachBtn" title="添加图片、文件或工具"><span class="ico">${icon('plus')}</span></button>
           ${state.pendingInteraction?.kind === 'approval' ? approvalControl() : ''}
           ${policyControl()}
         </div>
@@ -8581,6 +8587,123 @@ function openImageSkills() {
   }))
 }
 
+function imageComposerHtml(g, modelOptions, allModels) {
+  return `
+    <div class="img-composer-wrap">
+      <div class="img-refs" id="igRefs">${renderImageReferenceChips(g)}</div>
+      <div class="img-composer" id="igComposer">
+        <button type="button" class="img-plus" id="igPlus" aria-label="更多图像能力" aria-expanded="false" title="更多图像能力">${icon('plus')}</button>
+        <div class="img-plus-menu" id="igPlusMenu" hidden>
+          <button type="button" data-igplus="image"><span class="img-plus-menu-ico">${icon('image')}</span><span><b>添加图片</b><small>上传本地图片作为参考</small></span></button>
+          <button type="button" data-igplus="draw"><span class="img-plus-menu-ico">${icon('pen')}</span><span><b>绘图</b><small>打开画板，把画好的图作为参考</small></span></button>
+          <button type="button" data-igplus="skills"><span class="img-plus-menu-ico">${icon('spark')}</span><span><b>技能</b><small>标注、抠图、擦除、调整大小</small></span></button>
+        </div>
+        <select class="img-model-select" id="igModel" aria-label="选择图像模型" title="选择图像模型" ${allModels.length <= 1 ? 'disabled' : ''}>${modelOptions}</select>
+        <input class="img-input" id="igPrompt" placeholder="描述新图像" value="${esc(g.prompt)}">
+        <div class="img-tools">
+          <select class="img-count-select" id="igCount" aria-label="方案数量" title="方案数量">${[1, 2, 3].map((n) => `<option value="${n}" ${Number(g.count) === n ? 'selected' : ''}>${n} 方案</option>`).join('')}</select>
+          <button type="button" class="img-mic" id="igMic" title="语音输入" aria-label="语音输入">${icon('mic')}</button>
+          <button class="img-send" id="igGen" title="生成" ${g.busy ? 'disabled' : ''}>${g.busy ? '…' : icon('up')}</button>
+        </div>
+      </div>
+      <input id="igLocalFile" type="file" accept="image/png,image/jpeg,image/webp" hidden>
+    </div>`
+}
+
+function bindImageComposer(el, g, selectedModel) {
+  const input = el.querySelector('#igPrompt')
+  input.addEventListener('input', (e) => { g.prompt = e.target.value })
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); el.querySelector('#igGen').click() } })
+  el.querySelector('#igModel')?.addEventListener('change', (e) => {
+    g.modelId = e.target.value
+    renderView()
+  })
+  el.querySelector('#igCount')?.addEventListener('change', (e) => {
+    g.count = Math.max(1, Math.min(3, Number(e.target.value) || 1))
+  })
+  const plus = el.querySelector('#igPlus')
+  const plusMenu = el.querySelector('#igPlusMenu')
+  const closePlus = () => {
+    if (!plusMenu || !plus) return
+    plusMenu.hidden = true
+    plus.setAttribute('aria-expanded', 'false')
+  }
+  plus?.addEventListener('click', (event) => {
+    event.stopPropagation()
+    const open = plusMenu.hidden
+    plusMenu.hidden = !open
+    plus.setAttribute('aria-expanded', open ? 'true' : 'false')
+  })
+  el.querySelector('#igComposer')?.addEventListener('click', (event) => {
+    if (!event.target.closest('#igPlus') && !plusMenu?.contains(event.target)) closePlus()
+  })
+  plusMenu?.querySelectorAll('[data-igplus]').forEach((btn) => btn.addEventListener('click', () => {
+    closePlus()
+    if (btn.dataset.igplus === 'image') openLocalImagePicker()
+    else if (btn.dataset.igplus === 'draw') openDrawingBoard({ imageReference: true })
+    else if (btn.dataset.igplus === 'skills') openImageSkills()
+  }))
+  el.querySelector('#igLocalFile')?.addEventListener('change', (event) => {
+    const file = event.target.files?.[0]
+    if (file) addLocalImageReference(file)
+    event.target.value = ''
+  })
+  el.querySelector('#igMic')?.addEventListener('click', (event) => startVoiceInput(event.currentTarget, input))
+  el.querySelectorAll('[data-ref-remove]').forEach((btn) => btn.addEventListener('click', (e) => {
+    e.stopPropagation()
+    g.references = (g.references || []).filter((item) => item.id !== btn.dataset.refRemove)
+    renderView()
+  }))
+  el.querySelector('#igCompare')?.addEventListener('click', () => openImageCompare())
+
+  el.querySelector('#igGen').addEventListener('click', async () => {
+    if (!g.prompt.trim()) { toast('请先描述要生成的图像', true); input.focus(); return }
+    if (g.busy) return
+    g.busy = true
+    g.tab = 'mine'
+    renderView()
+    toast('正在调用真实生图服务，通常需要 10–30 秒')
+    const g2 = state.imagegen
+    const count = Math.max(1, Math.min(4, Number(g2.count) || 1))
+    const refs = g2.references || []
+    const assetRefs = refs.filter((item) => !item.local)
+    const localRefs = refs.filter((item) => item.local && item.url)
+    let made = 0
+    try {
+      for (let i = 0; i < count; i += 1) {
+        const res = await api('/api/images/generate', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            prompt: g2.prompt.trim(),
+            style: g2.style,
+            ratio: g2.ratio,
+            modelId: g2.modelId || selectedModel.id,
+            referenceAssetIds: assetRefs.map((item) => item.id),
+            referenceDataUrls: localRefs.map((item) => item.url),
+            seed: Math.floor(Math.random() * 2_147_483_647),
+          }),
+        })
+        if (!res.ok || !res.body?.image?.url) {
+          throw new Error(res.body?.error || `生图服务返回 HTTP ${res.status}`)
+        }
+        const image = res.body.image
+        g2.shots.unshift(imageShotFromAsset(image))
+        g2.assetsLoaded = true
+        g2.shots = g2.shots.slice(0, 30)
+        made += 1
+      }
+      g2.busy = false
+      renderView()
+      toast(`已生成 ${made} 张真实图像 · ${selectedModel.label}`)
+    } catch (err) {
+      g2.busy = false
+      renderView()
+      toast(err.message || '真实生图失败，请稍后重试', true)
+    }
+  })
+}
+
 async function renderImage(el) {
   const g = state.imagegen
   const cap = state.boot?.imageGeneration || {}
@@ -8632,9 +8755,11 @@ async function renderImage(el) {
     el.innerHTML = `${head}
       ${imageTemplateActions()}
       ${imageTemplateGrid(g)}
-      <div class="img-tpl-footnote">模板是用户提交、管理员审核后上线的真实提示词；选择模板后可上传一张参考照片，或直接点“试一试”。</div>`
+      <div class="img-tpl-footnote">模板是用户提交、管理员审核后上线的真实提示词；选择模板后可上传一张参考照片，或直接点“试一试”。</div>
+      ${imageComposerHtml(g, modelOptions, allModels)}`
     bindImageTabs(el)
     bindImageTemplateActions(el)
+    bindImageComposer(el, g, selectedModel)
     return
   }
 
@@ -8652,71 +8777,10 @@ async function renderImage(el) {
           <div class="img-empty-text">先到“模板”选一个方向试一试，或在下方描述画面自由生成；真实结果会保存在这里。</div>
         </div>`}
     </div>
-    <div class="img-composer-wrap">
-      <div class="img-refs" id="igRefs">${renderImageReferenceChips(g)}</div>
-      <div class="img-composer">
-        <button type="button" class="img-plus" id="igPlus" aria-label="更多图像能力" aria-expanded="false" title="更多图像能力">${icon('plus')}</button>
-        <div class="img-plus-menu" id="igPlusMenu" hidden>
-          <button type="button" data-igplus="image"><span class="img-plus-menu-ico">${icon('image')}</span><span><b>添加图片</b><small>上传本地图片作为参考</small></span></button>
-          <button type="button" data-igplus="draw"><span class="img-plus-menu-ico">${icon('pen')}</span><span><b>绘图</b><small>打开画板，把画好的图作为参考</small></span></button>
-          <button type="button" data-igplus="skills"><span class="img-plus-menu-ico">${icon('spark')}</span><span><b>技能</b><small>标注、抠图、擦除、调整大小</small></span></button>
-        </div>
-        <select class="img-model-select" id="igModel" aria-label="选择图像模型" title="选择图像模型" ${allModels.length <= 1 ? 'disabled' : ''}>${modelOptions}</select>
-        <input class="img-input" id="igPrompt" placeholder="描述新图像" value="${esc(g.prompt)}">
-        <div class="img-tools">
-          <select class="img-count-select" id="igCount" aria-label="方案数量" title="方案数量">${[1, 2, 3].map((n) => `<option value="${n}" ${Number(g.count) === n ? 'selected' : ''}>${n} 方案</option>`).join('')}</select>
-          <button type="button" class="img-mic" id="igMic" title="语音输入" aria-label="语音输入">${icon('mic')}</button>
-          <button class="img-send" id="igGen" title="生成" ${g.busy ? 'disabled' : ''}>${g.busy ? '…' : icon('up')}</button>
-        </div>
-      </div>
-      <input id="igLocalFile" type="file" accept="image/png,image/jpeg,image/webp" hidden>
-    </div>`
+    ${imageComposerHtml(g, modelOptions, allModels)}`
 
   bindImageTabs(el)
-  const input = el.querySelector('#igPrompt')
-  input.addEventListener('input', (e) => { g.prompt = e.target.value })
-  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); el.querySelector('#igGen').click() } })
-  el.querySelector('#igModel')?.addEventListener('change', (e) => {
-    g.modelId = e.target.value
-    renderView()
-  })
-  el.querySelector('#igCount')?.addEventListener('change', (e) => {
-    g.count = Math.max(1, Math.min(3, Number(e.target.value) || 1))
-  })
-  const plus = el.querySelector('#igPlus')
-  const plusMenu = el.querySelector('#igPlusMenu')
-  const closePlus = () => {
-    if (!plusMenu || !plus) return
-    plusMenu.hidden = true
-    plus.setAttribute('aria-expanded', 'false')
-  }
-  plus?.addEventListener('click', (event) => {
-    event.stopPropagation()
-    const open = plusMenu.hidden
-    plusMenu.hidden = !open
-    plus.setAttribute('aria-expanded', open ? 'true' : 'false')
-  })
-  el.querySelector('#igComposer')?.addEventListener('click', (event) => {
-    if (!event.target.closest('#igPlus') && !plusMenu?.contains(event.target)) closePlus()
-  })
-  plusMenu?.querySelectorAll('[data-igplus]').forEach((btn) => btn.addEventListener('click', () => {
-    closePlus()
-    if (btn.dataset.igplus === 'image') openLocalImagePicker()
-    else if (btn.dataset.igplus === 'draw') openDrawingBoard({ imageReference: true })
-    else if (btn.dataset.igplus === 'skills') openImageSkills()
-  }))
-  el.querySelector('#igLocalFile')?.addEventListener('change', (event) => {
-    const file = event.target.files?.[0]
-    if (file) addLocalImageReference(file)
-    event.target.value = ''
-  })
-  el.querySelector('#igMic')?.addEventListener('click', (event) => startVoiceInput(event.currentTarget, input))
-  el.querySelectorAll('[data-ref-remove]').forEach((btn) => btn.addEventListener('click', (e) => {
-    e.stopPropagation()
-    g.references = (g.references || []).filter((item) => item.id !== btn.dataset.refRemove)
-    renderView()
-  }))
-  el.querySelector('#igCompare')?.addEventListener('click', () => openImageCompare())
+  bindImageComposer(el, g, selectedModel)
 
   el.querySelectorAll('.img-card').forEach((b) => {
     const openPreview = () => {
@@ -8743,52 +8807,6 @@ async function renderImage(el) {
     })
   })
 
-  el.querySelector('#igGen').addEventListener('click', async () => {
-    if (!g.prompt.trim()) { toast('请先描述要生成的图像', true); input.focus(); return }
-    if (g.busy) return
-    g.busy = true
-    g.tab = 'mine'
-    renderView()
-    toast('正在调用真实生图服务，通常需要 10–30 秒')
-    const g2 = state.imagegen
-    const count = Math.max(1, Math.min(4, Number(g2.count) || 1))
-    const refs = g2.references || []
-    const assetRefs = refs.filter((item) => !item.local)
-    const localRefs = refs.filter((item) => item.local && item.url)
-    let made = 0
-    try {
-      for (let i = 0; i < count; i += 1) {
-        const res = await api('/api/images/generate', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({
-            prompt: g2.prompt.trim(),
-            style: g2.style,
-            ratio: g2.ratio,
-            modelId: g2.modelId || selectedModel.id,
-            referenceAssetIds: assetRefs.map((item) => item.id),
-            referenceDataUrls: localRefs.map((item) => item.url),
-            seed: Math.floor(Math.random() * 2_147_483_647),
-          }),
-        })
-        if (!res.ok || !res.body?.image?.url) {
-          throw new Error(res.body?.error || `生图服务返回 HTTP ${res.status}`)
-        }
-        const image = res.body.image
-        g2.shots.unshift(imageShotFromAsset(image))
-        g2.assetsLoaded = true
-        g2.shots = g2.shots.slice(0, 30)
-        made += 1
-      }
-      g2.busy = false
-      renderView()
-      toast(`已生成 ${made} 张真实图像 · ${selectedModel.label}`)
-    } catch (err) {
-      g2.busy = false
-      renderView()
-      toast(err.message || '真实生图失败，请稍后重试', true)
-    }
-  })
 }
 
 function bindImageTabs(root) {
@@ -13237,7 +13255,7 @@ function renderChat(el) {
       </div>` : ''}
       <div class="hh-composer" style="align-self:center;width:100%;min-width:280px;max-width:920px;margin:0 auto;box-sizing:border-box">
         <div style="display:flex;align-items:center;gap:6px;flex:none">
-          <button class="hc-plus" id="chatAttach" title="添加照片、文件或工具"><span class="ico">${icon('plus')}</span></button>
+          <button class="hc-plus" id="chatAttach" title="添加图片、文件或工具"><span class="ico">${icon('plus')}</span></button>
           ${state.pendingInteraction?.kind === 'approval' ? approvalControl() : ''}
           ${policyControl()}
         </div>
