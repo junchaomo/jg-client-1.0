@@ -13661,10 +13661,182 @@ function renderGuestShell(el, view) {
 
 /* ===== 恢复：被脚本误删的视图函数 ===== */
 
+/* 单条会话内的轮次导航：左侧短刻度对应一问一答，悬停预览、点击跳转。 */
+function chatTurnGroups(msgs) {
+  const groups = []
+  let current = null
+  ;(msgs || []).forEach((m, index) => {
+    if (m?.role === 'user') {
+      if (current) groups.push(current)
+      current = { userIndex: index, user: m, assistant: null, assistantIndex: null }
+    } else if (m?.role === 'assistant' && current) {
+      current.assistant = m
+      current.assistantIndex = index
+    }
+  })
+  if (current) groups.push(current)
+  return groups.filter((g) => String(g.user?.text || '').trim())
+}
+
+function chatNavText(raw, limit) {
+  const text = String(raw || '')
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+    .replace(/^\s*[-*#>|]+\s*/gm, '')
+    .replace(/[|*_`]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  return text.slice(0, limit)
+}
+
+function chatNavStamp(m) {
+  const stamp = String(m?.createdAt || '').trim()
+  if (stamp) {
+    const date = new Date(stamp)
+    if (!Number.isNaN(date.getTime())) {
+      const now = new Date()
+      const sameDay = (a, b) => a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate()
+      const hhmm = date.toLocaleTimeString('zh-CN', { hour12: false }).slice(0, 5)
+      if (sameDay(date, now)) return `今天 ${hhmm}`
+      const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1)
+      if (sameDay(date, yesterday)) return `昨天 ${hhmm}`
+      return `${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')} ${hhmm}`
+    }
+  }
+  return String(m?.time || '')
+}
+
+let chatNavCardEl = null
+let chatNavCardTimer = null
+let chatNavCardMark = null
+
+function hideChatNavCard() {
+  if (chatNavCardTimer) { clearTimeout(chatNavCardTimer); chatNavCardTimer = null }
+  if (chatNavCardMark) {
+    chatNavCardMark.classList.remove('hover')
+    chatNavCardMark.removeAttribute('aria-describedby')
+    chatNavCardMark = null
+  }
+  if (chatNavCardEl) { chatNavCardEl.remove(); chatNavCardEl = null }
+}
+
+function placeChatNavCard(mark, group, index) {
+  hideChatNavCard()
+  if (!mark || !group) return
+  const card = document.createElement('div')
+  card.className = 'chat-nav-card'
+  card.id = 'chatNavTip'
+  card.setAttribute('role', 'tooltip')
+  const title = chatNavText(group.user?.text, 64) || `第 ${index + 1} 轮对话`
+  const body = chatNavText(group.assistant?.text || group.user?.text, 220)
+  const time = chatNavStamp(group.assistant || group.user)
+  card.innerHTML = `<div class="chat-nav-card-title">${esc(title)}</div>
+    <div class="chat-nav-card-body">${esc(body || '暂无回答内容')}</div>
+    <div class="chat-nav-card-meta"><span>${esc(time)}</span><span>第 ${index + 1} 轮</span></div>`
+  document.body.appendChild(card)
+  chatNavCardEl = card
+  chatNavCardMark = mark
+  mark.classList.add('hover')
+  mark.setAttribute('aria-describedby', card.id)
+  const rect = mark.getBoundingClientRect()
+  const rightSpace = window.innerWidth - 12 - (rect.right + 14)
+  const width = Math.min(360, Math.max(220, rightSpace))
+  card.style.width = `${width}px`
+  const height = card.offsetHeight || 150
+  const left = Math.min(rect.right + 14, window.innerWidth - width - 12)
+  let top = rect.top - 10
+  if (top + height > window.innerHeight - 12) top = Math.max(12, window.innerHeight - height - 12)
+  card.style.left = `${Math.max(12, left)}px`
+  card.style.top = `${Math.max(12, top)}px`
+  requestAnimationFrame(() => card.classList.add('on'))
+}
+
+function scheduleChatNavCard(mark, group, index) {
+  if (chatNavCardTimer) clearTimeout(chatNavCardTimer)
+  chatNavCardTimer = setTimeout(() => {
+    chatNavCardTimer = null
+    placeChatNavCard(mark, group, index)
+  }, 120)
+}
+
+function syncChatNavGeometry(chat) {
+  const nav = chat?.querySelector('#chatNav')
+  const msgs = chat?.querySelector('#chatMsgs')
+  if (!nav || !msgs) return
+  const chatRect = chat.getBoundingClientRect()
+  const msgsRect = msgs.getBoundingClientRect()
+  nav.style.top = `${Math.round(msgsRect.top - chatRect.top + 8)}px`
+  nav.style.height = `${Math.max(96, Math.round(msgsRect.height - 16))}px`
+}
+
+function syncChatNavActive(chat) {
+  const nav = chat?.querySelector('#chatNav')
+  const msgs = chat?.querySelector('#chatMsgs')
+  if (!nav || !msgs) return
+  const marks = [...nav.querySelectorAll('[data-nav-turn]')]
+  if (!marks.length) return
+  const boxTop = msgs.getBoundingClientRect().top
+  let activeIndex = 0
+  marks.forEach((mark, index) => {
+    const target = msgs.querySelector(`[data-mi="${mark.dataset.navUser}"]`)
+    if (target && target.getBoundingClientRect().top <= boxTop + 28) activeIndex = index
+  })
+  marks.forEach((mark, index) => {
+    const on = index === activeIndex
+    mark.classList.toggle('on', on)
+    if (on) mark.setAttribute('aria-current', 'true')
+    else mark.removeAttribute('aria-current')
+  })
+}
+
+function bindChatNav(chat, groups) {
+  const nav = chat?.querySelector('#chatNav')
+  const msgs = chat?.querySelector('#chatMsgs')
+  if (!nav || !msgs) return
+  syncChatNavGeometry(chat)
+  requestAnimationFrame(() => { syncChatNavGeometry(chat); syncChatNavActive(chat) })
+  nav.querySelectorAll('[data-nav-turn]').forEach((mark, index) => {
+    const group = groups[index]
+    if (!group) return
+    mark.addEventListener('mouseenter', () => scheduleChatNavCard(mark, group, index))
+    mark.addEventListener('mouseleave', hideChatNavCard)
+    mark.addEventListener('focus', () => scheduleChatNavCard(mark, group, index))
+    mark.addEventListener('blur', hideChatNavCard)
+    mark.addEventListener('click', () => {
+      hideChatNavCard()
+      const target = msgs.querySelector(`[data-mi="${group.userIndex}"]`)
+      if (!target) return
+      const top = target.getBoundingClientRect().top - msgs.getBoundingClientRect().top + msgs.scrollTop - 8
+      msgs.scrollTo({ top: Math.max(0, top), behavior: 'smooth' })
+      target.classList.add('chat-nav-target')
+      setTimeout(() => target.classList.remove('chat-nav-target'), 1200)
+    })
+  })
+  msgs.addEventListener('scroll', () => syncChatNavActive(chat), { passive: true })
+  if (!bindChatNav.bound) {
+    bindChatNav.bound = true
+    window.addEventListener('resize', () => {
+      const current = document.querySelector('.chat.has-nav')
+      if (!current) return
+      syncChatNavGeometry(current)
+      syncChatNavActive(current)
+    })
+    document.addEventListener('click', (ev) => {
+      if (!ev.target.closest('#chatNav') && !ev.target.closest('.chat-nav-card')) hideChatNavCard()
+    }, true)
+    document.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Escape') hideChatNavCard()
+    })
+  }
+}
 
 function renderChat(el) {
+  hideChatNavCard()
   const conv = state.conversation
   const msgs = conv?.messages || []
+  const navGroups = chatTurnGroups(msgs)
+  const showNav = navGroups.length > 1 && !state.shareMode
   const hasStreaming = msgs.some((m) => m.streaming)
   const thinking = state.chatBusy && !hasStreaming
   const project = currentProject()
@@ -13675,7 +13847,7 @@ function renderChat(el) {
   }
 
   el.innerHTML = `
-    <div class="chat${state.shareMode ? ' share-mode' : ''}" style="height:100%;min-height:0">
+    <div class="chat${state.shareMode ? ' share-mode' : ''}${showNav ? ' has-nav' : ''}" style="height:100%;min-height:0">
       <div class="chat-head">
         <div class="chat-title">${esc(conv?.title || '新对话')}</div>
         ${project ? `<div class="chat-empty-sub" style="margin:3px 0 0">${esc(project.name)} · ${esc(project.cwd)} · ${project.status === 'online' ? '已连接' : '文件夹不可用'}</div>` : ''}
@@ -13685,6 +13857,9 @@ function renderChat(el) {
           <button type="button" class="msg-act icon" data-share-thread title="分享整段对话" aria-label="分享对话">${icon('send')}</button>
         </div>
       </div>
+      ${showNav ? `<nav class="chat-nav" id="chatNav" aria-label="对话轮次导航">
+        ${navGroups.map((g, i) => `<button type="button" class="chat-nav-mark" data-nav-turn="${i}" data-nav-user="${g.userIndex}" aria-label="跳到第 ${i + 1} 轮：${esc(chatNavText(g.user?.text, 48) || '继续追问')}"></button>`).join('')}
+      </nav>` : ''}
       <div class="chat-msgs" id="chatMsgs" style="width:100%;max-width:none;margin:0 auto;box-sizing:border-box">
         ${jobsPanel(msgs)}
         ${msgs.length ? msgs.map((m, i) => renderMsg(m, i)).join('') : `
@@ -13803,6 +13978,7 @@ function renderChat(el) {
     if (btn) stopJob(btn.dataset.killjob)
   })
   const msgsBox = document.getElementById('chatMsgs')
+  bindChatNav(el, navGroups)
   if (msgsBox) msgsBox.scrollTop = msgsBox.scrollHeight
   window.JGVisuals?.renderAll(el)
 }
@@ -14143,8 +14319,9 @@ function visualBlock(visuals) {
 
 function renderMsg(m, idx = null) {
   const on = shareSelected(idx)
+  const mi = idx != null ? ` data-mi="${idx}"` : ''
   if (m.role === 'user') {
-    return `<div class="msg user${state.shareMode ? ' share-mode' : ''}${on ? ' share-on' : ''}">
+    return `<div class="msg user${state.shareMode ? ' share-mode' : ''}${on ? ' share-on' : ''}"${mi}>
       ${sharePickHTML(idx, on)}<div class="bubble">${esc(m.text)}</div>
       ${idx != null ? `<div class="msg-actions user-actions">
         <span class="msg-time-inline" title="${esc(messageStamp(m))}">${esc(messageStamp(m))}</span>
@@ -14155,7 +14332,7 @@ function renderMsg(m, idx = null) {
       </div>` : `<div class="msg-time">${esc(messageStamp(m))}</div>`}
     </div>`
   }
-  return `<div class="msg ai${state.shareMode ? ' share-mode' : ''}${on ? ' share-on' : ''}">
+  return `<div class="msg ai${state.shareMode ? ' share-mode' : ''}${on ? ' share-on' : ''}"${mi}>
     ${sharePickHTML(idx, on)}
     <div class="ai-avatar">JG</div>
     <div class="ai-body">
