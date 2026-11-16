@@ -2667,10 +2667,16 @@ function isGreeting(text) {
   return /^(你好|您好|hi|hello|在吗|谢谢|感谢|再见|早上好|下午好|晚上好)[!！。?？]*$/i.test(String(text || '').trim())
 }
 
-function directGreetingReply() {
+function directGreetingReply(text = '') {
+  const source = String(text || '')
+  const reply = /谢谢|感谢/.test(source)
+    ? '不客气。需要继续查天气、时间或处理工作时，直接告诉我就行。'
+    : /再见/.test(source)
+      ? '再见，需要时随时找我。'
+      : '你好，我是九规智能中枢。可以直接问天气、时间或工作问题；需要读文件、执行命令、检索内部资料时，我会自动进入 Harness 执行。'
   return {
     kind: 'greeting',
-    reply: '你好，我是九规智能中枢。可以直接问天气、时间或工作问题；需要读文件、执行命令、检索内部资料时，我会自动进入 Harness 执行。',
+    reply,
     model: '本地应答',
     steps: [{ tool: '本地应答', detail: '问候语', status: 'ok', ms: 0 }],
     usage: { calls: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0 },
@@ -2686,7 +2692,7 @@ async function tryDirectReply({ text, body, mode, projectId, deepThink, webSearc
   if (Array.isArray(body?.images) && body.images.length) return null
   const source = String(text || '').trim()
   if (!source || source.length > 160) return null
-  if (isGreeting(source)) return directGreetingReply()
+  if (isGreeting(source)) return directGreetingReply(source)
   if (isDateTimeLookup(source)) return directDateTimeReply(source)
   return directWeatherReply(source)
 }
