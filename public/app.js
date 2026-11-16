@@ -14086,7 +14086,10 @@ function formatDurationMs(ms) {
 
 function tokenBadgeHTML(m) {
   const value = formatTokensK(m.usage)
-  if (!value) return ''
+  if (!value) {
+    if (m.direct) return `<span class="msg-cost" title="直连数据生成，未调用模型"><span class="ico">${icon('clock')}</span>直连 · 0 token</span>`
+    return ''
+  }
   const calls = Number(m.usage?.calls || 0)
   const duration = formatDurationMs(m.runStats?.durationMs || m.elapsedMs)
   return `<span class="msg-cost" title="${esc(usageTip(m.usage, m.runStats))}"><span class="ico">${icon('clock')}</span>消耗 ${esc(value)}${calls > 1 ? ` · ${calls} 次` : ''}${duration ? ` · ${esc(duration)}` : ''}</span>`

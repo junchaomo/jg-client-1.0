@@ -2466,6 +2466,231 @@ function isSimpleLookup(text) {
   return source.length > 0 && source.length <= 120 && SIMPLE_QUERY_PATTERNS.some((pattern) => pattern.test(source))
 }
 
+/** 直连快速通道只处理不需要 Harness 的确定性事实，任何不确定场景都返回 null 并立即回退。 */
+const WEATHER_CODE_LABELS = {
+  0: '晴', 1: '多云间晴', 2: '多云', 3: '阴',
+  45: '雾', 48: '冻雾',
+  51: '小毛毛雨', 53: '毛毛雨', 55: '较强毛毛雨',
+  56: '冻毛毛雨', 57: '较强冻毛毛雨',
+  61: '小雨', 63: '中雨', 65: '大雨',
+  66: '冻雨', 67: '较强冻雨',
+  71: '小雪', 73: '中雪', 75: '大雪', 77: '雪粒',
+  80: '小阵雨', 81: '阵雨', 82: '强阵雨',
+  85: '小阵雪', 86: '强阵雪',
+  95: '雷阵雨', 96: '雷阵雨伴冰雹', 99: '强雷阵雨伴冰雹',
+}
+
+function weatherLabel(code) {
+  if (String(code ?? '').trim() === '') return '天气变化'
+  return WEATHER_CODE_LABELS[Number(code)] || '天气变化'
+}
+
+// Open-Meteo 的当前观测通常每 15 分钟更新一次；同一城市 10 分钟内复用响应，
+// 不改变数据时间标注，只减少重复请求带来的等待。
+const WEATHER_CACHE = new Map()
+const WEATHER_CACHE_TTL_MS = 10 * 60 * 1000
+
+function windDirectionLabel(deg) {
+  if (String(deg ?? '').trim() === '') return '—'
+  const value = Number(deg)
+  if (!Number.isFinite(value)) return '—'
+  const labels = ['北', '东北', '东', '东南', '南', '西南', '西', '西北']
+  return labels[Math.round(((value % 360) + 360) % 360 / 45) % 8]
+}
+
+function cnDateTime(date = new Date()) {
+  return date.toLocaleString('zh-CN', {
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hour12: false,
+  }).replace(/\//g, '-')
+}
+
+function cnWeekday(dateText) {
+  const date = new Date(`${String(dateText).slice(0, 10)}T12:00:00+08:00`)
+  if (Number.isNaN(date.getTime())) return ''
+  return ['周日', '周一', '周二', '周三', '周四', '周五', '周六'][date.getDay()]
+}
+
+function isWeatherLookup(text) {
+  return /(天气|气温|温度|下雨|降雨|降雪|风力|风向|湿度|紫外线|预报)/i.test(String(text || ''))
+}
+
+function extractWeatherPlace(text) {
+  const cleaned = String(text || '')
+    .replace(/[？?。！!，,；;：:]/g, ' ')
+    .replace(/(帮我|请|麻烦|查一下|查询|查|看看|今天|明天|后天|现在|当前|的|天气|气温|温度|如何|怎么样|怎样|预报|下雨|降雨|风力|风向|湿度|紫外线|一周|7天|七天|未来|几天|情况)/g, ' ')
+  const tokens = cleaned.match(/[\u4e00-\u9fa5]{2,10}/g) || []
+  return tokens.sort((a, b) => b.length - a.length)[0] || ''
+}
+
+async function fetchJsonWithTimeout(url, timeoutMs = 8000) {
+  const response = await fetch(url, {
+    headers: { accept: 'application/json', 'user-agent': 'jg-client/1.0' },
+    signal: AbortSignal.timeout(timeoutMs),
+  })
+  if (!response.ok) throw new Error(`上游返回 ${response.status}`)
+  return response.json()
+}
+
+async function geocodeWeatherPlace(place) {
+  const clean = String(place || '').trim()
+  if (!clean) return null
+  const candidates = clean.endsWith('市') ? [clean] : [`${clean}市`, clean]
+  for (const candidate of candidates) {
+    const url = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(candidate)}&count=5&language=zh&format=json`
+    const data = await fetchJsonWithTimeout(url, 7000)
+    const results = Array.isArray(data?.results) ? data.results : []
+    const hit = results.find((item) => String(item.country_code || '').toUpperCase() === 'CN')
+      || results.find((item) => Number.isFinite(Number(item.latitude)) && Number.isFinite(Number(item.longitude)))
+    if (hit) {
+      return {
+        name: String(hit.name || clean),
+        admin1: String(hit.admin1 || ''),
+        latitude: Number(hit.latitude),
+        longitude: Number(hit.longitude),
+      }
+    }
+  }
+  return null
+}
+
+function formatDirectWeather({ geo, data, days, generatedAt }) {
+  const current = data?.current || {}
+  const daily = data?.daily || {}
+  const dateText = String(current.time || '').slice(0, 10)
+  const dataAt = String(current.time || '').replace('T', ' ')
+  const nowParts = [
+    weatherLabel(current.weather_code),
+    Number.isFinite(Number(current.temperature_2m)) ? `${Number(current.temperature_2m).toFixed(1)}℃` : '',
+    Number.isFinite(Number(current.apparent_temperature)) ? `体感 ${Number(current.apparent_temperature).toFixed(1)}℃` : '',
+    Number.isFinite(Number(current.relative_humidity_2m)) ? `湿度 ${Math.round(Number(current.relative_humidity_2m))}%` : '',
+    Number.isFinite(Number(current.wind_speed_10m)) ? `${windDirectionLabel(current.wind_direction_10m)}风 ${Number(current.wind_speed_10m).toFixed(1)}km/h` : '',
+    Number(current.precipitation) > 0 ? `当前降水 ${Number(current.precipitation).toFixed(1)}mm` : '当前无降水',
+  ].filter(Boolean)
+  const future = (Array.isArray(daily.time) ? daily.time : []).slice(0, Math.max(1, days)).map((date, index) => {
+    const code = Array.isArray(daily.weather_code) ? daily.weather_code[index] : ''
+    const min = Array.isArray(daily.temperature_2m_min) ? daily.temperature_2m_min[index] : ''
+    const max = Array.isArray(daily.temperature_2m_max) ? daily.temperature_2m_max[index] : ''
+    const rain = Array.isArray(daily.precipitation_probability_max) ? daily.precipitation_probability_max[index] : ''
+    const range = Number.isFinite(Number(min)) && Number.isFinite(Number(max))
+      ? `${Number(min).toFixed(0)}～${Number(max).toFixed(0)}℃`
+      : '温度数据暂缺'
+    return `- ${String(date).slice(5)} ${cnWeekday(date)}：${weatherLabel(code)}，${range}${Number.isFinite(Number(rain)) ? `，降水概率 ${Math.round(Number(rain))}%` : ''}`
+  })
+  return [
+    `## ${geo.name}天气（${dateText} ${cnWeekday(dateText)}）`,
+    '',
+    `**现在**：${nowParts.join('，')}。`,
+    ...(future.length ? ['', '**逐日预报（含今天）**：', ...future] : []),
+    '',
+    `数据来源：Open-Meteo（https://open-meteo.com/），数据更新时间 ${dataAt || '—'}。`,
+    `回答生成时间：${generatedAt}。`,
+  ].join('\n')
+}
+
+async function directWeatherReply(text) {
+  if (/空气质量|AQI|PM2\.5|污染|历史|昨天|昨日|上周|趋势|分析|比较|报告|文件|导出|保存|画图|图表|写入/i.test(String(text || ''))) return null
+  if (!isWeatherLookup(text)) return null
+  const place = extractWeatherPlace(text)
+  if (!place) return null
+  const startedAt = Date.now()
+  try {
+    const geo = await geocodeWeatherPlace(place)
+    if (!geo) return null
+    const days = /一周|7天|七天|本周/.test(String(text || '')) ? 7 : 3
+    const cacheKey = `${geo.latitude.toFixed(4)},${geo.longitude.toFixed(4)},${days}`
+    const cached = WEATHER_CACHE.get(cacheKey)
+    let data
+    if (cached && Date.now() - cached.at < WEATHER_CACHE_TTL_MS) {
+      data = cached.data
+    } else {
+      const params = new URLSearchParams({
+        latitude: String(geo.latitude),
+        longitude: String(geo.longitude),
+        current: 'temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,weather_code,wind_speed_10m,wind_direction_10m',
+        daily: 'weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max',
+        timezone: 'Asia/Shanghai',
+        forecast_days: String(days),
+      })
+      data = await fetchJsonWithTimeout(`https://api.open-meteo.com/v1/forecast?${params.toString()}`, 8000)
+      if (data?.current) {
+        WEATHER_CACHE.set(cacheKey, { at: Date.now(), data })
+        if (WEATHER_CACHE.size > 30) WEATHER_CACHE.delete(WEATHER_CACHE.keys().next().value)
+      }
+    }
+    if (!data?.current || !Number.isFinite(Number(data.current.temperature_2m))) return null
+    const generatedAt = cnDateTime(new Date())
+    const reply = formatDirectWeather({ geo, data, days, generatedAt })
+    return {
+      kind: 'weather',
+      reply,
+      place: geo.name,
+      model: 'Open-Meteo',
+      steps: [{
+        tool: '天气数据',
+        detail: `${geo.admin1 ? `${geo.admin1} · ` : ''}${geo.name} · Open-Meteo · 数据时间 ${String(data.current.time || '').replace('T', ' ')}`,
+        status: 'ok',
+        ms: Date.now() - startedAt,
+      }],
+      usage: { calls: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0 },
+    }
+  } catch (error) {
+    console.info('[jg-direct] weather failed', error?.message || error)
+    return null
+  }
+}
+
+function isDateTimeLookup(text) {
+  const source = String(text || '').replace(/[？?。！!]/g, '').trim()
+  return /^(今天|今日)(是)?(几号|日期|星期几|周几)$/.test(source)
+    || /^(现在|当前)(是)?(几点|时间)$/.test(source)
+}
+
+function directDateTimeReply(text) {
+  const now = new Date()
+  const stamp = cnDateTime(now)
+  const date = stamp.slice(0, 10)
+  const weekday = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'][now.getDay()]
+  let body = `现在是 ${stamp}（${weekday}）。`
+  if (/几号|日期/.test(String(text || ''))) body = `今天是 ${date}（${weekday}）。`
+  else if (/星期|周几/.test(String(text || ''))) body = `今天是 ${date}，${weekday}。`
+  return {
+    kind: 'datetime',
+    reply: `${body}\n\n回答生成时间：${stamp}。`,
+    model: '本地时间',
+    steps: [{ tool: '本地时间', detail: stamp, status: 'ok', ms: 0 }],
+    usage: { calls: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0 },
+  }
+}
+
+function isGreeting(text) {
+  return /^(你好|您好|hi|hello|在吗|谢谢|感谢|再见|早上好|下午好|晚上好)[!！。?？]*$/i.test(String(text || '').trim())
+}
+
+function directGreetingReply() {
+  return {
+    kind: 'greeting',
+    reply: '你好，我是九规智能中枢。可以直接问天气、时间或工作问题；需要读文件、执行命令、检索内部资料时，我会自动进入 Harness 执行。',
+    model: '本地应答',
+    steps: [{ tool: '本地应答', detail: '问候语', status: 'ok', ms: 0 }],
+    usage: { calls: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0 },
+  }
+}
+
+async function tryDirectReply({ text, body, mode, projectId, deepThink, webSearch, regenerate }) {
+  // 一旦出现附件、插件、项目、工作模式、深度思索或显式网页搜索，立即交回 Harness；
+  // 不能为了省 token 把真正需要工具链的任务降级成直连应答。
+  if (mode !== 'chat' || projectId || deepThink || webSearch || regenerate) return null
+  if (Array.isArray(body?.tools) && body.tools.length) return null
+  if (Array.isArray(body?.refs) && body.refs.length) return null
+  if (Array.isArray(body?.images) && body.images.length) return null
+  const source = String(text || '').trim()
+  if (!source || source.length > 160) return null
+  if (isGreeting(source)) return directGreetingReply()
+  if (isDateTimeLookup(source)) return directDateTimeReply(source)
+  return directWeatherReply(source)
+}
+
 function resolveTaskMode(text, requested, projectId) {
   const mode = ['auto', 'chat', 'work'].includes(String(requested || '')) ? String(requested) : 'auto'
   if (mode === 'chat') return { requested: 'chat', mode: 'chat', reason: '用户手动指定对话模式' }
@@ -7242,6 +7467,64 @@ const api = {
     }
     let chatTask = null
     let chatSlotHeld = false
+    // 直连快速通道：天气/日期/问候等确定性事实不进入 Harness，零模型调用；
+    // 一旦直连数据不可用（城市不明、接口失败、需要工具链），直接落到下面的 Harness 分支。
+    const directStartedAt = Date.now()
+    const direct = await tryDirectReply({ text, body, mode, projectId, deepThink, webSearch, regenerate })
+    if (direct) {
+      let directMessageId = ''
+      try {
+        directMessageId = `M-${Date.now().toString(36).toUpperCase()}-${randomBytes(3).toString('hex').toUpperCase()}`
+        const finishedAt = new Date()
+        const runStats = buildRunStats({
+          startedAt: directStartedAt,
+          endedAt: finishedAt.getTime(),
+          model: direct.model,
+          contextText: '',
+          steps: direct.steps,
+          usage: direct.usage,
+          events: [],
+          taskClass: `direct-${direct.kind}`,
+          replyChars: direct.reply.length,
+          finishReason: 'completed',
+        })
+        runStats.modelCalls = 0
+        runStats.toolCalls = direct.steps.length
+        const assistantMsg = {
+          id: directMessageId,
+          role: 'assistant', text: direct.reply,
+          time: finishedAt.toLocaleTimeString('zh-CN', { hour12: false }).slice(0, 5),
+          createdAt: finishedAt.toISOString(),
+          elapsedMs: runStats.durationMs,
+          steps: direct.steps,
+          subagents: [], workflows: [], todos: [], jobs: [], deliverables: [], visuals: [],
+          workspaceChanges: [], citations: [],
+          model: direct.model,
+          usage: direct.usage,
+          usageAt: finishedAt.getTime(),
+          traceId: '',
+          runStats,
+          taskClass: `direct-${direct.kind}`,
+          direct: true,
+        }
+        conv.messages.push(assistantMsg)
+        conv.turns = Math.ceil(conv.messages.length / 2)
+        conv.status = 'done'
+        conv.model = direct.model
+        conv.deepThink = false
+        chatTask = startChatRunTask({ conv, user, text, mode, taskMode, target: direct.place || project?.name || '' })
+        markChatRunStarted(chatTask, 'direct')
+        finishChatRunTask(chatTask, { steps: direct.steps.length, reply: direct.reply })
+        activeRuns.delete(conv.id)
+        persistPersistentState()
+        logAudit(user, 'chat.direct', conv.id, `${direct.kind}:${direct.place || direct.model}`, net)
+        return json(res, 200, { ok: true, conversation: conv, reply: direct.reply, steps: direct.steps, citations: [] })
+      } catch (directError) {
+        // 直连落库失败不能改变任务语义：清理草稿并继续走 Harness。
+        if (directMessageId) conv.messages = conv.messages.filter((m) => m.id !== directMessageId)
+        console.warn('[jg-server] direct reply failed, falling back to harness:', directError?.message || directError)
+      }
+    }
     try {
       chatTask = startChatRunTask({ conv, user, text, mode, taskMode, target: project?.name || '', idempotencyKey })
       await acquireChatRunSlot()
