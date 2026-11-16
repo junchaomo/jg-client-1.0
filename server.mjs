@@ -5182,15 +5182,7 @@ const api = {
         apps: liveApps.filter((a) => (a.nets || []).includes(net)).length,
         tasks: liveTasks.length,
       },
-      conversations: user.id === 'guest' ? [] : conversations.map((c) => ({
-        id: c.id, title: c.title, kind: c.kind, time: c.time, createdAt: c.createdAt || '', model: c.model, turns: c.turns, status: c.status,
-        workspace: c.workspace, projectId: c.projectId || '', dshSessionId: c.dshSessionId || '', agentPresetId: c.agentPresetId || '',
-        preview: String(
-          (c.messages || []).slice().reverse().find((m) => m.role === 'assistant' && String(m.text || '').trim())?.text
-          || (c.messages || []).slice(-1)[0]?.text
-          || '',
-        ).slice(0, 500),
-      })),
+      conversations: user.id === 'guest' ? [] : conversations.map((c) => ({ id: c.id, title: c.title, kind: c.kind, time: c.time, model: c.model, turns: c.turns, status: c.status, workspace: c.workspace, projectId: c.projectId || '', dshSessionId: c.dshSessionId || '', agentPresetId: c.agentPresetId || '' })),
       tasks: user.id === 'guest' ? [] : liveTasks,
       tools: conf.tools,
       models: user.id === 'guest' ? [] : conf.models,
@@ -6826,13 +6818,8 @@ const api = {
       items: conversations
         .filter((c) => conversationAllowed(user, c))
         .map((c) => ({
-          id: c.id, title: c.title, kind: c.kind, time: c.time, createdAt: c.createdAt || '', model: c.model, turns: c.turns, status: c.status,
+          id: c.id, title: c.title, kind: c.kind, time: c.time, model: c.model, turns: c.turns, status: c.status,
           workspace: c.workspace, projectId: c.projectId || '', executionPolicy: c.executionPolicy || 'auto', dshSessionId: c.dshSessionId || '',
-          preview: String(
-            (c.messages || []).slice().reverse().find((m) => m.role === 'assistant' && String(m.text || '').trim())?.text
-            || (c.messages || []).slice(-1)[0]?.text
-            || '',
-          ).slice(0, 500),
           ...(withText ? { searchText: (c.messages || []).map((m) => String(m.text || '')).join('\n').slice(0, 20000) } : {}),
         })),
     })

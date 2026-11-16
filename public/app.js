@@ -1383,113 +1383,6 @@ function recentConversations() {
   return recent
 }
 
-/* ---- 会话悬浮预览：多条对话时先看摘要，再决定打开哪一条 ---- */
-let convPreviewEl = null
-let convPreviewTimer = null
-let convPreviewAnchor = null
-
-function conversationPreviewText(c) {
-  const raw = String(c?.preview || '').trim()
-  if (!raw) return '暂无消息预览'
-  const clean = raw
-    .replace(/```[\s\S]*?```/g, ' ')
-    .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')
-    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
-    .replace(/^\s*[-*#>|]+\s*/gm, '')
-    .replace(/[|*_`]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-  return clean.slice(0, 180) || '暂无消息预览'
-}
-
-function conversationPreviewStamp(c) {
-  const raw = String(c?.createdAt || '').trim()
-  if (!raw) return String(c?.time || '')
-  const date = new Date(raw)
-  if (Number.isNaN(date.getTime())) return String(c?.time || '')
-  const now = new Date()
-  const sameDay = (a, b) => a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate()
-  const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1)
-  const hhmm = date.toLocaleTimeString('zh-CN', { hour12: false }).slice(0, 5)
-  if (sameDay(date, now)) return `今天 ${hhmm}`
-  if (sameDay(date, yesterday)) return `昨天 ${hhmm}`
-  return `${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')} ${hhmm}`
-}
-
-function hideConversationPreview() {
-  if (convPreviewTimer) { clearTimeout(convPreviewTimer); convPreviewTimer = null }
-  if (convPreviewAnchor) {
-    convPreviewAnchor.classList.remove('previewing')
-    convPreviewAnchor.querySelector('.sb-row')?.removeAttribute('aria-describedby')
-    convPreviewAnchor = null
-  }
-  if (convPreviewEl) { convPreviewEl.remove(); convPreviewEl = null }
-}
-
-function placeConversationPreview(anchor, conv) {
-  hideConversationPreview()
-  if (!anchor || !conv) return
-  const card = document.createElement('div')
-  card.className = 'conv-preview'
-  card.id = 'convPreviewTip'
-  card.setAttribute('role', 'tooltip')
-  card.innerHTML = `<div class="conv-preview-kicker">会话预览</div>
-    <div class="conv-preview-title">${esc(conv.title || '未命名会话')}</div>
-    <div class="conv-preview-body">${esc(conversationPreviewText(conv))}</div>
-    <div class="conv-preview-meta"><span>${esc(conversationPreviewStamp(conv))}</span>${Number(conv.turns) > 0 ? `<span>${Number(conv.turns)} 轮对话</span>` : ''}${conv.model ? `<span>${esc(conv.model)}</span>` : ''}${conv.status === 'failed' ? '<span class="bad">执行失败</span>' : ''}</div>`
-  document.body.appendChild(card)
-  convPreviewEl = card
-  convPreviewAnchor = anchor
-  anchor.classList.add('previewing')
-  anchor.querySelector('.sb-row')?.setAttribute('aria-describedby', card.id)
-  const rect = anchor.getBoundingClientRect()
-  const width = card.offsetWidth || 324
-  const height = card.offsetHeight || 160
-  let left = rect.right + 10
-  if (left + width > window.innerWidth - 10) left = rect.left - width - 10
-  left = Math.max(10, Math.min(left, window.innerWidth - width - 10))
-  let top = rect.top
-  if (top + height > window.innerHeight - 10) top = Math.max(10, window.innerHeight - height - 10)
-  card.style.left = `${left}px`
-  card.style.top = `${top}px`
-  requestAnimationFrame(() => card.classList.add('on'))
-}
-
-function scheduleConversationPreview(anchor, conv) {
-  if (!anchor || !conv) return
-  if (convPreviewEl && convPreviewAnchor === anchor) return
-  if (convPreviewTimer) clearTimeout(convPreviewTimer)
-  convPreviewTimer = setTimeout(() => {
-    convPreviewTimer = null
-    placeConversationPreview(anchor, conv)
-  }, 220)
-}
-
-function bindConversationPreviews(sidebar) {
-  if (!sidebar) return
-  sidebar.querySelectorAll('.sb-item[data-conv]').forEach((item) => {
-    const conv = (state.conversations || []).find((c) => c.id === item.dataset.conv)
-    item.addEventListener('mouseenter', () => scheduleConversationPreview(item, conv))
-    item.addEventListener('mouseleave', hideConversationPreview)
-    item.addEventListener('focusin', () => scheduleConversationPreview(item, conv))
-    item.addEventListener('focusout', (ev) => {
-      if (!item.contains(ev.relatedTarget)) hideConversationPreview()
-    })
-    item.addEventListener('click', hideConversationPreview)
-  })
-  if (!bindConversationPreviews.bound) {
-    bindConversationPreviews.bound = true
-    window.addEventListener('scroll', hideConversationPreview, true)
-    window.addEventListener('resize', hideConversationPreview)
-    document.addEventListener('click', (ev) => {
-      if (!ev.target.closest('.conv-preview')) hideConversationPreview()
-    }, true)
-    document.addEventListener('keydown', (ev) => {
-      if (ev.key === 'Escape') hideConversationPreview()
-    })
-  }
-}
-
 let homeSidebarCacheHtml = ''
 function renderSidebar() {
   const { user } = state.boot
@@ -1617,7 +1510,6 @@ function renderSidebar() {
     openProjectMenu(ev.currentTarget, b.dataset.projmenu2)
   }))
   sidebar.querySelectorAll('[data-conv]').forEach((b) => b.addEventListener('click', () => openConversation(b.dataset.conv)))
-  bindConversationPreviews(sidebar)
   sidebar.querySelectorAll('[data-unpin]').forEach((b) => b.addEventListener('click', (ev) => {
     ev.stopPropagation()
     togglePinnedConversation(b.dataset.unpin)
