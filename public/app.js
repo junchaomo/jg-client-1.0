@@ -4847,7 +4847,7 @@ async function sendMessage(text, options = {}) {
     conv = {
       id: `C-${Date.now()}${Math.floor(Math.random() * 900 + 100)}`,
       title: text.length > 26 ? `${text.slice(0, 26)}…` : text,
-      time: '刚刚', messages: [], status: 'running', projectId: state.activeProjectId || null,
+      time: '刚刚', createdAt: new Date().toISOString(), messages: [], status: 'running', projectId: state.activeProjectId || null,
       executionPolicy: state.executionPolicy,
       deepThink: Boolean(state.deepThink),
     }
@@ -4856,7 +4856,7 @@ async function sendMessage(text, options = {}) {
     renderSidebar()
   }
   if (!conv) return
-  if (!regenerate) conv.messages.push({ role: 'user', text, time: '刚刚' })
+  if (!regenerate) conv.messages.push({ role: 'user', text, time: '刚刚', createdAt: new Date().toISOString() })
   renderView()
   startInteractionPoll()
 
@@ -4922,10 +4922,12 @@ async function sendMessage(text, options = {}) {
     let draftMsg
     if (last && last.role === 'assistant') {
       draftMsg = last
-      draftMsg.time = '刚刚'
+      // 服务端已写入真实 createdAt/time；这里不能再用“刚刚”覆盖，否则首页只显示相对时间。
+      draftMsg.time = last.time || '刚刚'
+      draftMsg.createdAt = last.createdAt || (last.usageAt ? new Date(last.usageAt).toISOString() : new Date().toISOString())
       draftMsg.citations = citations.length ? citations : (draftMsg.citations || [])
     } else {
-      draftMsg = { role: 'assistant', text: '', time: '刚刚', steps: [], citations, streaming: true }
+      draftMsg = { role: 'assistant', text: '', time: '刚刚', createdAt: new Date().toISOString(), steps: [], citations, streaming: true }
       state.conversation.messages.push(draftMsg)
     }
     draftMsg.streaming = true
@@ -13793,7 +13795,7 @@ function renderChat(el) {
   el.querySelector('#qCancel')?.addEventListener('click', () => submitAnswer(true))
   el.querySelector('#confirmCancel')?.addEventListener('click', () => {
     state.pendingConfirm = null
-    state.conversation?.messages.push({ role: 'assistant', text: '已取消写入。任务未创建，未产生任何数据变更。', time: '刚刚' })
+    state.conversation?.messages.push({ role: 'assistant', text: '已取消写入。任务未创建，未产生任何数据变更。', time: '刚刚', createdAt: new Date().toISOString() })
     renderView()
   })
   document.getElementById('chatMsgs')?.addEventListener('click', (ev) => {
@@ -13965,18 +13967,21 @@ function deliverableBlock(files) {
 }
 
 
-function usageText(u) {
+function usageText(u, runStats = null) {
   if (!u || !u.calls) return ''
   const total = u.totalTokens || ((u.inputTokens || 0) + (u.outputTokens || 0))
-  return `${Number(total).toLocaleString('zh-CN')} tokens`
+  const duration = formatDurationMs(runStats?.durationMs)
+  return `${Number(total).toLocaleString('zh-CN')} tokens${duration ? ` · ${duration}` : ''}`
 }
 
-function usageTip(u) {
+function usageTip(u, runStats = null) {
   if (!u || !u.calls) return ''
-  const parts = [`输入 ${Number(u.inputTokens || 0).toLocaleString('zh-CN')}`, `输出 ${Number(u.outputTokens || 0).toLocaleString('zh-CN')}`]
+  const parts = [`${u.calls} 次模型调用`, `输入 ${Number(u.inputTokens || 0).toLocaleString('zh-CN')}`, `输出 ${Number(u.outputTokens || 0).toLocaleString('zh-CN')}`]
   if (u.cacheReadTokens) parts.push(`缓存读 ${Number(u.cacheReadTokens).toLocaleString('zh-CN')}`)
   if (u.reasoningTokens) parts.push(`推理 ${Number(u.reasoningTokens).toLocaleString('zh-CN')}`)
-  return `${u.calls} 次模型调用 · ${parts.join(' / ')}`
+  const duration = formatDurationMs(runStats?.durationMs)
+  if (duration) parts.push(`用时 ${duration}`)
+  return parts.join(' · ')
 }
 
 function traceEventSummary(event) {
@@ -14057,10 +14062,34 @@ function formatTokensK(u) {
   return `${(total / 1000).toFixed(2)}K`
 }
 
+function formatStamp(value) {
+  if (!value) return ''
+  const date = value instanceof Date ? value : new Date(value)
+  if (Number.isNaN(date.getTime())) return ''
+  return date.toLocaleString('zh-CN', {
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+  }).replace(/\//g, '-')
+}
+
+function messageStamp(m) {
+  return formatStamp(m?.createdAt || m?.usageAt) || String(m?.time || '')
+}
+
+function formatDurationMs(ms) {
+  const value = Number(ms || 0)
+  if (!Number.isFinite(value) || value <= 0) return ''
+  if (value < 1000) return `${Math.round(value)}ms`
+  if (value < 60000) return `${(value / 1000).toFixed(1)}s`
+  return `${Math.floor(value / 60000)}m ${Math.round((value % 60000) / 1000)}s`
+}
+
 function tokenBadgeHTML(m) {
   const value = formatTokensK(m.usage)
   if (!value) return ''
-  return `<span class="msg-cost" title="${esc(usageTip(m.usage))}"><span class="ico">${icon('clock')}</span>消耗 ${esc(value)}</span>`
+  const calls = Number(m.usage?.calls || 0)
+  const duration = formatDurationMs(m.runStats?.durationMs || m.elapsedMs)
+  return `<span class="msg-cost" title="${esc(usageTip(m.usage, m.runStats))}"><span class="ico">${icon('clock')}</span>消耗 ${esc(value)}${calls > 1 ? ` · ${calls} 次` : ''}${duration ? ` · ${esc(duration)}` : ''}</span>`
 }
 
 function shareSelected(idx) {
@@ -14115,12 +14144,12 @@ function renderMsg(m, idx = null) {
     return `<div class="msg user${state.shareMode ? ' share-mode' : ''}${on ? ' share-on' : ''}">
       ${sharePickHTML(idx, on)}<div class="bubble">${esc(m.text)}</div>
       ${idx != null ? `<div class="msg-actions user-actions">
-        <span class="msg-time-inline">${esc(m.time || '')}</span>
+        <span class="msg-time-inline" title="${esc(messageStamp(m))}">${esc(messageStamp(m))}</span>
         <button type="button" class="msg-act icon" title="复制" aria-label="复制" data-copymsg="${idx}">${icon('copy')}</button>
         <button type="button" class="msg-act icon" title="分享" aria-label="分享" data-sharemsg="${idx}">${icon('share')}</button>
         <button type="button" class="msg-act icon" title="编辑并重新发送" aria-label="编辑" data-editmsg="${idx}">${icon('pen')}</button>
         <button type="button" class="msg-act icon" title="更多" aria-label="更多" data-moremsg="${idx}">${icon('more')}</button>
-      </div>` : `<div class="msg-time">${esc(m.time || '')}</div>`}
+      </div>` : `<div class="msg-time">${esc(messageStamp(m))}</div>`}
     </div>`
   }
   return `<div class="msg ai${state.shareMode ? ' share-mode' : ''}${on ? ' share-on' : ''}">
@@ -14145,8 +14174,8 @@ function renderMsg(m, idx = null) {
         ${tokenBadgeHTML(m)}
         <button type="button" class="msg-act icon" title="重新生成这条回复" aria-label="重新生成" data-refreshmsg="${idx}">${icon('refresh')}</button>
         ${m.traceId ? `<button type="button" class="msg-act icon" title="更多" aria-label="更多" data-moremsg="${idx}">${icon('more')}</button>` : ''}
-        <span class="msg-time-inline" title="${esc(usageTip(m.usage))}">${esc(m.time || '')}</span>
-      </div>` : `<div class="msg-time">${esc(m.time || '')}${m.usage?.calls ? `<span title="${esc(usageTip(m.usage))}"> · ${esc(usageText(m.usage))}</span>` : ''}</div>`}
+        <span class="msg-time-inline" title="${esc(usageTip(m.usage, m.runStats))}">${esc(messageStamp(m))}</span>
+      </div>` : `<div class="msg-time">${esc(messageStamp(m))}${m.usage?.calls ? `<span title="${esc(usageTip(m.usage, m.runStats))}"> · ${esc(usageText(m.usage, m.runStats))}</span>` : ''}</div>`}
     </div>
   </div>`
 }

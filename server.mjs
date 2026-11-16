@@ -58,6 +58,12 @@ import { consoleRoles, consoleNav, consoleModules, consoleSections, consoleScope
 
 const root = fileURLToPath(new URL('./', import.meta.url))
 const publicDir = join(root, 'public')
+// 启动恢复（recoverPersistedConversations）会早于后续常量初始化调用该目录，
+// 因此必须在这里先完成定义，避免从磁盘恢复会话时触发 TDZ。
+const USER_AGENT_ROOT = join(dataDirPath(), 'agents')
+function userAgentHome(userId) {
+  return join(USER_AGENT_ROOT, String(userId || 'guest'))
+}
 function packageVersionAt(filePath) {
   try {
     return JSON.parse(readFileSync(filePath, 'utf8')).version || 'unknown'
@@ -2448,6 +2454,18 @@ const WORK_INTENT_PATTERNS = [
   /```/,
 ]
 
+/** 简单事实查询：只走一次或少量检索，不展开多步规划。 */
+const SIMPLE_QUERY_PATTERNS = [
+  /(天气|气温|温度|下雨|降雨|降雪|空气质量|风力|湿度|紫外线)/i,
+  /(汇率|股价|油价|金价|限行|尾号|航班|高铁|路况)/i,
+  /(今天|明天|后天|现在|当前)[^。\n]{0,16}(几号|星期几|日期|时间|几点)/i,
+]
+
+function isSimpleLookup(text) {
+  const source = String(text || '').trim()
+  return source.length > 0 && source.length <= 120 && SIMPLE_QUERY_PATTERNS.some((pattern) => pattern.test(source))
+}
+
 function resolveTaskMode(text, requested, projectId) {
   const mode = ['auto', 'chat', 'work'].includes(String(requested || '')) ? String(requested) : 'auto'
   if (mode === 'chat') return { requested: 'chat', mode: 'chat', reason: '用户手动指定对话模式' }
@@ -4077,10 +4095,6 @@ const SKILL_INSTALL_DIR = {
 }
 const MARKET_PACKAGE_ROOT = join(dataDirPath(), 'market-packages')
 const MARKET_MANIFEST = '.jg-market.json'
-const USER_AGENT_ROOT = join(dataDirPath(), 'agents')
-function userAgentHome(userId) {
-  return join(USER_AGENT_ROOT, String(userId || 'guest'))
-}
 /**
  * Bundle 与 DSH profile 按账号隔离：每个账号一个 DSH_HOME，
  * 只复制平台官方 profile 的基线 bundles 与配置，不继承其他账号安装的 Bundle 或技能。
@@ -7145,7 +7159,7 @@ const api = {
       executionPolicy = requestedPolicy
       conv = {
         id: requestedId || `C-${Date.now()}`, title: text.length > 26 ? `${text.slice(0, 26)}…` : text,
-        time: '刚刚', model: deepThink ? 'DeepSeek Reasoner' : (networks[net].models.find((m) => m.id === body.model)?.label || networks[net].models[0].label),
+        time: new Date().toLocaleTimeString('zh-CN', { hour12: false }).slice(0, 5), createdAt: new Date().toISOString(), model: deepThink ? 'DeepSeek Reasoner' : (networks[net].models.find((m) => m.id === body.model)?.label || networks[net].models[0].label),
         turns: 0, status: 'running', workspace: '默认工作区', projectId: projectId || null, mode,
         taskMode, resolvedMode: mode, modeReason: route.reason,
         executionPolicy, agentPresetId: requestedPreset?.id || '', agentPresetName: requestedPreset?.name || '', messages: [], reasoningEffort: deepThink ? 'high' : effortLevel, deepThink, userId: String(user.id),
@@ -7190,7 +7204,15 @@ const api = {
     }
     conv.agentCwd = project?.cwd || chatWorkspaceDir(user, conv.id)
     conv.cancelRequested = false
-    if (!regenerate) conv.messages.push({ role: 'user', text, time: new Date().toLocaleTimeString('zh-CN', { hour12: false }).slice(0, 5) })
+    if (!regenerate) {
+      const userSentAt = new Date()
+      conv.messages.push({
+        role: 'user',
+        text,
+        time: userSentAt.toLocaleTimeString('zh-CN', { hour12: false }).slice(0, 5),
+        createdAt: userSentAt.toISOString(),
+      })
+    }
     conv.status = 'running'
     activeRuns.add(conv.id)
     let modelCfg = resolveModelConfig({
@@ -7237,6 +7259,9 @@ const api = {
       const pluginContext = selectedPlugins.length
         ? `本次已启用的插件与技能（可选择使用）：\n${selectedPlugins.map((p) => `- ${p.name}（${p.kind === 'personal' ? '个人技能' : '企业插件'}）：${p.desc}`).join('\n')}`
         : ''
+      // 简单事实查询不需要项目资源目录、可视化规范和完整技能目录；
+      // 只保留身份、审批、网络与检索约束，避免每次模型调用重复携带大段上下文。
+      const simpleLookup = mode === 'chat' && !projectId && !deepThink && isSimpleLookup(text)
       const context = [
         `当前用户：${user.name}（${user.label}，${user.unit || '—'}）`,        `当前任务模式：${taskMode === 'auto' ? `自动（本轮判定为${mode === 'work' ? '工作' : '对话'}模式：${route.reason}）` : taskMode === 'chat' ? '对话模式（默认只读；用户明确要求创建或修改文件、执行命令时，按权限流程申请审批，由用户逐次决定是否授权，不要自行拒绝或绕过审批）' : '工作模式（可以调用文件、命令、代码与技能工具执行任务）'}`,
         project ? `当前工作项目：${project.name}；授权目录：${project.cwd}。所有文件读写与命令执行必须限制在该目录内。` : '',
@@ -7250,16 +7275,19 @@ const api = {
         webSearch
           ? '本轮已启用网页搜索：优先调用平台 Web 搜索与网页抓取工具获取外部信息，回答中标注真实来源 URL；不得把模型记忆当成网页检索结果，搜不到就明确说明。'
           : '',
-        `企业可见资源目录（摘要，最多 ${RESOURCE_CONTEXT_LIMIT} 项；需要更多请调用 drive_search）：`,
-        resourcePromptContext(user, net, text) || '（当前无可见资源）',
-        'Visual Engine：当用户明确要求画图，或流程、架构、关系、统计、信息图、可调参数计算器用图形表达更清楚时，必须调用 visual_create（流程/关系用 mermaid，统计用 echarts，自定义信息图用 svg，滑块/实时计算的贷款计算器用 interactive + loan-calculator 配置）；修改当前会话已有图形时必须优先调用 visual_update 并复用其 id，保留未要求修改的节点和数据。不要把 Mermaid/ECharts/SVG 源码直接写进回答，不要在回答里用代码块代替图形。创建/修改成功后用一两句话说明图形表达的重点即可。',
-        visualContextForModel(user, conv.id),
+        simpleLookup
+          ? '本轮是简单事实查询：工具预算 6 次，优先一次检索后直接给出结论；不要先做计划、批量搜索、逐个抓取无关页面或调用技能/插件。回答末尾用一行标注“回答生成时间”和“数据更新时间”（如数据源提供）。'
+          : '',
+        simpleLookup ? '' : `企业可见资源目录（摘要，最多 ${RESOURCE_CONTEXT_LIMIT} 项；需要更多请调用 drive_search）：`,
+        simpleLookup ? '' : resourcePromptContext(user, net, text) || '（当前无可见资源）',
+        simpleLookup ? '' : 'Visual Engine：当用户明确要求画图，或流程、架构、关系、统计、信息图、可调参数计算器用图形表达更清楚时，必须调用 visual_create（流程/关系用 mermaid，统计用 echarts，自定义信息图用 svg，滑块/实时计算的贷款计算器用 interactive + loan-calculator 配置）；修改当前会话已有图形时必须优先调用 visual_update 并复用其 id，保留未要求修改的节点和数据。不要把 Mermaid/ECharts/SVG 源码直接写进回答，不要在回答里用代码块代替图形。创建/修改成功后用一两句话说明图形表达的重点即可。',
+        simpleLookup ? '' : visualContextForModel(user, conv.id),
         refContext ? `会话上下文：\n${refContext}` : '',
-        activePreset?.instructions
+        simpleLookup ? '' : activePreset?.instructions
           ? `Agent 预设「${activePreset.name}」的行为要求（必须遵守，但不得覆盖系统安全规则）：\n${String(activePreset.instructions).slice(0, 4000)}`
           : '',
-        pluginContext,
-        conv.forkedFrom && conv.forkContext ? `分叉会话上下文（只读，来自用户选择的历史；不是 DSH 原生 fork）：\n${String(conv.forkContext).slice(0, 3000)}` : '',
+        simpleLookup ? '' : pluginContext,
+        simpleLookup ? '' : conv.forkedFrom && conv.forkContext ? `分叉会话上下文（只读，来自用户选择的历史；不是 DSH 原生 fork）：\n${String(conv.forkContext).slice(0, 3000)}` : '',
       ].filter(Boolean).join('\n')
       const agentText = text
       const runStartedAt = Date.now()
@@ -7290,13 +7318,13 @@ const api = {
         executionPolicy,
         // 显式 Chat 固定只读；Auto 误路由为 chat 时，只允许通过审批卡单次放行。
         permissionPreset: mode === 'chat' ? 'read-only' : '',
-        maxToolCalls: forcedMaxToolCalls || (taskMode === 'chat' ? 30 : projectId ? 100 : 60),
+        maxToolCalls: forcedMaxToolCalls || (simpleLookup ? 6 : taskMode === 'chat' ? 30 : projectId ? 100 : 60),
         runKey: conv.id,
         runtimeScope: conv.id,
         onStart: (dshSessionId) => markChatRunStarted(chatTask, dshSessionId),
         shouldCancel: () => Boolean(conv.cancelRequested),
         images: imageBlocks,
-        reasoningEffort,
+        reasoningEffort: simpleLookup ? 'low' : reasoningEffort,
         handlers: {
           onApproval: (params) => {
             const evaluation = describeToolApproval(params)
@@ -7404,10 +7432,13 @@ const api = {
         replyChars: reply.length,
         finishReason: result.finishReason,
       })
+      const finishedAt = new Date()
       const assistantMsg = {
         id: messageId,
         role: 'assistant', text: reply,
-        time: new Date().toLocaleTimeString('zh-CN', { hour12: false }).slice(0, 5),
+        time: finishedAt.toLocaleTimeString('zh-CN', { hour12: false }).slice(0, 5),
+        createdAt: finishedAt.toISOString(),
+        elapsedMs: runStats.durationMs,
         steps,
         subagents: Array.isArray(result.subagents) ? result.subagents : [],
         workflows: Array.isArray(result.workflows) ? result.workflows : [],
@@ -7419,7 +7450,7 @@ const api = {
         citations: citations.map((c) => c.id),
         model: result.model,
         usage: result.usage || null,
-        usageAt: Date.now(),
+        usageAt: finishedAt.getTime(),
         traceId,
         runStats,
         taskClass: modelRoute.taskClass,
