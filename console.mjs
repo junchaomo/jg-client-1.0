@@ -13,7 +13,7 @@ export const consoleNav = [
 export const consoleModules = {
   overview: { no: '01', label: '管理总览', desc: '待办审批、运行概况、风险告警；先处理事项，再看指标' },
   org: { no: '02', label: '组织与权限', desc: '组织架构、人员账号、角色权限、授权审批、账号生命周期' },
-  ai: { no: '03', label: 'AI 能力管理', desc: '运行基线、模型网关、Agent 与 MCP、插件与技能市场' },
+  ai: { no: '03', label: 'AI 能力管理', desc: '运行基线、模型网关、Agent 与 MCP、插件与技能市场、图像模板上下架' },
   data: { no: '04', label: '数据与资源', desc: '资源台账、登记与元数据、版本、授权、数据服务、下载与导出' },
   apps: { no: '05', label: '应用与集成', desc: 'AS 应用、业务应用、应用数据权限、版本与发布、接口连接' },
   ops: { no: '06', label: '运行与运维', desc: '服务健康、AS 进程与租约、DSH 与模型网关、任务调度、备份告警' },
@@ -39,7 +39,7 @@ export const consoleSections = {
   },
   ai: {
     title: 'AI 能力管理',
-    meta: '按四层结构管理：系统级运行基线 → 模型网关 → Agent 与 MCP → 员工插件与技能市场',
+    meta: '按四层结构管理：系统级运行基线 → 模型网关 → Agent 与 MCP → 员工插件、技能与图像模板',
     kpis: [],
     blocks: [],
   },

@@ -462,6 +462,14 @@ const stmt = {
     UPDATE image_templates SET status = ?, reviewer = ?, review_note = ?, reviewed_at = ?
     WHERE id = ? AND status = 'pending'
   `),
+  offlineImageTemplate: db.prepare(`
+    UPDATE image_templates SET status = 'offline', reviewer = ?, review_note = ?, reviewed_at = ?
+    WHERE id = ? AND status = 'approved'
+  `),
+  publishImageTemplate: db.prepare(`
+    UPDATE image_templates SET status = 'approved', reviewer = ?, review_note = '', reviewed_at = ?
+    WHERE id = ? AND status = 'offline'
+  `),
 }
 
 /* ------------------------------- sessions ------------------------------- */
@@ -1216,6 +1224,18 @@ export function listAllImageTemplates() {
 export function reviewImageTemplate(id, decision, reviewer, note = '') {
   const status = decision === 'approve' ? 'approved' : 'rejected'
   const result = stmt.reviewImageTemplate.run(status, String(reviewer || ''), String(note || ''), Date.now(), String(id || ''))
+  if (!Number(result.changes || 0)) return null
+  return getImageTemplate(id)
+}
+
+export function offlineImageTemplate(id, reviewer, note = '') {
+  const result = stmt.offlineImageTemplate.run(String(reviewer || ''), String(note || ''), Date.now(), String(id || ''))
+  if (!Number(result.changes || 0)) return null
+  return getImageTemplate(id)
+}
+
+export function publishImageTemplate(id, reviewer) {
+  const result = stmt.publishImageTemplate.run(String(reviewer || ''), Date.now(), String(id || ''))
   if (!Number(result.changes || 0)) return null
   return getImageTemplate(id)
 }

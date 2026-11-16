@@ -13,7 +13,7 @@ import { basename, dirname, extname, isAbsolute, join, normalize, relative, sep 
 import { fileURLToPath } from 'node:url'
 import {
   SESSION_TTL_MS, appendAudit, appendApprovalDecision, auditCount, backupNow, cleanupSessions, clearAudit, clearSessions, closeStore, createSession,
-  createImageAsset, createImageComment, createImageJob, createImageRevision, createImageTemplate, deleteFile, getImageAsset, getImageTemplate, imageRevisionCount, listImageAssets, listImageComments, listImageRevisions, listApprovedImageTemplates, listAllImageTemplates, listImageTemplatesByApplicant, reviewImageTemplate,
+  createImageAsset, createImageComment, createImageJob, createImageRevision, createImageTemplate, deleteFile, getImageAsset, getImageTemplate, imageRevisionCount, listImageAssets, listImageComments, listImageRevisions, listApprovedImageTemplates, listAllImageTemplates, listImageTemplatesByApplicant, reviewImageTemplate, offlineImageTemplate, publishImageTemplate,
   dataDirPath, deleteSession, expirePendingApprovalDecisions, getAccount, getAccountByRole, getAccountByUsername, getFile, getSession, latestApprovalDecisions, latestAudit,
   listAccounts, listFiles, loadState, putFile, readFileBuffer, saveState, touchSession,
   softDeleteImageAsset, updateImageAssetLatest, updateImageJob,
@@ -5902,6 +5902,15 @@ const api = {
     })
     res.end(buffer)
   },
+  'POST /api/as/verify-context': (req, res) => {
+    const body = JSON.parse(req.__body || '{}')
+    const appId = String(body.appId || '').trim()
+    const contextToken = String(body.contextToken || '').trim()
+    if (!appId || !contextToken) return json(res, 400, { error: '缺少应用上下文', code: 'AS_CONTEXT_MISSING' })
+    const context = verifyAppContext(contextToken, appId)
+    if (!context) return json(res, 401, { error: '中枢账号上下文无效或已过期', code: 'AS_CONTEXT_INVALID' })
+    return json(res, 200, { ok: true, appId: context.appId, userId: context.userId, exp: context.exp })
+  },
   'POST /api/as/start': async (req, res) => {
     const user = roleOf(req)
     const body = JSON.parse(req.__body || '{}')
@@ -9595,10 +9604,24 @@ const api = {
     const id = String(body.id || '').trim()
     const decision = String(body.decision || '').trim()
     const note = String(body.note || '').trim()
-    if (!['approve', 'reject'].includes(decision)) return json(res, 400, { error: '审核动作不支持' })
+    if (!['approve', 'reject', 'offline', 'publish'].includes(decision)) return json(res, 400, { error: '审核动作不支持' })
     if (note.length > 300) return json(res, 400, { error: '驳回原因不能超过 300 个字符' })
     const template = getImageTemplate(id)
     if (!template) return json(res, 404, { error: '模板申请不存在' })
+    if (decision === 'offline') {
+      if (template.status !== 'approved') return json(res, 409, { error: '只有已上线模板可以下架' })
+      const updated = offlineImageTemplate(id, user.name, note)
+      if (!updated) return json(res, 409, { error: '模板状态已经变化，请刷新后重试' })
+      logAudit(user, 'image.template.offline', `${id}:${note}`, 'allow', net)
+      return json(res, 200, { ok: true, application: imageTemplatePublic(updated) })
+    }
+    if (decision === 'publish') {
+      if (template.status !== 'offline') return json(res, 409, { error: '只有已下架模板可以重新上线' })
+      const updated = publishImageTemplate(id, user.name)
+      if (!updated) return json(res, 409, { error: '模板状态已经变化，请刷新后重试' })
+      logAudit(user, 'image.template.publish', id, 'allow', net)
+      return json(res, 200, { ok: true, application: imageTemplatePublic(updated) })
+    }
     if (template.status !== 'pending') return json(res, 409, { error: '该申请已经审核过，不能重复处理' })
     const updated = reviewImageTemplate(id, decision, user.name, decision === 'reject' ? note : '')
     if (!updated) return json(res, 409, { error: '该申请已经审核过，不能重复处理' })
@@ -10725,7 +10748,7 @@ const server = createServer(async (req, res) => {
 
     // 保留登录前的三个入口：读取引导、选网络、选角色；其余 API 必须先有服务端会话。
     const publicApi = new Set(['GET /api/captcha', 'GET /api/bootstrap', 'POST /api/login', 'POST /api/network', 'POST /api/logout'])
-    const appDataApi = new Set(['POST /api/app-data/token', 'POST /api/app-data/query'])
+    const appDataApi = new Set(['POST /api/app-data/token', 'POST /api/app-data/query', 'POST /api/as/verify-context'])
     const mcpToken = process.env.JG_MCP_TOKEN || ''
     const viaMcp = Boolean(mcpToken) && String(req.headers['x-jg-mcp-token'] || '') === mcpToken
     if (!publicApi.has(key) && !appDataApi.has(key) && !viaMcp && !sessionOf(req)) {

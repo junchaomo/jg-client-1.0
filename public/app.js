@@ -16165,6 +16165,20 @@ async function renderAdminApps(blocks) {
     <div class="mc-thead"><span>应用</span><span>运行</span><span>能力声明</span><span>租约</span><span>操作</span></div>
     ${asRows.join('') || '<div class="mc-row">应用市场没有 AS 应用</div>'}
   </div>`, 'AS 应用按机器级单例进程运行；停用只释放当前租约，强制停止仅管理员可用。'))
+  const gateRows = asApps.map((x) => {
+    const rt = x.runtime || {}
+    return `<div class="mc-trow">
+      <span class="mc-first"><b>${esc(x.name)}</b><span class="mc-dim mono" style="display:block;font-size:10px;font-weight:400;margin-top:2px">${esc(x.appId || x.id)}</span></span>
+      <span>${adminTag('中枢登录 + 安装记录 + asContext', 'ok')}</span>
+      <span>${rt.activeUser ? `<span class="mono" style="font-size:10px">${esc(rt.activeUser)}</span>` : adminTag('未绑定账号', 'warn')}</span>
+      <span class="mono" style="font-size:10px;word-break:break-all">${esc(rt.dataDir || '—')}</span>
+      <span>${rt.running ? adminTag('端口直连已拒绝', 'ok') : adminTag('未运行', '')}</span>
+    </div>`
+  })
+  blocks.appendChild(adminModuleBlock('中枢账号门禁', `${asApps.length} 个 AS 应用`, `<div class="mc-table" style="--mc-cols:minmax(150px,1.5fr) minmax(150px,1.5fr) minmax(110px,.95fr) minmax(220px,2fr) minmax(90px,.8fr)">
+    <div class="mc-thead"><span>应用</span><span>门禁校验</span><span>当前账号</span><span>账号数据目录</span><span>直连端口</span></div>
+    ${gateRows.join('') || '<div class="mc-row">当前没有 AS 应用</div>'}
+  </div>`, '应用入口必须由中枢登录账号启动并携带 asContext；应用进程校验上下文后发放 HttpOnly 会话，直接访问随机端口会被拒绝。项目、上传与产物落当前账号的独立数据目录。'))
   const bizRows = biz.map((a) => `<div class="mc-trow">
     <span class="mc-first"><b>${esc(a.name)}</b><span class="mc-dim" style="display:block;font-size:10px;font-weight:400;margin-top:2px">${esc(a.id)} · ${esc(a.maintainer || '')}</span></span>
     <span>v${esc(a.version || '—')}</span>
@@ -16385,6 +16399,7 @@ async function renderAdmin(el) {
     { id: 'models', no: '02', label: '模型与网关', note: 'DeepSeek 首页默认；Qwen-Image / Seedream 图像生成二选一；三个共享模型统一由模型网关管理' },
     { id: 'agents', no: '03', label: 'Agent 与 MCP', note: '运行时实际加载的 Agent、MCP、技能与调度模块' },
     { id: 'plugins', no: '04', label: '应用、插件与技能', note: '员工提交的应用、插件与技能，审核与分类上架管理' },
+    { id: 'templates', no: '05', label: '图像模板', note: '员工提交的图像模板申请、审核上线、下架与重新上线' },
   ]
   const aiTab = AI_SEGMENTS.some((s) => s.id === state.aiTab) ? state.aiTab : 'baseline'
   state.aiTab = aiTab
@@ -16404,6 +16419,7 @@ async function renderAdmin(el) {
     '插件 / 技能审核': 'plugins',
     '插件市场已上架管理': 'plugins',
     '插件 / 技能上架管理': 'plugins',
+    '图像模板管理': 'templates',
   }
   const sec = body.sections[tab]
   const STATUS = /^(正常|在线|成功|已发布|已通过|已闭环|已回收|已恢复|已修复|可用|开启|允许|通过|已入库|已生效|已显示|—)$/
@@ -16456,7 +16472,7 @@ async function renderAdmin(el) {
         </div>
         ${tab === 'overview' ? `<div class="mc-note">${esc(sec.meta)}</div>` : `<div class="mc-note">${esc(sec.meta)}</div>`}
         <div class="mc-kpis"${tab === 'ai' ? ' id="aiKpis"' : ''}>${tab === 'ai' ? '' : sec.kpis.map((k) => `<div class="mc-kpi"><div class="mc-kpi-k">${esc(k.k)}</div><div class="mc-kpi-v ${k.tone || ''}">${esc(k.v)}</div><div class="mc-kpi-note">${esc(k.note)}</div></div>`).join('')}</div>
-        ${tab === 'ai' ? `<style>.mc-seg{display:grid!important;grid-template-columns:repeat(4,minmax(0,1fr));gap:3px;margin-top:14px;padding:3px;border:1px solid #e7ebf1;border-radius:10px;background:#f7f8fa}.mc-seg-item{display:inline-flex;align-items:center;justify-content:center;gap:5px;border:1px solid transparent;background:transparent;border-radius:7px;padding:7px 3px;font-size:11px;color:#4a5057;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.mc-seg-item.on{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}.mc-seg-no{font-family:ui-monospace,Consolas,monospace;font-size:9px;color:#9aa1aa;flex:none}.mc-seg-item.on .mc-seg-no{color:var(--accent-ink)}.mc-seg-note{margin:9px 0 0;font-size:var(--fs-dense);color:#7b828b;line-height:1.6}@media (max-width:760px){.mc-seg-no{display:none}}</style><div class="mc-seg" id="aiSeg">${AI_SEGMENTS.map((s) => `<button class="mc-seg-item${aiTab === s.id ? ' on' : ''}" style="${aiTab === s.id ? 'background:var(--accent)!important;color:var(--accent-ink)!important;border-color:var(--accent)!important' : ''}" data-aitab="${s.id}"><span class="mc-seg-no">${s.no}</span>${s.label}</button>`).join('')}</div>
+        ${tab === 'ai' ? `<style>.mc-seg{display:grid!important;grid-template-columns:repeat(5,minmax(0,1fr));gap:3px;margin-top:14px;padding:3px;border:1px solid #e7ebf1;border-radius:10px;background:#f7f8fa}.mc-seg-item{display:inline-flex;align-items:center;justify-content:center;gap:5px;border:1px solid transparent;background:transparent;border-radius:7px;padding:7px 3px;font-size:11px;color:#4a5057;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.mc-seg-item.on{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}.mc-seg-no{font-family:ui-monospace,Consolas,monospace;font-size:9px;color:#9aa1aa;flex:none}.mc-seg-item.on .mc-seg-no{color:var(--accent-ink)}.mc-seg-note{margin:9px 0 0;font-size:var(--fs-dense);color:#7b828b;line-height:1.6}@media (max-width:760px){.mc-seg-no{display:none}}</style><div class="mc-seg" id="aiSeg">${AI_SEGMENTS.map((s) => `<button class="mc-seg-item${aiTab === s.id ? ' on' : ''}" style="${aiTab === s.id ? 'background:var(--accent)!important;color:var(--accent-ink)!important;border-color:var(--accent)!important' : ''}" data-aitab="${s.id}"><span class="mc-seg-no">${s.no}</span>${s.label}</button>`).join('')}</div>
           <div class="mc-seg-note">${esc(AI_SEGMENTS.find((s) => s.id === aiTab).note)}</div>` : ''}
         <div class="mc-blocks">${sec.blocks.map(block).join('')}${emptyState ? `<div class="mc-empty">该模块尚未接入真实数据，暂不展示演示内容。</div>` : ''}</div>
       </div>
@@ -16540,7 +16556,17 @@ async function renderAdmin(el) {
     const pending = (sub.items || []).filter((x) => x.status === 'pending')
     const pendingPlugins = pending.filter((x) => x.kind !== 'skill')
     const pendingSkills = pending.filter((x) => x.kind === 'skill')
-    const pendingTemplates = (tplBody.applications || []).filter((x) => x.status === 'pending')
+    const templates = tplBody.applications || []
+    const pendingTemplates = templates.filter((x) => x.status === 'pending')
+    const tplFilter = ['all', 'pending', 'approved', 'offline', 'rejected'].includes(state.templateFilter) ? state.templateFilter : 'all'
+    const shownTemplates = tplFilter === 'all' ? templates : templates.filter((x) => x.status === tplFilter)
+    const tplStatus = {
+      pending: ['warn', '待审核'],
+      approved: ['ok', '已上线'],
+      rejected: ['bad', '已退回'],
+      offline: ['', '已下架'],
+    }
+    const tplFilterLabel = { all: '全部', pending: '待审核', approved: '已上线', offline: '已下架', rejected: '已退回' }
     const runtimePlugins = runtimeInfo.plugins || []
     if (blocks) {
       const reviewRows = (items, emptyText, type) => items.map((x) => {
@@ -16562,19 +16588,33 @@ async function renderAdmin(el) {
           <div class="mc-thead"><span>技能</span><span>提交人</span><span>自动检测</span><span>操作</span></div>
           ${reviewRows(pendingSkills, '当前没有待审核技能', '技能')}
         </div>
-        <div style="display:flex;align-items:center;gap:8px;padding:12px 10px 4px"><b style="font-size:12px">图像模板审核</b><span class="mc-count">${pendingTemplates.length} 项待处理</span></div>
-        <div class="mc-table" style="--mc-cols:1.3fr .9fr .8fr 1.1fr">
-          <div class="mc-thead"><span>模板与提示词</span><span>申请人</span><span>规格</span><span>操作</span></div>
-          ${pendingTemplates.map((item) => `
-            <div class="mc-trow">
-              <span class="mc-first mc-tpl-first"><img class="mc-thumb" src="${esc(item.previewUrl)}" alt=""><span><b>${esc(item.title)}</b><span class="mc-dim mc-tpl-prompt">${esc(item.prompt || '')}</span></span></span>
+        <div style="display:flex;align-items:center;gap:8px;padding:12px 10px 4px;flex-wrap:wrap"><b style="font-size:12px">图像模板管理</b><span class="mc-count">${templates.length} 个 · ${templates.filter((x) => x.status === 'approved').length} 个上线 · ${pendingTemplates.length} 个待审</span><span class="spacer"></span>${Object.entries(tplFilterLabel).map(([key, label]) => `<button class="btn sm${tplFilter === key ? ' primary' : ''}" data-tplfilter="${key}">${label}</button>`).join('')}</div>
+        <div class="mc-table" style="--mc-cols:1.45fr .72fr .8fr .75fr 1.35fr">
+          <div class="mc-thead"><span>模板与提示词</span><span>状态</span><span>申请人</span><span>规格</span><span>操作</span></div>
+          ${shownTemplates.map((item) => {
+            const [tone, label] = tplStatus[item.status] || ['', item.status || '—']
+            const acts = item.status === 'pending'
+              ? `<button class="btn sm" data-tplpreview="${esc(item.id)}">预览</button><button class="btn sm" data-tplreview="reject" data-tplid="${esc(item.id)}">退回</button><button class="btn sm primary" data-tplreview="approve" data-tplid="${esc(item.id)}">通过上线</button>`
+              : item.status === 'approved'
+                ? `<button class="btn sm" data-tplpreview="${esc(item.id)}">预览</button><button class="btn sm" data-tplreview="offline" data-tplid="${esc(item.id)}">下架</button>`
+                : item.status === 'offline'
+                  ? `<button class="btn sm" data-tplpreview="${esc(item.id)}">预览</button><button class="btn sm primary" data-tplreview="publish" data-tplid="${esc(item.id)}">重新上线</button>`
+                  : `<button class="btn sm" data-tplpreview="${esc(item.id)}">预览</button>`
+            return `<div class="mc-trow">
+              <span class="mc-first mc-tpl-first"><img class="mc-thumb" src="${esc(item.previewUrl)}" alt=""><span><b>${esc(item.title)}</b><span class="mc-dim mc-tpl-prompt">${esc(item.prompt || '')}${item.reviewNote ? ` · 审核备注：${esc(item.reviewNote)}` : ''}</span></span></span>
+              <span><span class="mc-tag ${tone}">${label}</span></span>
               <span>${esc(item.applicant)}</span>
               <span>${esc(item.category)} · ${esc(item.ratio)}</span>
-              <span class="mc-acts"><button class="btn sm" data-tplpreview="${esc(item.id)}">预览</button><button class="btn sm" data-tplreview="reject" data-tplid="${esc(item.id)}">退回</button><button class="btn sm primary" data-tplreview="approve" data-tplid="${esc(item.id)}">通过上线</button></span>
-            </div>`).join('') || '<div class="mc-row">当前没有待审核图像模板</div>'}
+              <span class="mc-acts">${acts}</span>
+            </div>`
+          }).join('') || `<div class="mc-row">${tplFilter === 'all' ? '当前没有图像模板' : `当前没有${tplFilterLabel[tplFilter]}模板`}</div>`}
         </div>
-        <div class="mc-block-note">模板审核由运维人员判定：通过后模板立即上线；退回时填写原因，申请人可在 设置 · 审核进度 查看。</div>`
+        <div class="mc-block-note">模板审核由运维人员判定：通过后立即上线；下架后图像页不再展示，可随时重新上线。申请人可在 设置 · 审核进度 查看退回原因。</div>`
       blocks.appendChild(wrap)
+      wrap.querySelectorAll('[data-tplfilter]').forEach((b) => b.addEventListener('click', () => {
+        state.templateFilter = b.dataset.tplfilter
+        renderView()
+      }))
       wrap.querySelectorAll('[data-review]').forEach((b) => b.addEventListener('click', async () => {
         const id = b.dataset.subid
         if (b.dataset.review === 'approve') {
@@ -16602,15 +16642,17 @@ async function renderAdmin(el) {
         })
       }))
       wrap.querySelectorAll('[data-tplpreview]').forEach((b) => b.addEventListener('click', () => {
-        const item = pendingTemplates.find((x) => x.id === b.dataset.tplpreview)
+        const item = templates.find((x) => x.id === b.dataset.tplpreview)
         if (!item) return
-        openModal(`模板预览：${item.title}`, `<div class="form-note">申请人 ${esc(item.applicant)} · ${esc(item.category)} · ${esc(item.ratio)}</div><img src="${esc(item.previewUrl)}" alt="" style="display:block;width:100%;max-height:62vh;object-fit:contain;border-radius:12px;background:#f3f4f6"><div class="form-note" style="margin-top:10px">${esc(item.prompt || '')}</div>`, { wide: true })
+        const [, statusLabel] = tplStatus[item.status] || ['', item.status || '—']
+        openModal(`模板预览：${item.title}`, `<div class="form-note">申请人 ${esc(item.applicant)} · ${esc(item.category)} · ${esc(item.ratio)} · ${esc(statusLabel)}${item.reviewer ? ` · 审核人 ${esc(item.reviewer)}` : ''}${item.reviewNote ? ` · 备注：${esc(item.reviewNote)}` : ''}</div><img src="${esc(item.previewUrl)}" alt="" style="display:block;width:100%;max-height:62vh;object-fit:contain;border-radius:12px;background:#f3f4f6"><div class="form-note" style="margin-top:10px">${esc(item.prompt || '')}</div>`, { wide: true })
       }))
       wrap.querySelectorAll('[data-tplreview]').forEach((b) => b.addEventListener('click', async () => {
         const id = b.dataset.tplid
-        const item = pendingTemplates.find((x) => x.id === id)
+        const item = templates.find((x) => x.id === id)
         if (!item) return
-        if (b.dataset.tplreview === 'approve') {
+        const action = b.dataset.tplreview
+        if (action === 'approve') {
           b.disabled = true
           const { ok, body } = await api('/api/images/template-review', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id, decision: 'approve' }) })
           if (!ok) { b.disabled = false; return toast(body.error || '模板审核失败', true) }
@@ -16620,19 +16662,30 @@ async function renderAdmin(el) {
           renderView()
           return
         }
-        const m2 = openModal('退回图像模板', `
-          <div class="form-note">退回后申请人可在 设置 · 审核进度 查看原因，并重新从本人图像发起申请。</div>
-          <div class="form-label">退回原因</div>
-          <textarea class="form-area" id="tplReviewReason" rows="3" placeholder="例如：来源图像与模板用途不一致，请调整提示词或更换图像"></textarea>
-          <div class="form-foot"><span class="spacer"></span><button class="btn" data-mclose>取消</button><button class="btn primary" id="tplReviewReject">确认退回</button></div>`)
+        if (action === 'publish') {
+          b.disabled = true
+          const { ok, body } = await api('/api/images/template-review', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id, decision: 'publish' }) })
+          if (!ok) { b.disabled = false; return toast(body.error || '重新上线失败', true) }
+          state.imagegen.templatesLoaded = false
+          toast(`模板「${item.title}」已重新上线`)
+          renderView()
+          return
+        }
+        const isOffline = action === 'offline'
+        const m2 = openModal(isOffline ? '下架图像模板' : '退回图像模板', `
+          <div class="form-note">${isOffline ? '下架后图像页不再展示该模板，历史生成记录不受影响；之后可随时重新上线。' : '退回后申请人可在 设置 · 审核进度 查看原因，并重新从本人图像发起申请。'}</div>
+          <div class="form-label">${isOffline ? '下架原因（可选）' : '退回原因'}</div>
+          <textarea class="form-area" id="tplReviewReason" rows="3" placeholder="${isOffline ? '例如：模板效果不稳定，先下线调整' : '例如：来源图像与模板用途不一致，请调整提示词或更换图像'}"></textarea>
+          <div class="form-foot"><span class="spacer"></span><button class="btn" data-mclose>取消</button><button class="btn primary" id="tplReviewReject">${isOffline ? '确认下架' : '确认退回'}</button></div>`)
         m2.querySelector('[data-mclose]').addEventListener('click', () => m2.remove())
         m2.querySelector('#tplReviewReject').addEventListener('click', async () => {
           const note = m2.querySelector('#tplReviewReason').value.trim()
-          const { ok, body } = await api('/api/images/template-review', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id, decision: 'reject', note }) })
+          const { ok, body } = await api('/api/images/template-review', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id, decision: isOffline ? 'offline' : 'reject', note }) })
           m2.remove()
-          if (!ok) return toast(body.error || '退回失败', true)
+          if (!ok) return toast(body.error || (isOffline ? '下架失败' : '退回失败'), true)
+          state.imagegen.templatesLoaded = false
           state.reviewProgressLoaded = false
-          toast('已退回该模板申请')
+          toast(isOffline ? `模板「${item.title}」已下架` : '已退回该模板申请')
           renderView()
         })
       }))

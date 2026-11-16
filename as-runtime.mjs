@@ -318,7 +318,7 @@ async function waitHealth(url, health = {}, startTimeoutMs = null) {
   return false
 }
 
-function spawnCommand(info, appDir, entry, dataRoot, host, port, url) {
+function spawnCommand(info, appDir, entry, dataRoot, dataDir, host, port, url) {
   const manifest = info.manifest
   const runtime = String(manifest.runtime || '').toLowerCase()
   const env = {
@@ -326,7 +326,7 @@ function spawnCommand(info, appDir, entry, dataRoot, host, port, url) {
     AS_APP_ID: String(manifest.id || ''),
     AS_APP_ROOT: info.versionRoot,
     AS_DATA_ROOT: dataRoot,
-    AS_DATA_DIR: dataRoot,
+    AS_DATA_DIR: dataDir,
     AS_HOST: host,
     AS_PORT: String(port),
     AS_BASE_URL: url,
@@ -421,6 +421,7 @@ export function runtimeState(id) {
     stopAt: Number(state.stopAt || 0),
     version: String(state.version || ''),
     dataRoot: String(state.dataRoot || ''),
+    dataDir: String(state.dataDir || ''),
     activeUser: String(state.activeUser || ''),
   }
 }
@@ -434,7 +435,10 @@ export async function startApp({ id, userId }) {
     const existing = readRuntime(appId)
     if (existing?.status === 'running' && pidAlive(existing.pid)) {
       const existingSecret = APP_SECRETS.get(appId)
-      if (existingSecret) {
+      const existingUser = safeUser(existing.activeUser)
+      /* 应用数据按中枢账号隔离：同一应用进程只能服务一个账号的数据目录。
+         账号切换时销毁旧进程与租约，按新账号的数据目录重新冷启动，避免 A 的项目落进 B 的库。 */
+      if (existingSecret && existingUser === safeUser(userId)) {
         const dataRoot = existing.dataRoot || dataRootFor(appId)
         const dataDir = dataDirFor(appId, userId)
         const leaseId = addLease(appId, userId)
@@ -452,8 +456,10 @@ export async function startApp({ id, userId }) {
         const contextToken = signContext(appId, userId, existingSecret, CONTEXT_TTL_MS)
         return { leaseId, url: userUrl(existing.url, userId, contextToken), port: existing.port, pid: existing.pid, status: 'running', dataRoot, dataDir, contextToken }
       }
-      // 进程还活着但服务端没有对应 secret（例如异常重启），必须重启才能签发可信上下文。
+      // 进程还活着但账号已切换，或服务端没有对应 secret（例如异常重启），必须先销毁再按新账号启动。
       killTree(existing.pid)
+      APP_SECRETS.delete(appId)
+      leaseSet(appId).clear()
     }
     if (existing?.pid && pidAlive(existing.pid)) killTree(existing.pid)
     const contextSecret = randomBytes(32).toString('hex')
@@ -486,7 +492,7 @@ export async function startApp({ id, userId }) {
     })
     let child = null
     try {
-      child = spawnCommand(info, paths.appDir, paths.entry, dataRoot, host, port, url)
+      child = spawnCommand(info, paths.appDir, paths.entry, dataRoot, dataDir, host, port, url)
       writeRuntime(appId, { status: 'starting', pid: child.pid, leaseCount: 0 })
       const ok = await waitHealth(url, manifest.health || {}, startTimeoutMs)
       if (!ok) {
