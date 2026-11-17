@@ -1182,6 +1182,19 @@ export function imageRevisionCount(assetId) {
   return Number(stmt.countImageRevisions.get(String(assetId || '')).count || 0)
 }
 
+/** 供成本汇总读取：每个图像版本连同其 params（含落库成本）与资产归属。 */
+export function listImageRevisionCosts(owner = '') {
+  const rows = db.prepare(`
+    SELECT r.asset_id AS assetId, r.revision, r.model_id AS modelId, r.model,
+           r.params, r.created_at AS createdAt, a.owner AS owner
+    FROM image_revisions r
+    LEFT JOIN image_assets a ON a.id = r.asset_id
+    ORDER BY r.created_at ASC
+  `).all()
+  const normalizedOwner = String(owner || '')
+  return normalizedOwner ? rows.filter((row) => String(row.owner || '') === normalizedOwner) : rows
+}
+
 function imageCommentOf(row) {
   if (!row) return null
   return {
@@ -1358,7 +1371,7 @@ export function backupNow(note = '定时备份') {
     dbBytes: statSync(targetDb).size,
   }
   writeFileSync(join(dir, 'manifest.json'), JSON.stringify(manifest, null, 2), 'utf8')
-  pruneBackups(14)
+  pruneBackupsTiered()
   return { ...manifest, path: dir }
 }
 
@@ -1379,6 +1392,61 @@ export function pruneBackups(keep = 14) {
     if (existsSync(dir)) rmSync(dir, { recursive: true, force: true })
   }
   return extra.length
+}
+
+/* 分层保留：近期全留，随后每小时留一份，再往后每天留一份。
+   默认 12 份近期 + 24 小时 + 7 天，可用 JG_BACKUP_KEEP_RECENT / JG_BACKUP_HOURLY_HOURS / JG_BACKUP_DAILY_DAYS 调整。 */
+function backupTimestamp(item) {
+  const parsed = Date.parse(item.createdAt || '')
+  if (Number.isFinite(parsed) && parsed > 0) return parsed
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z$/.exec(String(item.name))
+  if (!m) return 0
+  return Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6], +m[7])
+}
+
+export function pruneBackupsTiered(options = {}) {
+  const recent = Math.max(1, Number(options.recent ?? process.env.JG_BACKUP_KEEP_RECENT ?? 12))
+  const hourlyHours = Math.max(0, Number(options.hourlyHours ?? process.env.JG_BACKUP_HOURLY_HOURS ?? 24))
+  const dailyDays = Math.max(0, Number(options.dailyDays ?? process.env.JG_BACKUP_DAILY_DAYS ?? 7))
+  const now = Number(options.now ?? Date.now())
+  const items = listBackups()
+  if (items.length <= recent) return { removed: 0, kept: items.length }
+
+  const kept = new Set(items.slice(0, recent).map((item) => item.name))
+  const hourKeys = new Set()
+  const dayKeys = new Set()
+  let removed = 0
+
+  for (const item of items.slice(recent)) {
+    const stamp = backupTimestamp(item)
+    // 非时间戳目录（如人工放置的其它快照）不参与裁剪，避免误删。
+    if (!stamp) continue
+    const ageHours = (now - stamp) / 3_600_000
+    const hourKey = new Date(stamp).toISOString().slice(0, 13)
+    const dayKey = new Date(stamp).toISOString().slice(0, 10)
+    let keep = false
+    if (ageHours <= hourlyHours && hourKeys.size < hourlyHours) {
+      if (!hourKeys.has(hourKey)) {
+        hourKeys.add(hourKey)
+        keep = true
+      }
+    } else if (ageHours <= hourlyHours + dailyDays * 24 && dayKeys.size < dailyDays) {
+      if (!dayKeys.has(dayKey)) {
+        dayKeys.add(dayKey)
+        keep = true
+      }
+    }
+    if (keep) {
+      kept.add(item.name)
+      continue
+    }
+    const dir = join(backupsDir, item.name)
+    if (existsSync(dir)) {
+      rmSync(dir, { recursive: true, force: true })
+      removed += 1
+    }
+  }
+  return { removed, kept: kept.size }
 }
 
 export function backupPath() {

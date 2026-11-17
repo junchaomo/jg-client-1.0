@@ -6019,6 +6019,8 @@ async function renderSkills(el) {
       : state.plugins.filter((p) => p.kind === 'personal' && !isOfficialBaseline(p))
 
   const tone = (i) => 't' + (i % 8)
+  const appUpdates = appUpdateList()
+  const appUpdateCount = appUpdates.length
   const marketType = (m) => m.type || (m.kind === 'app' ? 'app' : m.kind === 'bundle' ? 'plugin' : 'skill')
   const typeLabel = (t) => (t === 'plugin' ? '插件' : t === 'app' ? '应用' : '技能')
   const typeIcon = (t) => (t === 'plugin' ? 'plugin' : t === 'app' ? 'grid' : 'spark')
@@ -6030,6 +6032,8 @@ async function renderSkills(el) {
       <span class="pl-ico ${tone(i)}">${icon(typeIcon(t))}</span>
       <div class="pl-item-main"><div class="pl-item-name">${esc(m.name)}</div><div class="pl-item-desc">${esc(m.desc)}</div></div>
       ${t === 'app' && m.runtime?.running ? '<span class="tag ok" style="font-size:10px">运行中</span>' : ''}
+      ${t === 'app' && m.installed && m.versionDrift ? `<span class="tag bad" style="font-size:10px" title="市场已发布新版本">可更新 v${esc(m.marketVersion)}</span>` : ''}
+      ${t === 'app' && m.installed && m.runningVersion && m.installedVersion && m.runningVersion !== m.installedVersion ? '<span class="tag warn" style="font-size:10px" title="版本已切换，重启应用后生效">重启后生效</span>' : ''}
       ${t === 'app' && (m.appCapabilities?.tools || []).filter((tool) => !tool.sideEffect).length ? `<span class="tag" style="font-size:10px">AI · ${(m.appCapabilities.tools || []).filter((tool) => !tool.sideEffect).length}</span>` : ''}
       ${m.installed
         ? `<button class="pl-act" data-mmenu="${esc(m.id)}" data-mname="${esc(m.name)}" title="已安装，更多操作">${icon('dots')}</button>`
@@ -6130,7 +6134,7 @@ async function renderSkills(el) {
           <button class="pl2-side-search" id="skSideSearchBtn" title="搜索插件或技能">${icon('search')}</button>
         </div>
         <nav class="pl-nav">
-          <button class="pl-nav-item${tab === 'app' ? ' on' : ''}" data-sktab="app"><span class="pl-nav-ico">${icon('grid')}</span>应用</button>
+          <button class="pl-nav-item${tab === 'app' ? ' on' : ''}" data-sktab="app"><span class="pl-nav-ico">${icon('grid')}</span>应用${appUpdateCount ? `<span class="tag bad" style="font-size:10px;margin-left:6px">${appUpdateCount}</span>` : ''}</button>
           <button class="pl-nav-item${tab === 'plugin' ? ' on' : ''}" data-sktab="plugin"><span class="pl-nav-ico">${icon('plugin')}</span>插件</button>
           <button class="pl-nav-item${tab === 'skill' ? ' on' : ''}" data-sktab="skill"><span class="pl-nav-ico">${icon('spark')}</span>技能</button>
         </nav>
@@ -6140,6 +6144,7 @@ async function renderSkills(el) {
             const mid = x.marketId || (state.market.find((m) => m.name === x.name)?.id) || (tab === 'plugin' ? x.id : '')
             return `<div class="pl-inst" ${instAttr(x)} role="button" tabindex="0">
               <span class="pl-inst-ico ${tone(i)}">${icon(tab === 'plugin' ? 'plugin' : tab === 'app' ? 'grid' : 'spark')}</span><span class="pl-inst-name">${esc(x.name)}</span>
+              ${tab === 'app' && x.versionDrift ? '<span class="tag bad" style="font-size:10px" title="市场有新版本">可更新</span>' : ''}
               ${mid ? `<button class="pl-inst-more" data-mi-menu="${esc(mid)}" data-mi-name="${esc(x.name)}" title="更多操作" type="button">${icon('dots')}</button>` : ''}
             </div>`
           }).join('') || `<div class="pl2-inst-empty">${tab === 'plugin' ? '暂无已安装插件' : tab === 'app' ? '暂无已安装应用' : '暂无已安装技能'}</div>`}
@@ -6155,6 +6160,7 @@ async function renderSkills(el) {
               <input id="skSearch" placeholder="搜索${tab === 'plugin' ? '插件' : tab === 'app' ? '应用' : '技能'}" value="${esc(state.skillQuery || '')}" />
             </label>
             <button class="pl-ico-btn pl2-tool" id="skRefresh" title="刷新">${icon('refresh')}</button>
+            ${tab === 'app' && appUpdateCount ? `<button class="pl-add pl2-add" id="skUpdates" title="有 ${appUpdateCount} 个应用可更新">更新 · ${appUpdateCount}</button>` : ''}
             <button class="pl-add pl2-add" id="skAddLeft">添加</button>
           </div>
           <div class="pl-sub">${sub}</div>
@@ -6179,6 +6185,7 @@ async function renderSkills(el) {
   el.querySelectorAll('[data-sktab]').forEach((b) => { b.onclick = () => { state.skillTab = b.dataset.sktab; renderView() } })
   el.querySelectorAll('[data-skscope]').forEach((b) => { b.onclick = () => { state.skillScope = b.dataset.skscope; renderView() } })
   el.querySelector('#skRefresh').addEventListener('click', () => { toast('已刷新插件目录'); renderView() })
+  el.querySelector('#skUpdates')?.addEventListener('click', () => openUpdatesSlide())
   const search = el.querySelector('#skSearch')
   const applyQuery = () => {
     const q = search.value.trim().toLowerCase()
@@ -6338,6 +6345,68 @@ function openPluginSurface(m) {
   mask.querySelector('[data-surface-open]')?.addEventListener('click', () => window.open(surface.url, '_blank', 'noopener,noreferrer'))
 }
 
+/* ---- 应用更新（App Store 式：有新版本就提示，由用户点更新，不悄悄换掉正在用的版本） ---- */
+function appUpdateList() {
+  const seen = new Set()
+  return (state.market || [])
+    .filter((m) => m.kind === 'app' && m.installed && m.versionDrift)
+    .filter((m) => {
+      const key = String(m.appId || m.id)
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+}
+
+async function refreshMarketState() {
+  const { ok, body } = await api('/api/plugin-market')
+  if (ok) state.market = body.items || []
+  return state.market || []
+}
+
+async function openUpdatesSlide() {
+  const list = appUpdateList()
+  const slide = ensureSlide()
+  const row = (m) => `<div style="display:flex;gap:10px;align-items:center;padding:12px 0;border-bottom:1px solid var(--line,#eceff3)">
+      <div style="flex:1;min-width:0">
+        <div style="font-weight:600">${esc(m.name)}</div>
+        <div style="font-size:12px;color:var(--muted,#6b7280);margin-top:2px">v${esc(m.installedVersion || '—')} → v${esc(m.marketVersion)}${m.runtime?.running ? ' · 正在运行，更新会先停掉它' : ''}</div>
+      </div>
+      <button class="btn sm" data-upd="${esc(m.id)}">更新</button>
+    </div>`
+  slide.innerHTML = `
+    <div class="slide-head"><div><div class="slide-title">应用更新</div><div class="slide-sub">${list.length ? `${list.length} 个应用有新版本` : '所有已安装应用都是最新版本'}</div></div><span class="spacer"></span><button class="btn subtle" data-close>${icon('close')}</button></div>
+    <div class="slide-body">
+      ${list.length ? list.map(row).join('') : '<div class="notice neutral">没有可更新的应用。市场发布新版本后，这里会出现「更新」。</div>'}
+      <div class="notice neutral" style="margin-top:12px">更新只改本机版本指针；正在运行的旧版本进程会被停止，重新「打开应用」即用新版本。账号数据不随版本走，更新不会丢项目。</div>
+    </div>
+    <div class="slide-foot"><button class="btn primary" data-upd-all ${list.length ? '' : 'disabled'}>全部更新${list.length ? `（${list.length}）` : ''}</button></div>`
+  wireSlide(slide)
+  const doUpdate = async (ids) => {
+    let done = 0
+    const failed = []
+    for (const id of ids) {
+      const item = (state.market || []).find((x) => x.id === id)
+      if (!item) continue
+      const { ok, body } = await api('/api/as/version', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id, version: item.marketVersion }) })
+      if (!ok) { failed.push(`${item.name}：${body.error || '更新失败'}`); continue }
+      done += 1
+      releaseAsLease(id)
+      removeAsTab(id, true)
+    }
+    await refreshMarketState()
+    slide.classList.remove('open')
+    if (failed.length) toast(failed[0], true)
+    if (done) toast(`已更新 ${done} 个应用；正在运行的旧版本进程已停止，重新打开即用新版本`)
+    if (state.view === 'skills') renderView()
+  }
+  slide.querySelectorAll('[data-upd]').forEach((b) => b.addEventListener('click', () => doUpdate([b.dataset.upd])))
+  slide.querySelector('[data-upd-all]')?.addEventListener('click', () => {
+    const ids = appUpdateList().map((m) => m.id)
+    if (ids.length) doUpdate(ids)
+  })
+}
+
 function openPluginSlide(id) {
   /* 抽屉不再压制右侧浏览器里的应用视图：应用现在是浏览器分栏中的标签，
      打开应用详情不会影响主工作区，也不会回收应用租约。 */
@@ -6356,8 +6425,21 @@ function openPluginSlide(id) {
     <div class="slide-body">
       <div style="display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap"><span class="tag ${m.installed ? 'ok' : ''}">${m.installed ? '已安装' : '未安装'}</span><span class="tag ${m.available === false ? 'warn' : ''}">${m.available === false ? (appPkgStale ? '包缺失 · 待重新入库' : '待上架') : m.locked ? '系统内置' : '可安装'}</span><span class="tag">${isApp ? '应用' : m.origin === 'community' ? '社区提交' : '官方/内置'}</span>${isApp ? `<span class="tag ${appRuntime.running ? 'ok' : ''}" data-as-state>${appRuntime.running ? `运行中 · ${appRuntime.port || ''}` : '未运行'}</span>` : ''}<span class="tag">${esc(m.scope)}</span></div>
       <div class="field"><div class="field-label">功能说明</div><div class="field-value">${esc(m.desc)}</div></div>
-      <div class="field"><div class="field-label">来源</div><div class="field-value">${m.origin === 'community' ? `${esc(m.submittedUnit || '')} · 提交人 ${esc(m.submittedBy || '')} · v${esc(m.version || '1.0.0')}` : `${isApp ? 'AS 应用包' : 'DSH 官方 / 产品内置'} · v${esc(m.version || '1.0.0')}`}</div></div>
+      <div class="field"><div class="field-label">来源</div><div class="field-value">${isApp
+        ? `AS 应用包 · 市场 v${esc(m.marketVersion || m.version || '—')} · 已安装 v${esc(m.installedVersion || '—')}${m.runningVersion ? ` · 运行 v${esc(m.runningVersion)}` : ''}`
+        : m.origin === 'community'
+          ? `${esc(m.submittedUnit || '')} · 提交人 ${esc(m.submittedBy || '')} · v${esc(m.version || '1.0.0')}`
+          : `DSH 官方 / 产品内置 · v${esc(m.version || '1.0.0')}`}</div></div>
+      ${isApp && m.installed && (m.versionDrift || (m.versionDirs || []).length > 1) ? `<div class="field"><div class="field-label">版本</div><div class="field-value">
+        ${m.versionDrift ? `<div style="margin-bottom:8px;color:#b45309">市场已发布 v${esc(m.marketVersion)}，本机装的是 v${esc(m.installedVersion)}${m.runningVersion && m.runningVersion !== m.installedVersion ? `，正在跑的却是 v${esc(m.runningVersion)}` : ''}。</div>` : ''}
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <select class="text-input" id="asVersionSelect" style="max-width:180px">${(m.versionDirs || []).map((v) => `<option value="${esc(v)}"${v === m.installedVersion ? ' selected' : ''}>v${esc(v)}${v === m.installedVersion ? '（当前）' : ''}</option>`).join('')}</select>
+          <button class="btn" data-as-version>切换到此版本</button>
+        </div>
+        <div style="font-size:11px;color:var(--muted,#6b7280);margin-top:6px">切换只改版本指针；正在运行的旧版本进程会被停止，下次「启动并打开」用新版本。账号数据目录不随版本走，切回旧版本仍能看到原有项目。</div>
+      </div></div>` : ''}
       <div class="field"><div class="field-label">权限与数据</div><div class="field-value">${isApp ? '应用进程由 AS Runtime 托管；版本目录只读，账号数据写入独立目录；网络与文件权限按 app.json 声明审核。' : '按当前授权与网络范围返回数据；敏感字段最小必要展示，读取与调用进审计。写操作需人工确认。'}</div></div>
+      ${isApp && m.installed && m.runningVersion && m.installedVersion && m.runningVersion !== m.installedVersion ? `<div class="notice warn">已切换到 v${esc(m.installedVersion)}，但正在运行的还是 v${esc(m.runningVersion)}。点「停止应用」再「启动并打开」才会真正用新版本。</div>` : ''}
       ${isApp ? `<div class="field"><div class="field-label">AI 可调用</div><div class="field-value">${
         (appCaps?.tools || []).length || (appCaps?.resources || []).length
           ? `${(appCaps.tools || []).map((tool) => `<div style="padding:7px 0;border-bottom:1px solid var(--line,#eceff3)"><div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap"><span class="mono">${esc(tool.name)}</span><span class="tag">${esc(tool.method)}</span>${tool.sideEffect ? '<span class="tag warn">写操作</span>' : ''}<span class="spacer"></span>${tool.sideEffect ? `<button class="linkbtn" data-as-approve="${esc(tool.name)}">审批执行</button>` : `<button class="linkbtn" data-as-call="${esc(tool.name)}">试调用</button>`}</div><div style="color:var(--muted,#6b7280);font-size:12px;margin-top:3px">${esc(tool.description || '未填写说明')}</div><div class="mono" style="font-size:10px;color:#9aa1aa;margin-top:2px">${esc(tool.path)}</div></div>`).join('')}${(appCaps.resources || []).length ? `<div style="font-size:11px;color:var(--muted,#6b7280);margin-top:6px">资源：${(appCaps.resources || []).map((r) => `<span class="mono">${esc(r.name)}</span>`).join('、')}</div>` : ''}`
@@ -6380,7 +6462,7 @@ function openPluginSlide(id) {
           : m.available === false
           ? '<button class="btn primary" disabled>尚未完成入库</button>'
           : m.installed
-            ? `<button class="btn primary" data-as-start>${appRuntime.running ? '打开应用' : '启动并打开'}</button>${appRuntime.running ? '<button class="btn" data-as-stop>停止应用</button>' : ''}<button class="btn" data-toggle>卸载</button>`
+            ? `<button class="btn primary" data-as-start>${appRuntime.running ? '打开应用' : '启动并打开'}</button>${m.versionDrift ? `<button class="btn" data-as-update>更新到 v${esc(m.marketVersion)}</button>` : ''}${appRuntime.running ? '<button class="btn" data-as-stop>停止应用</button>' : ''}<button class="btn" data-toggle>卸载</button>`
             : '<button class="btn primary" data-toggle>安装</button>')
         : m.locked ? `<button class="btn primary" disabled>${m.product ? '产品内置' : '全客户端基线'}</button>` : m.available === false ? '<button class="btn primary" disabled>尚未提供安装包</button>' : `<button class="btn primary" data-toggle>${m.installed ? '卸载' : '安装'}</button>`}
       ${m.downloadUrl ? '<button class="btn" data-download>下载原始包</button>' : ''}
@@ -6554,6 +6636,22 @@ function openPluginSlide(id) {
     if (st.ok) m.runtime = st.body.runtime
     openPluginSlide(m.id)
   })
+  /* 更新与回滚是同一个动作：切 current.json 指向。区别只是目标版本是「市场最新」还是「本机旧版本」。
+     切完必须重拉一次市场，否则抽屉里的三段版本还是旧的，用户会以为没生效。 */
+  const switchAsVersion = async (version) => {
+    if (!version) return
+    const { ok, body } = await api('/api/as/version', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: m.id, version }) })
+    if (!ok) return toast(body.error || '版本切换失败', true)
+    releaseAsLease(m.id)
+    removeAsTab(m.id, true)
+    const list = await api('/api/plugin-market')
+    if (list.ok) state.market = list.body.items || []
+    const fresh = (state.market || []).find((x) => x.id === m.id) || m
+    toast(body.stopped ? `已切到 v${version}，旧版本进程已停止；重新「启动并打开」即用新版本` : `已切到 v${version}`)
+    openPluginSlide(fresh.id)
+  }
+  slide.querySelector('[data-as-update]')?.addEventListener('click', () => switchAsVersion(m.marketVersion))
+  slide.querySelector('[data-as-version]')?.addEventListener('click', () => switchAsVersion(slide.querySelector('#asVersionSelect')?.value))
   slide.querySelector('[data-toggle]')?.addEventListener('click', async () => {
     const scopeEl = slide.querySelector('#mktInstallScope')
     const projectEl = slide.querySelector('#mktInstallProject')
@@ -17448,6 +17546,8 @@ async function renderAdminCost(root, blocks) {
   const totals = data.totals || {}
   const models = Array.isArray(data.models) ? data.models : []
   const byProvider = Array.isArray(data.byProvider) ? data.byProvider : []
+  const imageCost = data.image || {}
+  const imageModels = Array.isArray(imageCost.models) ? imageCost.models : []
   const pricing = data.pricing || {}
   const watch = statusResult.ok ? statusResult.body || {} : {}
   const sources = Array.isArray(watch.sources) ? watch.sources : []
@@ -17459,8 +17559,8 @@ async function renderAdminCost(root, blocks) {
   const kpis = root.querySelector('.mc-kpis')
   if (kpis) {
     kpis.innerHTML = `
-      <div class="mc-kpi"><div class="mc-kpi-k">平台总积分</div><div class="mc-kpi-v">${n(totals.costCredits ?? Number(totals.costCny || 0) * 100)}</div><div class="mc-kpi-note">100 积分 = 1 元</div></div>
-      <div class="mc-kpi"><div class="mc-kpi-k">人民币实价</div><div class="mc-kpi-v">${cny(totals.costCny)}</div><div class="mc-kpi-note">按官方人民币价目</div></div>
+      <div class="mc-kpi"><div class="mc-kpi-k">平台总积分</div><div class="mc-kpi-v">${n(data.combined?.costCredits ?? totals.costCredits ?? Number(totals.costCny || 0) * 100)}</div><div class="mc-kpi-note">文本 ${n(totals.costCredits ?? Number(totals.costCny || 0) * 100)} + 图像 ${n(imageCost.costCredits)}</div></div>
+      <div class="mc-kpi"><div class="mc-kpi-k">人民币实价</div><div class="mc-kpi-v">${cny(data.combined?.costCny ?? totals.costCny)}</div><div class="mc-kpi-note">按官方人民币价目</div></div>
       <div class="mc-kpi"><div class="mc-kpi-k">已计 / 未计</div><div class="mc-kpi-v">${n(totals.pricedRequests)} / ${n(totals.unpricedRequests)}</div><div class="mc-kpi-note">缺 usage 字段不估算</div></div>
       <div class="mc-kpi"><div class="mc-kpi-k">价目版本</div><div class="mc-kpi-v" style="font-size:16px;white-space:nowrap">${esc(pricing.checkedAt || '—')}</div><div class="mc-kpi-note">${n((pricing.launchModels || []).length)} 个上线文本 · ${n((pricing.launchImageModels || []).length)} 个上线图像</div></div>`
   }
@@ -17480,6 +17580,14 @@ async function renderAdminCost(root, blocks) {
     <span class="mono">${n(p.totalTokens)}</span>
     <span class="mono">${cny(p.costCny)}</span>
     <span class="mono">${n(p.costCredits ?? Number(p.costCny || 0) * 100)}</span>
+  </div>`).join('')
+
+  const imageRows = imageModels.map((m) => `<div class="mc-trow">
+    <span class="mc-first">${esc(m.modelId || m.model)}<span class="mc-dim mono" style="display:block;font-size:10px;font-weight:400;margin-top:2px">${esc(m.model || '图像模型')}</span></span>
+    <span class="mono">${n(m.revisions)}</span>
+    <span class="mono">${n(m.recorded)} / ${n(m.unrecorded)}${m.local ? ` · 本地 ${n(m.local)}` : ''}${m.unpriced ? ` · 未计价 ${n(m.unpriced)}` : ''}</span>
+    <span class="mono">${cny(m.costCny)}</span>
+    <span class="mono">${n(m.costCredits)}</span>
   </div>`).join('')
 
   const sourceRows = sources.map((s) => {
@@ -17519,6 +17627,15 @@ async function renderAdminCost(root, blocks) {
         <div class="mc-thead"><span>供应商</span><span>调用</span><span>Tokens</span><span>人民币</span><span>积分</span></div>
         ${providerRows || '<div class="mc-empty">暂无供应商成本</div>'}
       </div>
+    </div>
+    <div class="mc-block">
+      <div class="mc-block-head"><b>图像成本 · 已落库</b><span class="spacer"></span><span class="mc-count">${n(imageCost.revisions)} 个版本 · 覆盖 ${pct(imageCost.coverage)}</span></div>
+      <div style="padding:10px 12px;border-bottom:1px solid #eceff3;font-size:var(--fs-dense);color:#6f767e;line-height:1.65">只统计版本里落库的金额：已计入 ${n(imageCost.recorded)} 次，未记录 ${n(imageCost.unrecorded)} 次（迁移前的历史版本），本地操作 ${n(imageCost.local)} 次不计费，未计价 ${n(imageCost.unpriced)} 次；不做回算补齐。DeepSeek 按次服务与 Kimi cache 存储费仍未接入计量。</div>
+      <div class="mc-table" style="--mc-cols:minmax(200px,2fr) minmax(58px,.55fr) minmax(128px,1.15fr) minmax(92px,.9fr) minmax(84px,.8fr)">
+        <div class="mc-thead"><span>模型</span><span>版本</span><span>已计 / 未记录</span><span>人民币</span><span>积分</span></div>
+        ${imageRows || '<div class="mc-empty">暂无图像成本记录</div>'}
+      </div>
+      <div class="mc-row" style="border-top:1px solid #eceff3"><span class="mc-row-main">图像合计</span><span class="mc-row-cell mono">${cny(imageCost.costCny)} · ${n(imageCost.costCredits)} 积分</span></div>
     </div>
     <div class="mc-block">
       <div class="mc-block-head"><b>官方价格源监控</b><span class="spacer"></span><span class="mc-count">${watch.pendingCount || 0} 项待核对 · 每 ${watch.intervalHours || 6} 小时自动检查</span><button class="btn sm" data-price-check>立即检查</button></div>

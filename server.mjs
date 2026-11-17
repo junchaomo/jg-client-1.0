@@ -13,7 +13,7 @@ import { basename, dirname, extname, isAbsolute, join, normalize, relative, sep 
 import { fileURLToPath } from 'node:url'
 import {
   SESSION_TTL_MS, appendAudit, appendApprovalDecision, auditCount, backupNow, cleanupSessions, clearAudit, clearSessions, closeStore, createSession,
-  createImageAsset, createImageComment, createImageJob, createImageRevision, createImageTemplate, deleteFile, getImageAsset, getImageTemplate, imageRevisionCount, listImageAssets, listImageComments, listImageRevisions, listApprovedImageTemplates, listAllImageTemplates, listImageTemplatesByApplicant, reviewImageTemplate, offlineImageTemplate, publishImageTemplate,
+  createImageAsset, createImageComment, createImageJob, createImageRevision, createImageTemplate, deleteFile, getImageAsset, getImageTemplate, imageRevisionCount, listImageAssets, listImageComments, listImageRevisions, listImageRevisionCosts, listApprovedImageTemplates, listAllImageTemplates, listImageTemplatesByApplicant, reviewImageTemplate, offlineImageTemplate, publishImageTemplate,
   dataDirPath, deleteSession, expirePendingApprovalDecisions, backfillActorUserIds, getAccount, getAccountByRole, getAccountByUsername, getFile, getSession, latestApprovalDecisions, latestAudit,
   listAccounts, listFiles, loadState, putFile, readFileBuffer, saveState, touchSession,
   softDeleteImageAsset, updateImageAssetLatest, updateImageJob,
@@ -22,6 +22,7 @@ import {
   saveVisualArtifact, updateVisualArtifact, restoreVisualVersion,
 } from './db.mjs'
 import { normalizeVisualInput, parseStoredVisual, VISUAL_TYPE_LABELS, visualError } from './visuals.mjs'
+import { summarizeImageCost } from './image-cost.mjs'
 import { describeToolCall, summarizeToolCall } from './approval-rules.mjs'
 import { mergeToolPolicies, runCodeLimitForTurn, toolPolicyForTurn } from './tool-policy.mjs'
 import {
@@ -48,8 +49,8 @@ import { pinyin } from 'pinyin-pro'
 import { HarnessError, cancelRun, closeHarness, closeHarnessForHome, dshBin, runAgent, stopBackgroundRuntime } from './harness.mjs'
 import { extractAppPackage, extractBundlePackage, extractSkillPackage, inspectPluginZip } from './plugin-scan.mjs'
 import {
-  AS_APPS_ROOT, appAvailable, appCapabilities, appManifest, appRoot, appVersionDir, callAppTool, currentAppInfo, dataDirFor,
-  heartbeatApp, reconcileAppsOnBoot, releaseApp, runtimeState, setCurrentAppVersion,
+  AS_APPS_ROOT, appAvailable, appCapabilities, appManifest, appRoot, appVersionDir, appVersionList, callAppTool, currentAppInfo, dataDirFor,
+  heartbeatApp, reconcileAppsOnBoot, releaseApp, runtimeState, setCurrentAppVersion, switchAppVersion,
   shutdownApps, startApp, sweepApps, uninstallApp, verifyAppContext,
 } from './as-runtime.mjs'
 import { activeGrantFor, createGrant, grantView, listGrants, mintDataToken, revokeGrant, verifyDataToken } from './app-data-grants.mjs'
@@ -155,6 +156,18 @@ function imageCostFields(image, width, height, inputImages = 0) {
     tier: priced.tier,
     pricingNote: priced.pricingNote,
     pricingReason: priced.reason,
+  }
+}
+
+/* 落库到版本 params 的成本戳：只记录当时真实计算的金额，供后续并表读取。 */
+function costStamp(cost) {
+  return {
+    priced: Boolean(cost?.priced),
+    cny: cost?.priced ? Number(cost.costCny || 0) : null,
+    credits: cost?.priced ? Number(cost.costCredits || 0) : null,
+    pricingModel: cost?.pricingModel || '',
+    tier: cost?.tier || '',
+    at: new Date().toISOString(),
   }
 }
 
@@ -5516,6 +5529,8 @@ async function installMarketApp(item, user) {
     scope: 'account',
     projectId: '',
     installedAt: Date.now(),
+    /* 装的时候是哪个版本：包后来被新版本替换掉之后，这条是唯一的"他最初用的是哪个版本"靠据。 */
+    version: info.version,
   })
   return { version: info.version, appId: item.appId || item.id }
 }
@@ -5585,6 +5600,16 @@ function marketItemState(item, ctx = {}) {
       note: appCaps.note,
     } : null,
     version: appInfo?.version || item.version,
+    /* 应用的三处版本要分开报，不能并成一个 version：
+       marketVersion = 市场条目审核通过的版本（"最新可用"），
+       installedVersion = 磁盘 current.json 指向的版本（"装的是什么"），
+       runningVersion = 运行中进程实际加载的版本（"跑的是什么"）。
+       三者不一致时必须让用户看见，否则"显示已更新、实际还在跑旧代码"无从发现。 */
+    marketVersion: isApp ? String(item.version || '') : (appInfo?.version || item.version),
+    installedVersion: isApp ? String(appInfo?.version || '') : '',
+    runningVersion: isApp ? String(appLive?.version || '') : '',
+    versionDirs: isApp ? appVersionList(appId) : [],
+    versionDrift: isApp ? (String(item.version || '') !== String(appInfo?.version || '')) : false,
     downloadUrl: sub && sub.fileId ? `/api/plugin-market/download?id=${encodeURIComponent(item.id)}` : '',
     versions: marketVersionsOf(item.id).map((v) => ({ version: v.version, at: v.at, note: v.note || '' })),
     canRollback: Boolean(sub && marketVersionsOf(item.id).length),
@@ -5698,12 +5723,14 @@ const api = {
     const user = roleOf(req)
     const mine = conversations.filter((conv) => conv.userId === user.id)
     const summary = summarizeUsage(mine)
-    logAudit(user, 'usage.summary', user.id, `requests=${summary.totals.requests}`, netOf(req))
+    const image = summarizeImageCost(listImageRevisionCosts(user.name))
+    logAudit(user, 'usage.summary', user.id, `requests=${summary.totals.requests} imageCny=${image.costCny}`, netOf(req))
     json(res, 200, {
       ok: true,
       user: user.name,
       generatedAt: new Date().toISOString(),
       ...summary,
+      image,
     })
   },
   'GET /api/admin/cost-analysis': (req, res) => {
@@ -5763,7 +5790,12 @@ const api = {
       providerMap.set(key, item)
     }
     const byProvider = [...providerMap.values()].sort((a, b) => b.costCny - a.costCny)
-    logAudit(user, 'cost.analysis', user.id, `models=${models.length} cny=${summary.totals.costCny}`, netOf(req))
+    const image = summarizeImageCost(listImageRevisionCosts())
+    const combined = {
+      costCny: Number((Number(summary.totals.costCny || 0) + image.costCny).toFixed(6)),
+      costCredits: Number((Number(summary.totals.costCredits ?? Number(summary.totals.costCny || 0) * 100) + image.costCredits).toFixed(2)),
+    }
+    logAudit(user, 'cost.analysis', user.id, `models=${models.length} cny=${summary.totals.costCny} imageCny=${image.costCny}`, netOf(req))
     json(res, 200, {
       ok: true,
       scope: 'platform',
@@ -5773,10 +5805,16 @@ const api = {
       totals: summary.totals,
       models,
       byProvider,
+      image,
+      combined,
       pricing: summary.pricing,
       baseline: summary.baseline,
       coverage: summary.coverage,
-      note: '人民币实价来自已落库的真实 usage 与各厂商官方价目；无 usage 的调用保持未计价，不估算。',
+      note: '人民币实价来自已落库的真实 usage 与各厂商官方价目；图像成本只统计版本里落库的金额，迁移前的历史版本单列未记录，不回算补齐。',
+      uncovered: [
+        'DeepSeek 搜索 / 网页抓取 / 文件解析 / TTS / ASR：usage 未记录调用次数，暂未并表',
+        'Kimi cache 存储费：没有按日存储计量，暂未并表',
+      ],
     })
   },
   'GET /api/admin/pricing/status': async (req, res) => {
@@ -6982,6 +7020,30 @@ const api = {
     logAudit(user, 'as.stop', item.id, `force=${Boolean(body.force) && canManage(user)}`, netOf(req))
     return json(res, 200, { ok: true, ...result, runtime: runtimeState(item.appId || item.id) })
   },
+  'POST /api/as/version': (req, res) => {
+    const user = roleOf(req)
+    const body = JSON.parse(req.__body || '{}')
+    const id = String(body.id || '').trim()
+    const target = String(body.version || '').trim()
+    const item = liveMarket.find((x) => x.id === id && x.kind === 'app')
+    if (!item) return json(res, 404, { error: '应用不存在', code: 'AS_APP_NOT_FOUND' })
+    if (!marketInstallRecords(item.id).some((r) => r.userId === user.id)) {
+      return json(res, 403, { error: '只有安装过该应用的账号可以更新或切换版本', code: 'AS_NOT_INSTALLED' })
+    }
+    const appId = item.appId || item.id
+    const wanted = target || String(item.version || '')
+    const dirs = appVersionList(appId)
+    if (!wanted || !dirs.includes(wanted)) {
+      return json(res, 409, { error: `本机没有 v${wanted || '?'} 的版本目录`, code: 'AS_VERSION_MISSING', versions: dirs })
+    }
+    try {
+      const result = switchAppVersion(appId, wanted)
+      logAudit(user, 'as.version', item.id, `v${result.version}${result.stopped ? ' 已停旧进程' : ''}`, netOf(req))
+      return json(res, 200, { ok: true, ...result, runtime: runtimeState(appId), appId })
+    } catch (error) {
+      return json(res, 409, { error: error.message || '版本切换失败', code: 'AS_VERSION_SWITCH_FAILED' })
+    }
+  },
   'GET /api/as/status': (req, res, url) => {
     const id = String(url.searchParams.get('id') || '').trim()
     if (id) {
@@ -7357,7 +7419,11 @@ const api = {
             extractAppPackage(filePath, target)
             const manifest = JSON.parse(readFileSync(join(target, 'app.json'), 'utf8'))
             if (String(manifest.id || '') !== appId) throw new Error('app.json 的 id 与审核记录不一致')
-            setCurrentAppVersion(appId, appVersion)
+            /* 审核通过只让新版本"可用"（写进 versions/<ver>），不替用户换掉正在用的版本。
+               类似 App Store：新版本下载完了，仍然要用户点「更新」才切过去。
+               只有本机还没有可用当前版本（首次入库、或 current.json 指向的目录已丢失）才直接指向它，
+               否则已安装用户会看到"版本自己变了"，运行中的进程也解释不清。 */
+            if (!currentAppInfo(appId)) setCurrentAppVersion(appId, appVersion)
             sub.marketId = marketId
             sub.appId = appId
             sub.appVersion = appVersion
@@ -10077,7 +10143,7 @@ const api = {
         model: image.model,
         modelId: image.modelId,
         seed,
-        params: { fullPrompt, width, height, requestId: image.requestId || '' },
+        params: { fullPrompt, width, height, requestId: image.requestId || '', cost: costStamp(cost) },
         note: '首次生成',
         createdBy: user.name,
       })
@@ -10219,6 +10285,7 @@ const api = {
           width,
           height,
           requestId: image.requestId || '',
+          cost: costStamp(cost),
         },
         note: `编辑生成 v${revision}`,
         createdBy: user.name,
@@ -10387,6 +10454,7 @@ const api = {
           region,
           wholeImage: Boolean(image.wholeImage),
           requestId: image.requestId || '',
+          cost: costStamp(cost),
         },
         note: `选区局部重绘 v${revision}`,
         createdBy: user.name,
@@ -12331,14 +12399,16 @@ server.listen(port, '127.0.0.1', () => {
   } catch (err) {
     console.error('[jg-server] backup failed:', err && err.message ? err.message : err)
   }
-  // P0-2：本地库按 10 分钟做一致性快照，满足 RPO ≤ 15 分钟；备份目录只保留最近 14 份。
+  // P0-2：本地库默认每 10 分钟做一致性快照（JG_BACKUP_INTERVAL_MIN 可调），
+  // 保留策略为“近期全留 + 每小时一份 + 每天一份”，见 db.mjs pruneBackupsTiered。
+  const backupEveryMs = Math.max(1, Number(process.env.JG_BACKUP_INTERVAL_MIN || 10)) * 60 * 1000
   const backupTimer = setInterval(() => {
     try {
       backupNow('定时备份')
     } catch (err) {
       console.error('[jg-server] backup failed:', err && err.message ? err.message : err)
     }
-  }, 10 * 60 * 1000)
+  }, backupEveryMs)
   if (typeof backupTimer.unref === 'function') backupTimer.unref()
 })
 
