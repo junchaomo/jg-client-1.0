@@ -12328,35 +12328,61 @@ server.listen(port, '127.0.0.1', () => {
   }, 5000)
   if (typeof asSweepTimer.unref === 'function') asSweepTimer.unref()
   console.log(`[jg-hub] http://127.0.0.1:${port}`)
+  console.log(`[jg-server] origin: ${serverOrigin}（client=客户端托管，manual=手工启动）`)
   console.log(`[jg-server] sqlite: ${dataDirPath()}`)
   console.log(`[jg-server] as apps: ${AS_APPS_ROOT}`)
-  try {
-    const first = backupNow('启动备份')
-    console.log(`[jg-server] backup: ${first.path}`)
-  } catch (err) {
-    console.error('[jg-server] backup failed:', err && err.message ? err.message : err)
-  }
-  // P0-2：本地库默认每 10 分钟做一致性快照（JG_BACKUP_INTERVAL_MIN 可调），
-  // 保留策略为“近期全留 + 每小时一份 + 每天一份”，见 db.mjs pruneBackupsTiered。
-  const backupEveryMs = Math.max(1, Number(process.env.JG_BACKUP_INTERVAL_MIN || 10)) * 60 * 1000
-  const backupTimer = setInterval(() => {
+  /* 开发机只把代码托管到 GitHub，本地不再滚快照：JG_BACKUP_DISABLED=1 同时关闭启动备份与定时备份。 */
+  const backupsDisabled = String(process.env.JG_BACKUP_DISABLED || '') === '1'
+  if (backupsDisabled) {
+    console.log('[jg-server] backup: disabled（JG_BACKUP_DISABLED=1）')
+  } else {
     try {
-      backupNow('定时备份')
+      const first = backupNow('启动备份')
+      console.log(`[jg-server] backup: ${first.path}`)
     } catch (err) {
       console.error('[jg-server] backup failed:', err && err.message ? err.message : err)
     }
-  }, backupEveryMs)
-  if (typeof backupTimer.unref === 'function') backupTimer.unref()
+    // P0-2：本地库默认每 10 分钟做一致性快照（JG_BACKUP_INTERVAL_MIN 可调），
+    // 保留策略为“近期全留 + 每小时一份 + 每天一份”，见 db.mjs pruneBackupsTiered。
+    const backupEveryMs = Math.max(1, Number(process.env.JG_BACKUP_INTERVAL_MIN || 10)) * 60 * 1000
+    const backupTimer = setInterval(() => {
+      try {
+        backupNow('定时备份')
+      } catch (err) {
+        console.error('[jg-server] backup failed:', err && err.message ? err.message : err)
+      }
+    }, backupEveryMs)
+    if (typeof backupTimer.unref === 'function') backupTimer.unref()
+  }
 })
 
-/* 进程生命周期留痕：控制台重定向每次启动都会被截断，退出原因必须落到追加日志里。 */
-const lifecycleLogPath = join(dataDirPath(), 'logs', 'server-lifecycle.log')
-function lifecycleLog(event, detail = '') {
+/* 进程生命周期留痕：控制台重定向每次启动都会被截断，退出原因必须落到追加日志里。
+   日志按天分文件，保留 7 天（JG_LOG_KEEP_DAYS 可调），避免长期运行时无限增长。 */
+const serverOrigin = process.env.JG_SERVER_ORIGIN === 'client' ? 'client' : 'manual'
+const lifecycleLogDir = join(dataDirPath(), 'logs')
+const LIFECYCLE_KEEP_DAYS = Math.max(1, Number(process.env.JG_LOG_KEEP_DAYS || 7))
+function lifecycleLogFile(now = new Date()) {
+  const stamp = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}`
+  return join(lifecycleLogDir, `server-lifecycle-${stamp}.log`)
+}
+function pruneLifecycleLogs() {
   try {
-    mkdirSync(dirname(lifecycleLogPath), { recursive: true })
-    appendFileSync(lifecycleLogPath, `${new Date().toISOString()} pid=${process.pid} ${event}${detail ? ` ${detail}` : ''}\n`, 'utf8')
+    mkdirSync(lifecycleLogDir, { recursive: true })
+    const now = Date.now()
+    for (const name of readdirSync(lifecycleLogDir)) {
+      const match = /^server-lifecycle-(\d{4})(\d{2})(\d{2})\.log$/.exec(name)
+      if (!match) continue
+      const at = Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]))
+      if (now - at > LIFECYCLE_KEEP_DAYS * 24 * 60 * 60 * 1000) rmSync(join(lifecycleLogDir, name), { force: true })
+    }
   } catch {}
 }
+function lifecycleLog(event, detail = '') {
+  try {
+    appendFileSync(lifecycleLogFile(), `${new Date().toISOString()} pid=${process.pid} origin=${serverOrigin} ${event}${detail ? ` ${detail}` : ''}\n`, 'utf8')
+  } catch {}
+}
+pruneLifecycleLogs()
 lifecycleLog('start', `port=${port} node=${process.version}`)
 process.on('exit', () => { lifecycleLog('exit', 'code=event-loop-end'); closeStore() })
 for (const signal of ['SIGTERM', 'SIGINT']) {

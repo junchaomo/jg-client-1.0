@@ -8,6 +8,8 @@ const net = require('net')
 
 const ROOT = path.join(__dirname, '..')
 const ENTRY = path.join(ROOT, 'server.mjs')
+/* 客户端与手工调试共用同一个端口，避免同一份 data 目录上跑两套服务。 */
+const PREFERRED_PORT = Number(process.env.JG_PORT || 54269)
 
 // 与旧客户端彻底隔离，避免沿用旧客户端的登录态、缓存与窗口状态。
 app.setName('jg-client-1.0')
@@ -100,7 +102,7 @@ function resolveNodeExe() {
 
 function startServer(port) {
   const nodeExe = resolveNodeExe()
-  const env = { ...process.env, PORT: String(port) }
+  const env = { ...process.env, PORT: String(port), JG_SERVER_ORIGIN: 'client' }
   delete env.ELECTRON_RUN_AS_NODE
   serverProcess = spawn(nodeExe, [ENTRY], {
     cwd: ROOT,
@@ -143,6 +145,26 @@ function waitForServer(port, timeoutMs = 15000) {
       request.on('timeout', () => request.destroy())
     }
     probe()
+  })
+}
+
+function probeHealth(port, timeoutMs = 1500) {
+  return new Promise((resolve) => {
+    const request = http.get({ host: '127.0.0.1', port, path: '/api/health', timeout: timeoutMs }, (response) => {
+      let body = ''
+      response.setEncoding('utf8')
+      response.on('data', (chunk) => { body += chunk })
+      response.on('end', () => {
+        try {
+          const parsed = JSON.parse(body)
+          resolve(Boolean(parsed && parsed.ok && parsed.service === 'jg-server'))
+        } catch (_) {
+          resolve(false)
+        }
+      })
+    })
+    request.on('error', () => resolve(false))
+    request.on('timeout', () => { request.destroy(); resolve(false) })
   })
 }
 
@@ -865,9 +887,22 @@ if (!hasLock) {
     app.on('web-contents-created', (_event, contents) => installBridge(contents))
 
     try {
-      serverPort = await getFreePort()
-      startServer(serverPort)
-      await waitForServer(serverPort)
+      /* 已经有健康的本机服务就复用，不再另起一套：两套服务会同时写同一个 SQLite。 */
+      if (await probeHealth(PREFERRED_PORT)) {
+        serverPort = PREFERRED_PORT
+        console.log(`[jg-server] 复用已在运行的本机服务 http://127.0.0.1:${serverPort}`)
+      } else {
+        serverPort = PREFERRED_PORT
+        startServer(serverPort)
+        try {
+          await waitForServer(serverPort)
+        } catch (_) {
+          stopServer()
+          serverPort = await getFreePort()
+          startServer(serverPort)
+          await waitForServer(serverPort)
+        }
+      }
       mainWindow = createWindow()
     } catch (error) {
       dialog.showErrorBox('九规智能中枢启动失败', String(error && error.message ? error.message : error))
