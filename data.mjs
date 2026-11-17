@@ -1108,8 +1108,8 @@ export const aiTools = [
   { name: 'history_list', label: '检索本人操作历史', target: '平台', args: '{"kind":"web","q":"体检","limit":20}', desc: '检索当前用户本人访问过的网页、应用与系统会话记录，返回 URL、标题、访问时间与当时正文快照；仅返回本人记录，不提供跨用户检索。' },
   { name: 'audit_list', label: '检索本人审计记录', target: '平台', args: '{"q":"文件","limit":20}', desc: '检索当前用户本人触发的操作审计记录（动作、对象、结果、网络归属、时间）；仅返回本人记录，管理员同样不可跨账号读取。' },
   { name: 'approval_list', label: '检索本人审批决策记录', target: '平台', args: '{"q":"写操作","limit":20}', desc: '检索当前用户本人相关的工具审批决策记录（工具、操作、参数摘要、风险、放行/待审结果、审批人、时间）；仅返回本人记录。' },
-  { name: 'app_data_list', label: '列出本人应用数据文件', target: '平台', args: '{"appId":"as-sample"}', desc: '列出当前用户本人在指定已安装应用数据目录下的文件（相对路径、大小）；只读，不跨应用或跨用户。' },
-  { name: 'app_data_read', label: '读取本人应用数据文件', target: '平台', args: '{"appId":"as-sample","path":"records.json"}', desc: '读取本人应用数据目录内的文本类文件内容；路径越界拒绝，限制文件大小；只读，不修改应用数据。' },
+  { name: 'app_data_list', label: '列出本人应用数据文件', target: '平台', args: '{"appId":"jg-material-studio"}', desc: '列出当前用户本人在指定已安装应用数据目录下的文件（相对路径、大小）；只读，不跨应用或跨用户。' },
+  { name: 'app_data_read', label: '读取本人应用数据文件', target: '平台', args: '{"appId":"jg-material-studio","path":"records.json"}', desc: '读取本人应用数据目录内的文本类文件内容；路径越界拒绝，限制文件大小；只读，不修改应用数据。' },
 ]
 
 

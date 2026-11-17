@@ -7,7 +7,7 @@ import { spawn, spawnSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { createServer } from 'node:http'
 import { createHash, createHmac, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto'
-import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { basename, dirname, extname, isAbsolute, join, normalize, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -4507,69 +4507,6 @@ function taskTick() {
   // 任务状态全部由真实运行启动、完成和失败收尾，不再用时间推进假进度。
 }
 
-/** 演示用回复生成：按关键词命中不同工具链，保持"步骤 → 结果"的可见性 */
-function buildReply(text, user, net) {
-  if (user.id === 'guest') {
-    return {
-      steps: [{ tool: '个人模型（自带 Key）', detail: '不经集团网关 · 仅本人额度', status: 'ok', ms: 900 }],
-      reply: '外部访客模式：已使用你本人的模型 API 完成本轮回答。集团统一模型与集团数据不对访客开放；如需引用某个业务模块，请由管理员在运维管理平台按模块授权后重试。',
-      citations: [],
-    }
-  }
-  const visible = liveResources.filter((r) => canSee(user, r, net))
-  const lower = text || ''
-  const cite = (id) => visible.find((r) => r.id === id)
-  const citations = []
-  const steps = []
-  let reply = ''
-
-  if (/周报|日报|生成报告|写一份报告/.test(lower)) {
-    steps.push({ tool: '会话与任务收集', detail: '本周 6 个会话 · 3 个任务', status: 'ok', ms: 1100 })
-    return {
-      requiresConfirm: true,
-      confirmText: '将写入工作区文件「规划一所周报_2026-11-07.md」，并登记到任务中心。是否继续？',
-      steps,
-      draft: '生成本周规划一所工作进展周报：汇总 3 个已完成任务、2 个进行中任务与 6 个会话要点，输出 Markdown 到工作区。',
-      citations,
-    }
-  }
-
-  if (/周报|日报|生成报告|写一份报告|总结成文/.test(lower)) {
-    steps.push({ tool: '会话与任务收集', detail: '本周 6 个会话 · 3 个任务', status: 'ok', ms: 1100 })
-    return {
-      requiresConfirm: true,
-      confirmText: '将写入工作区文件「规划一所周报_2026-11-07.md」，并登记到任务中心。是否继续？',
-      steps,
-      draft: '生成本周规划一所工作进展周报：汇总 3 个已完成任务、2 个进行中任务与 6 个会话要点，输出 Markdown 到工作区。',
-      citations,
-    }
-  }
-
-  if (/影像|对比|图斑|季度/.test(lower)) {
-    const gis = visible.filter((r) => r.type === 'gis').slice(0, 2)
-    gis.forEach((r) => citations.push(r.id))
-    steps.push({ tool: '空间范围检索', detail: 'bbox=115.96,29.70,116.02,29.75 · 命中 2 项', status: 'ok', ms: 2200 })
-    steps.push({ tool: '影像服务', detail: net === 'inet' ? '天地图 WMTS 在线引用（外部服务）' : 'QGIS Server 动态读取 GeoTIFF（GDAL 金字塔）', status: 'warn', ms: 3600 })
-    reply = `已完成同视口影像比对：两期共识别变化图斑 3 处（新增工地 2.4 ha、道路贯通 3.1 ha、场地平整 5.6 ha）。\n\n${net === 'inet' ? '本网影像来自天地图在线引用，受服务方配额约束；定量面积需以内部影像复核。' : '影像来自政务网季度入库版本，可直接用于成果引用。'}\n\n引用：${gis.map((r) => `${r.id}（${r.name}）`).join('、') || '无可见影像资源'}`
-  } else if (/公示|项目|建设单位/.test(lower)) {
-    const biz = cite('R-PROJ-PUB') || visible.find((r) => r.type === 'bizdata')
-    if (biz) citations.push(biz.id)
-    steps.push({ tool: '数据中心检索', detail: 'type=bizdata · keyword=公示', status: 'ok', ms: 820 })
-    steps.push({ tool: '文档解析', detail: '表格抽取 86 行 · 脱敏字段校验', status: 'ok', ms: 1600 })
-    reply = '已汇总 86 条公示记录，按建设单位归并为 12 组，公示期集中在 9—10 月，其中 3 个项目已过公示期。\n\n' + (biz ? `引用：${biz.id}（${biz.name}）` : '当前网络与授权范围内无公示数据。')
-  } else if (/规划|口径|原文|容积率|开发强度/.test(lower)) {
-    const doc = cite('R-DOC-GH-2021') || visible.find((r) => r.type === 'document')
-    if (doc) citations.push(doc.id)
-    steps.push({ tool: '全文检索', detail: 'keyword=开发强度 · 命中 6 段', status: 'ok', ms: 1300 })
-    steps.push({ tool: '引用校对', detail: '定位原文第 112—115 页 · 权限复核', status: 'ok', ms: 900 })
-    reply = '中心城区新建住宅容积率上限 2.5、建筑密度不超过 30%；历史街区另有专项规定。原文位于第 112—115 页，已标注段落。\n\n' + (doc ? `引用：${doc.id}（${doc.name}）` : '当前目录内无规划文本。')
-  } else {
-    steps.push({ tool: '数据中心检索', detail: `keyword=${lower.slice(0, 12) || '—'} · 命中 ${Math.min(visible.length, 3)} 项`, status: 'ok', ms: 760 })
-    reply = `已按当前网络（${networks[net].label}）与授权范围检索到 ${visible.length} 项可用资源，可按类型筛选后在对话中引用；需要我进一步打开某一项吗？`
-  }
-
-  return { reply, steps, citations }
-}
 
 function fileVisibleToUser(user, net, fileId) {
   if (!fileId) return false
@@ -12412,9 +12349,19 @@ server.listen(port, '127.0.0.1', () => {
   if (typeof backupTimer.unref === 'function') backupTimer.unref()
 })
 
-process.on('exit', () => closeStore())
+/* 进程生命周期留痕：控制台重定向每次启动都会被截断，退出原因必须落到追加日志里。 */
+const lifecycleLogPath = join(dataDirPath(), 'logs', 'server-lifecycle.log')
+function lifecycleLog(event, detail = '') {
+  try {
+    mkdirSync(dirname(lifecycleLogPath), { recursive: true })
+    appendFileSync(lifecycleLogPath, `${new Date().toISOString()} pid=${process.pid} ${event}${detail ? ` ${detail}` : ''}\n`, 'utf8')
+  } catch {}
+}
+lifecycleLog('start', `port=${port} node=${process.version}`)
+process.on('exit', () => { lifecycleLog('exit', 'code=event-loop-end'); closeStore() })
 for (const signal of ['SIGTERM', 'SIGINT']) {
   process.on(signal, async () => {
+    lifecycleLog('signal', signal)
     try { await shutdownApps() } catch {}
     try { await closeHarness() } catch {}
     try { closeStore() } catch {}
@@ -12422,8 +12369,10 @@ for (const signal of ['SIGTERM', 'SIGINT']) {
   })
 }
 process.on('uncaughtException', (error) => {
+  lifecycleLog('uncaughtException', error && error.stack ? String(error.stack).slice(0, 400) : String(error))
   console.error('[jg-server] uncaughtException:', error && error.stack ? error.stack : error)
 })
 process.on('unhandledRejection', (error) => {
+  lifecycleLog('unhandledRejection', error && error.stack ? String(error.stack).slice(0, 400) : String(error))
   console.error('[jg-server] unhandledRejection:', error && error.stack ? error.stack : error)
 })
