@@ -34,7 +34,8 @@ const state = {
   runtimeSettings: { defaultPolicy: 'auto', defaultEffort: 'medium', workspaceChanges: true },
   agentPresets: [],
   agentPresetId: '',
-  composerModel: '',
+  composerModel: 'sys-chat-deepseek-flash',
+  modelGateway: { presets: [], custom: [], chat: [], image: [] },
   composerTools: ['T-DATA'],
   composerRefs: [],
   reasoningEffort: 'medium',
@@ -115,11 +116,8 @@ const state = {
   sbPinned: true,
   cloudTabs: [{ id: 'new', kind: 'new', title: '新标签页' }],
   cloudTab: 'new',
-  cloudExts: [
-    { id: 'ext-audit', name: '企业审计水印', desc: '对企业站点自动叠加水印并留痕', on: true },
-    { id: 'ext-json', name: 'JSON 格式化', desc: '格式化接口返回与调试数据', on: true },
-    { id: 'ext-ad', name: '广告拦截', desc: '拦截弹窗与追踪脚本', on: false },
-  ],
+  cloudExts: [],
+  cloudExtsCanManage: false,
   cbW: 440,
   cbUserW: 0,
   imagegen: { prompt: '', ratio: '1:1', count: 1, style: '写实', shots: [], busy: false, modelId: '', references: [], assetsLoaded: false, assetsLoading: false, tab: 'templates', templates: [], templatesLoaded: false, templatesLoading: false, templateApps: [], templateAppsLoaded: false, templateAppsLoading: false },
@@ -268,16 +266,82 @@ function toast(message, bad = false) {
   toast._t = setTimeout(() => { el.className = 'toast' }, 3200)
 }
 
+/* 统一浮层管理：同一个触发按钮第二次点击关闭，点击外部或按 Esc 也关闭。 */
+const POPOVER_SELECTOR = [
+  '.jg-row-menu', '.conv-menu', '.prj-row-menu', '.msg-more-menu', '.recent-pop',
+  '.account-pop', '.notify-pop', '.rail-pop', '.mb-pop', '.plus-pop', '.nb-more-pop',
+  '.img-menu', '.cb-more-pop', '.cb-ext-pop', '.drive-more-pop', '.more-pop', '.tk-more-pop',
+  '.popover', '#wPickerPop',
+].join(',')
+let activePopover = null
+
+function closeActivePopover() {
+  const pop = activePopover
+  activePopover = null
+  if (!pop) return
+  const onClose = pop.__popoverClose
+  try { if (typeof onClose === 'function') onClose() } catch (e) { /* 关闭回调不应阻断浮层移除 */ }
+  pop.remove()
+}
+
+function beginPopover(anchor) {
+  if (activePopover && !activePopover.isConnected) activePopover = null
+  if (activePopover && anchor && activePopover.__popoverAnchor === anchor) {
+    closeActivePopover()
+    return false
+  }
+  closeActivePopover()
+  document.querySelectorAll(POPOVER_SELECTOR).forEach((pop) => pop.remove())
+  return true
+}
+
+function finishPopover(pop, anchor, onClose = null) {
+  if (!pop) return pop
+  pop.__popoverAnchor = anchor || null
+  pop.__popoverClose = onClose || null
+  activePopover = pop
+  return pop
+}
+
+document.addEventListener('pointerdown', (event) => {
+  if (!activePopover || !activePopover.isConnected) { activePopover = null; return }
+  if (activePopover.contains(event.target)) return
+  const anchor = activePopover.__popoverAnchor
+  if (anchor && (anchor === event.target || anchor.contains?.(event.target))) return
+  closeActivePopover()
+}, true)
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') closeActivePopover()
+})
+
+/* 内联弹层（随父容器渲染、用 hidden 控制）同样支持点空白关闭。 */
+function bindInlinePopover(trigger, panel, close) {
+  if (!trigger || !panel) return
+  panel.setAttribute('data-inline-popover', '1')
+  panel.__inlineTrigger = trigger
+  panel.__inlineClose = close
+}
+
+document.addEventListener('pointerdown', (event) => {
+  document.querySelectorAll('[data-inline-popover]').forEach((panel) => {
+    if (panel.hidden) return
+    const trigger = panel.__inlineTrigger
+    if (!trigger || panel.contains(event.target) || trigger.contains(event.target)) return
+    if (typeof panel.__inlineClose === 'function') panel.__inlineClose()
+  })
+}, true)
+
 function closeRowMenu() {
   document.querySelectorAll('.jg-row-menu, .msg-more-menu').forEach((m) => m.remove())
 }
 
 function openRowMenu(anchor, marketId, name = '') {
-  closeRowMenu()
+  if (!beginPopover(anchor)) return
   const menu = document.createElement('div')
   menu.className = 'jg-row-menu'
   menu.innerHTML = `<button type="button" data-row-uninstall="${esc(marketId)}">${icon('close')}<span>卸载${name ? `「${esc(name)}」` : ''}</span></button>`
   document.body.appendChild(menu)
+  finishPopover(menu, anchor)
   const r = anchor.getBoundingClientRect()
   const w = menu.offsetWidth || 148
   const h = menu.offsetHeight || 40
@@ -297,7 +361,7 @@ function openRowMenu(anchor, marketId, name = '') {
   })
   setTimeout(() => {
     document.addEventListener('pointerdown', function onDown(e) {
-      if (!menu.contains(e.target)) {
+      if (!menu.contains(e.target) && !anchor.contains(e.target)) {
         menu.remove()
         document.removeEventListener('pointerdown', onDown, true)
       }
@@ -475,9 +539,10 @@ async function loadBoot() {
   if (body.settings?.defaultEffort) state.reasoningEffort = body.settings.defaultEffort
   state.tasks = body.tasks || []
   state.conversations = body.conversations || []
-  const netModels = body.models || []
-  if (!netModels.some((m) => m.id === state.composerModel)) {
-    state.composerModel = body.network?.defaultModel || netModels[0]?.id || ''
+  state.modelGateway = body.modelGateway || { presets: [], custom: [], chat: [], image: [] }
+  const chatChoices = state.modelGateway.chat || []
+  if (!chatChoices.some((m) => m.id === state.composerModel)) {
+    state.composerModel = chatChoices.find((m) => m.preset && m.configured)?.id || chatChoices.find((m) => m.configured)?.id || chatChoices.find((m) => m.preset)?.id || chatChoices[0]?.id || ''
   }
   const enabledTools = (body.tools || []).filter((t) => t.enabled).map((t) => t.id)
   state.composerTools = state.composerTools.filter((id) => enabledTools.includes(id))
@@ -569,7 +634,7 @@ function renderRail() {
 }
 
 function openRailMore(anchor) {
-  document.querySelectorAll('.rail-pop').forEach((p) => p.remove())
+  if (!beginPopover(anchor)) return
   const { user, modules } = state.boot
   const ids = ['datacenter', 'knowledge', 'oneMap', 'review', 'oa', 'finance', 'admin', 'settings']
   const pop = document.createElement('div')
@@ -577,6 +642,7 @@ function openRailMore(anchor) {
   pop.innerHTML = ids.filter((id) => id === 'settings' || user.visibleModules.includes(id)).map((id) => `
     <button class="rail-pop-item" data-nav="${id}"><span class="ico">${icon(navIcon(id))}</span><span>${esc(modules[id]?.label || id)}</span></button>`).join('')
   document.body.appendChild(pop)
+  finishPopover(pop, anchor)
   const r = anchor.getBoundingClientRect()
   pop.style.left = `${r.right + 8}px`
   pop.style.bottom = `${window.innerHeight - r.bottom + 8}px`
@@ -596,7 +662,7 @@ function openRailMore(anchor) {
 
 let __projCardTimer = null
 function openProjectMenu(anchor, id) {
-  document.querySelectorAll('.conv-menu').forEach((pop) => pop.remove())
+  if (!beginPopover(anchor)) return
   const p = (state.sidebarProjects || []).find((x) => x.id === id)
   if (!p) return
   const pop = document.createElement('div')
@@ -616,6 +682,7 @@ function openProjectMenu(anchor, id) {
     item('remove', 'close', '移除工作区'),
   ].join('')
   document.body.appendChild(pop)
+  finishPopover(pop, anchor)
   const r = anchor.getBoundingClientRect()
   pop.style.left = `${Math.max(8, Math.min(window.innerWidth - 236, r.right + 8))}px`
   const ph = pop.offsetHeight
@@ -650,7 +717,7 @@ function startProjectChat(p) {
 }
 
 function openProjectRowMenu(anchor, id) {
-  document.querySelectorAll('.prj-row-menu').forEach((pop) => pop.remove())
+  if (!beginPopover(anchor)) return
   const p = (state.projects || []).find((x) => x.id === id)
   if (!p) return
   const menu = document.createElement('div')
@@ -665,6 +732,7 @@ function openProjectRowMenu(anchor, id) {
     item('remove', 'close', '移除工作区'),
   ].join('')
   document.body.appendChild(menu)
+  finishPopover(menu, anchor)
   const r = anchor.getBoundingClientRect()
   const w = menu.offsetWidth || 200
   const h = menu.offsetHeight || 220
@@ -685,7 +753,7 @@ function openProjectRowMenu(anchor, id) {
     if (act === 'remove') return confirmRemoveProject(p)
   }))
   setTimeout(() => document.addEventListener('pointerdown', function close(e) {
-    if (!menu.contains(e.target)) {
+    if (!menu.contains(e.target) && !anchor.contains(e.target)) {
       menu.remove()
       document.removeEventListener('pointerdown', close, true)
     }
@@ -713,7 +781,7 @@ async function setProjectPinned(p, next) {
 }
 
 function openProjectSectionPicker(anchor, p) {
-  document.querySelectorAll('.conv-menu').forEach((pop) => pop.remove())
+  if (!beginPopover(anchor)) return
   const sections = state.projectSections || []
   const current = (state.projectSectionMap || {})[p.id] || ''
   const pop = document.createElement('div')
@@ -723,6 +791,7 @@ function openProjectSectionPicker(anchor, p) {
     sections.map((section) => `<button class="cm-item" data-pjs="${esc(section.id)}"><span class="ico">${icon('folder')}</span><span class="cm-label">${esc(section.name)}</span>${current === section.id ? '<span class="cm-key">✓</span>' : ''}</button>`).join('') +
     `<div class="cm-sep"></div><button class="cm-item" data-pjs-new><span class="ico">${icon('plus')}</span><span class="cm-label">新建分区</span></button>`
   document.body.appendChild(pop)
+  finishPopover(pop, anchor)
   const r = anchor.getBoundingClientRect()
   pop.style.left = `${Math.max(8, Math.min(window.innerWidth - 236, r.right + 8))}px`
   const ph = pop.offsetHeight
@@ -819,7 +888,7 @@ function archiveConversation(id) {
 }
 
 function openConversationSectionPicker(anchor, id) {
-  document.querySelectorAll('.conv-menu').forEach((p) => p.remove())
+  if (!beginPopover(anchor)) return
   const conv = (state.conversations || []).find((c) => c.id === id)
   if (!conv) return
   const current = (state.convSections || {})[id] || ''
@@ -830,6 +899,7 @@ function openConversationSectionPicker(anchor, id) {
     (state.sidebarSections || []).map((sec) => `<button class="cm-item" data-cs="${esc(sec.id)}"><span class="ico">${icon('grid')}</span><span class="cm-label">${esc(sec.name)}</span>${current === sec.id ? '<span class="cm-key">✓</span>' : ''}</button>`).join('') +
     `<div class="cm-sep"></div><button class="cm-item" data-cs-new><span class="ico">${icon('plus')}</span><span class="cm-label">新建分区</span></button>`
   document.body.appendChild(pop)
+  finishPopover(pop, anchor)
   const r = anchor.getBoundingClientRect()
   pop.style.left = `${Math.max(64, Math.min(window.innerWidth - 236, r.right + 8))}px`
   const ph = pop.offsetHeight
@@ -1130,7 +1200,7 @@ function openProjectEditCard(anchor, id) {
 }
 
 function openProjectDisplayMenu(anchor) {
-  document.querySelectorAll('.conv-menu').forEach((p) => p.remove())
+  if (!beginPopover(anchor)) return
   const pop = document.createElement('div')
   pop.className = 'conv-menu proj-menu'
   pop.innerHTML = `
@@ -1140,6 +1210,7 @@ function openProjectDisplayMenu(anchor) {
     <button class="cm-item" data-pm="split"><span class="ico">${icon('folder')}</span><span class="cm-label">分项目显示</span>${state.projMerge ? '' : '<span class="cm-key">✓</span>'}</button>
     <button class="cm-item" data-pm="merge"><span class="ico">${icon('list')}</span><span class="cm-label">合并显示</span>${state.projMerge ? '<span class="cm-key">✓</span>' : ''}</button>`
   document.body.appendChild(pop)
+  finishPopover(pop, anchor)
   const r = anchor.getBoundingClientRect()
   pop.style.left = `${Math.max(8, Math.min(window.innerWidth - 240, r.right - 210))}px`
   const ph = pop.offsetHeight
@@ -1164,7 +1235,7 @@ function closeSideMenus() {
 }
 
 function openRecentHeadMenu(anchor) {
-  closeSideMenus()
+  if (!beginPopover(anchor)) return
   const pop = document.createElement('div')
   pop.className = 'conv-menu proj-menu recent-pop'
   pop.innerHTML = `
@@ -1178,6 +1249,7 @@ function openRecentHeadMenu(anchor) {
     <div class="cm-sep"></div>
     <button class="cm-item" data-rh="clear" style="color:#b3282d"><span class="ico" style="color:#b3282d">${icon('trash')}</span><span class="cm-label">清空最近对话</span></button>`
   document.body.appendChild(pop)
+  finishPopover(pop, anchor)
   const r = anchor.getBoundingClientRect()
   pop.style.left = `${Math.max(64, Math.min(window.innerWidth - 240, r.right - 208))}px`
   const ph = pop.offsetHeight
@@ -1199,12 +1271,13 @@ function openRecentHeadMenu(anchor) {
 }
 
 function openRecentSortMenu(anchor) {
-  closeSideMenus()
+  if (!beginPopover(anchor)) return
   const pop = document.createElement('div')
   pop.className = 'conv-menu recent-pop'
   const opt = (k, label) => `<button class="cm-item" data-rs="${k}"><span class="cm-label">${label}</span>${state.recentSort === k ? '<span class="cm-key">✓</span>' : ''}</button>`
   pop.innerHTML = opt('recent', '最近优先') + opt('old', '最早优先') + opt('name', '按名称 A–Z')
   document.body.appendChild(pop)
+  finishPopover(pop, anchor)
   const r = anchor.getBoundingClientRect()
   pop.style.left = `${Math.max(72, Math.min(window.innerWidth - 220, r.left + 40))}px`
   const ph = pop.offsetHeight
@@ -1222,12 +1295,13 @@ function openRecentSortMenu(anchor) {
 }
 
 function openRecentFilterMenu(anchor) {
-  closeSideMenus()
+  if (!beginPopover(anchor)) return
   const pop = document.createElement('div')
   pop.className = 'conv-menu recent-pop'
   const opt = (k, label) => `<button class="cm-item" data-rf="${k}"><span class="cm-label">${label}</span>${state.recentFilter === k ? '<span class="cm-key">✓</span>' : ''}</button>`
   pop.innerHTML = opt('all', '全部') + opt('chat', '聊天') + opt('work', '工作')
   document.body.appendChild(pop)
+  finishPopover(pop, anchor)
   const r = anchor.getBoundingClientRect()
   pop.style.left = `${Math.max(72, Math.min(window.innerWidth - 220, r.right - 150))}px`
   const ph = pop.offsetHeight
@@ -1326,13 +1400,14 @@ function openSectionForm(onCreated) {
 }
 
 function openSectionMenu(anchor, id) {
-  closeSideMenus()
+  if (!beginPopover(anchor)) return
   const sec = (state.sidebarSections || []).find((x) => x.id === id)
   if (!sec) return
   const pop = document.createElement('div')
   pop.className = 'conv-menu recent-pop'
   pop.innerHTML = `<button class="cm-item" data-sm="rename"><span class="cm-label">重命名</span></button><button class="cm-item" data-sm="del"><span class="cm-label">删除分区</span></button>`
   document.body.appendChild(pop)
+  finishPopover(pop, anchor)
   const r = anchor.getBoundingClientRect()
   pop.style.left = `${Math.max(64, Math.min(window.innerWidth - 210, r.right - 170))}px`
   const ph = pop.offsetHeight
@@ -1478,7 +1553,6 @@ function renderSidebar() {
         <div class="sb-head-acts">
           <button class="sb-collapse" id="recentMore" title="更多"><span class="ico">${icon('dots')}</span></button>
           <button class="sb-collapse" id="recentFilter" title="筛选"><span class="ico">${icon('filter')}</span></button>
-          <button class="sb-collapse sb-quicknew" id="recentNew" title="开始全新对话：不继承当前项目、上下文与执行策略"><span class="ico">${icon('pen')}</span></button>
         </div>
       </div>
       <div class="sb-recent${state.recentCollapsed ? ' folded' : ''}" id="recentList">
@@ -1500,7 +1574,6 @@ function renderSidebar() {
   })
   document.getElementById('recentMore')?.addEventListener('click', (ev) => { ev.stopPropagation(); openRecentHeadMenu(ev.currentTarget) })
   document.getElementById('recentFilter')?.addEventListener('click', (ev) => { ev.stopPropagation(); openRecentFilterMenu(ev.currentTarget) })
-  document.getElementById('recentNew')?.addEventListener('click', () => startFreshChat())
   sidebar.querySelectorAll('[data-secmenu]').forEach((b) => b.addEventListener('click', (ev) => {
     ev.stopPropagation()
     openSectionMenu(ev.currentTarget, b.dataset.secmenu)
@@ -1630,7 +1703,6 @@ function showHomeSidebarFloat() {
   float.querySelector('#sbSearch')?.addEventListener('click', (ev) => { ev.stopPropagation(); openSearchPalette() })
   float.querySelector('#notifyTrigger')?.addEventListener('click', (ev) => { ev.stopPropagation(); openNotifications(ev.currentTarget) })
   float.querySelector('#sbNew')?.addEventListener('click', () => { close(); startFreshChat() })
-  float.querySelector('#recentNew')?.addEventListener('click', () => { close(); startFreshChat() })
   float.querySelector('#brandMenu')?.addEventListener('click', (ev) => { ev.stopPropagation(); openAccountMenu(ev.currentTarget) })
   float.querySelectorAll('[data-conv]').forEach((b) => b.addEventListener('click', () => { close(); openConversation(b.dataset.conv) }))
   document.addEventListener('keydown', onKey)
@@ -1727,7 +1799,7 @@ function togglePinnedConversation(id) {
 }
 
 function openConversationMenu(anchor, id) {
-  document.querySelectorAll('.conv-menu').forEach((p) => p.remove())
+  if (!beginPopover(anchor)) return
   const conv = (state.conversations || []).find((c) => c.id === id)
   if (!conv) return
   const locked = (state.lockedConvs || []).includes(id)
@@ -1760,6 +1832,7 @@ function openConversationMenu(anchor, id) {
         ${['section', 'move'].includes(act) ? '<span class="cm-arrow">›</span>' : ''}
       </button>`).join('')
   document.body.appendChild(pop)
+  finishPopover(pop, anchor)
   const r = anchor.getBoundingClientRect()
   pop.style.left = `${Math.max(8, Math.min(window.innerWidth - 230, r.right + 8))}px`
   const ph = pop.offsetHeight
@@ -1779,13 +1852,14 @@ function openConversationMenu(anchor, id) {
 }
 
 function openMoveToProject(anchor, id) {
-  document.querySelectorAll('.conv-menu').forEach((p) => p.remove())
+  if (!beginPopover(anchor)) return
   const projects = state.sidebarProjects || state.projects || []
   const pop = document.createElement('div')
   pop.className = 'conv-menu'
   pop.innerHTML = `<div class="cm-head">移至项目</div>` + projects.map((p) => `
     <button class="cm-item" data-mp="${p.id}"><span class="ico">${icon('folder')}</span><span class="cm-label">${esc(p.name)}</span></button>`).join('')
   document.body.appendChild(pop)
+  finishPopover(pop, anchor)
   const r = anchor.getBoundingClientRect()
   pop.style.left = `${Math.max(8, Math.min(window.innerWidth - 230, r.right + 8))}px`
   const ph = pop.offsetHeight
@@ -1960,20 +2034,45 @@ function renderMenubar() {
       ${Object.entries(menus).map(([k, [label, items]]) => `<button class="mb-menu" data-menu="${k}">${label}</button>`).join('')}
       ${cloudAllowed() ? `<button class="mb-icon mb-cloud-toggle${state.cloudOpen ? ' on' : ''}" id="mbCloudToggle" title="${state.cloudOpen ? '折叠云浏览器' : '展开云浏览器'}" aria-label="云浏览器">${icon('globe')}</button>` : ''}
     </div>
-    <div class="mb-win">
-      <span class="mb-winbtn" title="最小化"><svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 6h8"/></svg></span>
-      <span class="mb-winbtn" title="最大化"><svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2.5" y="2.5" width="7" height="7"/></svg></span>
-      <span class="mb-winbtn close" title="关闭"><svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3 3l6 6M9 3L3 9"/></svg></span>
+    <div class="mb-win" role="group" aria-label="窗口控制">
+      <button type="button" class="mb-winbtn" data-win="minimize" title="最小化" aria-label="最小化"><svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 6h8"/></svg></button>
+      <button type="button" class="mb-winbtn" id="winMax" data-win="maximize" title="最大化" aria-label="最大化" aria-pressed="false"><svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2.5" y="2.5" width="7" height="7"/></svg></button>
+      <button type="button" class="mb-winbtn close" data-win="close" title="关闭" aria-label="关闭"><svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3 3l6 6M9 3L3 9"/></svg></button>
     </div>`
   mb.querySelector('#mbLayoutToggle')?.addEventListener('click', () => toggleGlobalSidebar())
   mb.querySelector('#mbCloudToggle')?.addEventListener('click', () => toggleCloudPanel())
+  const winMax = mb.querySelector('#winMax')
+  const paintWinMax = (maximized) => {
+    if (!winMax) return
+    winMax.title = maximized ? '还原' : '最大化'
+    winMax.setAttribute('aria-label', maximized ? '还原窗口' : '最大化窗口')
+    winMax.setAttribute('aria-pressed', String(maximized))
+    winMax.innerHTML = maximized
+      ? '<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2" y="4" width="6" height="6"/><path d="M4 4V2h6v6H8"/></svg>'
+      : '<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2.5" y="2.5" width="7" height="7"/></svg>'
+  }
+  paintWinMax(Boolean(document.fullscreenElement))
+  window.jgClient?.getWindowState?.().then((s) => paintWinMax(Boolean(s?.maximized || s?.fullscreen))).catch(() => {})
+  mb.querySelectorAll('[data-win]').forEach((btn) => btn.addEventListener('click', async () => {
+    if (window.jgClient) return
+    const action = btn.dataset.win
+    if (action === 'minimize') return toast('浏览器页面不支持最小化窗口')
+    if (action === 'close') { window.close(); return }
+    try {
+      if (document.fullscreenElement) await document.exitFullscreen()
+      else await document.documentElement.requestFullscreen()
+    } catch (error) {
+      toast(error?.message || '当前浏览器不支持全屏切换', true)
+    }
+  }))
+  document.onfullscreenchange = () => paintWinMax(Boolean(document.fullscreenElement))
   mb.querySelectorAll('[data-mbact]').forEach((b) => b.addEventListener('click', () => {
     if (b.dataset.mbact === 'back') history.back()
     else toast('已是最近的历史记录')
   }))
   mb.querySelectorAll('[data-menu]').forEach((btn) => btn.addEventListener('click', (ev) => {
     ev.stopPropagation()
-    document.querySelectorAll('.mb-pop').forEach((p) => p.remove())
+    if (!beginPopover(btn)) return
     const [label, items] = menus[btn.dataset.menu]
     const pop = document.createElement('div')
     pop.className = 'mb-pop'
@@ -1981,6 +2080,7 @@ function renderMenubar() {
       ? '<div class="mb-sep"></div>'
       : `<button class="mb-item" data-act="${act}"${off ? ' disabled style="opacity:.45;cursor:not-allowed"' : ''}><span>${text}</span>${key ? `<span class="mb-key">${key}</span>` : ''}</button>`).join('')
     document.body.appendChild(pop)
+    finishPopover(pop, btn)
     const r = btn.getBoundingClientRect()
     pop.style.left = `${Math.max(8, Math.min(window.innerWidth - pop.offsetWidth - 8, r.left))}px`
     const ph = pop.offsetHeight
@@ -2008,6 +2108,12 @@ function runMenuAction(act) {
     render()
     setTimeout(() => document.getElementById('draft')?.focus(), 60)
   }
+  // 缩放改变 body 布局尺寸后，显式把原生应用/网页视图槽位矩形重推给主进程，
+  // 避免个别内核版本下 ResizeObserver 未随 CSS zoom 触发，导致原生视图停留在旧尺寸。
+  const syncBoundsAfterZoom = () => requestAnimationFrame(() => {
+    if (document.getElementById('cbWebSlot')) sendNativeBounds()
+    if (document.getElementById('cbAppSlot')) sendCloudAppBounds(asPaneAppId)
+  })
   const map = {
     newWindow: () => window.open(location.href, '_blank'),
     newChat: focusHome,
@@ -2028,9 +2134,9 @@ function runMenuAction(act) {
     toggleSidebar: () => { toggleGlobalSidebar() },
     cloud: () => toggleCloudPanel(),
     find: () => openSearchPalette(''),
-    zoomIn: () => { document.body.style.zoom = String(Math.min(1.4, (Number(document.body.style.zoom) || 1) + 0.1)) },
-    zoomOut: () => { document.body.style.zoom = String(Math.max(0.7, (Number(document.body.style.zoom) || 1) - 0.1)) },
-    zoomReset: () => { document.body.style.zoom = '1' },
+    zoomIn: () => { document.body.style.zoom = String(Math.min(1.4, (Number(document.body.style.zoom) || 1) + 0.1)); syncBoundsAfterZoom() },
+    zoomOut: () => { document.body.style.zoom = String(Math.max(0.7, (Number(document.body.style.zoom) || 1) - 0.1)); syncBoundsAfterZoom() },
+    zoomReset: () => { document.body.style.zoom = '1'; syncBoundsAfterZoom() },
     fullscreen: () => { if (document.fullscreenElement) document.exitFullscreen(); else document.documentElement.requestFullscreen?.() },
     docs: () => {},
     shortcuts: () => toast('Ctrl+K 全局搜索 · Ctrl+, 设置 · Ctrl+Shift+S 侧边栏'),
@@ -2281,7 +2387,7 @@ async function loadUsageSummary() {
 }
 
 function openAccountMenu(anchor) {
-  document.querySelectorAll('.account-pop').forEach((p) => p.remove())
+  if (!beginPopover(anchor)) { window.__accountPop = null; return }
   const { user, counts } = state.boot
   const item = (act, ic, label, meta = '') => `
     <button class="acct-item" data-acct="${act}">
@@ -2321,6 +2427,7 @@ function openAccountMenu(anchor) {
 
   document.body.appendChild(pop)
   window.__accountPop = pop
+  finishPopover(pop, anchor, () => { if (window.__accountPop === pop) window.__accountPop = null })
   const rect = anchor.getBoundingClientRect()
   const navBtn = document.querySelector('#railbar [data-nav]')
   const left = navBtn ? navBtn.getBoundingClientRect().right + 10 : rect.left
@@ -2411,7 +2518,7 @@ function toggleGlobalSidebar() {
 }
 
 function openNotifications(anchor) {
-  document.querySelectorAll('.notify-pop').forEach((p) => p.remove())
+  if (!beginPopover(anchor)) return
   const items = state.notifications
   const unread = items.filter((n) => n.unread).length
   const pop = document.createElement('div')
@@ -2437,6 +2544,7 @@ function openNotifications(anchor) {
     <div class="notify-foot">通知与审计同源：安全事件不可关闭，其余可在设置中调整</div>`
 
   document.body.appendChild(pop)
+  finishPopover(pop, anchor)
   const rect = anchor.getBoundingClientRect()
   pop.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - 338))}px`
   const ph = pop.offsetHeight
@@ -2599,8 +2707,8 @@ async function openSearchPalette(initial = '') {
     { tab: 'models', group: '共享模型', label: 'Seedream', desc: '图像生成模型之一；图像页在 Qwen 与 Seedream 中二选一', kw: 'Seedream 图像 生成 模型' },
     { tab: 'models', group: '个人密钥', label: '个人 API Key', desc: '仅用于本机调试，不属于三个共享模型', kw: 'API Key 个人密钥 key 调试' },
     { tab: 'models', group: '个人密钥', label: '数据外发策略', desc: '决定个人模型可接触的数据级别', kw: '外发 数据级别 涉密 敏感 审批' },
-    { tab: 'usage', group: '真实计量', label: '累计 tokens', desc: '来自每轮运行时返回的 usage；没有 usage 的轮次不计入', kw: 'token 累计 用量 统计' },
-    { tab: 'usage', group: '真实计量', label: '输入 / 输出', desc: '输入 = 上下文与提示词；输出 = 模型生成', kw: '输入 输出 上下文 提示词 生成' },
+    { tab: 'usage', group: '真实计量', label: '累计 tokens', desc: '来自每轮运行时返回的 usage；包含缓存读，但没有 usage 的轮次不计入', kw: 'token 累计 用量 统计' },
+    { tab: 'usage', group: '真实计量', label: '新增输入 / 输出', desc: '新增输入 = 未命中缓存的输入；缓存读单独计量', kw: '新增输入 输出 上下文 提示词 生成' },
     { tab: 'usage', group: '真实计量', label: '模型调用次数', desc: '按真实 usage.calls 汇总，不是前端点击次数', kw: '调用 次数 请求 usage' },
     { tab: 'usage', group: '真实计量', label: '缓存读 / 写', desc: '缓存命中与写入分别计量', kw: '缓存 命中 读取 写入' },
     { tab: 'usage', group: '真实计量', label: '推理 tokens', desc: '仅统计上游返回的 reasoning_tokens', kw: '推理 reasoning 思考 token' },
@@ -3096,6 +3204,79 @@ function reasoningLabel(id) {
   return { low: '低', medium: '中', high: '高' }[id] || '中'
 }
 
+function chatModelChoices() {
+  return (state.modelGateway?.chat || []).filter((m) => m.enabled)
+}
+
+function currentChatModel() {
+  return chatModelChoices().find((m) => m.id === state.composerModel) || null
+}
+
+function currentChatModelLabel() {
+  return currentChatModel()?.label || '默认模型'
+}
+
+function modelMultiplierLabel(model) {
+  if (!model || !model.preset || model.multiplier == null) return ''
+  return `${Number(model.multiplier).toFixed(2)}x`
+}
+
+function openModelReasoningMenu(anchor) {
+  if (!beginPopover(anchor)) return
+  const pop = document.createElement('div')
+  pop.className = 'plus-pop reason-pop model-reason-pop'
+  pop.style.width = '292px'
+  const choices = chatModelChoices()
+  const effortRows = [['low', '低', '更快响应'], ['medium', '中', '平衡推理与耗时'], ['high', '高', '更充分推理']]
+  pop.innerHTML = `
+    <div class="mr-head">模型</div>
+    ${choices.length ? choices.map((m) => `<button class="pp-row mr-model-row" data-model="${esc(m.id)}" ${m.configured ? '' : 'disabled title="该模型尚未配置可用密钥"'}>
+      <span class="ico pp-ico">${icon('spark')}</span>
+      <span class="pp-label">${esc(m.label)}</span>
+      ${m.configured ? (modelMultiplierLabel(m) ? `<span class="mr-mult" title="${esc(m.multiplierNote || '相对成本倍率')}">${esc(modelMultiplierLabel(m))}</span>` : '<span class="mr-mult">自定义</span>') : '<span class="mr-mult">未配置</span>'}
+      <span class="ico mr-check">${state.composerModel === m.id ? icon('check') : ''}</span>
+    </button>`).join('') : '<div class="pp-row" style="opacity:.6"><span class="pp-label">暂无可用对话模型</span></div>'}
+    ${choices.some((m) => !m.configured) ? '<div class="mr-note">未配置的系统模型需在部署环境设置对应 API Key 后才能选用</div>' : ''}
+    <div class="mr-sep"></div>
+    <button class="pp-row mr-effort-toggle" data-effort-toggle>
+      <span class="ico pp-ico">${icon('target')}</span>
+      <span class="pp-label">推理强度</span>
+      <span class="mr-effort-value">${reasoningLabel(state.reasoningEffort)}</span>
+      <span class="ico mr-chev">${icon('chevron')}</span>
+    </button>
+    <div class="mr-effort-list" hidden>
+      ${effortRows.map(([id, label, desc]) => `<button class="pp-row" data-effort="${id}">
+        <span class="ico pp-ico">${state.reasoningEffort === id ? icon('check') : ''}</span>
+        <span class="pp-label">${label}</span>
+        <span class="pp-desc">${desc}</span>
+      </button>`).join('')}
+    </div>`
+  document.body.appendChild(pop)
+  finishPopover(pop, anchor)
+  const r = anchor.getBoundingClientRect()
+  pop.style.left = `${Math.round(Math.min(window.innerWidth - 304, Math.max(12, r.left)))}px`
+  pop.style.top = `${Math.round(Math.max(12, r.top - pop.offsetHeight - 8))}px`
+  pop.querySelectorAll('[data-model]').forEach((b) => b.addEventListener('click', (e) => {
+    e.stopPropagation()
+    state.composerModel = b.dataset.model
+    pop.remove()
+    renderView()
+    toast(`已切换模型：${currentChatModelLabel()}`)
+  }))
+  pop.querySelector('[data-effort-toggle]')?.addEventListener('click', (e) => {
+    e.stopPropagation()
+    const list = pop.querySelector('.mr-effort-list')
+    list.hidden = !list.hidden
+    pop.querySelector('.mr-chev')?.classList.toggle('open', !list.hidden)
+  })
+  pop.querySelectorAll('[data-effort]').forEach((b) => b.addEventListener('click', (e) => {
+    e.stopPropagation()
+    state.reasoningEffort = b.dataset.effort
+    pop.remove()
+    renderView()
+  }))
+}
+
 function toggleDeepThink() {
   if (state.chatBusy) return
   state.deepThink = !state.deepThink
@@ -3105,8 +3286,7 @@ function toggleDeepThink() {
 }
 
 function openReasoningMenu(anchor) {
-  document.querySelectorAll('.reason-pop').forEach((p) => p.remove())
-  if (window.__reasonPop) { window.__reasonPop.remove(); window.__reasonPop = null; return }
+  if (!beginPopover(anchor)) { window.__reasonPop = null; return }
   const pop = document.createElement('div')
   pop.className = 'plus-pop reason-pop'
   pop.style.width = '236px'
@@ -3118,6 +3298,7 @@ function openReasoningMenu(anchor) {
     </button>`).join('')
   document.body.appendChild(pop)
   window.__reasonPop = pop
+  finishPopover(pop, anchor, () => { if (window.__reasonPop === pop) window.__reasonPop = null })
   const r = anchor.getBoundingClientRect()
   pop.style.left = `${Math.round(Math.min(window.innerWidth - 248, Math.max(12, r.left)))}px`
   pop.style.top = `${Math.round(Math.max(12, r.top - pop.offsetHeight - 8))}px`
@@ -3161,6 +3342,7 @@ function openSlashMenu(anchor, query = '') {
       <span class="pp-label">${c.label}</span>
       <span class="pp-desc">${c.desc}</span>
     </button>`).join('')
+  finishPopover(pop, anchor, () => { if (window.__slashPop === pop) window.__slashPop = null })
   const r = anchor.getBoundingClientRect()
   pop.style.left = `${Math.round(Math.min(window.innerWidth - 276, Math.max(12, r.left)))}px`
   pop.style.top = `${Math.round(Math.max(12, r.top - pop.offsetHeight - 8))}px`
@@ -3209,6 +3391,7 @@ function openMentionMenu(input, items, token, start, end) {
     </button>`).join('')
   document.body.appendChild(pop)
   window.__mentionPop = pop
+  finishPopover(pop, input, () => { if (window.__mentionPop === pop) window.__mentionPop = null })
   const r = input.getBoundingClientRect()
   pop.style.left = `${Math.round(Math.max(12, Math.min(window.innerWidth - pop.offsetWidth - 12, r.left)))}px`
   pop.style.top = `${Math.round(Math.max(8, r.top - pop.offsetHeight - 8))}px`
@@ -3538,9 +3721,7 @@ function taskModeControl() {
 }
 
 function openTaskModeMenu(anchor) {
-  document.querySelectorAll('.mode-pop').forEach((p) => p.remove())
-  document.querySelectorAll('.policy-pop').forEach((p) => p.remove())
-  if (window.__modePop) { window.__modePop.remove(); window.__modePop = null; return }
+  if (!beginPopover(anchor)) { window.__modePop = null; return }
   const pop = document.createElement('div')
   pop.className = 'plus-pop mode-pop'
   pop.style.width = '260px'
@@ -3555,6 +3736,7 @@ function openTaskModeMenu(anchor) {
     </button>`).join('')
   document.body.appendChild(pop)
   window.__modePop = pop
+  finishPopover(pop, anchor, () => { if (window.__modePop === pop) window.__modePop = null })
   const r = anchor.getBoundingClientRect()
   pop.style.left = `${Math.round(Math.min(window.innerWidth - 272, Math.max(12, r.left)))}px`
   pop.style.top = `${Math.round(Math.max(12, r.top - pop.offsetHeight - 8))}px`
@@ -3612,9 +3794,7 @@ function toolLabel(name) {
 
 /** 点击胶囊后弹出的审批菜单；选择前不会产生任何副作用。 */
 function openApprovalMenu(anchor) {
-  if (window.__approvalPop) { window.__approvalPop.remove(); window.__approvalPop = null; return }
-  document.querySelectorAll('.approval-pop').forEach((p) => p.remove())
-  document.querySelectorAll('.policy-pop').forEach((p) => p.remove())
+  if (!beginPopover(anchor)) { window.__approvalPop = null; return }
   const p = state.pendingInteraction
   if (!p || p.kind !== 'approval') return
   const riskText = { low: '低', medium: '中', high: '高' }[p.risk] || p.risk
@@ -3667,6 +3847,7 @@ function openApprovalMenu(anchor) {
     </button>`
   document.body.appendChild(pop)
   window.__approvalPop = pop
+  finishPopover(pop, anchor, () => { if (window.__approvalPop === pop) window.__approvalPop = null })
   const r = anchor.getBoundingClientRect()
   pop.style.left = `${Math.round(Math.min(window.innerWidth - 372, Math.max(12, r.left - 8)))}px`
   pop.style.top = `${Math.round(Math.max(12, r.top - pop.offsetHeight - 8))}px`
@@ -3684,9 +3865,7 @@ function openApprovalMenu(anchor) {
 /** 审批策略菜单，用词与交互参考 Codex：点击后让用户选择，不直接切换。 */
 function openPolicyMenu(anchor) {
   if (state.taskMode === 'chat') { toast('对话模式默认只读；越权操作会先请你逐次确认'); return }
-  document.querySelectorAll('.policy-pop').forEach((p) => p.remove())
-  document.querySelectorAll('.mode-pop').forEach((p) => p.remove())
-  if (window.__policyPop) { window.__policyPop.remove(); window.__policyPop = null; return }
+  if (!beginPopover(anchor)) { window.__policyPop = null; return }
   const pop = document.createElement('div')
   pop.className = 'plus-pop policy-pop'
   pop.style.width = '326px'
@@ -3703,6 +3882,7 @@ function openPolicyMenu(anchor) {
     </button>`).join('')
   document.body.appendChild(pop)
   window.__policyPop = pop
+  finishPopover(pop, anchor, () => { if (window.__policyPop === pop) window.__policyPop = null })
   const r = anchor.getBoundingClientRect()
   pop.style.left = `${Math.round(Math.min(window.innerWidth - 338, Math.max(12, r.left - 8)))}px`
   pop.style.top = `${Math.round(Math.max(12, r.top - pop.offsetHeight - 8))}px`
@@ -3720,10 +3900,12 @@ function openPolicyMenu(anchor) {
 
 /** 统一入口的项目选择：浮层卡片，支持已有项目、新建项目、解除关联。 */
 async function openWorkspacePicker(trigger) {
-  document.querySelectorAll('#wPickerPop').forEach((p) => p.remove())
-  if (document.querySelector('#wPickerPop')) return
   const anchor = trigger?.currentTarget || document.querySelector('#projectContext') || document.querySelector('#chatProjectContext')
+  if (!beginPopover(anchor)) return
+  const seq = (window.__wPickerSeq || 0) + 1
+  window.__wPickerSeq = seq
   const { ok, body } = await api('/api/projects')
+  if (seq !== window.__wPickerSeq) return
   if (!ok) return toast(body.error || '项目加载失败', true)
   state.projects = body.items || state.projects || []
   const projects = (body.items || []).filter((p) => p.cwd && !p.removed)
@@ -3765,6 +3947,7 @@ async function openWorkspacePicker(trigger) {
       </div>
     </div>`
   document.body.appendChild(wrap)
+  finishPopover(wrap, anchor)
   const rect = anchor ? anchor.getBoundingClientRect() : { left: 40, top: 500, bottom: 540 }
   const left = Math.max(12, Math.min(rect.left, window.innerWidth - 432))
   const h = wrap.offsetHeight || 420
@@ -3999,7 +4182,7 @@ async function renderHome(el) {
       <div class="quick-row" style="justify-content:space-between;align-items:center;margin:8px auto 0;width:100%;max-width:820px;box-sizing:border-box">
         <div style="display:flex;gap:6px;align-items:center">${projectContextControl()}</div>
         <div style="display:flex;gap:6px;align-items:center">
-          <button class="hc-lang" id="langBtn" title="推理强度"><span id="langValue">${reasoningLabel(state.reasoningEffort)}</span><span class="ico hc-caret">${icon('chevron')}</span></button>
+          <button class="hc-lang hc-model" id="modelBtn" title="${esc(currentChatModelLabel())} · 推理强度${reasoningLabel(state.reasoningEffort)}"><span class="hc-model-name">${esc(currentChatModelLabel())}</span><span class="hc-model-effort">${reasoningLabel(state.reasoningEffort)}</span><span class="ico hc-caret">${icon('chevron')}</span></button>
           ${taskModeControl()}
         </div>
       </div>
@@ -4019,7 +4202,7 @@ async function renderHome(el) {
   el.querySelector('#taskModeBtn')?.addEventListener('click', (ev) => { ev.stopPropagation(); openTaskModeMenu(ev.currentTarget) })
   el.querySelector('#policyToggle')?.addEventListener('click', (ev) => { ev.stopPropagation(); openPolicyMenu(ev.currentTarget) })
   el.querySelector('#approvalToggle')?.addEventListener('click', (ev) => { ev.stopPropagation(); openApprovalMenu(ev.currentTarget) })
-  el.querySelector('#langBtn')?.addEventListener('click', (ev) => { ev.stopPropagation(); openReasoningMenu(ev.currentTarget) })
+  el.querySelector('#modelBtn')?.addEventListener('click', (ev) => { ev.stopPropagation(); openModelReasoningMenu(ev.currentTarget) })
   el.querySelectorAll('[data-prompt]').forEach((btn) => btn.addEventListener('click', () => {
     state.draft = btn.dataset.prompt
     renderView()
@@ -4648,7 +4831,7 @@ function openProjectForm(onDone) {
 }
 
 function openToolsMenu(anchor) {
-  document.querySelectorAll('.popover').forEach((p) => p.remove())
+  if (!beginPopover(anchor)) return
   const pop = document.createElement('div')
   pop.className = 'popover'
   const { tools, network } = state.boot
@@ -4665,6 +4848,7 @@ function openToolsMenu(anchor) {
     borderRadius: '8px', boxShadow: '0 10px 30px rgba(23,25,28,.12)', padding: '4px', minWidth: '210px',
   })
   document.body.appendChild(pop)
+  finishPopover(pop, anchor)
   const rect = anchor.getBoundingClientRect()
   pop.style.left = `${Math.max(8, Math.min(window.innerWidth - 220, rect.left))}px`
   const ph = pop.offsetHeight
@@ -5084,7 +5268,7 @@ async function renderFormats(el) {
     { id: 'cad', label: 'CAD / DXF', family: '空间数据', read: ['实体', '图层', '范围', 'SVG 预览'], write: ['ASCII DXF 回写'], note: 'DWG 需先转 DXF' },
   ]
   const cards = (items.length ? items : fallback)
-  el.innerHTML = `<div style="max-width:1180px;margin:0 auto;padding:24px">
+  el.innerHTML = `<div style="width:100%;box-sizing:border-box;padding:24px">
     <div style="display:flex;align-items:flex-start;gap:16px;flex-wrap:wrap">
       <div>
         <div style="font-size:24px;font-weight:700">数据格式基座</div>
@@ -5746,6 +5930,8 @@ function ensureSlide() {
     document.body.appendChild(slide)
   }
   slide.classList.add('open')
+  initSlideNativeObserver(slide)
+  syncNativeWithSlide()
   return slide
 }
 
@@ -6338,6 +6524,7 @@ function openPluginSlide(id) {
           state.cloudOpen = true
           if (!paneUp) paneUp = await openAppCloudTab(tab)
           renderCloudPanel()
+          setTimeout(() => collectHistory({ kind: 'app', appId: m.id, url: body.url, title: m.name }), 600)
         }
       } else if (popup && !popup.closed) {
         popup.location.href = body.url
@@ -6774,7 +6961,7 @@ function openNotebookCollectionDialog(nb) {
 }
 
 function openNotebookMore(anchor, nb, scope = 'normal') {
-  closeNotebookMenu()
+  if (!beginPopover(anchor)) return
   const items = scope === 'shared'
     ? [['collection', 'folder', '添加到集合'], ['vote', 'megaphone', '推荐']]
     : [['rename', 'pen', '重命名'], ['pin', 'pin', nb.pinned ? '取消置顶' : '置顶'], ['share', 'users', nb.shared ? '共享设置' : '共享'], ['delete', 'trash', '删除', 'danger'], ['collection', 'folder', '添加到集合']]
@@ -6782,6 +6969,7 @@ function openNotebookMore(anchor, nb, scope = 'normal') {
   pop.className = 'nb-more-pop'
   pop.innerHTML = items.map(([act, ic, label, tone]) => `<button class="nb-more-item ${tone || ''}" data-nbact="${act}">${icon(ic)}<span>${label}</span>${act === 'pin' && nb.pinned ? icon('check') : ''}</button>`).join('')
   document.body.appendChild(pop)
+  finishPopover(pop, anchor, () => anchor.classList.remove('open'))
   anchor.classList.add('open')
   const r = anchor.getBoundingClientRect()
   const w = 184
@@ -7448,7 +7636,8 @@ function selectedImageModel() {
 
 function imageEditModel() {
   const models = Array.isArray(state.boot?.imageGeneration?.models) ? state.boot.imageGeneration.models : []
-  return models.find((model) => model.configured && model.capabilities?.edit) || null
+  const editable = models.filter((model) => model.configured && model.capabilities?.edit)
+  return editable.find((model) => model.id === state.imagegen.modelId) || editable[0] || null
 }
 
 function imagegenReady() {
@@ -7699,7 +7888,7 @@ async function openImageVersions(shot) {
           </div>
         </div>`).join('')}
     </div>
-    <div class="form-note">恢复历史版本会创建一个新的当前版本，原版本记录不会被覆盖；局部选区编辑仍需模型原生 Mask 能力。</div>`, { wide: true })
+    <div class="form-note">恢复历史版本会创建一个新的当前版本，原版本记录不会被覆盖；局部选区编辑只把选区交给当前选中的图像模型重绘，选区外像素保持不变。</div>`, { wide: true })
   const left = mask.querySelector('#igCmpLeft')
   const right = mask.querySelector('#igCmpRight')
   const hint = mask.querySelector('#igCmpHint')
@@ -7844,26 +8033,28 @@ function editImageAsset(shot) {
 }
 
 function openImageMenu(anchor, shot) {
-  closeImageMenu()
+  if (!beginPopover(anchor)) return
   const editModel = imageEditModel()
   const menu = document.createElement('div')
   menu.className = 'img-menu'
   menu.innerHTML = `
     ${editModel ? '<button type="button" data-imenu="edit">编辑</button>' : ''}
     <button type="button" data-imenu="mask">局部选区</button>
+    <button type="button" data-imenu="polygon">多边形选区</button>
     <button type="button" data-imenu="download">下载原图</button>
     <button type="button" data-imenu="copy">复制提示词</button>
     <button type="button" data-imenu="template">申请成为模板</button>
     <button type="button" data-imenu="versions">版本历史对比</button>
     <button type="button" data-imenu="delete" class="danger">删除</button>`
   document.body.appendChild(menu)
+  finishPopover(menu, anchor)
   const rect = anchor.getBoundingClientRect()
   const width = menu.offsetWidth || 148
   const height = menu.offsetHeight || 156
   menu.style.left = `${Math.max(8, Math.min(window.innerWidth - width - 8, rect.right - width))}px`
   menu.style.top = `${Math.max(8, Math.min(window.innerHeight - height - 8, rect.bottom + 4))}px`
   const close = (e) => {
-    if (menu.contains(e.target)) return
+    if (menu.contains(e.target) || anchor.contains(e.target)) return
     menu.remove()
     document.removeEventListener('click', close, true)
     document.removeEventListener('scroll', close, true)
@@ -7878,6 +8069,7 @@ function openImageMenu(anchor, shot) {
     const action = btn.dataset.imenu
     if (action === 'edit') editImageAsset(shot)
     else if (action === 'mask') openImageMaskEditor(shot)
+    else if (action === 'polygon') openImageMaskEditor(shot, { tool: 'polygon' })
     else if (action === 'download') downloadImageAsset(shot)
     else if (action === 'copy') copyImagePrompt(shot)
     else if (action === 'template') openImageTemplateApplication(shot)
@@ -7888,8 +8080,14 @@ function openImageMenu(anchor, shot) {
 
 function openImageMaskEditor(shot, opts = {}) {
   const erase = Boolean(opts.erase)
+  const startPolygon = Boolean(opts.polygon) || (!erase && opts.tool === 'polygon')
+  const editModel = imageEditModel()
+  const modelName = editModel?.label || ''
+  const intro = erase
+    ? '涂抹要移除的物体或文字，白笔为擦除区、未涂抹为保留区。提交后由当前选中的图像模型重绘选区，并创建新版本。'
+    : '涂抹或圈出要修改的区域，白色为编辑区、未选中为保留区。提交后只把选区交给当前选中的图像模型重绘，选区外像素保持不变，并创建新版本。'
   const mask = openModal(erase ? '擦除' : '局部选区编辑', `
-    <div class="form-note">${erase ? '涂抹要移除的物体或文字，白笔为擦除区、未涂抹为保留区。提交后由万相局部重绘用周围画面自然补全，并创建新版本。' : '用画笔涂抹要修改的区域，白色为编辑区、未涂抹为保留区。提交后由万相局部重绘生成新版本，原图保留在版本历史对比中；这不是用提示词模拟的局部编辑。'}</div>
+    <div class="form-note">${intro}${modelName ? `当前使用：${esc(modelName)}。` : ''}选区外像素由服务端按选区合成保留，原图保留在版本历史对比中。</div>
     <div class="img-mask-wrap">
       <div class="img-mask-stage">
         <img id="igMaskImg" src="${shot.url}" alt="">
@@ -7897,12 +8095,15 @@ function openImageMaskEditor(shot, opts = {}) {
       </div>
     </div>
     <div class="img-mask-tools">
-      <button class="btn sm primary" type="button" data-mask-mode="brush">画笔</button>
+      <button class="btn sm ${startPolygon ? '' : 'primary'}" type="button" data-mask-mode="brush">画笔</button>
       <button class="btn sm" type="button" data-mask-mode="eraser">橡皮</button>
+      <button class="btn sm ${startPolygon ? 'primary' : ''}" type="button" data-mask-mode="polygon">多边形</button>
       <label class="img-mask-size">笔刷 <input id="igMaskSize" type="range" min="6" max="72" value="26"></label>
+      <button class="btn sm" type="button" id="igMaskUndo">撤销</button>
       <button class="btn sm" type="button" id="igMaskClear">清除</button>
       <span class="img-mask-state" id="igMaskState">未标记</span>
     </div>
+    <div class="form-note" id="igMaskHint"></div>
     <input class="img-edit-input" id="igMaskPrompt" placeholder="${erase ? '可补充要擦除的对象，例如：移除广告牌和地面上的文字' : '描述选区里要改成什么，例如：把这段外墙改成暖灰色石材'}" value="${erase ? '移除选区内的物体，并用周围背景自然补全，保持光影和材质连续' : ''}">
     <div class="img-edit-err" id="igMaskErr"></div>
     <div class="img-edit-foot">
@@ -7913,16 +8114,80 @@ function openImageMaskEditor(shot, opts = {}) {
   const canvas = mask.querySelector('#igMaskCanvas')
   const size = mask.querySelector('#igMaskSize')
   const stateLabel = mask.querySelector('#igMaskState')
+  const hint = mask.querySelector('#igMaskHint')
   const err = mask.querySelector('#igMaskErr')
   const go = mask.querySelector('#igMaskGo')
   const promptInput = mask.querySelector('#igMaskPrompt')
+  const undoBtn = mask.querySelector('#igMaskUndo')
   let ctx = null
-  let mode = 'brush'
+  let brush = null
+  let brushCtx = null
+  let mode = startPolygon ? 'polygon' : 'brush'
   let drawing = false
   let last = null
-  let hasInk = false
-  const modeButtons = [...mask.querySelectorAll('[data-mask-mode]')]
+  let downAt = null
   let pointerSeen = false
+  let hasInk = false
+  let brushUsed = false
+  const polygons = []
+  let current = []
+  const modeButtons = [...mask.querySelectorAll('[data-mask-mode]')]
+  const hintText = () => (mode === 'polygon'
+    ? '多边形：在图上依次点击落点，点回起点或双击闭合；闭合后可继续画下一块，点“撤销”可退回上一个点。'
+    : mode === 'eraser' ? '橡皮：擦掉已经标出的白色区域。' : '画笔：按住拖动涂抹要修改的区域。')
+  const syncHint = () => { hint.textContent = hintText() }
+  const syncModeButtons = () => {
+    modeButtons.forEach((item) => item.classList.toggle('primary', item.dataset.maskMode === mode))
+    size.disabled = mode === 'polygon'
+    syncHint()
+  }
+  const syncState = () => {
+    stateLabel.textContent = hasInk ? '已标记' : '未标记'
+  }
+  const render = () => {
+    if (!ctx) return
+    ctx.clearRect(0, 0, canvas.width, canvas.height)
+    if (brush) ctx.drawImage(brush, 0, 0)
+    ctx.save()
+    ctx.fillStyle = '#ffffff'
+    ctx.strokeStyle = '#ffffff'
+    ctx.lineWidth = Math.max(2, Number(size.value) * 0.5)
+    polygons.forEach((points) => {
+      ctx.beginPath()
+      points.forEach((point, index) => {
+        if (index === 0) ctx.moveTo(point.x, point.y)
+        else ctx.lineTo(point.x, point.y)
+      })
+      ctx.closePath()
+      ctx.fill()
+    })
+    if (current.length) {
+      ctx.globalAlpha = 0.28
+      ctx.beginPath()
+      current.forEach((point, index) => {
+        if (index === 0) ctx.moveTo(point.x, point.y)
+        else ctx.lineTo(point.x, point.y)
+      })
+      if (current.length >= 3) ctx.closePath()
+      ctx.fill()
+      ctx.globalAlpha = 1
+      ctx.strokeStyle = 'rgba(255,255,255,0.9)'
+      ctx.lineWidth = Math.max(1.5, Number(size.value) * 0.18)
+      ctx.beginPath()
+      current.forEach((point, index) => {
+        if (index === 0) ctx.moveTo(point.x, point.y)
+        else ctx.lineTo(point.x, point.y)
+      })
+      ctx.stroke()
+      ctx.fillStyle = '#ffffff'
+      current.forEach((point, index) => {
+        ctx.beginPath()
+        ctx.arc(point.x, point.y, index === 0 ? 5 : 3, 0, Math.PI * 2)
+        ctx.fill()
+      })
+    }
+    ctx.restore()
+  }
   const setupCanvas = () => {
     const width = Number(img.naturalWidth || 0)
     const height = Number(img.naturalHeight || 0)
@@ -7930,10 +8195,15 @@ function openImageMaskEditor(shot, opts = {}) {
     canvas.width = width
     canvas.height = height
     ctx = canvas.getContext('2d')
-    ctx.clearRect(0, 0, width, height)
+    brush = document.createElement('canvas')
+    brush.width = width
+    brush.height = height
+    brushCtx = brush.getContext('2d')
+    render()
   }
   if (img.complete && img.naturalWidth) setupCanvas()
   else img.addEventListener('load', setupCanvas, { once: true })
+  syncModeButtons()
   const pointOf = (event) => {
     const rect = canvas.getBoundingClientRect()
     return {
@@ -7943,82 +8213,155 @@ function openImageMaskEditor(shot, opts = {}) {
     }
   }
   const paint = (from, to, scale) => {
-    if (!ctx) return
+    if (!brushCtx) return
     const lineWidth = Math.max(2, Number(size.value) * scale)
-    ctx.save()
-    ctx.globalCompositeOperation = mode === 'eraser' ? 'destination-out' : 'source-over'
-    ctx.strokeStyle = '#ffffff'
-    ctx.fillStyle = '#ffffff'
-    ctx.lineWidth = lineWidth
-    ctx.lineCap = 'round'
-    ctx.lineJoin = 'round'
+    brushCtx.save()
+    brushCtx.globalCompositeOperation = mode === 'eraser' ? 'destination-out' : 'source-over'
+    brushCtx.strokeStyle = '#ffffff'
+    brushCtx.fillStyle = '#ffffff'
+    brushCtx.lineWidth = lineWidth
+    brushCtx.lineCap = 'round'
+    brushCtx.lineJoin = 'round'
     if (from) {
-      ctx.beginPath()
-      ctx.moveTo(from.x, from.y)
-      ctx.lineTo(to.x, to.y)
-      ctx.stroke()
+      brushCtx.beginPath()
+      brushCtx.moveTo(from.x, from.y)
+      brushCtx.lineTo(to.x, to.y)
+      brushCtx.stroke()
     } else {
-      ctx.beginPath()
-      ctx.arc(to.x, to.y, lineWidth / 2, 0, Math.PI * 2)
-      ctx.fill()
+      brushCtx.beginPath()
+      brushCtx.arc(to.x, to.y, lineWidth / 2, 0, Math.PI * 2)
+      brushCtx.fill()
     }
-    ctx.restore()
+    brushCtx.restore()
+    brushUsed = true
     hasInk = true
-    stateLabel.textContent = '已标记'
+    syncState()
+    render()
+  }
+  const closePolygon = () => {
+    if (current.length < 3) return
+    polygons.push(current.slice())
+    current = []
+    hasInk = true
+    syncState()
+    render()
+  }
+  const polygonClick = (point) => {
+    const closeRadius = 14 * point.scale
+    if (current.length >= 3) {
+      const first = current[0]
+      if (Math.hypot(point.x - first.x, point.y - first.y) <= closeRadius) {
+        closePolygon()
+        return
+      }
+    }
+    current.push({ x: point.x, y: point.y })
+    render()
   }
   canvas.addEventListener('pointerdown', (event) => {
     if (!ctx) return
     pointerSeen = true
     event.preventDefault()
+    const point = pointOf(event)
+    if (mode === 'polygon') {
+      downAt = point
+      canvas.setPointerCapture?.(event.pointerId)
+      return
+    }
     drawing = true
-    last = pointOf(event)
+    last = point
     canvas.setPointerCapture?.(event.pointerId)
     paint(null, last, last.scale)
   })
   canvas.addEventListener('pointermove', (event) => {
-    if (!drawing || !ctx) return
+    if (mode === 'polygon' || !drawing || !ctx) return
     event.preventDefault()
     const next = pointOf(event)
     paint(last, next, next.scale)
     last = next
   })
   const end = () => { drawing = false; last = null }
-  canvas.addEventListener('pointerup', end)
-  canvas.addEventListener('pointercancel', end)
-  canvas.addEventListener('pointerleave', end)
+  canvas.addEventListener('pointerup', (event) => {
+    if (mode === 'polygon') {
+      if (!ctx || !downAt) return
+      const point = pointOf(event)
+      const moved = Math.hypot(point.x - downAt.x, point.y - downAt.y)
+      downAt = null
+      if (moved <= 6 * point.scale) polygonClick(point)
+      return
+    }
+    end()
+  })
+  canvas.addEventListener('pointercancel', () => { downAt = null; end() })
+  canvas.addEventListener('pointerleave', () => { if (mode !== 'polygon') end() })
   canvas.addEventListener('dragstart', (event) => event.preventDefault())
+  canvas.addEventListener('dblclick', (event) => {
+    if (mode !== 'polygon' || !ctx) return
+    event.preventDefault()
+    closePolygon()
+  })
   canvas.addEventListener('mousedown', (event) => {
     if (pointerSeen || !ctx) return
     event.preventDefault()
+    const point = pointOf(event)
+    if (mode === 'polygon') { downAt = point; return }
     drawing = true
-    last = pointOf(event)
+    last = point
     paint(null, last, last.scale)
   })
   canvas.addEventListener('mousemove', (event) => {
-    if (pointerSeen || !drawing || !ctx) return
+    if (mode === 'polygon' || pointerSeen || !drawing || !ctx) return
     event.preventDefault()
     const next = pointOf(event)
     paint(last, next, next.scale)
     last = next
   })
-  canvas.addEventListener('mouseup', end)
-  canvas.addEventListener('mouseleave', end)
+  canvas.addEventListener('mouseup', (event) => {
+    if (pointerSeen) return
+    if (mode === 'polygon') {
+      if (!ctx || !downAt) return
+      const point = pointOf(event)
+      const moved = Math.hypot(point.x - downAt.x, point.y - downAt.y)
+      downAt = null
+      if (moved <= 6 * point.scale) polygonClick(point)
+      return
+    }
+    end()
+  })
+  canvas.addEventListener('mouseleave', () => { if (mode === 'polygon') { downAt = null; return } end() })
   modeButtons.forEach((btn) => btn.addEventListener('click', () => {
+    if (current.length >= 3) closePolygon()
     mode = btn.dataset.maskMode
-    modeButtons.forEach((item) => item.classList.toggle('primary', item === btn))
+    drawing = false
+    last = null
+    downAt = null
+    syncModeButtons()
+    render()
   }))
+  undoBtn.addEventListener('click', () => {
+    if (current.length) current.pop()
+    else if (polygons.length) polygons.pop()
+    hasInk = brushUsed || polygons.length > 0
+    syncState()
+    render()
+  })
   mask.querySelector('#igMaskClear').addEventListener('click', () => {
     if (!ctx) return
-    ctx.clearRect(0, 0, canvas.width, canvas.height)
+    brushCtx.clearRect(0, 0, brush.width, brush.height)
+    polygons.length = 0
+    current = []
+    brushUsed = false
     hasInk = false
-    stateLabel.textContent = '未标记'
+    syncState()
     err.textContent = ''
+    render()
   })
   mask.querySelector('#igMaskCancel').addEventListener('click', () => mask.remove())
   go.addEventListener('click', async () => {
     err.textContent = ''
     if (!ctx || !canvas.width) return (err.textContent = '图片还没有加载完成')
-    if (!hasInk) return (err.textContent = '请先在图片上涂抹要修改的区域')
+    if (current.length >= 3) closePolygon()
+    if (!hasInk) return (err.textContent = '请先在图片上涂抹或圈出要修改的区域')
     const prompt = String(promptInput.value || '').trim()
     if (!prompt) return (err.textContent = '请描述选区里要改成什么')
     const exportCanvas = document.createElement('canvas')
@@ -8035,7 +8378,7 @@ function openImageMaskEditor(shot, opts = {}) {
       const res = await api('/api/images/mask-edit', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ assetId: shot.id, prompt, maskDataUrl }),
+        body: JSON.stringify({ assetId: shot.id, prompt, maskDataUrl, modelId: editModel?.id || '' }),
       })
       if (!res.ok) throw new Error(res.body?.error || `局部选区编辑失败（HTTP ${res.status}）`)
       const next = imageShotFromAsset(res.body.image)
@@ -8710,6 +9053,7 @@ function bindImageComposer(el, g, selectedModel) {
     plusMenu.hidden = true
     plus.setAttribute('aria-expanded', 'false')
   }
+  bindInlinePopover(plus, plusMenu, closePlus)
   plus?.addEventListener('click', (event) => {
     event.stopPropagation()
     const open = plusMenu.hidden
@@ -9455,7 +9799,44 @@ async function ensureCloud() {
   if (state.cloud && state.cloud.net === state.boot.network?.id) return state.cloud
   const { body } = await api('/api/cloud')
   state.cloud = { ...body, net: state.boot.network?.id }
+  loadBrowserExts().then(pushActiveExts).catch(() => {})
+  initCloudBrowserBridge()
   return state.cloud
+}
+
+async function loadBrowserExts() {
+  const { body } = await api('/api/browser-exts')
+  state.cloudExts = Array.isArray(body.items) ? body.items : []
+  state.cloudExtsCanManage = Boolean(body.canManage)
+  return state.cloudExts
+}
+
+/** 把服务端审核通过且当前用户启用的扩展目录推给浏览器隔离分区加载。 */
+async function pushActiveExts() {
+  if (!window.jgClient?.browser?.loadExtensions) return
+  const { body } = await api('/api/browser-exts/active').catch(() => ({ body: { items: [] } }))
+  const paths = (body.items || []).map((x) => String(x.extPath || '')).filter(Boolean)
+  window.jgClient.browser.loadExtensions(paths)
+}
+
+/* 本人操作历史采集：导航打开后异步上报 URL、标题与访问时正文快照；失败不阻断主流程。 */
+async function collectHistory(entry) {
+  const payload = {
+    kind: entry.kind, appId: entry.appId || '', systemId: entry.systemId || '',
+    url: entry.url || '', title: entry.title || '', snapshotText: '',
+  }
+  try {
+    if (entry.kind === 'app' && window.jgClient?.asApp?.pageText) {
+      const pt = await window.jgClient.asApp.pageText(entry.appId)
+      if (pt?.ok) payload.snapshotText = String(pt.text || '')
+    } else if (entry.kind === 'web' && window.jgClient?.browser?.pageText) {
+      const pt = await window.jgClient.browser.pageText()
+      if (pt?.ok) payload.snapshotText = String(pt.text || '')
+    }
+  } catch { /* 快照抽取失败忽略 */ }
+  try {
+    await api('/api/history/report', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ items: [payload] }) })
+  } catch { /* 历史上报失败忽略，不影响浏览 */ }
 }
 
 async function openCloudWebTab(url, title = '') {
@@ -9486,6 +9867,7 @@ async function openCloudWebTab(url, title = '') {
   applyLayout()
   renderCloudPanel()
   renderTopbar()
+  setTimeout(() => collectHistory({ kind: 'web', url: target, title: name }), 600)
   toast('已在右侧自带浏览器打开')
 }
 
@@ -9529,33 +9911,25 @@ async function endAllCloudSessions() {
 }
 
 function cloudHomeHTML() {
-  const systems = (state.cloud?.systems || [])
   return `
     <div class="cb-addr">
       <div class="cb-navgrp">
-        <button class="cb-nav" title="后退" disabled>${icon('chevron')}</button>
+        <button class="cb-nav cb-back-btn" title="后退" disabled>${icon('back')}</button>
         <span class="cb-nav-sep"></span>
-        <button class="cb-nav cb-nav-fwd" title="前进" disabled>${icon('chevron')}</button>
+        <button class="cb-nav cb-nav-fwd cb-fwd-btn" title="前进" disabled>${icon('arrow')}</button>
       </div>
       <button class="cb-nav cb-reload" id="cbReload" title="刷新">${icon('refresh')}</button>
       <input id="cbAddr" placeholder="搜索或输入网址" autocomplete="off">
       <div class="cb-actgrp">
-        <button class="cb-nav cb-ext-btn" id="cbExt" title="扩展程序尚未接入" disabled style="opacity:.45;cursor:not-allowed"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 5h3v2.5a1.5 1.5 0 1 0 3 0V5h3v4h2.5a1.5 1.5 0 1 0 0 3H18v4h-4v2.5a1.5 1.5 0 1 0-3 0V16H5v-4H7.5a1.5 1.5 0 1 0 0-3H5V5h4z"/></svg><span class="cb-ext-dot">${state.cloudExts?.filter((x) => x.on).length || 0}</span></button>
+        <button class="cb-nav cb-ext-btn" id="cbExt" title="扩展市场"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 5h3v2.5a1.5 1.5 0 1 0 3 0V5h3v4h2.5a1.5 1.5 0 1 0 0 3H18v4h-4v2.5a1.5 1.5 0 1 0-3 0V16H5v-4H7.5a1.5 1.5 0 1 0 0-3H5V5h4z"/></svg><span class="cb-ext-dot">${state.cloudExts?.filter((x) => x.status === 'listed' && x.active).length || 0}</span></button>
         <button class="cb-nav" id="cbDownload" title="下载"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 4v10M8 11l4 4 4-4M5 19h14"/></svg></button>
-        <button class="cb-nav" id="cbMore" title="更多工具尚未接入" disabled style="opacity:.45;cursor:not-allowed"><svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><circle cx="6" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="18" cy="12" r="1.6"/></svg></button>
+        <button class="cb-nav" id="cbMore" title="更多工具"><svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><circle cx="6" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="18" cy="12" r="1.6"/></svg></button>
       </div>
     </div>
     <div class="cb-h">工具</div>
     <div class="cb-tool-row">
       <button class="cb-tool" id="cbToolFile">${icon('folder')}<span>文件</span><em>Ctrl+P</em></button>
       <button class="cb-tool" id="cbToolMore">${icon('grid')}<span>更多工具…</span><em>⌄</em></button>
-    </div>
-    <div class="cb-h">推荐</div>
-    <div class="cb-rec-row">
-      <button class="cb-rec" data-open="CB-2"><span class="cb-rec-ico">${icon('globe')}</span><b>公共资源交易</b></button>
-      <button class="cb-rec" data-open="CB-1"><span class="cb-rec-ico">${icon('globe')}</span><b>四库一平台</b></button>
-      <button class="cb-rec" data-open="CB-5"><span class="cb-rec-ico">${icon('doc')}</span><b>集团 OA</b></button>
-      <button class="cb-rec" data-open="CB-3"><span class="cb-rec-ico">${icon('map')}</span><b>自然资源平台</b></button>
     </div>
     <div class="cb-sec-row">
       ${(state.cloud?.policy || []).slice(0, 4).map((p) => `<span class="cb-sec">${esc(p.title)}</span>`).join('')}
@@ -9602,7 +9976,7 @@ function cloudWebHTML(tab) {
     <div class="cb-frame" style="padding:0;display:flex;flex-direction:column;height:100%;min-height:0">
       <div class="cb-frame-bar">
         <span class="cb-dots"><i></i><i></i><i></i></span>
-        <span class="mono cb-frame-url" title="${esc(tab.url)}">${esc(tab.url.replace(/^https?:\/\//, ''))}</span>
+        <input id="cbWebAddr" class="cb-web-addr" value="${esc(tab.url)}" placeholder="输入网址或搜索关键词" autocomplete="off" title="${esc(tab.url)}">
         <span class="spacer"></span>
         <span class="tag ok">网页</span>
         <button class="btn sm subtle" data-web-reload title="刷新">刷新</button>
@@ -9629,6 +10003,7 @@ function cloudAppHTML(tab) {
         <span class="mono cb-frame-url" title="${esc(tab.url || '')}">${esc(originOf(tab.url) || '应用进程')}</span>
         <span class="spacer"></span>
         <span class="tag${status === 'ready' || status === 'running' ? ' ok' : status === 'failed' || status === 'crashed' || status === 'expired' ? ' warn' : ''}">${statusLabel}</span>
+        <button class="btn sm subtle" data-cb-app-data="${esc(tab.id)}" data-cb-app-name="${esc(tab.title || '')}" title="查看本人应用生产数据（只读）">应用数据</button>
         <button class="btn sm subtle" data-cb-app-stop="${esc(tab.id)}" ${!tab.url ? 'disabled' : ''}>停止应用</button>
         <button class="btn sm subtle" data-cb-app-external="${esc(tab.url || '')}" ${!tab.url ? 'disabled' : ''}>外部打开</button>
       </div>
@@ -9718,6 +10093,7 @@ function renderCloudPanel() {
     }
     const tab = state.cloudTabs.find((t) => t.id === b.dataset.x)
     if (tab?.kind === 'session') await api('/api/cloud/close', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: tab.id }) })
+    else if (tab?.kind === 'web') window.jgClient?.browser?.close?.()
     state.cloudTabs = state.cloudTabs.filter((t) => t.id !== b.dataset.x)
     if (state.cloudTab === b.dataset.x) state.cloudTab = state.cloudTabs[0]?.id || 'new'
     if (!state.cloudTabs.length) state.cloudTabs = [{ id: 'new', kind: 'new', title: '新标签页' }]
@@ -9737,7 +10113,7 @@ function renderCloudPanel() {
     renderCloudPanel()
   })
   panel.querySelector('#cbFold').addEventListener('click', () => toggleCloudPanel(false))
-  panel.querySelector('#cbExt')?.addEventListener('click', (ev) => { ev.stopPropagation(); openCloudExtensions(ev.currentTarget) })
+  panel.querySelector('#cbExt')?.addEventListener('click', (ev) => { ev.stopPropagation(); loadBrowserExts().catch(() => {}).then(() => openCloudExtensions(ev.currentTarget)) })
   panel.querySelector('#cbDownload')?.addEventListener('click', () => openCloudDownloads())
   panel.querySelector('#cbMore')?.addEventListener('click', (ev) => { ev.stopPropagation(); openCloudMore(ev.currentTarget) })
   const cbc = panel.querySelector('#cbcInput')
@@ -9750,10 +10126,18 @@ function renderCloudPanel() {
 
   panel.querySelectorAll('[data-open]').forEach((b) => b.addEventListener('click', () => openCloudTab(b.dataset.open)))
   panel.querySelector('#cbAddr')?.addEventListener('keydown', (e) => { if (e.key === 'Enter') submitCloudAddr(panel) })
-  panel.querySelector('#cbReload')?.addEventListener('click', () => { renderCloudPanel(); toast('已刷新云浏览器视图（会话仍托管在企业侧）') })
+  panel.querySelector('#cbBack')?.addEventListener('click', () => window.jgClient?.browser?.goBack?.())
+  panel.querySelector('#cbFwd')?.addEventListener('click', () => window.jgClient?.browser?.goForward?.())
+  panel.querySelector('#cbReload')?.addEventListener('click', () => {
+    if (window.jgClient?.browser?.reload) window.jgClient.browser.reload()
+    else renderCloudPanel()
+  })
   panel.querySelector('[data-web-reload]')?.addEventListener('click', () => {
     if (window.jgClient?.browser) window.jgClient.browser.reload()
     else renderCloudPanel()
+  })
+  panel.querySelector('#cbWebAddr')?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); submitWebAddr(e.currentTarget) }
   })
   panel.querySelector('[data-web-external]')?.addEventListener('click', (e) => {
     const url = e.currentTarget.dataset.webExternal
@@ -9762,6 +10146,9 @@ function renderCloudPanel() {
   })
   panel.querySelectorAll('[data-cb-app-stop]').forEach((btn) => {
     btn.addEventListener('click', () => stopAsApp(btn.dataset.cbAppStop))
+  })
+  panel.querySelectorAll('[data-cb-app-data]').forEach((btn) => {
+    btn.addEventListener('click', () => openAppData(btn.dataset.cbAppData, btn.dataset.cbAppName))
   })
   panel.querySelector('[data-cb-app-external]')?.addEventListener('click', (e) => {
     const url = e.currentTarget.dataset.cbAppExternal
@@ -9908,6 +10295,37 @@ function hideNativeApp() {
   window.jgClient?.asApp?.hide()
 }
 
+/* 详情抽屉是渲染进程里的 fixed 覆盖层；Electron 的应用视图（WebContentsView）
+   层级始终高于 HTML。抽屉打开时若已嵌入的上一个应用视图仍可见，会盖住抽屉正文，
+   只露出标题条，表现为“第二个应用标题错位飘在顶部、右侧仍是上一个应用页面”。
+   因此抽屉打开期间隐藏原生应用视图；抽屉关闭后由云浏览器面板按当前标签恢复。 */
+var __syncingSlideNative = false
+function syncNativeWithSlide() {
+  if (__syncingSlideNative) return
+  const drawerOpen = Boolean(document.getElementById('slide')?.classList.contains('open'))
+  if (drawerOpen) {
+    /* 网页视图与应用视图都是置顶的原生视图，抽屉打开期间一并隐藏，避免遮挡正文。 */
+    closeNativeWeb()
+    hideNativeApp()
+    return
+  }
+  __syncingSlideNative = true
+  try {
+    if (state.cloudOpen && cloudAllowed()) renderCloudPanel()
+    else hideNativeApp()
+  } finally {
+    __syncingSlideNative = false
+  }
+}
+
+function initSlideNativeObserver(slide) {
+  if (window.__slideNativeObserverBound) return
+  window.__slideNativeObserverBound = true
+  if (!window.MutationObserver) { syncNativeWithSlide(); return }
+  const observer = new MutationObserver(() => syncNativeWithSlide())
+  observer.observe(slide, { attributes: true, attributeFilter: ['class'] })
+}
+
 window.addEventListener('resize', () => {
   if (asPaneAppId) sendCloudAppBounds(asPaneAppId)
 })
@@ -9944,7 +10362,7 @@ function syncNativeBrowser(active) {
   }
   hideNativeApp()
   if (!bridge) return
-  if (!active || active.kind !== 'web') return closeNativeWeb()
+  if (!active || active.kind !== 'web' || !active.url) return closeNativeWeb()
   if (nativeWebUrl !== active.url) {
     nativeWebUrl = active.url
     bridge.open(active.url)
@@ -10114,6 +10532,10 @@ function initAsTabBridge() {
     if (!tab) return
     if (event.url) tab.url = String(event.url)
     if (event.status) tab.status = String(event.status)
+    // 应用视图加载完成后二次采集快照，与网页侧对齐；后端按账号+类型+URL 幂等覆盖。
+    if (event.status === 'ready' && event.url) {
+      collectHistory({ kind: 'app', appId: event.appId, url: String(event.url), title: tab.title || event.title || '' })
+    }
     renderAsTabs()
     if (state.cloudOpen) renderCloudPanel()
   })
@@ -10166,6 +10588,21 @@ document.getElementById('asPaneStop')?.addEventListener('click', () => stopAsApp
 
 var cloudDownloads = []
 var cloudDownloadsBound = false
+var cloudNav = { canGoBack: false, canGoForward: false, error: null }
+var cloudZoom = (() => {
+  const f = Number(localStorage.getItem('jg-cloud-zoom'))
+  return Number.isFinite(f) ? Math.max(0.5, Math.min(2, Math.round(f * 10) / 10)) : 1
+})()
+var zoomRestored = false
+var cloudViewport = 'desktop'
+
+function syncCloudNavButtons() {
+  const back = document.getElementById('cbBack')
+  const fwd = document.getElementById('cbFwd')
+  if (back) back.disabled = !cloudNav.canGoBack
+  if (fwd) fwd.disabled = !cloudNav.canGoForward
+}
+
 function initCloudBrowserBridge() {
   const bridge = window.jgClient?.browser
   if (!bridge || cloudDownloadsBound) return
@@ -10181,6 +10618,46 @@ function initCloudBrowserBridge() {
     })
   }
   bridge.downloads?.().then((res) => { if (res?.items?.length) cloudDownloads = res.items }).catch(() => {})
+  if (typeof bridge.onNavState === 'function') {
+    bridge.onNavState((nav) => {
+      cloudNav.canGoBack = !!nav.canGoBack
+      cloudNav.canGoForward = !!nav.canGoForward
+      cloudNav.error = null
+      if (!zoomRestored && cloudZoom !== 1 && typeof bridge.setZoom === 'function') { bridge.setZoom(cloudZoom); zoomRestored = true }
+      const tab = (state.cloudTabs || []).find((t) => t.id === state.cloudTab && t.kind === 'web')
+      if (tab) {
+        if (nav.url) tab.url = nav.url
+        if (nav.title) tab.title = String(nav.title).slice(0, 48)
+        // 导航完成后二次采集：刷新、站内跳转、后退/前进都覆盖更新快照；后端按账号+类型+URL 幂等去重。
+        if (nav.url) collectHistory({ kind: 'web', url: nav.url, title: tab.title || '' })
+      }
+      syncCloudNavButtons()
+      const slot = document.getElementById('cbWebSlot')
+      slot?.querySelector('.cb-web-status')?.remove()
+      if (tab) renderCloudPanel()
+    })
+  }
+  if (typeof bridge.onNavError === 'function') {
+    bridge.onNavError((err) => {
+      cloudNav.error = err || null
+      const slot = document.getElementById('cbWebSlot')
+      if (!slot) return
+      let box = slot.querySelector('.cb-web-status')
+      if (!box) { box = document.createElement('div'); box.className = 'cb-web-status'; slot.appendChild(box) }
+      box.innerHTML = `<div class="cb-web-err">页面加载失败${err?.description ? `：${esc(err.description)}` : ''}</div><button class="btn sm" id="cbWebRetry">重试</button>`
+      box.querySelector('#cbWebRetry')?.addEventListener('click', () => {
+        cloudNav.error = null
+        box.remove()
+        window.jgClient?.browser?.reload?.()
+      })
+    })
+  }
+  if (typeof bridge.onFindResult === 'function') {
+    bridge.onFindResult((res) => {
+      const count = document.getElementById('cbFindCount')
+      if (count) count.textContent = res?.matchCount ? `${res.activeMatchOrdinal}/${res.matchCount}` : ''
+    })
+  }
 }
 
 function cloudDownloadRows(items) {
@@ -10257,26 +10734,23 @@ async function handoffWebPageToAI() {
 
 
 function openCloudMore(anchor) {
-  document.querySelectorAll('.cb-more-pop').forEach((p) => p.remove())
+  if (!beginPopover(anchor)) return
   const pop = document.createElement('div')
   pop.className = 'cb-more-pop'
   pop.innerHTML = `
+    <div class="cbm-zoom"><span>缩放</span><span class="cbm-scale"><i data-zoom="out">−</i><b id="cbmZoomVal">${Math.round(cloudZoom * 100)}%</b><i data-zoom="in">+</i></span><span class="cbm-reset" data-zoom="reset" title="重置缩放">${icon('refresh')}</span></div>
+    <div class="cbm-sep"></div>
     <button class="cbm-item" data-cbm="find">在页面中查找</button>
-    <button class="cbm-item" data-cbm="print">打印</button>
+    <button class="cbm-item" data-cbm="print">打印页面</button>
+    <button class="cbm-item" data-cbm="shot">截取屏幕截图</button>
+    <button class="cbm-item" data-cbm="viewport">${cloudViewport === 'mobile' ? '切换为桌面视口' : '切换为移动视口'}</button>
     <div class="cbm-sep"></div>
-    <div class="cbm-zoom"><span>缩放</span><span class="cbm-scale"><i>−</i><b>100%</b><i>+</i></span><span class="cbm-reset">${icon('refresh')}</span></div>
-    <div class="cbm-sep"></div>
-    <button class="cbm-item" data-cbm="device">设备工具栏<span class="cbm-arrow">›</span></button>
-    <button class="cbm-item cbm-off" disabled>截取屏幕截图</button>
-    <div class="cbm-sep"></div>
-    <button class="cbm-item" data-cbm="cookie">导入 Cookie 和密码…</button>
-    <button class="cbm-item" data-cbm="password">密码和自动填充<span class="cbm-arrow">›</span></button>
-    <button class="cbm-item" data-cbm="download">下载</button>
     <button class="cbm-item" data-cbm="history">历史记录</button>
+    <button class="cbm-item" data-cbm="download">下载与文件</button>
     <button class="cbm-item" data-cbm="clear">清除浏览数据</button>
-    <div class="cbm-sep"></div>
-    <button class="cbm-item" data-cbm="settings">浏览器设置</button>`
+    <button class="cbm-item" data-cbm="secure">凭据与 Cookie 说明</button>`
   document.body.appendChild(pop)
+  finishPopover(pop, anchor)
   const r = anchor.getBoundingClientRect()
   const w = 236
   pop.style.left = Math.max(8, Math.min(window.innerWidth - w - 8, r.right - w)) + 'px'
@@ -10284,74 +10758,308 @@ function openCloudMore(anchor) {
   pop.style.top = Math.round(Math.max(8, Math.min(window.innerHeight - h - 8, r.bottom + 6))) + 'px'
   const close = () => pop.remove()
   setTimeout(() => document.addEventListener('click', close, { once: true }), 0)
+  const applyZoom = (next) => {
+    cloudZoom = Math.max(0.5, Math.min(2, Math.round(next * 10) / 10))
+    try { localStorage.setItem('jg-cloud-zoom', String(cloudZoom)) } catch (_) {}
+    if (window.jgClient?.browser?.setZoom) window.jgClient.browser.setZoom(cloudZoom)
+    const val = pop.querySelector('#cbmZoomVal')
+    if (val) val.textContent = Math.round(cloudZoom * 100) + '%'
+  }
+  pop.querySelectorAll('[data-zoom]').forEach((b) => b.addEventListener('click', (e) => {
+    e.stopPropagation()
+    const k = b.dataset.zoom
+    if (k === 'in') applyZoom(cloudZoom + 0.1)
+    else if (k === 'out') applyZoom(cloudZoom - 0.1)
+    else applyZoom(1)
+  }))
   pop.querySelectorAll('[data-cbm]').forEach((b) => b.addEventListener('click', (e) => {
     e.stopPropagation()
+    const k = b.dataset.cbm
     pop.remove()
-    const map = {
-      find: '页面内查找仅对当前会话画面生效（演示）',
-      print: '打印走企业打印策略，需审批后执行（演示）',
-      device: '设备工具栏用于切换移动端视口（演示）',
-      cookie: '导入 Cookie 与密码需凭据库授权，客户端不落盘（演示）',
-      password: '自动填充由企业凭据库注入，明文不出服务端（演示）',
-      download: '下载记录进审计，敏感文件按数据分级管控（演示）',
-      history: '云会话历史仅保留在企业侧，客户端可查询（演示）',
-      clear: '清除浏览数据会同时清理容器侧缓存（演示）',
-      settings: '浏览器设置由管理员统一下发，个人不可改（演示）',
-    }
-    toast(map[b.dataset.cbm] || '演示操作')
+    if (k === 'history') openCloudHistory()
+    else if (k === 'download') openCloudDownloads()
+    else if (k === 'find') openCloudFindBar()
+    else if (k === 'print') {
+      if (window.jgClient?.browser?.print) window.jgClient.browser.print()
+      else toast('当前环境不支持打印', true)
+    } else if (k === 'shot') takeCloudScreenshot()
+    else if (k === 'viewport') {
+      cloudViewport = cloudViewport === 'mobile' ? 'desktop' : 'mobile'
+      window.jgClient?.browser?.viewport?.(cloudViewport)
+      toast(cloudViewport === 'mobile' ? '已切换移动视口（UA 模拟）' : '已切换桌面视口')
+    } else if (k === 'clear') confirmClearCloudData()
+    else if (k === 'secure') openCloudSecureNote()
   }))
 }
 
-function openCloudExtensions(anchor) {
-  document.querySelectorAll('.cb-ext-pop').forEach((p) => p.remove())
-  const exts = state.cloudExts || []
-  const pop = document.createElement('div')
-  pop.className = 'cb-ext-pop'
-  const rows = () => exts.map((x) => `
-    <div class="ce-row">
-      <span class="ce-ico">${icon('grid')}</span>
-      <div class="ce-meta"><b>${esc(x.name)}</b><span>${esc(x.desc)}</span></div>
-      <button class="ce-toggle${x.on ? ' on' : ''}" data-ext-toggle="${x.id}" title="${x.on ? '停用' : '启用'}"><i></i></button>
-    </div>`).join('')
-  pop.innerHTML = `
-    <div class="ce-head"><b>扩展程序</b><span class="ce-count">${exts.filter((x) => x.on).length} 个已启用</span></div>
-    <div class="ce-list">${rows()}</div>
-    <div class="ce-note">扩展运行在隔离容器内，安装与启用需管理员白名单审批。</div>
-    <div class="ce-foot">
-      <button class="ce-btn" data-ext-install>${icon('plus')}从商店安装</button>
-      <button class="ce-btn" data-ext-dev>加载已解压扩展</button>
-    </div>`
-  document.body.appendChild(pop)
-  const r = anchor.getBoundingClientRect()
-  pop.style.left = Math.max(8, Math.min(window.innerWidth - 308, r.left - 250)) + 'px'
-  const h = pop.offsetHeight
-  pop.style.top = Math.round(Math.max(8, Math.min(window.innerHeight - h - 8, r.bottom + 8))) + 'px'
-  const refresh = () => {
-    pop.querySelector('.ce-list').innerHTML = rows()
-    pop.querySelector('.ce-count').textContent = `${exts.filter((x) => x.on).length} 个已启用`
-    const dot = document.getElementById('cbExt')?.querySelector('.cb-ext-dot')
-    if (dot) dot.textContent = String(exts.filter((x) => x.on).length)
-    bindToggles()
+async function takeCloudScreenshot() {
+  const bridge = window.jgClient?.browser
+  if (!bridge?.screenshot) return toast('当前环境不支持截图', true)
+  const res = await bridge.screenshot().catch(() => null)
+  if (res?.ok) { toast('截图已保存到下载目录'); openCloudDownloads() }
+  else toast(res?.error || '截图失败', true)
+}
+
+function confirmClearCloudData() {
+  const mask = openModal('清除浏览数据', `
+    <div class="notice">将清除当前浏览器分区的缓存、Cookie、localStorage 与站点数据；已登录的网页会话需要重新登录。此操作不影响中枢账号与应用生产数据。</div>
+    <div class="form-foot" style="margin-top:14px"><span class="spacer"></span><button class="btn" data-mclose>取消</button><button class="btn primary" id="ccClear">确认清除</button></div>`, {})
+  mask.querySelector('#ccClear')?.addEventListener('click', async () => {
+    const bridge = window.jgClient?.browser
+    if (!bridge?.clearData) { mask.remove(); return toast('当前环境不支持清除数据', true) }
+    const res = await bridge.clearData().catch(() => null)
+    mask.remove()
+    if (res?.ok) toast('浏览数据已清除')
+    else toast(res?.error || '清除失败', true)
+  })
+}
+
+function openCloudSecureNote() {
+  openModal('凭据与 Cookie 说明', `
+    <div class="mc-block" style="padding:12px">
+      <div style="font-weight:600;margin-bottom:8px">凭据与站点 Cookie 的处理边界</div>
+      <div class="mc-dim" style="line-height:1.7">
+        企业系统登录凭据由服务端凭据库统一注入，客户端不落盘、不可查看，也不提供 Cookie / 密码导入入口。<br>
+        浏览器分区内的站点 Cookie 仅用于维持当前会话，可通过“清除浏览数据”一并清空；中枢 AI 不读取 Cookie、localStorage 或输入框内容。
+      </div>
+    </div>`, {})
+}
+
+function closeFindBar() {
+  const slot = document.getElementById('cbWebSlot')
+  const bar = slot?.querySelector('.cb-find-bar')
+  if (bar) { bar.remove(); window.jgClient?.browser?.findStop?.() }
+}
+
+function openCloudFindBar() {
+  const slot = document.getElementById('cbWebSlot')
+  if (!slot) return toast('请先打开一个网页标签', true)
+  let bar = slot.querySelector('.cb-find-bar')
+  if (!bar) {
+    bar = document.createElement('div')
+    bar.className = 'cb-find-bar'
+    bar.innerHTML = `
+      <input id="cbFindInput" placeholder="查找页面内容" autocomplete="off">
+      <span class="cb-find-count" id="cbFindCount"></span>
+      <button class="btn sm" id="cbFindPrev" title="上一个">↑</button>
+      <button class="btn sm" id="cbFindNext" title="下一个">↓</button>
+      <button class="btn sm subtle" id="cbFindClose" title="关闭">×</button>`
+    slot.appendChild(bar)
+    const input = bar.querySelector('#cbFindInput')
+    const find = (forward) => { const q = input.value.trim(); if (q) window.jgClient?.browser?.find?.(q, forward) }
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); find(!e.shiftKey) }
+      if (e.key === 'Escape') closeFindBar()
+    })
+    bar.querySelector('#cbFindNext').addEventListener('click', () => find(true))
+    bar.querySelector('#cbFindPrev').addEventListener('click', () => find(false))
+    bar.querySelector('#cbFindClose').addEventListener('click', closeFindBar)
+    input.focus()
+  } else {
+    bar.querySelector('#cbFindInput').focus()
   }
-  const bindToggles = () => {
-    pop.querySelectorAll('[data-ext-toggle]').forEach((btn) => btn.addEventListener('click', (e) => {
-      e.stopPropagation()
-      const ext = exts.find((x) => x.id === btn.dataset.extToggle)
-      if (!ext) return
-      ext.on = !ext.on
-      toast(`${ext.on ? '已启用' : '已停用'}扩展「${ext.name}」`)
-      refresh()
+}
+
+const HIST_KIND_LABEL = { web: '网页', app: '应用', session: '系统会话' }
+
+function histUrlDisplay(url) {
+  try { const u = new URL(String(url || '')); return u.host + (u.pathname === '/' ? '' : u.pathname) } catch { return String(url || '') }
+}
+
+function histTime(ts) {
+  const d = new Date(Number(ts) || 0)
+  if (!Number(ts)) return ''
+  const p = (n) => String(n).padStart(2, '0')
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+}
+
+async function openCloudHistory() {
+  const m = openModal('本人浏览历史', `
+    <div class="form-note">仅展示你本人访问过的网页、应用与系统会话；按账号隔离，管理员也无法跨账号查看。</div>
+    <div class="cb-hist-tool">
+      <input id="cbHistQ" placeholder="检索标题、网址或页面内容" autocomplete="off">
+      <button class="btn sm" id="cbHistClear">清除历史</button>
+    </div>
+    <div id="cbHistList" class="cb-hist-list"><div class="mc-row">加载中…</div></div>`, { wide: true })
+  const list = m.querySelector('#cbHistList')
+  const q = m.querySelector('#cbHistQ')
+  let items = []
+  const render = () => {
+    const needle = q.value.trim().toLowerCase()
+    const shown = needle
+      ? items.filter((x) => [x.title, x.url, x.snapshotText].join(' ').toLowerCase().includes(needle))
+      : items
+    list.innerHTML = shown.length ? shown.map((x) => `
+      <div class="cb-hist-item">
+        <div class="cb-hist-top">
+          <span class="cb-hist-kind">${HIST_KIND_LABEL[x.kind] || '记录'}</span>
+          <b>${esc(x.title || histUrlDisplay(x.url) || '未命名')}</b>
+          <span class="spacer"></span>
+          <span class="cb-hist-time">${histTime(x.createdAt)}</span>
+        </div>
+        ${x.url ? `<div class="cb-hist-url">${esc(histUrlDisplay(x.url))}</div>` : ''}
+        ${x.snapshotText ? `<div class="cb-hist-snap">${esc(x.snapshotText.slice(0, 120))}</div>` : ''}
+      </div>`).join('') : '<div class="mc-row">暂无历史记录</div>'
+  }
+  const load = async () => {
+    const { body } = await api('/api/history?limit=50').catch(() => ({ body: { items: [] } }))
+    items = Array.isArray(body.items) ? body.items : []
+    render()
+  }
+  q.addEventListener('input', render)
+  const clearBtn = m.querySelector('#cbHistClear')
+  clearBtn.addEventListener('click', async () => {
+    if (clearBtn.dataset.armed !== '1') {
+      clearBtn.dataset.armed = '1'
+      clearBtn.textContent = '确认清除？'
+      setTimeout(() => { clearBtn.dataset.armed = ''; clearBtn.textContent = '清除历史' }, 3000)
+      return
+    }
+    await api('/api/history', { method: 'DELETE' }).catch(() => {})
+    items = []
+    render()
+    clearBtn.dataset.armed = ''
+    clearBtn.textContent = '清除历史'
+    toast('本人浏览历史已清除')
+  })
+  load()
+}
+
+async function openAppData(appId, appName) {
+  const m = openModal(`应用生产数据 · ${appName || appId}`, `
+    <div class="form-note">只读浏览当前账号在该应用下的数据目录；不跨应用、不跨用户，界面不提供写入或删除操作。</div>
+    <div class="ad-tool">
+      <span class="ad-path" id="adPath">根目录</span>
+      <span class="spacer"></span>
+      <button class="btn sm subtle" id="adRefresh">刷新</button>
+    </div>
+    <div class="ad-body">
+      <div id="adFiles" class="ad-files"><div class="mc-row">加载中…</div></div>
+      <pre id="adContent" class="ad-content" hidden></pre>
+    </div>`, { wide: true })
+  const filesEl = m.querySelector('#adFiles')
+  const contentEl = m.querySelector('#adContent')
+  const pathEl = m.querySelector('#adPath')
+  let currentPath = ''
+  const fmtSize = (n) => (n > 1024 ? `${(n / 1024).toFixed(1)} KB` : `${n} B`)
+  const load = async (path = '') => {
+    currentPath = path
+    pathEl.textContent = path || '根目录'
+    contentEl.hidden = true
+    const { body } = await api(`/api/app-data?appId=${encodeURIComponent(appId)}${path ? `&path=${encodeURIComponent(path)}` : ''}`).catch(() => ({ body: { files: [] } }))
+    const files = Array.isArray(body.files) ? body.files : []
+    filesEl.innerHTML = files.length ? files.map((f) => `
+      <button class="ad-file${f.isDir ? ' dir' : ''}" data-path="${esc(f.path)}" data-dir="${f.isDir ? 1 : 0}">
+        <span class="ad-file-ico"></span>
+        <span class="ad-file-name">${esc(f.path)}</span>
+        <span class="ad-file-size">${f.isDir ? '目录' : fmtSize(f.size || 0)}</span>
+      </button>`).join('') : '<div class="mc-row">暂无数据文件</div>'
+    filesEl.querySelectorAll('[data-path]').forEach((b) => b.addEventListener('click', async () => {
+      if (b.dataset.dir === '1') { toast('当前仅展示数据目录第一层', true); return }
+      const r = await api(`/api/app-data?appId=${encodeURIComponent(appId)}&path=${encodeURIComponent(b.dataset.path)}`).catch(() => null)
+      if (!r) { toast('读取失败', true); return }
+      if (r.body.content == null) { toast(r.body.error || '该文件不可读', true); return }
+      pathEl.textContent = b.dataset.path
+      contentEl.textContent = r.body.content
+      contentEl.hidden = false
     }))
   }
-  bindToggles()
-  pop.querySelector('[data-ext-install]').addEventListener('click', (e) => {
-    e.stopPropagation()
-    toast('已打开扩展商店：选择扩展后需管理员审批（演示）')
-  })
-  pop.querySelector('[data-ext-dev]').addEventListener('click', (e) => {
-    e.stopPropagation()
-    toast('已打开加载入口：选择本地扩展目录，校验签名后启用（演示）')
-  })
+  m.querySelector('#adRefresh').addEventListener('click', () => load(currentPath))
+  load('')
+}
+
+const EXT_PERMISSION_OPTIONS = ['tabs', 'storage', 'cookies', 'webRequest', 'declarativeNetRequest', 'scripting', 'history', 'bookmarks']
+
+function openCloudExtensions(anchor) {
+  if (!beginPopover(anchor)) return
+  const pop = document.createElement('div')
+  pop.className = 'cb-ext-pop'
+  document.body.appendChild(pop)
+  finishPopover(pop, anchor)
+
+  const visible = () => (state.cloudExts || []).filter((x) => state.cloudExtsCanManage || x.status === 'listed')
+  const activeCount = () => visible().filter((x) => x.status === 'listed' && x.active).length
+
+  const statusTag = (x) => {
+    if (x.status === 'pending') return '<span class="tag warn">待审核</span>'
+    if (x.status === 'disabled') return '<span class="tag">已下架</span>'
+    return ''
+  }
+  const rows = () => visible().map((x) => `
+    <div class="ce-row">
+      <span class="ce-ico">${icon('grid')}</span>
+      <div class="ce-meta">
+        <b>${esc(x.name)}${x.version ? `<span class="ce-ver">v${esc(x.version)}</span>` : ''}</b>
+        <span>${esc(x.desc || '')}</span>
+        <span class="ce-perms">${(x.permissions || []).map((p) => `<em>${esc(p)}</em>`).join('')}${x.highRisk ? '<em class="ce-risk">高危权限</em>' : ''}</span>
+      </div>
+      ${x.status === 'listed'
+        ? `<button class="ce-toggle${x.active ? ' on' : ''}" data-ext-toggle="${esc(x.id)}" title="${x.active ? '停用' : '启用'}"><i></i></button>`
+        : statusTag(x)}
+    </div>`).join('')
+
+  const renderList = () => {
+    pop.innerHTML = `
+      <div class="ce-head"><b>扩展市场</b><span class="ce-count">${activeCount()} 个已启用</span></div>
+      <div class="ce-list">${rows() || '<div class="ce-empty">暂无已上架扩展</div>'}</div>
+      <div class="ce-note">扩展运行在浏览器隔离分区；上架需经管理中心审核，仅可启用已收录项。</div>
+      <div class="ce-foot"><button class="ce-btn" data-ext-request>${icon('plus')}提交新扩展申请</button></div>`
+    pop.querySelector('[data-ext-request]')?.addEventListener('click', (e) => { e.stopPropagation(); renderForm() })
+    pop.querySelectorAll('[data-ext-toggle]').forEach((btn) => btn.addEventListener('click', async (e) => {
+      e.stopPropagation()
+      const ext = (state.cloudExts || []).find((x) => x.id === btn.dataset.extToggle)
+      if (!ext) return
+      const next = !ext.active
+      const { body } = await api('/api/browser-exts/toggle', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: ext.id, on: next }) })
+      if (!body.ok) { toast(body.error || '操作失败', true); return }
+      ext.active = next
+      toast(next ? `已启用「${ext.name}」` : `已停用「${ext.name}」`)
+      await pushActiveExts().catch(() => {})
+      renderList()
+    }))
+    const dot = document.getElementById('cbExt')?.querySelector('.cb-ext-dot')
+    if (dot) dot.textContent = String(activeCount())
+  }
+
+  const renderForm = () => {
+    const permChecks = EXT_PERMISSION_OPTIONS.map((p) => `<label class="ce-perm"><input type="checkbox" name="perm" value="${p}"> ${p}</label>`).join('')
+    pop.innerHTML = `
+      <div class="ce-head"><b>提交扩展申请</b><span class="ce-count"></span></div>
+      <form class="ce-form" data-ext-form>
+        <label class="ce-field"><span>名称</span><input name="name" maxlength="40" placeholder="扩展名称" required></label>
+        <label class="ce-field"><span>说明</span><input name="desc" maxlength="120" placeholder="用途与适用场景"></label>
+        <label class="ce-field"><span>版本</span><input name="version" maxlength="20" placeholder="1.0.0"></label>
+        <div class="ce-field"><span>申请权限</span><div class="ce-perms-box">${permChecks}</div></div>
+        <label class="ce-field"><span>备注</span><input name="note" maxlength="120" placeholder="补充说明（可选）"></label>
+        <div class="ce-foot">
+          <button type="button" class="ce-btn" data-ext-back>返回</button>
+          <button type="submit" class="ce-btn primary">提交审核</button>
+        </div>
+      </form>`
+    pop.querySelector('[data-ext-back]').addEventListener('click', (e) => { e.stopPropagation(); renderList() })
+    pop.querySelector('[data-ext-form]').addEventListener('submit', async (e) => {
+      e.preventDefault()
+      const f = e.target
+      const permissions = [...f.querySelectorAll('input[name="perm"]:checked')].map((i) => i.value)
+      const payload = {
+        name: f.name.value.trim(), desc: f.desc.value.trim(), version: f.version.value.trim() || '1.0.0',
+        permissions, note: f.note.value.trim(),
+      }
+      const { body } = await api('/api/browser-exts/request', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) })
+      if (!body.ok) { toast(body.error || '提交失败', true); return }
+      toast('申请已提交，等待管理中心审核')
+      await loadBrowserExts().catch(() => {})
+      renderList()
+    })
+  }
+
+  renderList()
+  const place = () => {
+    const r = anchor.getBoundingClientRect()
+    pop.style.left = Math.max(8, Math.min(window.innerWidth - 308, r.left - 250)) + 'px'
+    pop.style.top = Math.round(Math.max(8, Math.min(window.innerHeight - pop.offsetHeight - 8, r.bottom + 8))) + 'px'
+  }
+  place()
   const close = (e) => {
     if (pop.contains(e.target) || anchor.contains(e.target)) return
     pop.remove()
@@ -10360,12 +11068,39 @@ function openCloudExtensions(anchor) {
   setTimeout(() => document.addEventListener('pointerdown', close), 0)
 }
 
+function normalizeCloudTarget(input) {
+  const v = String(input || '').trim()
+  if (!v) return null
+  if (/^https?:\/\//i.test(v)) return { url: v }
+  // 域名 / IP：不含空格、至少含一个字母或点号，补 https 协议；允许携带端口与路径。
+  if (!/\s/.test(v) && (/^[A-Za-z0-9.-]+\.[A-Za-z0-9.-]+/.test(v) || /^\d{1,3}(\.\d{1,3}){3}/.test(v))) {
+    return { url: 'https://' + v }
+  }
+  // 其余按关键词走网页搜索。
+  return { search: v }
+}
+
 function submitCloudAddr(panel) {
-  const v = panel.querySelector('#cbAddr').value.trim().toLowerCase()
-  if (!v) return
-  const sys = (state.cloud?.systems || []).find((s) => s.host.toLowerCase() === v || s.host.toLowerCase().includes(v) || s.name.includes(v))
-  if (!sys) { toast('云浏览器只打开已登记的企业系统，该地址未登记', true); return }
-  openCloudTab(sys.id)
+  const raw = panel.querySelector('#cbAddr')?.value
+  const norm = normalizeCloudTarget(raw)
+  if (!norm) return
+  if (norm.url) { openCloudWebTab(norm.url, ''); return }
+  const q = encodeURIComponent(norm.search)
+  openCloudWebTab(`https://www.baidu.com/s?wd=${q}`, norm.search)
+}
+
+/* 当前网页视图改址导航：解析网址或关键词，在原生浏览器视图内直接跳转；标签由导航状态回写。 */
+function submitWebAddr(input) {
+  const norm = normalizeCloudTarget(input?.value)
+  if (!norm) return
+  const target = norm.url || `https://www.baidu.com/s?wd=${encodeURIComponent(norm.search)}`
+  if (window.jgClient?.browser?.open) window.jgClient.browser.open(target)
+  const tab = (state.cloudTabs || []).find((t) => t.id === state.cloudTab && t.kind === 'web')
+  if (tab) {
+    tab.url = target
+    if (norm.search) tab.title = norm.search
+  }
+  renderCloudPanel()
 }
 
 async function openCloudTab(systemId) {
@@ -10385,6 +11120,7 @@ async function openCloudTab(systemId) {
   state.cloudTabs.push(tab)
   state.cloudTab = tab.id
   renderCloudPanel()
+  collectHistory({ kind: 'session', systemId, title: sys.name || systemId })
 }
 
 /* ---------------------------- placeholder --------------------------- */
@@ -10480,7 +11216,7 @@ async function openRegisterForm() {
   const orgOptions = orgMap.size ? [...orgMap.entries()] : [['unit:规划一所', '规划一所'], ['unit:测绘地理信息中心', '测绘地理信息中心'], ['unit:集团总部', '集团总部'], ['unit:智数中心', '智数中心']]
   const pureTypes = ['gis', '3d', 'cad', 'document', 'image', 'video', 'bizdata']
   const formats = ['PDF', 'DOCX', 'XLSX', 'PPTX', 'SHP', 'GDB', 'DWG', 'GeoTIFF', '3D Tiles', 'CSV', '其他']
-  const mapCategories = [['satellite', '01 卫星影像'], ['current', '02 现状数据'], ['planning', '03 规划数据'], ['construction', '04 建设工程数据'], ['management', '05 管理数据'], ['socioeconomic', '06 社会经济数据'], ['threeD', '07 三维数据']]
+  const mapCategories = [['satellite', '卫星影像'], ['current', '现状数据'], ['planning', '规划数据'], ['construction', '建设工程数据'], ['management', '管理数据'], ['socioeconomic', '社会经济数据'], ['threeD', '三维数据']]
   const spatialTypes = [['GIS_VECTOR', 'GIS 矢量'], ['GIS_RASTER', 'GIS 栅格'], ['3D_MODEL', '三维模型'], ['POINT_CLOUD', '点云'], ['BIM', 'BIM 模型']]
   const zones = [['gov', '政务网'], ['inet', '互联网']]
   let kind = 'pure'
@@ -11914,7 +12650,7 @@ function placeDrivePop(pop, anchor) {
 function closeDrivePops() { document.querySelectorAll('.drive-more-pop').forEach((p) => p.remove()) }
 
 function openDriveNewMenu(anchor, el) {
-  closeDrivePops()
+  if (!beginPopover(anchor)) return
   const pop = document.createElement('div')
   pop.className = 'drive-more-pop drive-new-pop'
   pop.innerHTML = `
@@ -11924,6 +12660,7 @@ function openDriveNewMenu(anchor, el) {
     <button class="drive-more-item" data-nact="pptx"><span class="ico">${icon('window')}</span>新建 ppt</button>
     <button class="drive-more-item" data-nact="folder"><span class="ico">${icon('folder')}</span>新建文件夹</button>`
   document.body.appendChild(pop)
+  finishPopover(pop, anchor)
   placeDrivePop(pop, anchor)
   pop.querySelectorAll('[data-nact]').forEach((b) => b.addEventListener('click', () => {
     const act = b.dataset.nact
@@ -11985,7 +12722,7 @@ function handleDriveUpload(input, el) {
 }
 
 function openDriveMoreMenu(it, anchor, el, spaces, personal) {
-  closeDrivePops()
+  if (!beginPopover(anchor)) return
   const docType = ['docx', 'xlsx', 'pptx'].includes(it.type)
   const main = it.type === 'folder' ? ['open', '打开', 'folder'] : docType ? ['edit', '协作编辑', 'pen'] : ['preview', '查看', 'window']
   const pop = document.createElement('div')
@@ -11999,6 +12736,7 @@ function openDriveMoreMenu(it, anchor, el, spaces, personal) {
     <button class="drive-more-item" data-dact="rename"><span class="ico">${icon('pen')}</span>重命名</button>
     <button class="drive-more-item" data-dact="remove" style="color:#b2413b"><span class="ico" style="color:#b2413b">${icon('trash')}</span>删除</button>`
   document.body.appendChild(pop)
+  finishPopover(pop, anchor)
   placeDrivePop(pop, anchor)
   pop.querySelectorAll('[data-dact]').forEach((b) => b.addEventListener('click', () => {
     const act = b.dataset.dact
@@ -12273,12 +13011,17 @@ async function openAssetCard(id) {
 }
 
 async function openShareCard(id, anchor) {
+  if (!beginPopover(anchor)) return
+  const seq = (window.__shareSeq || 0) + 1
+  window.__shareSeq = seq
   const { body } = await api('/api/contacts')
+  if (seq !== window.__shareSeq) return
   const people = (body.items || []).filter((c) => c.name !== state.boot.user.name).slice(0, 6)
   const pop = document.createElement('div')
   pop.className = 'conv-menu share-menu'
   pop.innerHTML = `<div class="share-head">共享给</div>${people.map((c) => `<button class="cm-item" data-dto="${esc(c.name)}"><span class="avatar sm">${esc(c.name.slice(0, 1))}</span><span class="cm-label">${esc(c.name)}</span><span class="cm-key">${esc(c.dept)}</span></button>`).join('')}`
   document.body.appendChild(pop)
+  finishPopover(pop, anchor)
   const r = anchor.getBoundingClientRect()
   pop.style.left = `${Math.max(8, Math.min(window.innerWidth - 280, r.left - 200))}px`
   const ph = pop.offsetHeight
@@ -12378,7 +13121,7 @@ function imCloudContext(thread) {
 }
 
 function openTransferPop(file, thread, anchor) {
-  closeDrivePops()
+  if (!beginPopover(anchor)) return
   const ctx = imCloudContext(thread)
   const sharedSpace = ctx.kind === 'team' ? ctx.space : 'CL-DEPT'
   const sharedLabel = ctx.kind === 'team' ? ctx.label : `部门云空间 · ${thread?.dept || '规划一所'}`
@@ -12390,6 +13133,7 @@ function openTransferPop(file, thread, anchor) {
   pop.className = 'drive-more-pop im-tr-pop'
   pop.innerHTML = `<div class="im-tr-title">转存到</div>${targets.map((t) => `<button type="button" class="drive-more-item" data-tr-target="${t.id}"><span class="ico">${icon(t.ic)}</span>${esc(t.title)}</button>`).join('')}`
   document.body.appendChild(pop)
+  finishPopover(pop, anchor)
   placeDrivePop(pop, anchor)
   const sizeGB = (() => {
     const m = String(file.size || '').match(/([\d.]+)\s*(GB|MB|KB)/i)
@@ -12607,6 +13351,7 @@ async function renderIM(el) {
       imMenu.hidden = true
       imMore.setAttribute('aria-expanded', 'false')
     }
+    bindInlinePopover(imMore, imMenu, closeMenu)
     imMore.addEventListener('click', (ev) => {
       ev.stopPropagation()
       const willOpen = imMenu.hidden
@@ -12736,7 +13481,7 @@ async function renderIM(el) {
 }
 
 function openImComposeMenu(thread, input, anchor) {
-  document.querySelectorAll('.im-plus-pop').forEach((p) => p.remove())
+  if (!beginPopover(anchor)) return
   const pop = document.createElement('div')
   pop.className = 'conv-menu im-plus-pop'
   pop.innerHTML = [
@@ -12750,6 +13495,7 @@ function openImComposeMenu(thread, input, anchor) {
       <span class="cm-key">${desc}</span>
     </button>`).join('')
   document.body.appendChild(pop)
+  finishPopover(pop, anchor)
   const r = anchor.getBoundingClientRect()
   pop.style.left = `${r.left - 6}px`
   pop.style.top = 'auto'
@@ -13662,6 +14408,13 @@ function renderGuestShell(el, view) {
 /* ===== 恢复：被脚本误删的视图函数 ===== */
 
 /* 单条会话内的轮次导航：左侧短刻度对应一问一答，悬停预览、点击跳转。 */
+const CHAT_NAV_MIN_TURNS = 8
+const CHAT_NAV_MIN_VIEWPORT_RATIO = 2
+const CHAT_NAV_MIN_WIDTH = 640
+const CHAT_NAV_MAX_HEIGHT = 420
+const CHAT_NAV_MAX_STEP = 8
+const CHAT_NAV_MIN_STEP = 6
+
 function chatTurnGroups(msgs) {
   const groups = []
   let current = null
@@ -13760,40 +14513,95 @@ function scheduleChatNavCard(mark, group, index) {
   }, 120)
 }
 
-function syncChatNavGeometry(chat) {
+function chatNavLayout(chat) {
   const nav = chat?.querySelector('#chatNav')
   const msgs = chat?.querySelector('#chatMsgs')
-  if (!nav || !msgs) return
+  if (!nav || !msgs) return null
   const chatRect = chat.getBoundingClientRect()
   const msgsRect = msgs.getBoundingClientRect()
-  nav.style.top = `${Math.round(msgsRect.top - chatRect.top + 8)}px`
-  nav.style.height = `${Math.max(96, Math.round(msgsRect.height - 16))}px`
+  const top = Math.round(msgsRect.top - chatRect.top + 8)
+  const available = Math.max(0, Math.min(
+    Math.round(msgsRect.height - 16),
+    Math.round(window.innerHeight - msgsRect.top - 16),
+  ))
+  const track = Math.min(CHAT_NAV_MAX_HEIGHT, available)
+  return { nav, msgs, top, available, track }
+}
+
+function syncChatNavVisibility(chat) {
+  const nav = chat?.querySelector('#chatNav')
+  const msgs = chat?.querySelector('#chatMsgs')
+  if (!nav || !msgs) return false
+  const count = nav.querySelectorAll('[data-nav-turn]').length
+  const chatWidth = chat.getBoundingClientRect().width
+  const tallEnough = msgs.clientHeight > 0 && msgs.scrollHeight >= msgs.clientHeight * CHAT_NAV_MIN_VIEWPORT_RATIO
+  const wideEnough = chatWidth >= CHAT_NAV_MIN_WIDTH && !window.matchMedia('(max-width: 720px)').matches
+  const show = count >= CHAT_NAV_MIN_TURNS && tallEnough && wideEnough
+  chat.classList.toggle('has-nav', show)
+  nav.hidden = !show
+  return show
+}
+
+function syncChatNavGeometry(chat) {
+  const layout = chatNavLayout(chat)
+  if (!layout) return
+  const { nav, top, available, track } = layout
+  nav.style.height = 'auto'
+  nav.style.maxHeight = `${track}px`
+  const count = nav.querySelectorAll('[data-nav-turn]').length
+  if (!count) return
+  // 用实际可用高度（扣除轨道上下 4px 内边距）计算中心距，轮次少时保持 8px 紧凑排列，轮次多时逐步压到 6px。
+  const usableHeight = Math.max(0, track - 8)
+  const step = Math.max(
+    CHAT_NAV_MIN_STEP,
+    Math.min(CHAT_NAV_MAX_STEP, Math.floor(usableHeight / count)),
+  )
+  nav.style.setProperty('--chat-nav-step', `${step}px`)
+  // 横杠组在当前消息可视区内垂直居中；轨道撑满 420px 时也整体居中。
+  const contentHeight = Math.min(track, count * step + 8)
+  nav.style.top = `${top + Math.max(0, Math.round((available - contentHeight) / 2))}px`
 }
 
 function syncChatNavActive(chat) {
   const nav = chat?.querySelector('#chatNav')
   const msgs = chat?.querySelector('#chatMsgs')
-  if (!nav || !msgs) return
+  if (!nav || !msgs || nav.hidden) return
   const marks = [...nav.querySelectorAll('[data-nav-turn]')]
   if (!marks.length) return
   const boxTop = msgs.getBoundingClientRect().top
-  let activeIndex = 0
-  marks.forEach((mark, index) => {
-    const target = msgs.querySelector(`[data-mi="${mark.dataset.navUser}"]`)
-    if (target && target.getBoundingClientRect().top <= boxTop + 28) activeIndex = index
-  })
+  const atBottom = msgs.scrollTop + msgs.clientHeight >= msgs.scrollHeight - 8
+  let activeIndex = atBottom ? marks.length - 1 : 0
+  if (!atBottom) {
+    marks.forEach((mark, index) => {
+      const target = msgs.querySelector(`[data-mi="${mark.dataset.navUser}"]`)
+      if (target && target.getBoundingClientRect().top <= boxTop + 28) activeIndex = index
+    })
+  }
+  let activeMark = null
   marks.forEach((mark, index) => {
     const on = index === activeIndex
     mark.classList.toggle('on', on)
-    if (on) mark.setAttribute('aria-current', 'true')
-    else mark.removeAttribute('aria-current')
+    if (on) {
+      mark.setAttribute('aria-current', 'true')
+      activeMark = mark
+    } else {
+      mark.removeAttribute('aria-current')
+    }
   })
+  // 当前横杠超出导航自己的可视区域时，只滚动导航轨道，不改变正文位置。
+  if (activeMark) {
+    const markTop = activeMark.offsetTop
+    const markBottom = markTop + activeMark.offsetHeight
+    if (markTop < nav.scrollTop) nav.scrollTop = markTop
+    else if (markBottom > nav.scrollTop + nav.clientHeight) nav.scrollTop = markBottom - nav.clientHeight
+  }
 }
 
 function bindChatNav(chat, groups) {
   const nav = chat?.querySelector('#chatNav')
   const msgs = chat?.querySelector('#chatMsgs')
   if (!nav || !msgs) return
+  syncChatNavVisibility(chat)
   syncChatNavGeometry(chat)
   requestAnimationFrame(() => { syncChatNavGeometry(chat); syncChatNavActive(chat) })
   nav.querySelectorAll('[data-nav-turn]').forEach((mark, index) => {
@@ -13813,12 +14621,17 @@ function bindChatNav(chat, groups) {
       setTimeout(() => target.classList.remove('chat-nav-target'), 1200)
     })
   })
-  msgs.addEventListener('scroll', () => syncChatNavActive(chat), { passive: true })
+  msgs.addEventListener('scroll', () => {
+    syncChatNavVisibility(chat)
+    syncChatNavGeometry(chat)
+    syncChatNavActive(chat)
+  }, { passive: true })
   if (!bindChatNav.bound) {
     bindChatNav.bound = true
     window.addEventListener('resize', () => {
-      const current = document.querySelector('.chat.has-nav')
+      const current = document.querySelector('.chat')
       if (!current) return
+      syncChatNavVisibility(current)
       syncChatNavGeometry(current)
       syncChatNavActive(current)
     })
@@ -13836,7 +14649,12 @@ function renderChat(el) {
   const conv = state.conversation
   const msgs = conv?.messages || []
   const navGroups = chatTurnGroups(msgs)
-  const showNav = navGroups.length > 1 && !state.shareMode
+  const sameConversation = el.__chatConvId === (conv?.id || '')
+  const oldMsgs = sameConversation ? el.querySelector('#chatMsgs') : null
+  const prevScrollTop = oldMsgs ? oldMsgs.scrollTop : 0
+  const wasAtBottom = !oldMsgs || (prevScrollTop + oldMsgs.clientHeight >= oldMsgs.scrollHeight - 8)
+  el.__chatConvId = conv?.id || ''
+  const showNav = navGroups.length >= CHAT_NAV_MIN_TURNS && !state.shareMode
   const hasStreaming = msgs.some((m) => m.streaming)
   const thinking = state.chatBusy && !hasStreaming
   const project = currentProject()
@@ -13895,7 +14713,7 @@ function renderChat(el) {
       <div class="quick-row" style="align-self:center;justify-content:space-between;align-items:center;margin:8px auto 0;width:72%;min-width:280px;max-width:920px;box-sizing:border-box;flex-wrap:wrap;gap:6px">
         <div style="display:flex;gap:6px;align-items:center">${projectContextControl()}</div>
         <div style="display:flex;gap:6px;align-items:center">
-          <button class="hc-lang" id="chatLang" title="推理强度"><span id="chatLangValue">${reasoningLabel(state.reasoningEffort)}</span><span class="ico hc-caret">${icon('chevron')}</span></button>
+          <button class="hc-lang hc-model" id="chatModelBtn" title="${esc(currentChatModelLabel())} · 推理强度${reasoningLabel(state.reasoningEffort)}"><span class="hc-model-name">${esc(currentChatModelLabel())}</span><span class="hc-model-effort">${reasoningLabel(state.reasoningEffort)}</span><span class="ico hc-caret">${icon('chevron')}</span></button>
           ${taskModeControl()}
         </div>
       </div>
@@ -13921,7 +14739,7 @@ function renderChat(el) {
     removeComposerRef(b.dataset.refdrop)
     renderView()
   }))
-  el.querySelector('#chatLang')?.addEventListener('click', (ev) => { ev.stopPropagation(); openReasoningMenu(ev.currentTarget) })
+  el.querySelector('#chatModelBtn')?.addEventListener('click', (ev) => { ev.stopPropagation(); openModelReasoningMenu(ev.currentTarget) })
   el.querySelector('#chatMic')?.addEventListener('click', (ev) => startVoiceInput(ev.currentTarget))
   el.querySelector('#shareAll')?.addEventListener('change', (e) => {
     state.shareSelection = e.target.checked ? shareEligibleIndexes() : []
@@ -13978,8 +14796,13 @@ function renderChat(el) {
     if (btn) stopJob(btn.dataset.killjob)
   })
   const msgsBox = document.getElementById('chatMsgs')
-  bindChatNav(el, navGroups)
-  if (msgsBox) msgsBox.scrollTop = msgsBox.scrollHeight
+  const chatRoot = el.querySelector('.chat')
+  bindChatNav(chatRoot, navGroups)
+  if (msgsBox) {
+    const maxScrollTop = Math.max(0, msgsBox.scrollHeight - msgsBox.clientHeight)
+    msgsBox.scrollTop = wasAtBottom ? maxScrollTop : Math.min(prevScrollTop, maxScrollTop)
+  }
+  syncChatNavActive(chatRoot)
   window.JGVisuals?.renderAll(el)
 }
 
@@ -14147,13 +14970,28 @@ function usageText(u, runStats = null) {
   if (!u || !u.calls) return ''
   const total = u.totalTokens || ((u.inputTokens || 0) + (u.outputTokens || 0))
   const duration = formatDurationMs(runStats?.durationMs)
-  return `${Number(total).toLocaleString('zh-CN')} tokens${duration ? ` · ${duration}` : ''}`
+  return `总 ${Number(total).toLocaleString('zh-CN')} tokens${duration ? ` · ${duration}` : ''}`
+}
+
+function formatTokenK(value) {
+  return `${(Number(value || 0) / 1000).toFixed(2)}K`
+}
+
+function tokenBreakdownParts(u) {
+  if (!u || !u.calls) return []
+  const parts = []
+  if (Number(u.inputTokens || 0)) parts.push(`新输入 ${formatTokenK(u.inputTokens)}`)
+  if (Number(u.cacheReadTokens || 0)) parts.push(`缓存读 ${formatTokenK(u.cacheReadTokens)}`)
+  if (Number(u.cacheWriteTokens || 0)) parts.push(`缓存写 ${formatTokenK(u.cacheWriteTokens)}`)
+  if (Number(u.outputTokens || 0)) parts.push(`输出 ${formatTokenK(u.outputTokens)}`)
+  return parts
 }
 
 function usageTip(u, runStats = null) {
   if (!u || !u.calls) return ''
-  const parts = [`${u.calls} 次模型调用`, `输入 ${Number(u.inputTokens || 0).toLocaleString('zh-CN')}`, `输出 ${Number(u.outputTokens || 0).toLocaleString('zh-CN')}`]
+  const parts = [`${u.calls} 次模型调用`, `总 ${Number(u.totalTokens || ((u.inputTokens || 0) + (u.outputTokens || 0))).toLocaleString('zh-CN')}`, `新增输入 ${Number(u.inputTokens || 0).toLocaleString('zh-CN')}`, `输出 ${Number(u.outputTokens || 0).toLocaleString('zh-CN')}`]
   if (u.cacheReadTokens) parts.push(`缓存读 ${Number(u.cacheReadTokens).toLocaleString('zh-CN')}`)
+  if (u.cacheWriteTokens) parts.push(`缓存写 ${Number(u.cacheWriteTokens).toLocaleString('zh-CN')}`)
   if (u.reasoningTokens) parts.push(`推理 ${Number(u.reasoningTokens).toLocaleString('zh-CN')}`)
   const duration = formatDurationMs(runStats?.durationMs)
   if (duration) parts.push(`用时 ${duration}`)
@@ -14268,7 +15106,8 @@ function tokenBadgeHTML(m) {
   }
   const calls = Number(m.usage?.calls || 0)
   const duration = formatDurationMs(m.runStats?.durationMs || m.elapsedMs)
-  return `<span class="msg-cost" title="${esc(usageTip(m.usage, m.runStats))}"><span class="ico">${icon('clock')}</span>消耗 ${esc(value)}${calls > 1 ? ` · ${calls} 次` : ''}${duration ? ` · ${esc(duration)}` : ''}</span>`
+  const breakdown = tokenBreakdownParts(m.usage).join(' · ')
+  return `<span class="msg-cost" title="${esc(usageTip(m.usage, m.runStats))}"><span class="ico">${icon('clock')}</span>总 ${esc(value)}${breakdown ? ` · ${esc(breakdown)}` : ''}${calls > 1 ? ` · ${calls} 次` : ''}${duration ? ` · ${esc(duration)}` : ''}</span>`
 }
 
 function shareSelected(idx) {
@@ -14353,8 +15192,8 @@ function renderMsg(m, idx = null) {
         <button type="button" class="msg-act icon" title="分享" aria-label="分享" data-sharemsg="${idx}">${icon('share')}</button>
         ${tokenBadgeHTML(m)}
         <button type="button" class="msg-act icon" title="重新生成这条回复" aria-label="重新生成" data-refreshmsg="${idx}">${icon('refresh')}</button>
-        ${m.traceId ? `<button type="button" class="msg-act icon" title="更多" aria-label="更多" data-moremsg="${idx}">${icon('more')}</button>` : ''}
         <span class="msg-time-inline" title="${esc(usageTip(m.usage, m.runStats))}">${esc(messageStamp(m))}</span>
+        ${m.traceId ? `<button type="button" class="msg-act icon" title="更多" aria-label="更多" data-moremsg="${idx}">${icon('more')}</button>` : ''}
       </div>` : `<div class="msg-time">${esc(messageStamp(m))}${m.usage?.calls ? `<span title="${esc(usageTip(m.usage, m.runStats))}"> · ${esc(usageText(m.usage, m.runStats))}</span>` : ''}</div>`}
     </div>
   </div>`
@@ -14849,7 +15688,7 @@ function deleteUserMessage(index) {
 }
 
 function openMessageMoreMenu(anchor, index) {
-  closeRowMenu()
+  if (!beginPopover(anchor)) return
   const conv = state.conversation
   const m = conv?.messages?.[Number(index)]
   if (!conv || !m) return
@@ -14867,6 +15706,7 @@ function openMessageMoreMenu(anchor, index) {
     <button type="button" class="msg-more-item" data-mm="report"><span class="ico">${icon('alert')}</span><span>反馈与举报</span></button>
     <button type="button" class="msg-more-item danger" data-mm="delete"><span class="ico">${icon('trash')}</span><span>删除</span></button>`
   document.body.appendChild(menu)
+  finishPopover(menu, anchor)
   const r = anchor.getBoundingClientRect()
   const w = menu.offsetWidth || 220
   const h = menu.offsetHeight || 250
@@ -14893,7 +15733,7 @@ function openMessageMoreMenu(anchor, index) {
   }))
   setTimeout(() => {
     document.addEventListener('pointerdown', function onDown(e) {
-      if (!menu.contains(e.target)) {
+      if (!menu.contains(e.target) && !anchor.contains(e.target)) {
         menu.remove()
         document.removeEventListener('pointerdown', onDown, true)
       }
@@ -15489,6 +16329,11 @@ async function renderTaskCenter(el) {
   listRoot.querySelector('#newAuto').addEventListener('click', () => openAutomationForm())
   const filterBtn = listRoot.querySelector('#tkFilter')
   const filterPop = listRoot.querySelector('#tkFilterPop')
+  bindInlinePopover(filterBtn, filterPop, () => {
+    state.taskFilterOpen = false
+    filterPop.hidden = true
+    filterBtn.classList.remove('on')
+  })
   filterBtn.addEventListener('click', (e) => {
     e.stopPropagation()
     state.taskFilterOpen = !state.taskFilterOpen
@@ -15556,7 +16401,7 @@ async function renderTaskCenter(el) {
     if (act === 'panel') return
     if (act === 'plus') return
     if (act === 'more') {
-      document.querySelectorAll('.tk-more-pop').forEach((p) => p.remove())
+      if (!beginPopover(b)) return
       const pinned = (state.taskPins || []).includes(sel.id)
       const projectNames = (state.projects || []).slice(0, 6).map((p) => p.name)
       const moveTargets = projectNames.length ? projectNames : ['滨江片区更新', '城市体检', '国土空间规划', '项目复盘']
@@ -15596,6 +16441,7 @@ async function renderTaskCenter(el) {
           <span class="tk-menu-label">删除任务</span>
         </button>`
       document.body.appendChild(pop)
+      finishPopover(pop, b)
       const r = b.getBoundingClientRect()
       pop.style.left = `${Math.max(8, r.right - pop.offsetWidth)}px`
       const ph = pop.offsetHeight
@@ -15907,7 +16753,7 @@ async function renderCodeReview(el) {
   const res = await api('/api/projects').catch(() => null)
   if (res?.ok) state.projects = res.body.items || []
   const projects = (state.projects || []).filter((p) => !p.removed)
-  el.innerHTML = `<div style="max-width:1080px;margin:0 auto;padding:24px">
+  el.innerHTML = `<div style="width:100%;box-sizing:border-box;padding:24px">
     <div style="display:flex;align-items:flex-start;gap:16px;flex-wrap:wrap">
       <div>
         <div style="font-size:24px;font-weight:700">代码审查服务</div>
@@ -16588,6 +17434,132 @@ async function renderAdminManagedModule(tab, blocks) {
   if (tab === 'service') return renderAdminService(blocks)
 }
 
+async function renderAdminCost(root, blocks) {
+  if (!blocks) return
+  const [analysisResult, statusResult] = await Promise.all([
+    api('/api/admin/cost-analysis').catch(() => ({ ok: false, body: {} })),
+    api('/api/admin/pricing/status').catch(() => ({ ok: false, body: {} })),
+  ])
+  if (!analysisResult.ok) {
+    blocks.innerHTML = `<div class="mc-empty">${esc(analysisResult.body?.error || '成本分析读取失败')}</div>`
+    return
+  }
+  const data = analysisResult.body || {}
+  const totals = data.totals || {}
+  const models = Array.isArray(data.models) ? data.models : []
+  const byProvider = Array.isArray(data.byProvider) ? data.byProvider : []
+  const pricing = data.pricing || {}
+  const watch = statusResult.ok ? statusResult.body || {} : {}
+  const sources = Array.isArray(watch.sources) ? watch.sources : []
+  const alerts = Array.isArray(watch.alerts) ? watch.alerts : []
+  const n = (v) => Number(v || 0).toLocaleString('zh-CN', { minimumFractionDigits: 0, maximumFractionDigits: 2 })
+  const cny = (v) => `¥${Number(v || 0).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 6 })}`
+  const pct = (v) => `${Math.round(Number(v || 0) * 100)}%`
+  const timeOf = (v) => (v ? String(v).replace('T', ' ').slice(0, 16) : '—')
+  const kpis = root.querySelector('.mc-kpis')
+  if (kpis) {
+    kpis.innerHTML = `
+      <div class="mc-kpi"><div class="mc-kpi-k">平台总积分</div><div class="mc-kpi-v">${n(totals.costCredits ?? Number(totals.costCny || 0) * 100)}</div><div class="mc-kpi-note">100 积分 = 1 元</div></div>
+      <div class="mc-kpi"><div class="mc-kpi-k">人民币实价</div><div class="mc-kpi-v">${cny(totals.costCny)}</div><div class="mc-kpi-note">按官方人民币价目</div></div>
+      <div class="mc-kpi"><div class="mc-kpi-k">已计 / 未计</div><div class="mc-kpi-v">${n(totals.pricedRequests)} / ${n(totals.unpricedRequests)}</div><div class="mc-kpi-note">缺 usage 字段不估算</div></div>
+      <div class="mc-kpi"><div class="mc-kpi-k">价目版本</div><div class="mc-kpi-v" style="font-size:16px;white-space:nowrap">${esc(pricing.checkedAt || '—')}</div><div class="mc-kpi-note">${n((pricing.launchModels || []).length)} 个上线文本 · ${n((pricing.launchImageModels || []).length)} 个上线图像</div></div>`
+  }
+
+  const modelRows = models.map((m) => `<div class="mc-trow">
+    <span class="mc-first">${esc(m.displayName || m.model)}<span class="mc-dim mono" style="display:block;font-size:10px;font-weight:400;margin-top:2px">${esc(m.providerLabel || '未计价模型')} · ${esc(m.model)}${m.pricingModel && m.pricingModel !== m.model ? ` → ${esc(m.pricingModel)}` : ''}${m.tier ? ` · ${esc(String(m.tier).toUpperCase())}` : ''}</span></span>
+    <span class="mono">${n(m.requests)}</span>
+    <span class="mono">${n(m.totalTokens)}</span>
+    <span class="mono">${pct(m.cacheHitRate)}</span>
+    <span class="mono">${cny(m.costCny)}</span>
+    <span class="mono">${n(m.costCredits ?? Number(m.costCny || 0) * 100)}</span>
+  </div>`).join('')
+
+  const providerRows = byProvider.map((p) => `<div class="mc-trow">
+    <span class="mc-first">${esc(p.providerLabel)}<span class="mc-dim" style="display:block;font-size:10px;font-weight:400;margin-top:2px">${n(p.models)} 个模型</span></span>
+    <span class="mono">${n(p.requests)}</span>
+    <span class="mono">${n(p.totalTokens)}</span>
+    <span class="mono">${cny(p.costCny)}</span>
+    <span class="mono">${n(p.costCredits ?? Number(p.costCny || 0) * 100)}</span>
+  </div>`).join('')
+
+  const sourceRows = sources.map((s) => {
+    const pending = Boolean(s.pending)
+    const failed = s.status === 'failed'
+    const baseline = !failed && !pending && Number(s.checks || 0) <= 1
+    const tag = failed ? '<span class="mc-tag bad">抓取失败</span>' : pending ? '<span class="mc-tag warn">待核对</span>' : baseline ? '<span class="mc-tag">已建基线</span>' : s.hash ? '<span class="mc-tag ok">已对齐</span>' : '<span class="mc-tag">待首次检查</span>'
+    return `<div class="mc-trow">
+      <span class="mc-first">${esc(s.label)}<span class="mc-dim" style="display:block;font-size:10px;font-weight:400;margin-top:2px">${esc(s.kind || '')} · ${esc(s.url || '')}</span></span>
+      <span>${tag}</span>
+      <span class="mono">${timeOf(s.checkedAt)}</span>
+      <span class="mono" style="font-size:10px">${esc(s.error || (!s.checkedAt ? '尚未完成首次检查' : pending ? '内容有变化，待人工核对' : '无变化'))}</span>
+      <span>${pending ? `<button class="btn sm" data-price-ack="${esc(s.id)}">确认已核对</button>` : '—'}</span>
+    </div>`
+  }).join('')
+
+  blocks.innerHTML = `
+    <div class="mc-block" style="margin-bottom:14px">
+      <div class="mc-block-head"><b>计费口径</b><span class="spacer"></span><span class="mc-count">${esc(data.scopeLabel || '平台')}</span></div>
+      <div class="mc-rows">
+        <div class="mc-row"><span class="mc-row-main">智能中枢</span><span class="mc-row-cell">按积分展示：调用、价目、费用构成统一换算为积分</span></div>
+        <div class="mc-row"><span class="mc-row-main">管理中心</span><span class="mc-row-cell">按人民币展示 API 分项实价，保留官方价目货币单位</span></div>
+        <div class="mc-row"><span class="mc-row-main">汇率</span><span class="mc-row-cell mono">100 积分 = ¥1 · 1 积分 = ¥0.01</span></div>
+        <div class="mc-row"><span class="mc-row-main">数据范围</span><span class="mc-row-cell">已落库真实 usage / runStats；缺失字段保持未计价</span></div>
+      </div>
+    </div>
+    <div class="mc-block">
+      <div class="mc-block-head"><b>API 分项 · 人民币实价</b><span class="spacer"></span><span class="mc-count">${models.length} 个模型</span></div>
+      <div class="mc-table" style="--mc-cols:minmax(200px,2fr) minmax(58px,.55fr) minmax(92px,.9fr) minmax(62px,.6fr) minmax(96px,.9fr) minmax(84px,.8fr)">
+        <div class="mc-thead"><span>模型 / 供应商</span><span>调用</span><span>Tokens</span><span>缓存</span><span>人民币</span><span>积分</span></div>
+        ${modelRows || '<div class="mc-empty">暂无带真实 usage 的模型调用</div>'}
+      </div>
+    </div>
+    <div class="mc-block">
+      <div class="mc-block-head"><b>按供应商汇总</b><span class="spacer"></span><span class="mc-count">${byProvider.length} 个供应商</span></div>
+      <div class="mc-table" style="--mc-cols:minmax(180px,1.8fr) minmax(64px,.6fr) minmax(100px,1fr) minmax(100px,1fr) minmax(88px,.8fr)">
+        <div class="mc-thead"><span>供应商</span><span>调用</span><span>Tokens</span><span>人民币</span><span>积分</span></div>
+        ${providerRows || '<div class="mc-empty">暂无供应商成本</div>'}
+      </div>
+    </div>
+    <div class="mc-block">
+      <div class="mc-block-head"><b>官方价格源监控</b><span class="spacer"></span><span class="mc-count">${watch.pendingCount || 0} 项待核对 · 每 ${watch.intervalHours || 6} 小时自动检查</span><button class="btn sm" data-price-check>立即检查</button></div>
+      <div style="padding:10px 12px;border-bottom:1px solid #eceff3;font-size:var(--fs-dense);color:#6f767e;line-height:1.65">上次检查 ${timeOf(watch.lastCheckedAt)}。只对官方页面中的价格字段做指纹：导航、公告、推荐位变化不提示；价格字段变化仍标“待核对”，避免限时价、海外区域价被当成标准价。</div>
+      <div class="mc-table" style="--mc-cols:minmax(210px,2fr) minmax(90px,.8fr) minmax(118px,1fr) minmax(170px,1.6fr) minmax(106px,1fr)">
+        <div class="mc-thead"><span>价格源</span><span>状态</span><span>最近检查</span><span>说明</span><span>操作</span></div>
+        ${sourceRows || '<div class="mc-empty">尚未完成首次价格源检查</div>'}
+      </div>
+      ${alerts.length ? `<div style="padding:10px 12px;border-top:1px solid #eceff3"><div class="mc-count" style="margin-bottom:6px">待核对变更 ${alerts.length} 条</div>${alerts.slice(0, 8).map((a) => `<div class="mc-row"><span class="mc-row-main">${esc(a.label || a.sourceId)}</span><span class="mc-row-cell">${esc(timeOf(a.at))} · 价格指纹 ${esc(String(a.fromHash || '').slice(0, 8))} → ${esc(String(a.toHash || '').slice(0, 8))}</span></div>`).join('')}</div>` : ''}
+    </div>`
+
+  blocks.querySelector('[data-price-check]')?.addEventListener('click', async (event) => {
+    const btn = event.currentTarget
+    btn.disabled = true
+    btn.textContent = '检查中…'
+    const { ok, body } = await api('/api/admin/pricing/check', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+    if (!ok) {
+      btn.disabled = false
+      btn.textContent = '立即检查'
+      return toast(body.error || '价格源检查失败', true)
+    }
+    toast(`价格源已检查：${(body.alerts || []).length} 条待核对`)
+    renderView()
+  })
+  blocks.querySelectorAll('[data-price-ack]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      btn.disabled = true
+      const { ok, body } = await api('/api/admin/pricing/ack', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ sourceId: btn.dataset.priceAck, note: '管理中心人工核对' }),
+      })
+      if (!ok) {
+        btn.disabled = false
+        return toast(body.error || '确认失败', true)
+      }
+      toast('已标记本价格源为人工核对')
+      renderView()
+    })
+  })
+}
+
 async function renderAdmin(el) {
   const { body } = await api('/api/console')
   state.console = body
@@ -16604,11 +17576,12 @@ async function renderAdmin(el) {
   const tab = allowed(state.consoleTab) ? state.consoleTab : 'overview'
   state.consoleTab = tab
   const AI_SEGMENTS = [
-    { id: 'baseline', no: '01', label: '运行基线', note: '系统内核只读；平台公共能力可停用；官方技能在市场按需安装' },
-    { id: 'models', no: '02', label: '模型与网关', note: 'DeepSeek 首页默认；Qwen-Image / Seedream 图像生成二选一；三个共享模型统一由模型网关管理' },
-    { id: 'agents', no: '03', label: 'Agent 与 MCP', note: '运行时实际加载的 Agent、MCP、技能与调度模块' },
-    { id: 'plugins', no: '04', label: '应用、插件与技能', note: '员工提交的应用、插件与技能，审核与分类上架管理' },
-    { id: 'templates', no: '05', label: '图像模板', note: '员工提交的图像模板申请、审核上线、下架与重新上线' },
+    { id: 'baseline', label: '运行基线', note: '系统内核只读；平台公共能力可停用；官方技能在市场按需安装' },
+    { id: 'models', label: '模型与网关', note: '4 个问答 + 2 个图像系统预设；个人自定义模型仅本人可见；应用只引用中枢模型' },
+    { id: 'agents', label: 'Agent 与 MCP', note: '运行时实际加载的 Agent、MCP、技能与调度模块' },
+    { id: 'plugins', label: '应用、插件与技能', note: '员工提交的应用、插件与技能，审核与分类上架管理' },
+    { id: 'templates', label: '图像模板', note: '员工提交的图像模板申请、审核上线、下架与重新上线' },
+    { id: 'exts', label: '浏览器扩展', note: '云浏览器扩展审核：批准上架、拒绝下架与移除；扩展只在浏览器隔离分区运行' },
   ]
   const aiTab = AI_SEGMENTS.some((s) => s.id === state.aiTab) ? state.aiTab : 'baseline'
   state.aiTab = aiTab
@@ -16663,7 +17636,7 @@ async function renderAdmin(el) {
       ${items.map((id) => `<button class="mc-nav-item${tab === id ? ' on' : ''}" data-mc="${id}"><span>${esc(meta[id].label)}</span></button>`).join('')}`
   }).join('')
 
-  const emptyState = tab !== 'ai' && !sec.kpis.length && !sec.blocks.length
+  const emptyState = tab !== 'ai' && tab !== 'cost' && !sec.kpis.length && !sec.blocks.length
   // 先在离屏节点里组装完整页面，AI 能力管理的补充数据到位后再一次性挂载，
   // 避免切换时先出现“侧栏导航重复、主区空白”的中间态。
   const root = document.createElement('div')
@@ -16681,7 +17654,7 @@ async function renderAdmin(el) {
         </div>
         ${tab === 'overview' ? `<div class="mc-note">${esc(sec.meta)}</div>` : `<div class="mc-note">${esc(sec.meta)}</div>`}
         <div class="mc-kpis"${tab === 'ai' ? ' id="aiKpis"' : ''}>${tab === 'ai' ? '' : sec.kpis.map((k) => `<div class="mc-kpi"><div class="mc-kpi-k">${esc(k.k)}</div><div class="mc-kpi-v ${k.tone || ''}">${esc(k.v)}</div><div class="mc-kpi-note">${esc(k.note)}</div></div>`).join('')}</div>
-        ${tab === 'ai' ? `<style>.mc-seg{display:grid!important;grid-template-columns:repeat(5,minmax(0,1fr));gap:3px;margin-top:14px;padding:3px;border:1px solid #e7ebf1;border-radius:10px;background:#f7f8fa}.mc-seg-item{display:inline-flex;align-items:center;justify-content:center;gap:5px;border:1px solid transparent;background:transparent;border-radius:7px;padding:7px 3px;font-size:11px;color:#4a5057;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.mc-seg-item.on{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}.mc-seg-no{font-family:ui-monospace,Consolas,monospace;font-size:9px;color:#9aa1aa;flex:none}.mc-seg-item.on .mc-seg-no{color:var(--accent-ink)}.mc-seg-note{margin:9px 0 0;font-size:var(--fs-dense);color:#7b828b;line-height:1.6}@media (max-width:760px){.mc-seg-no{display:none}}</style><div class="mc-seg" id="aiSeg">${AI_SEGMENTS.map((s) => `<button class="mc-seg-item${aiTab === s.id ? ' on' : ''}" style="${aiTab === s.id ? 'background:var(--accent)!important;color:var(--accent-ink)!important;border-color:var(--accent)!important' : ''}" data-aitab="${s.id}"><span class="mc-seg-no">${s.no}</span>${s.label}</button>`).join('')}</div>
+        ${tab === 'ai' ? `<style>.mc-seg{display:flex!important;gap:3px;margin-top:14px;padding:3px;border:1px solid #e7ebf1;border-radius:10px;background:#f7f8fa;overflow-x:auto;overflow-y:hidden;scrollbar-width:thin}.mc-seg-item{flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;gap:5px;border:1px solid transparent;background:transparent;border-radius:7px;padding:7px 10px;font-size:11px;color:#4a5057;cursor:pointer;white-space:nowrap}.mc-seg-item.on{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}.mc-seg-no{font-family:ui-monospace,Consolas,monospace;font-size:9px;color:#9aa1aa;flex:none}.mc-seg-item.on .mc-seg-no{color:var(--accent-ink)}.mc-seg-note{margin:9px 0 0;font-size:var(--fs-dense);color:#7b828b;line-height:1.6}@media (max-width:760px){.mc-seg-no{display:none}}</style><div class="mc-seg" id="aiSeg">${AI_SEGMENTS.map((s) => `<button class="mc-seg-item${aiTab === s.id ? ' on' : ''}" style="${aiTab === s.id ? 'background:var(--accent)!important;color:var(--accent-ink)!important;border-color:var(--accent)!important' : ''}" data-aitab="${s.id}">${s.label}</button>`).join('')}</div>
           <div class="mc-seg-note">${esc(AI_SEGMENTS.find((s) => s.id === aiTab).note)}</div>` : ''}
         <div class="mc-blocks">${sec.blocks.map(block).join('')}${emptyState ? `<div class="mc-empty">该模块尚未接入真实数据，暂不展示演示内容。</div>` : ''}</div>
       </div>
@@ -16703,6 +17676,9 @@ async function renderAdmin(el) {
 
   if (['overview', 'org', 'data', 'apps', 'ops', 'service'].includes(tab)) {
     await renderAdminManagedModule(tab, blocks)
+  }
+  if (tab === 'cost') {
+    await renderAdminCost(root, blocks)
   }
 
   if (tab === 'security') {
@@ -16756,12 +17732,20 @@ async function renderAdmin(el) {
   }
 
   if (tab === 'ai') {
-    const [{ body: sub }, { body: runtimeInfo }, { body: modelCfg }, { body: tplBody }] = await Promise.all([
+    const [{ body: sub }, { body: runtimeInfo }, { body: modelCfg }, { body: tplBody }, sharedRes, extRes, appRes] = await Promise.all([
       api('/api/plugin-subs'),
       api('/api/runtime/plugins'),
       api('/api/model/config'),
       api('/api/images/template-applications'),
+      api('/api/admin/shared-models').catch(() => ({ ok: false, body: { presets: [], custom: [] } })),
+      api('/api/browser-exts').catch(() => ({ ok: false, body: { items: [], canManage: false } })),
+      api('/api/apps').catch(() => ({ ok: false, body: { items: [] } })),
     ])
+    const presetModels = sharedRes.body.presets || []
+    const customModels = sharedRes.body.custom || []
+    const sharedModels = [...presetModels, ...customModels]
+    const appItems = appRes.body.items || []
+    const sharedCanManage = Boolean(sharedRes.body.canManage)
     const pending = (sub.items || []).filter((x) => x.status === 'pending')
     const pendingPlugins = pending.filter((x) => x.kind !== 'skill')
     const pendingSkills = pending.filter((x) => x.kind === 'skill')
@@ -16899,6 +17883,54 @@ async function renderAdmin(el) {
         })
       }))
     }
+
+    if (blocks && aiTab === 'exts') {
+      const extItems = extRes.body.items || []
+      const extCanManage = Boolean(extRes.body.canManage)
+      const extStatus = { pending: ['warn', '待审核'], listed: ['ok', '已上架'], disabled: ['', '已下架'] }
+      const extWrap = document.createElement('div')
+      extWrap.className = 'mc-block mc-span-2'
+      const extRows = extItems.map((x) => {
+        const [tone, label] = extStatus[x.status] || ['', x.status || '—']
+        const perms = (x.permissions || []).join(' · ') || '—'
+        const acts = extCanManage ? (
+          x.status === 'pending'
+            ? `<button class="btn sm" data-ext-reject="${esc(x.id)}">拒绝下架</button><button class="btn sm primary" data-ext-approve="${esc(x.id)}">批准上架</button>`
+            : x.status === 'listed'
+              ? `<button class="btn sm" data-ext-reject="${esc(x.id)}">下架</button><button class="btn sm" data-ext-delete="${esc(x.id)}">移除</button>`
+              : `<button class="btn sm primary" data-ext-approve="${esc(x.id)}">重新上架</button><button class="btn sm" data-ext-delete="${esc(x.id)}">移除</button>`
+        ) : ''
+        return `<div class="mc-trow">
+          <span class="mc-first">${esc(x.name)} <span class="mc-dim mono">v${esc(x.version || '1.0.0')}</span>${x.highRisk ? ' <span class="mc-tag bad">高危权限</span>' : ''}</span>
+          <span>${esc(x.requestedBy === 'hub' ? '平台' : x.requestedBy || '—')}</span>
+          <span class="mc-dim">${esc(perms)}</span>
+          <span><span class="mc-tag ${tone}">${label}</span></span>
+          <span class="mc-acts">${acts}</span>
+        </div>`
+      }).join('') || '<div class="mc-row">暂无扩展记录</div>'
+      extWrap.innerHTML = `<div class="mc-block-head"><b>浏览器扩展审核</b><span class="spacer"></span><span class="mc-count">${extItems.length} 个 · ${extItems.filter((x) => x.status === 'pending').length} 待审核</span></div>
+        <div class="mc-table" style="--mc-cols:1.6fr .9fr 1.2fr .8fr 1.2fr">
+          <div class="mc-thead"><span>扩展</span><span>提交人</span><span>权限</span><span>状态</span><span>操作</span></div>
+          ${extRows}
+        </div>
+        <div class="mc-block-note">扩展在浏览器隔离分区运行，不接触中枢会话与密钥；上架后用户可在云浏览器扩展市场自行启用。</div>`
+      blocks.appendChild(extWrap)
+      const extPost = async (id, action, extra = {}) => {
+        const { ok, body } = await api('/api/admin/browser-exts/review', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id, action, ...extra }) })
+        if (!ok) return toast(body.error || '操作失败', true)
+        toast(body.message || '操作完成')
+        renderView()
+      }
+      extWrap.querySelectorAll('[data-ext-approve]').forEach((b) => b.addEventListener('click', () => extPost(b.dataset.extApprove, 'approve')))
+      extWrap.querySelectorAll('[data-ext-reject]').forEach((b) => b.addEventListener('click', () => extPost(b.dataset.extReject, 'reject')))
+      extWrap.querySelectorAll('[data-ext-delete]').forEach((b) => b.addEventListener('click', async () => {
+        const { ok, body } = await api('/api/admin/browser-exts/delete', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: b.dataset.extDelete }) })
+        if (!ok) return toast(body.error || '移除失败', true)
+        toast('扩展已移除')
+        renderView()
+      }))
+    }
+
     const { body: baselineAdmin } = await api('/api/admin/official-baseline')
     if (blocks) {
       const bundles = baselineAdmin.bundles || []
@@ -16976,12 +18008,17 @@ async function renderAdmin(el) {
     if (blocks) {
       const concept = document.createElement('div')
       concept.className = 'mc-block'
-      concept.innerHTML = `<div class="mc-block-head"><b>概念边界</b><span class="spacer"></span><span class="mc-count">两个独立控制面</span></div>
+      concept.innerHTML = `<div class="mc-block-head"><b>概念边界</b><span class="spacer"></span><span class="mc-count">系统预设 · 个人自定义 · 插件运行时</span></div>
         <div class="mc-concept-grid">
           <div class="mc-concept">
-            <div class="mc-concept-k">模型网关</div>
-            <div class="mc-concept-v">管理中枢共享模型的调用、路由、鉴权、计费与审计。</div>
-            <span class="mc-tag ok">共享模型</span>
+            <div class="mc-concept-k">系统预设模型</div>
+            <div class="mc-concept-v">4 个问答 + 2 个图像模型，owner 为平台（hub），全平台公共可见、只读，密钥由部署环境变量托管。</div>
+            <span class="mc-tag ok">平台公共</span>
+          </div>
+          <div class="mc-concept">
+            <div class="mc-concept-k">我的自定义模型</div>
+            <div class="mc-concept-v">用户自行填写的 API 模型固定归属本人，仅本人及其应用可选，不会进入公共模型池。</div>
+            <span class="mc-tag">仅本人可见</span>
           </div>
           <div class="mc-concept">
             <div class="mc-concept-k">插件运行管理</div>
@@ -16996,27 +18033,182 @@ async function renderAdmin(el) {
       const wrap = document.createElement('div')
       wrap.className = 'mc-block'
       const imageModels = Array.isArray(state.boot?.imageGeneration?.models) ? state.boot.imageGeneration.models : []
-      const imageRows = imageModels.map((m) => `<div class="mc-trow">
+      const MODEL_PRESETS = [
+        { key: 'deepseek-flash', label: 'DeepSeek V4.1 Flash（默认通用）', provider: 'DeepSeek', endpoint: 'https://api.deepseek.com', model: 'deepseek-flash' },
+        { key: 'qwen4-max', label: 'Qwen4-Max（专业多模态）', provider: '阿里云百炼', endpoint: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen4-max' },
+        { key: 'kimi-k3.1-pro', label: 'Kimi K3.1 Pro（高级推理）', provider: 'Moonshot', endpoint: 'https://api.moonshot.cn/v1', model: 'kimi-k3.1-pro' },
+        { key: 'glm-5.3-flash', label: 'GLM 5.3 Flash（Agent 执行）', provider: '智谱 AI', endpoint: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-5.3-flash' },
+      ]
+      const purposeLabel = (p) => (p === 'image' ? '图像' : p === 'app' ? '应用' : '问答')
+      const modelRowHtml = (m, presetGroup) => `<div class="mc-trow">
+        <span class="mc-first">${esc(m.label)} <span class="mc-dim mono" style="display:block;font-size:10px;font-weight:400;margin-top:2px">${esc(m.providerLabel || m.provider || '—')}${m.role ? ` · ${esc(m.role)}` : ''}</span></span>
+        <span>${purposeLabel(m.purpose)}</span>
+        ${presetGroup
+    ? `<span class="mono" style="font-size:10px">${m.multiplier != null ? `${Number(m.multiplier).toFixed(2)}x` : '—'}</span>`
+    : `<span class="mono" style="font-size:10px">${esc(m.model || '—')}</span>`}
+        <span><span class="mc-tag ${m.configured ? 'ok' : 'warn'}" title="${esc(!m.configured && (m.keyEnvs || []).length ? `需设置环境变量：${m.keyEnvs.join(' / ')}` : (m.configured ? (m.keySource === 'account' ? '使用当前账号已保存的 Key' : '密钥已就绪') : '尚未配置密钥'))}">${m.configured ? '可用' : '未配置 Key'}</span></span>
+        <span><span class="mc-tag ${m.enabled ? 'ok' : ''}">${m.enabled ? '启用' : '停用'}</span></span>
+        <span class="mc-acts">${presetGroup
+    ? '<span class="mc-dim" style="font-size:10px">系统预设 · 只读</span>'
+    : `<button class="btn sm" data-model-edit="${esc(m.id)}">编辑</button><button class="btn sm" data-model-test="${esc(m.id)}">测试</button><button class="btn sm" data-model-del="${esc(m.id)}">删除</button>`}</span>
+      </div>`
+      const presetRows = presetModels.map((m) => modelRowHtml(m, true)).join('')
+      const customRows = customModels.map((m) => modelRowHtml(m, false)).join('')
+      const imageRows = imageModels.map((m) => {
+        const caps = []
+        if (m.capabilities?.generate) caps.push('生图')
+        if (m.capabilities?.edit) caps.push('编辑')
+        if (m.capabilities?.references) caps.push('参考图')
+        return `<div class="mc-trow">
         <span class="mc-first">${esc(m.label)} <span class="mc-dim" style="display:block;font-size:10px;font-weight:400;margin-top:2px">${esc(m.providerLabel || m.provider || '—')}</span></span>
-        <span>图像生成 · 用户二选一</span>
+        <span>${esc(caps.join(' / ') || '生成')}</span>
         <span><span class="mc-tag ${m.configured ? 'ok' : 'warn'}">${m.configured ? '可用' : '未配置'}</span></span>
+      </div>`
+      }).join('')
+      const appModelRows = appItems.map((a) => `<div class="mc-trow">
+        <span class="mc-first">${esc(a.name)}<span class="mc-dim" style="display:block;font-size:10px;font-weight:400;margin-top:2px">${esc(a.id)}</span></span>
+        <span>${esc(a.modelLabel || '默认通用模型')}</span>
+        <span class="mono" style="font-size:10px">${esc(a.modelRef || '—')}</span>
+        <span class="mc-acts"><button class="btn sm" data-app-model="${esc(a.id)}">选择模型</button></span>
       </div>`).join('')
-      wrap.innerHTML = `<div class="mc-block-head"><b>模型网关</b><span class="spacer"></span><span class="mc-count">3 个共享模型</span></div>
-        <div class="form-note" style="margin:0 0 8px">首页默认 DeepSeek；图像生成由用户在 Qwen-Image 与 Seedream 中二选一。三个模型统一由管理中心维护调用、路由、鉴权、计费与审计，互联网与政务网均按本网关策略执行。</div>
+      wrap.innerHTML = `<div class="mc-block-head"><b>模型网关</b><span class="spacer"></span><span class="mc-count">系统预设 ${presetModels.length} · 个人 ${customModels.length}</span><button class="btn sm primary" data-model-add>新增我的模型</button></div>
+        <div class="form-note" style="margin:0 0 8px">系统预设模型是全平台公共模型，由平台统一托管 provider、端点与密钥；用户自定义模型固定归属本人，<b>不会成为公共模型</b>，只有本人和本人应用可选。应用与首页问答都只保存模型引用，provider 与密钥始终由智能中枢解析。</div>
+        <div style="display:flex;align-items:center;gap:8px;padding:2px 10px 6px"><b style="font-size:12px">系统预设模型</b><span class="mc-count">全平台公共 · 只读</span></div>
+        <div class="mc-table" style="--mc-cols:minmax(150px,1.6fr) minmax(48px,.42fr) minmax(56px,.5fr) minmax(70px,.62fr) minmax(52px,.44fr) minmax(86px,.8fr)">
+          <div class="mc-thead"><span>模型</span><span>用途</span><span>倍率</span><span>凭证</span><span>状态</span><span>操作</span></div>
+          ${presetRows || '<div class="mc-row">系统预设模型未加载</div>'}
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;padding:12px 10px 6px"><b style="font-size:12px">我的自定义模型</b><span class="mc-count">仅本人可见</span></div>
+        <div class="mc-table" style="--mc-cols:minmax(150px,1.6fr) minmax(48px,.42fr) minmax(110px,1.1fr) minmax(70px,.62fr) minmax(52px,.44fr) minmax(150px,1.4fr)">
+          <div class="mc-thead"><span>模型</span><span>用途</span><span>模型 ID</span><span>凭证</span><span>状态</span><span>操作</span></div>
+          ${customRows || '<div class="mc-row">还没有自定义模型。点击右上角「新增我的模型」添加自己的 API 模型。</div>'}
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;padding:12px 10px 6px"><b style="font-size:12px">应用模型引用</b><span class="mc-count">应用不设置 provider，只从智能中枢选模型</span></div>
+        <div class="mc-table" style="--mc-cols:minmax(140px,1.4fr) minmax(110px,1.1fr) minmax(120px,1.2fr) minmax(84px,.8fr)">
+          <div class="mc-thead"><span>应用</span><span>当前模型</span><span>模型引用</span><span>操作</span></div>
+          ${appModelRows || '<div class="mc-row">暂无已登记应用</div>'}
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;padding:12px 10px 4px"><b style="font-size:12px">内置图像 Provider（环境变量探测 · 只读）</b></div>
         <div class="mc-table" style="--mc-cols:minmax(126px,1.28fr) minmax(128px,1.2fr) minmax(70px,.62fr)">
           <div class="mc-thead"><span>模型</span><span>角色</span><span>状态</span></div>
-          <div class="mc-trow"><span class="mc-first">DeepSeek <span class="mc-dim" style="display:block;font-size:10px;font-weight:400;margin-top:2px">${esc(modelCfg.provider || '统一模型网关')}</span></span><span>首页 · 默认对话</span><span><span class="mc-tag ok">统一网关</span></span></div>
           ${imageRows || '<div class="mc-row">服务端未返回图像模型清单</div>'}
         </div>
-        <div style="display:flex;align-items:center;gap:8px;padding:12px 10px 4px"><b style="font-size:12px">当前账号接入</b><span class="mc-count">只读展示，共享模型凭证由服务端托管</span></div>
+        <div class="form-note" style="margin:8px 10px 0">两款模型都支持生图、参考图和编辑：Seedream 5.5 以单图生图方式编辑，Qwen-Image 3.0 Pro 以多模态指令方式编辑；编辑默认使用图像页当前选中的模型。</div>
+        <div style="display:flex;align-items:center;gap:8px;padding:12px 10px 4px"><b style="font-size:12px">当前账号接入</b><span class="mc-count">旧版单模型配置，仅作预设缺 Key 时的兜底</span></div>
         <div class="mc-table" style="--mc-cols:minmax(90px,.7fr) minmax(200px,1.6fr)">
           <div class="mc-thead"><span>配置项</span><span>当前值</span></div>
           <div class="mc-trow"><span>接口地址</span><span class="mono" style="font-size:11px">${esc(modelCfg.endpoint || '未配置')}</span></div>
           <div class="mc-trow"><span>默认模型</span><span>${esc(modelCfg.defaultModel || '未配置')}</span></div>
           <div class="mc-trow"><span>API Key</span><span><span class="mc-tag ${modelCfg.apiKeySaved ? 'ok' : 'warn'}">${modelCfg.apiKeySaved ? '已保存' : '统一网关'}</span> <span class="mc-dim mono">${esc(modelCfg.key || '—')}</span></span></div>
-          <div class="mc-trow"><span>连接测试</span><span>${modelCfg.testedAt ? `${esc(modelCfg.testedAt)} · ${esc(modelCfg.latency || '—')}` : '<span class="mc-dim">尚未测试</span>'}</span></div>
         </div>`
       blocks.appendChild(wrap)
+
+      const openSharedModelModal = (record) => {
+        const r = record || {}
+        const defaultPurpose = r.purpose || 'chat'
+        const m = openModal(record ? '编辑我的模型 API' : '新增我的模型 API', `
+          <div class="form-note">自定义模型只属于当前账号，不会成为全平台公共模型；系统预设模型由平台统一维护。</div>
+          <div class="form-label" style="margin-top:12px">模型名称</div>
+          <input class="text-input" id="smLabel" maxlength="40" placeholder="例如：我的 DeepSeek / 通义千问" value="${esc(r.label || '')}" />
+          <div class="form-label" style="margin-top:12px">绑定用途</div>
+          <select class="text-input" id="smPurpose">
+            <option value="chat" ${defaultPurpose === 'chat' ? 'selected' : ''}>问答</option>
+            <option value="image" ${defaultPurpose === 'image' ? 'selected' : ''}>图像</option>
+            <option value="app" ${defaultPurpose === 'app' ? 'selected' : ''}>应用</option>
+          </select>
+          <div class="form-label" style="margin-top:12px">主流模型预设</div>
+          <select class="text-input" id="smPreset">
+            <option value="">自定义（手动填写）</option>
+            ${MODEL_PRESETS.map((p) => `<option value="${p.key}">${p.label}</option>`).join('')}
+          </select>
+          <div class="form-label" style="margin-top:12px">提供商（展示用）</div>
+          <input class="text-input" id="smProvider" maxlength="40" placeholder="例如：DeepSeek / 阿里云百炼 / Moonshot / 智谱 AI" value="${esc(r.provider || '')}" />
+          <div class="form-label" style="margin-top:12px">接口地址</div>
+          <input class="text-input mono" id="smEndpoint" placeholder="https://api.example.com/v1" value="${esc(r.endpoint || '')}" />
+          <div class="form-label" style="margin-top:12px">模型 ID</div>
+          <input class="text-input mono" id="smModel" maxlength="80" placeholder="例如：deepseek-flash / qwen4-max / kimi-k3.1-pro / glm-5.3-flash" value="${esc(r.model || '')}" />
+          <div class="form-label" style="margin-top:12px">API Key${record ? '（留空表示不修改）' : ''}</div>
+          <input class="text-input mono" id="smKey" type="password" autocomplete="off" placeholder="sk-..." />
+          <label style="display:flex;align-items:center;gap:8px;margin-top:12px;font-size:12px;color:#4b5056"><input type="checkbox" id="smEnabled" ${r.enabled === false ? '' : 'checked'} /> 启用该模型</label>
+          <div class="form-label" style="margin-top:12px">备注（可选）</div>
+          <input class="text-input" id="smNote" maxlength="120" placeholder="用途、适用网络等说明" value="${esc(r.note || '')}" />
+          <div class="form-foot"><span class="spacer"></span><button class="btn" data-mclose>取消</button><button class="btn primary" id="smSave">保存</button></div>`)
+        m.querySelector('[data-mclose]').addEventListener('click', () => m.remove())
+        m.querySelector('#smPreset').addEventListener('change', (e) => {
+          const preset = MODEL_PRESETS.find((p) => p.key === e.target.value)
+          if (!preset) return
+          m.querySelector('#smProvider').value = preset.provider
+          m.querySelector('#smEndpoint').value = preset.endpoint
+          m.querySelector('#smModel').value = preset.model
+          if (!m.querySelector('#smLabel').value.trim()) m.querySelector('#smLabel').value = preset.label
+        })
+        m.querySelector('#smSave').addEventListener('click', async () => {
+          const payload = {
+            label: m.querySelector('#smLabel').value.trim(),
+            purpose: m.querySelector('#smPurpose').value,
+            provider: m.querySelector('#smProvider').value.trim(),
+            endpoint: m.querySelector('#smEndpoint').value.trim(),
+            model: m.querySelector('#smModel').value.trim(),
+            note: m.querySelector('#smNote').value.trim(),
+            enabled: m.querySelector('#smEnabled').checked,
+          }
+          const key = m.querySelector('#smKey').value.trim()
+          if (key) payload.apiKey = key
+          if (record) payload.id = record.id
+          const { ok, body } = await api('/api/admin/shared-models', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) })
+          if (!ok) return toast(body.error || '保存失败', true)
+          m.remove()
+          toast(body.message || '模型 API 已保存')
+          renderView()
+        })
+      }
+      wrap.querySelector('[data-model-add]').addEventListener('click', () => openSharedModelModal(null))
+      wrap.querySelectorAll('[data-model-edit]').forEach((b) => b.addEventListener('click', () => {
+        const rec = sharedModels.find((x) => x.id === b.dataset.modelEdit)
+        if (rec) openSharedModelModal(rec)
+      }))
+      wrap.querySelectorAll('[data-model-test]').forEach((b) => b.addEventListener('click', async () => {
+        const rec = sharedModels.find((x) => x.id === b.dataset.modelTest)
+        if (!rec) return
+        const { ok, body } = await api('/api/admin/shared-models/test', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: rec.id }) })
+        if (!ok) return toast(body.error || '测试失败', true)
+        toast(body.message || '连接正常')
+      }))
+      wrap.querySelectorAll('[data-model-del]').forEach((b) => b.addEventListener('click', () => {
+        const rec = sharedModels.find((x) => x.id === b.dataset.modelDel)
+        if (!rec) return
+        const confirm = openModal('删除模型 API', `<div class="form-note">确定将「${esc(rec.label)}」从模型网关移除吗？已安装应用与中枢对话将不再调用该模型；删除后可重新添加。</div>
+          <div class="form-foot"><span class="spacer"></span><button class="btn" data-mclose>取消</button><button class="btn primary" id="smDelOk">确认删除</button></div>`)
+        confirm.querySelector('[data-mclose]').addEventListener('click', () => confirm.remove())
+        confirm.querySelector('#smDelOk').addEventListener('click', async () => {
+          const { ok, body } = await api('/api/admin/shared-models/delete', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: rec.id }) })
+          if (!ok) return toast(body.error || '删除失败', true)
+          confirm.remove()
+          toast(body.message || '已删除')
+          renderView()
+        })
+      }))
+      wrap.querySelectorAll('[data-app-model]').forEach((b) => b.addEventListener('click', () => {
+        const app = appItems.find((x) => x.id === b.dataset.appModel)
+        if (!app) return
+        const options = [...presetModels, ...customModels].filter((m) => m.enabled && m.configured && (m.purpose === 'chat' || m.purpose === 'app'))
+        const m = openModal(`应用模型 · ${app.name}`, `
+          <div class="form-note">应用只保存模型引用，provider、端点和密钥都由智能中枢托管；可选系统预设或本人自定义模型。</div>
+          <div class="form-label" style="margin-top:12px">模型</div>
+          <select class="text-input" id="appModelRef">
+            ${options.length ? options.map((item) => `<option value="${esc(item.id)}" ${item.id === app.modelRef ? 'selected' : ''}>${esc(item.label)}${item.preset ? ' · 系统预设' : ' · 我的模型'}</option>`).join('') : '<option value="">暂无可用模型</option>'}
+          </select>
+          <div class="form-foot"><span class="spacer"></span><button class="btn" data-mclose>取消</button><button class="btn primary" id="appModelSave" ${options.length ? '' : 'disabled'}>保存</button></div>`)
+        m.querySelector('[data-mclose]').addEventListener('click', () => m.remove())
+        m.querySelector('#appModelSave').addEventListener('click', async () => {
+          const ref = m.querySelector('#appModelRef').value
+          const { ok, body } = await api('/api/apps/model', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: app.id, modelRef: ref }) })
+          if (!ok) return toast(body.error || '保存失败', true)
+          m.remove()
+          toast(body.message || '应用模型已更新')
+          renderView()
+        })
+      }))
     }
     if (blocks) {
       const wrap = document.createElement('div')
@@ -17181,6 +18373,78 @@ async function renderAdmin(el) {
         })
       }))
     }
+    // 图像模板管理：员工在图像页“申请成为模板”，管理员在这里审核、上线、下架与重新上线。
+    let tplAdmin = { applications: [] }
+    try {
+      const res = await api('/api/images/template-applications')
+      if (res.ok) tplAdmin = res.body
+    } catch {}
+    const tplItems = Array.isArray(tplAdmin.applications) ? tplAdmin.applications : []
+    if (blocks) {
+      const STATUS_TPL = { pending: ['warn', '待审核'], approved: ['ok', '已上线'], offline: ['warn', '已下架'], rejected: ['bad', '已驳回'] }
+      const pendingTpl = tplItems.filter((x) => x.status === 'pending').length
+      const onlineTpl = tplItems.filter((x) => x.status === 'approved').length
+      const fmtTplTime = (ts) => {
+        const n = Number(ts)
+        if (!Number.isFinite(n) || n <= 0) return '—'
+        const d = new Date(n)
+        const pad = (v) => String(v).padStart(2, '0')
+        return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+      }
+      const tplRows = tplItems.map((x) => {
+        const [cls, label] = STATUS_TPL[x.status] || ['', x.status || '—']
+        const acts = x.status === 'pending'
+          ? `<button class="btn sm primary" data-tpl-review="${esc(x.id)}" data-decision="approve">通过</button><button class="btn sm" data-tpl-review="${esc(x.id)}" data-decision="reject">驳回</button>`
+          : x.status === 'approved'
+            ? `<button class="btn sm" data-tpl-review="${esc(x.id)}" data-decision="offline">下架</button>`
+            : x.status === 'offline'
+              ? `<button class="btn sm primary" data-tpl-review="${esc(x.id)}" data-decision="publish">重新上线</button>`
+              : '<span class="mc-dim">—</span>'
+        return `<div class="mc-trow" style="display:flex;flex-direction:column;align-items:stretch;gap:4px;padding:9px 10px;border-bottom:1px solid var(--line)">
+          <div style="display:flex;align-items:center;gap:8px;min-width:0">
+            <span style="font-size:12px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(x.title)}</span>
+            <span class="mc-tag ${cls}" style="flex:none">${esc(label)}</span>
+          </div>
+          <div class="mc-dim" style="font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(x.category || '未分类')} · ${esc(x.ratio || '1:1')} · ${esc(x.applicant || '—')} · ${esc(fmtTplTime(x.createdAt))} · ${esc(x.id)}</div>
+          <div class="mc-acts" style="display:flex;gap:6px;flex-wrap:wrap">${acts}</div>
+        </div>`
+      }).join('')
+      const wrap = document.createElement('div')
+      wrap.className = 'mc-block mc-span-2'
+      wrap.innerHTML = `<div class="mc-block-head"><b>图像模板管理</b><span class="spacer"></span><span class="mc-count">${tplItems.length} 个模板 · 待审核 ${pendingTpl} · 已上线 ${onlineTpl}</span></div>
+        <div class="form-note" style="margin:0 0 8px">员工在图像页对自己生成的图像点“申请成为模板”，这里审核上线；通过后才会出现在图像页“模板”栏，下架后对员工隐藏。</div>
+        <div>${tplRows || '<div class="mc-row">还没有模板申请。员工在“我的图像”里点“申请成为模板”后会出现在这里。</div>'}</div>`
+      blocks.appendChild(wrap)
+      wrap.querySelectorAll('[data-tpl-review]').forEach((b) => b.addEventListener('click', () => {
+        const id = b.dataset.tplReview
+        const decision = b.dataset.decision
+        const item = tplItems.find((x) => x.id === id)
+        if (!item) return
+        const run = async (note = '') => {
+          const { ok, body } = await api('/api/images/template-review', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ id, decision, note }),
+          })
+          if (!ok) return toast(body?.error || '模板审核失败', true)
+          const verb = { approve: '已通过并上线', reject: '已驳回', offline: '已下架', publish: '已重新上线' }[decision] || '已处理'
+          toast(`${item.title} ${verb}`)
+          renderView()
+        }
+        if (decision !== 'reject') return run()
+        const m = openModal('驳回模板申请', `
+          <div class="form-note">模板：<b>${esc(item.title)}</b> · 申请人 ${esc(item.applicant || '—')}</div>
+          <div class="form-label" style="margin-top:8px">驳回原因（会记入审核记录）</div>
+          <textarea class="form-area" id="tplRejectNote" rows="3" maxlength="300" placeholder="例如：预览图与提示词不一致，请重新提交"></textarea>
+          <div class="form-foot"><span class="spacer"></span><button class="btn" data-mclose>取消</button><button class="btn primary" id="tplRejectOk">确认驳回</button></div>`)
+        m.querySelector('[data-mclose]').addEventListener('click', () => m.remove())
+        m.querySelector('#tplRejectOk').addEventListener('click', async (ev) => {
+          ev.currentTarget.disabled = true
+          await run(m.querySelector('#tplRejectNote').value.trim())
+          m.remove()
+        })
+      }))
+    }
     const kpiBox = root.querySelector('#aiKpis')
     if (kpiBox) {
       const marketItems = marketAdmin.items || []
@@ -17194,6 +18458,7 @@ async function renderAdmin(el) {
         { k: '系统内核', v: `${enabledBundles + enabledInfra} / ${kernelTotal}`, note: '启动底座与文件基础，只读' },
         { k: '平台公共能力', v: `${enabledCaps} / ${capRows.length}`, note: '系统级模块，可停用' },
         { k: '市场条目', v: `${marketItems.length}`, note: `官方 ${officialCount} · 待审核 ${pending.length}` },
+        { k: '图像模板', v: `${tplItems.filter((x) => x.status === 'approved').length} / ${tplItems.length}`, note: `已上线 · 待审核 ${tplItems.filter((x) => x.status === 'pending').length}`, tone: tplItems.some((x) => x.status === 'pending') ? 'warn' : 'ok' },
         { k: '待审核', v: `${pending.length}`, note: '员工插件与技能提交' },
       ]
       kpiBox.innerHTML = kpis.map((x) => `<div class="mc-kpi"><div class="mc-kpi-k">${esc(x.k)}</div><div class="mc-kpi-v">${esc(x.v)}</div><div class="mc-kpi-note">${esc(x.note)}</div></div>`).join('')
@@ -17667,6 +18932,7 @@ function renderSettings(el) {
   const ap = el.querySelector('#accentPick')
   const am = el.querySelector('#accentMenu')
   if (ap && am) {
+    bindInlinePopover(ap, am, () => { am.hidden = true })
     ap.addEventListener('click', (e) => {
       e.stopPropagation()
       const willOpen = am.hidden
@@ -17969,10 +19235,10 @@ function settingsBody(tab) {
       title: '模型与密钥',
       groups: [
         sgroup('共享模型（由管理中心统一管理）', [
-          srow('首页对话模型', 'DeepSeek · 首页默认；调用、鉴权、计费与审计统一走模型网关',
-            `<span class="tag ok">DeepSeek · 默认</span>`),
+          srow('问答模型', '4 个系统预设（DeepSeek V4.1 Flash / Qwen4-Max / Kimi K3.1 Pro / GLM 5.3 Flash），首页在模型与推理强度弹层中切换',
+            '<span class="tag ok">4 个预设</span>'),
           ...(imageRows.length ? imageRows : [srow('图像生成模型', 'Qwen-Image / Seedream 未从服务端返回', '<span class="tag">未配置</span>')]),
-          srow('图像模型选择', '图像页由用户在 Qwen-Image 与 Seedream 之间二选一；管理中心维护凭证、端点与可用状态',
+          srow('图像模型选择', '图像页由用户在 Qwen-Image 3.0 Pro 与 Seedream 5.5 之间二选一；管理中心维护凭证、端点与可用状态',
             '<span class="set-value">用户二选一</span>'),
         ]),
         sgroup('网关策略', [
@@ -17980,8 +19246,14 @@ function settingsBody(tab) {
           srow('鉴权与计费', '服务端持有凭证，按模型与账号计量；客户端不保存共享模型密钥', '<span class="set-value">服务端托管</span>'),
           srow('审计', '每次模型调用记录账号、模型、网络与结果，进入管理中心审计', '<span class="set-value">统一审计</span>'),
         ]),
+        sgroup('我的自定义模型', [
+          srow('入口', '在「管理中心 → AI 能力管理 → 模型与网关」中新增；固定归属当前账号，仅本人和本人应用可选',
+            '<span class="set-value">管理中心</span>'),
+          srow('可见范围', '自定义模型不会进入全平台公共模型池；系统预设模型由平台统一维护 provider、端点与密钥',
+            '<span class="set-value">仅本人</span>'),
+        ]),
         sgroup('个人凭证（可选）', [
-          srow('个人 API Key', '仅用于本机调试，不属于三个共享模型；共享模型仍由管理中心统一管理',
+          srow('个人 API Key', '账号级 DeepSeek 密钥；未部署环境变量时，首页问答的 DeepSeek V4.1 Flash 预设将使用该 Key',
             `<input class="mini-input mono" id="${p}key" value="${esc(state.modelCfg?.key || '')}" placeholder="粘贴完整 API Key"><span class="set-btn-gap"></span>${sbtn('saveKey', '保存到凭证库')}${sbtn('clearKey', '清除')}`),
           srow('数据外发策略', '决定个人调试凭证可接触的数据级别', sel(`${p}egress`, ['禁止涉密与敏感内容外发', '仅内部级可外发', '按单次审批'], '禁止涉密与敏感内容外发')),
         ]),
@@ -18157,28 +19429,139 @@ function settingsBody(tab) {
     const summary = state.usageSummary
     const totals = summary?.totals || {}
     const fmt = (n) => Number(n || 0).toLocaleString('zh-CN')
+    const pct = (n) => `${Math.round(Number(n || 0) * 100)}%`
+    const money = (n) => `¥${Number(n || 0).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 6 })}`
+    const points = (n) => Number(n || 0).toLocaleString('zh-CN', { minimumFractionDigits: 0, maximumFractionDigits: 2 })
+    const credit = (n) => `${points(n)} 积分`
+    const creditOfCny = (n) => points(Number(n || 0) * 100)
+    const rateCredit = (n) => points(Number(n || 0) * 100)
+    const pricing = summary?.pricing || {}
+    const timeText = (value) => {
+      if (!value) return '—'
+      const date = new Date(value)
+      return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString('zh-CN', { hour12: false }).slice(0, 16)
+    }
+    const statusText = { success: '完成', failure: '失败', unknown: '未判定' }
     const coverage = summary?.coverage || {}
+    const baseline = summary?.baseline || {}
     const records = (summary?.records || []).slice(0, 8)
+    const taskRows = (summary?.tasks || []).slice(0, 6)
+    const sessionRows = (summary?.sessions || []).slice(0, 6)
+    const toolRows = (summary?.tools || []).slice(0, 8)
+    const skillRows = (summary?.skills || []).slice(0, 6)
+    const localSuccess = Math.max(0, Number(totals.successfulTasks || 0) - Number(totals.successfulModelTasks || 0))
+    const pricingModeText = { 'peak-offpeak': '峰谷', tiered: '输入分档', flat: '固定价', 'image-resolution': '按张/分辨率', 'image-flat': '按张固定价' }
+    const rateLine = (m) => {
+      if (m.free) return '免费模型（0 积分）'
+      if (m.offPeak && m.peak) {
+        return `空闲 命中 ${rateCredit(m.offPeak.cacheHit)} / 未命中 ${rateCredit(m.offPeak.cacheMiss)} / 输出 ${rateCredit(m.offPeak.output)}；高峰 ${rateCredit(m.peak.cacheHit)} / ${rateCredit(m.peak.cacheMiss)} / ${rateCredit(m.peak.output)} 积分/M tokens`
+      }
+      if (m.tiers?.length) {
+        return m.tiers.map((t) => `${t.label}：命中 ${rateCredit(t.cacheHit)}${t.explicitCacheHit != null ? `（显式 ${rateCredit(t.explicitCacheHit)}）` : ''} / 未命中 ${rateCredit(t.cacheMiss)} / 输出 ${rateCredit(t.output)}${t.thinkingOutput != null ? `（思考 ${rateCredit(t.thinkingOutput)}）` : ''}`).join('；') + ' 积分/M tokens'
+      }
+      if (m.rates) return `命中 ${rateCredit(m.rates.cacheHit)} / 输入 ${rateCredit(m.rates.cacheMiss)} / 输出 ${rateCredit(m.rates.output)} 积分/M tokens`
+      return '未记录单价'
+    }
+    const tierLabel = (m) => (m.tier ? `[${String(m.tier).toUpperCase()}] ` : '')
+    const textPricingRows = (pricing.launchModels || pricing.textModels || []).map((m) => srow(
+      `${tierLabel(m)}${m.displayName} · ${m.providerLabel}`,
+      `${pricingModeText[m.billingMode] || m.billingMode} · ${m.billingNote || ''}${m.aliasNote ? ` · ${m.aliasNote}` : ''}${m.routedTo ? ` · 实际按 ${m.routedTo} 计价` : ''}`,
+      `<span class="set-value mono">${rateLine(m)}</span>`,
+    ))
+    const imagePricingRows = (pricing.launchImageModels || pricing.imageModels || []).map((m) => {
+      const output = m.outputTiers?.length
+        ? m.outputTiers.map((t) => `${t.label} ${rateCredit(t.price)} 积分/张`).join(' / ')
+        : `${rateCredit(m.flatOutputPerImage ?? 0)} 积分/张`
+      return srow(
+        `${tierLabel(m)}${m.displayName} · ${m.providerLabel}`,
+        `${pricingModeText[m.billingMode] || m.billingMode} · 输入图 ${rateCredit(m.inputPerImage)} 积分/张${m.aliasNote ? ` · ${m.aliasNote}` : ''}`,
+        `<span class="set-value mono">${output}</span>`,
+      )
+    })
+    const providerNames = (pricing.providers || []).map((p) => p.providerLabel).filter(Boolean).join(' / ')
+    const serviceRows = (pricing.services || []).map((item) => srow(
+      item.label,
+      `按 ${item.unit} 计费；当前 usage 没有次数/页数/字符数/音频时长字段，因此不并入总额，不估算`,
+      `<span class="set-value mono">${rateCredit(item.price)} 积分${item.discountPrice != null ? `（限时 ${rateCredit(item.discountPrice)} 积分）` : ''}</span>`,
+    ))
     return {
       title: 'Token 用量',
       groups: [
         sgroup('真实计量', [
-          srow('累计 tokens', '来自每轮 DSH 返回的 usage；没有 usage 的轮次不计入', `<span class="set-value mono">${summary ? fmt(totals.totalTokens) : '读取中…'}</span>`),
-          srow('输入 / 输出', '输入 = 上下文与提示词；输出 = 模型生成', `<span class="set-value mono">${fmt(totals.inputTokens)} / ${fmt(totals.outputTokens)}</span>`),
-          srow('模型调用次数', '按真实 usage.calls 汇总，不是前端点击次数', `<span class="set-value mono">${fmt(totals.requests)}</span>`),
-          srow('缓存读 / 写', '缓存命中与写入分别计量', `<span class="set-value mono">${fmt(totals.cacheReadTokens)} / ${fmt(totals.cacheWriteTokens)}</span>`),
+          srow('累计 tokens', '取上游 usage.totalTokens；包含新增输入、缓存读/写与输出，缓存读不重复相加', `<span class="set-value mono">${summary ? fmt(totals.totalTokens) : '读取中…'}</span>`),
+          srow('新增输入 / 输出', '新增输入 = 未命中缓存的输入；缓存读单独计量，不重复计入新增输入', `<span class="set-value mono">${fmt(totals.inputTokens)} / ${fmt(totals.outputTokens)}</span>`),
+          srow('累计积分', '100 积分 = 1 元；按各厂商官方人民币价目换算。文本按 tokens、图像按张/分辨率档；覆盖峰谷、输入长度分档、缓存命中/未命中/缓存创建、固定价与免费模型；缺模型或关键字段不猜价', `<span class="set-value mono">${credit(totals.costCredits ?? (Number(totals.costCny || 0) * 100))}</span><span class="set-btn-gap"></span><span class="set-value mono">已计 ${fmt(totals.pricedRequests)} · 未计 ${fmt(totals.unpricedRequests)} 次</span>`),
+          srow('积分构成 / 计费档', '缓存命中、未命中、缓存创建与输出分列；DeepSeek 另按北京时间峰谷归集，其他模型为固定价或输入长度分档', `<span class="set-value mono">命中 ${points(totals.costBreakdownCredits?.cacheHit ?? Number(totals.costBreakdownCny?.cacheHit || 0) * 100)} · 未命中 ${points(totals.costBreakdownCredits?.cacheMiss ?? Number(totals.costBreakdownCny?.cacheMiss || 0) * 100)} · 缓存写 ${points(totals.costBreakdownCredits?.write ?? Number(totals.costBreakdownCny?.write || 0) * 100)} · 输出 ${points(totals.costBreakdownCredits?.output ?? Number(totals.costBreakdownCny?.output || 0) * 100)}</span><span class="set-btn-gap"></span><span class="set-value mono">高峰 ${fmt(totals.peakRequests)} · 空闲 ${fmt(totals.offPeakRequests)} · 固定价 ${fmt(totals.flatRequests)} · 未判定 ${fmt(totals.unknownPeriodRequests)}</span>`),
+          srow('模型调用 / 会话', '按真实 usage.calls 汇总；会话数来自当前账号', `<span class="set-value mono">${fmt(totals.requests)} / ${fmt(coverage.conversations)}</span>`),
+          srow('缓存读 / 写', '缓存命中与写入分别计量；命中率见效率基线', `<span class="set-value mono">${fmt(totals.cacheReadTokens)} / ${fmt(totals.cacheWriteTokens)}</span>`),
           srow('推理 tokens', '仅统计上游返回的 reasoning_tokens', `<span class="set-value mono">${fmt(totals.reasoningTokens)}</span>`),
           srow('采集覆盖', '只统计已落库的真实计量，不用估算值补齐', `<span class="set-value mono">${coverage.usageMessages || 0} / ${coverage.assistantMessages || 0} 条助手消息</span><span class="set-btn-gap"></span><button class="btn sm" data-usage-refresh>刷新</button>`),
         ]),
+        sgroup('效率基线', [
+          srow('单位模型成功任务 tokens', '只取发生模型调用的成功轮次；本地天气/时间/问候不摊入', `<span class="set-value mono">${fmt(totals.avgTokensPerSuccessfulModelTask)}</span>`),
+          srow('全部成功任务均摊', `含 ${fmt(localSuccess)} 个 0 token 本地直连成功任务`, `<span class="set-value mono">${fmt(totals.avgTokensPerSuccessfulTask)}</span>`),
+          srow('完成 / 失败 / 未判定', '完成按 runStats.finishReason 判定；未判定不强行计入成功率', `<span class="set-value mono">${fmt(totals.successfulTasks)} / ${fmt(totals.failedTasks)} / ${fmt(totals.unknownTasks)}</span>`),
+          srow('任务成功率 / 缓存命中率', '成功任务 / 有明确结束状态的轮次；缓存命中 = 缓存读 / 输入总量', `<span class="set-value mono">${pct(totals.successRate)} / ${pct(totals.cacheHitRate)}</span>`),
+          srow('工具调用 / 失败', '来自 runStats.toolCalls 与 toolFailures；工具级 token 无法单独归属', `<span class="set-value mono">${fmt(totals.toolCalls)} / ${fmt(totals.toolFailures)}</span>`),
+          srow('工具结果外置 / 裁剪', '超过平台外置阈值的工具结果会保留首尾并落 spill 文件；裁剪只统计压缩事件', `<span class="set-value mono">外置 ${fmt(totals.spillCalls)} 次 · 省略 ${fmt(totals.spillOmittedBytes)} 字节 · 裁剪 ${fmt(totals.prunedResults)} 次</span>`),
+          srow('计量起点 / 最近', '第一条与最后一条真实 usage 的落库时间', `<span class="set-value mono">${timeText(baseline.since)} / ${timeText(baseline.lastAt)}</span>`),
+        ]),
+        sgroup('按任务类型', taskRows.length
+          ? taskRows.map((t) => srow(
+            t.taskClass,
+            `${fmt(t.messages)} 个计量轮次 · ${fmt(t.requests)} 次模型调用 · 成功 ${fmt(t.successfulTasks)} / 失败 ${fmt(t.failedTasks)}`,
+            `<span class="set-value mono">${fmt(t.totalTokens)} tokens · ${credit(t.costCredits ?? (Number(t.costCny || 0) * 100))} · 单成功任务 ${fmt(t.avgTokensPerSuccessfulTask)}</span>`,
+          ))
+          : [srow('暂无任务类型计量', '需要至少一条带 runStats.taskClass 的真实模型轮次', '<span class="set-value">—</span>')]),
+        sgroup('按会话', sessionRows.length
+          ? sessionRows.map((s) => srow(
+            s.conversationTitle,
+            `${fmt(s.usageMessages)} 条计量消息 · ${fmt(s.requests)} 次模型调用 · 成功 ${fmt(s.successfulTasks)} / 失败 ${fmt(s.failedTasks)}`,
+            `<span class="set-value mono">${fmt(s.totalTokens)} tokens · ${credit(s.costCredits ?? (Number(s.costCny || 0) * 100))}</span>`,
+          ))
+          : [srow('暂无会话计量', '发起一次模型对话后，这里会按会话归因', '<span class="set-value">—</span>')]),
+        sgroup('按工具', toolRows.length
+          ? toolRows.map((t) => srow(
+            t.tool,
+            `${fmt(t.calls)} 次调用 · ${fmt(t.failures)} 次失败 · ${t.conversations.length} 个会话`,
+            `<span class="set-value mono">调用 ${fmt(t.calls)}</span>`,
+          ))
+          : [srow('暂无工具计量', '工具调用会出现在助手消息的 runStats.steps 中', '<span class="set-value">—</span>')]),
+        sgroup('按 Skill', skillRows.length
+          ? skillRows.map((t) => srow(
+            t.tool,
+            `${fmt(t.calls)} 次加载/调用 · ${fmt(t.failures)} 次失败 · ${t.conversations.length} 个会话`,
+            `<span class="set-value mono">调用 ${fmt(t.calls)}</span>`,
+          ))
+          : [srow('暂无 Skill 级归因', '当前工具步骤没有 skill/技能 标记；后续接 Harness 技能加载事件后再纳入', '<span class="set-value">待接入</span>')]),
         sgroup('按模型', (summary?.models || []).length
-          ? summary.models.map((m) => srow(m.model, `${fmt(m.requests)} 次调用 · 输入 ${fmt(m.inputTokens)} / 输出 ${fmt(m.outputTokens)}`, `<span class="set-value mono">${fmt(m.totalTokens)} tokens</span>`))
+          ? summary.models.map((m) => srow(`${m.model}${m.tier ? ` · ${String(m.tier).toUpperCase()}` : ''}`, `${fmt(m.requests)} 次调用 · 输入 ${fmt(m.inputTokens)} / 输出 ${fmt(m.outputTokens)} · 成功 ${fmt(m.successfulTasks)} / 失败 ${fmt(m.failedTasks)} · 已计 ${fmt(m.pricedRequests)} / 未计 ${fmt(m.unpricedRequests)}`, `<span class="set-value mono">${fmt(m.totalTokens)} tokens · ${credit(m.costCredits ?? (Number(m.costCny || 0) * 100))}</span>`))
           : [srow('暂无真实模型用量', '发起一次模型对话后，这里会出现按模型的真实统计', '<span class="set-value">—</span>')]),
+        sgroup('上线文本模型价目', textPricingRows.length
+          ? textPricingRows
+          : [srow('价目未加载', '刷新 Token 面板后重新读取价目摘要', '<span class="set-value">—</span>')]),
+        sgroup('上线图像模型价目', imagePricingRows.length
+          ? imagePricingRows
+          : [srow('价目未加载', '刷新 Token 面板后重新读取图像价目', '<span class="set-value">—</span>')]),
+        sgroup('服务价目（不并入总额）', serviceRows.length
+          ? serviceRows
+          : [srow('价目未加载', '刷新 Token 面板后重新读取 DeepSeek 服务价目', '<span class="set-value">—</span>')]),
         sgroup('最近计量', records.length
-          ? records.map((r) => srow(`${r.conversationTitle}${r.time ? ` · ${r.time}` : ''}`, `${r.model} · ${r.calls} 次调用${r.at ? ` · ${r.at.slice(0, 16).replace('T', ' ')}` : ''}`, `<span class="set-value mono">${fmt(r.totalTokens)} tokens</span>`))
+          ? records.map((r) => srow(
+            `${r.conversationTitle}${r.time ? ` · ${r.time}` : ''}`,
+            `${r.model} · ${r.taskClass} · ${r.calls} 次调用 · ${statusText[r.status] || r.status}${r.at ? ` · ${r.at.slice(0, 16).replace('T', ' ')}` : ''}${r.pricingModel && r.pricingModel !== r.model ? ` · 按 ${r.pricingModel} 计价` : ''}${r.pricingTier ? ` · ${r.pricingTier}` : ''}${r.priced && r.billingPeriod === 'flat' ? ' · 固定价' : ''}`,
+            `<span class="set-value mono">${fmt(r.totalTokens)} tokens · ${r.priced ? credit(r.costCredits ?? (Number(r.costCny || 0) * 100)) : '未计价'}</span>`,
+          ))
           : [srow('暂无计量记录', '当前账号还没有带 usage 的模型轮次', '<span class="set-value">—</span>')]),
         sgroup('口径', [
-          srow('数据来源', '本机会话库中的助手消息 usageAt / usage 字段，刷新后从服务端重新聚合', '<span class="set-value">会话持久化</span>'),
-          srow('不计入项', '历史轮次未返回 usage 的部分、失败且无 usage 的请求、客户端本地估算', '<span class="set-value">不估算</span>'),
+          srow('数据来源', '本机会话库中的助手消息 usageAt / usage / runStats 字段，刷新后从服务端重新聚合', '<span class="set-value">会话持久化</span>'),
+          srow('任务类型口径', '优先取 runStats.taskClass；历史轮次缺失时按会话模式归组，不猜测具体业务类型', '<span class="set-value">不猜测</span>'),
+          srow('成功判定', 'completed / success / stop / end_turn 记为完成；无结束原因记为未判定', '<span class="set-value">finishReason</span>'),
+          srow('RunStats 覆盖', '用于任务类型、工具轮次和成功判定；没有 runStats 的历史轮次不反推', `<span class="set-value mono">${coverage.runStatsMessages || 0} 条</span>`),
+          srow('积分汇率', '100 积分 = 1 元，1 积分 = 0.01 元；智能中枢所有费用、价目和构成统一用积分表达，人民币实价仅在管理中心「成本与计费」展示', `<span class="set-value mono">100 积分 = ¥1</span>`),
+          srow('积分口径', 'DeepSeek 峰谷、Qwen 输入长度分档、Kimi/GLM 固定价、GLM 免费模型分别计价；缓存命中/未命中/缓存创建与输出分列；图像按张与分辨率/像素档计价；峰谷按 message.usageAt 的北京时间判定', `<span class="set-value mono">${pricing.checkedAt || '未加载'} · ${pricing.currency || 'CNY'} 基准</span>`),
+          srow('价格来源', `${providerNames || '各厂商'} 官方价格页；旧模型名与别名按对应主模型映射；V4 Pro 已按官方路由到 V4.1 Flash 计费；图像通道价格独立，未配置密钥时不产生调用费用`, `<span class="set-value">${providerNames ? '官方价目' : '未加载'}</span>`),
+          srow('不计入项', '历史轮次未返回 usage 的部分、失败且无 usage 的请求、客户端本地估算；无法识别模型或峰谷模型缺失 usageAt 的轮次只计入未计价次数；搜索/抓取/文件解析/语音按次价格尚未并入（usage 无对应计数字段）', '<span class="set-value">不估算</span>'),
         ]),
       ],
     }

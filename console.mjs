@@ -1,12 +1,12 @@
 export const consoleRoles = [
-  { id: 'platform', name: '集团平台管理员', scope: '集团全部管理范围', scopes: ['全部可管理范围', '本单位', '本部门'], modules: ['overview', 'org', 'ai', 'data', 'apps', 'ops', 'security', 'service', 'settings'] },
-  { id: 'data', name: '数据管理员', scope: '数据与资源范围', scopes: ['全部可管理范围', '本单位'], modules: ['overview', 'org', 'ai', 'data', 'apps'] },
-  { id: 'security', name: '安全管理员', scope: '安全与审计范围', scopes: ['全部可管理范围', '本单位'], modules: ['overview', 'org', 'security', 'service', 'settings'] },
+  { id: 'platform', name: '集团平台管理员', scope: '集团全部管理范围', scopes: ['全部可管理范围', '本单位', '本部门'], modules: ['overview', 'org', 'ai', 'cost', 'data', 'apps', 'ops', 'security', 'service', 'settings'] },
+  { id: 'data', name: '数据管理员', scope: '数据与资源范围', scopes: ['全部可管理范围', '本单位'], modules: ['overview', 'org', 'ai', 'cost', 'data', 'apps'] },
+  { id: 'security', name: '安全管理员', scope: '安全与审计范围', scopes: ['全部可管理范围', '本单位'], modules: ['overview', 'org', 'cost', 'security', 'service', 'settings'] },
   { id: 'subsidiary', name: '子公司管理员', scope: '九江市规划设计集团', scopes: ['本单位', '本部门'], modules: ['overview', 'org', 'apps', 'ops', 'service'] },
 ]
 
 export const consoleNav = [
-  { group: '治理', items: ['overview', 'org', 'ai', 'data', 'apps'] },
+  { group: '治理', items: ['overview', 'org', 'ai', 'cost', 'data', 'apps'] },
   { group: '运行', items: ['ops', 'security', 'service', 'settings'] },
 ]
 
@@ -14,12 +14,13 @@ export const consoleModules = {
   overview: { no: '01', label: '管理总览', desc: '待办审批、运行概况、风险告警；先处理事项，再看指标' },
   org: { no: '02', label: '组织与权限', desc: '组织架构、人员账号、角色权限、授权审批、账号生命周期' },
   ai: { no: '03', label: 'AI 能力管理', desc: '运行基线、模型网关、Agent 与 MCP、插件与技能市场、图像模板上下架' },
-  data: { no: '04', label: '数据与资源', desc: '资源台账、登记与元数据、版本、授权、数据服务、下载与导出' },
-  apps: { no: '05', label: '应用与集成', desc: 'AS 应用、业务应用、应用数据权限、版本与发布、接口连接' },
-  ops: { no: '06', label: '运行与运维', desc: '服务健康、AS 进程与租约、DSH 与模型网关、任务调度、备份告警' },
-  security: { no: '07', label: '安全与审计', desc: '安全策略、敏感访问、权限复核、操作日志、安全事件（对接深信服）' },
-  service: { no: '08', label: '服务与工单', desc: '员工报障、人员变动、权限申请、反馈、问题处理' },
-  settings: { no: '09', label: '系统设置', desc: '基础配置、客户端版本与环境配置' },
+  cost: { no: '04', label: '成本与计费', desc: '积分制总账、API 分项人民币实价、模型价目版本与官方价目变动监控' },
+  data: { no: '05', label: '数据与资源', desc: '资源台账、登记与元数据、版本、授权、数据服务、下载与导出' },
+  apps: { no: '06', label: '应用与集成', desc: 'AS 应用、业务应用、应用数据权限、版本与发布、接口连接' },
+  ops: { no: '07', label: '运行与运维', desc: '服务健康、AS 进程与租约、DSH 与模型网关、任务调度、备份告警' },
+  security: { no: '08', label: '安全与审计', desc: '安全策略、敏感访问、权限复核、操作日志、安全事件（对接深信服）' },
+  service: { no: '09', label: '服务与工单', desc: '员工报障、人员变动、权限申请、反馈、问题处理' },
+  settings: { no: '10', label: '系统设置', desc: '基础配置、客户端版本与环境配置' },
 }
 
 // 管理中心只保留结构定义。除总览、AI 能力与已接入的运行时计数外，
@@ -40,6 +41,12 @@ export const consoleSections = {
   ai: {
     title: 'AI 能力管理',
     meta: '按四层结构管理：系统级运行基线 → 模型网关 → Agent 与 MCP → 员工插件、技能与图像模板',
+    kpis: [],
+    blocks: [],
+  },
+  cost: {
+    title: '成本与计费',
+    meta: '智能中枢按积分展示；管理中心按人民币展示各 API 分项实价，并监控官方价目变动',
     kpis: [],
     blocks: [],
   },

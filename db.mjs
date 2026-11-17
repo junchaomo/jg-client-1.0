@@ -75,6 +75,7 @@ db.exec(`
     object TEXT NOT NULL,
     result TEXT NOT NULL,
     net TEXT NOT NULL,
+    user_id TEXT NOT NULL DEFAULT '',
     created_at INTEGER NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_audit_created ON audit(created_at DESC);
@@ -93,6 +94,7 @@ db.exec(`
     actor TEXT NOT NULL DEFAULT '',
     approver TEXT NOT NULL DEFAULT '',
     net TEXT NOT NULL DEFAULT '',
+    user_id TEXT NOT NULL DEFAULT '',
     time TEXT NOT NULL DEFAULT '',
     created_at INTEGER NOT NULL,
     decided_at INTEGER
@@ -281,6 +283,18 @@ for (const sql of [
   }
 }
 
+// 审计与审批决策：补 user_id，支撑按账号隔离的本人历史读取。
+for (const sql of [
+  "ALTER TABLE audit ADD COLUMN user_id TEXT NOT NULL DEFAULT ''",
+  "ALTER TABLE approval_decisions ADD COLUMN user_id TEXT NOT NULL DEFAULT ''",
+]) {
+  try {
+    db.exec(sql)
+  } catch (error) {
+    if (!/duplicate column name/i.test(String(error && error.message))) throw error
+  }
+}
+
 export const SESSION_TTL_MS = 8 * 60 * 60 * 1000
 
 const stmt = {
@@ -295,17 +309,17 @@ const stmt = {
   clearSessions: db.prepare('DELETE FROM sessions'),
   updateSessionNet: db.prepare('UPDATE sessions SET net = ?, last_seen = ? WHERE id = ?'),
   insertAudit: db.prepare(`
-    INSERT INTO audit (time, actor, action, object, result, net, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO audit (time, actor, action, object, result, net, user_id, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `),
-  latestAudit: db.prepare('SELECT time, actor, action, object, result, net FROM audit ORDER BY id DESC LIMIT ?'),
+  latestAudit: db.prepare('SELECT time, actor, action, object, result, net, user_id FROM audit ORDER BY id DESC LIMIT ?'),
   countAudit: db.prepare('SELECT COUNT(*) AS count FROM audit'),
   clearAudit: db.prepare('DELETE FROM audit'),
   insertApprovalDecision: db.prepare(`
     INSERT INTO approval_decisions (
       decision_id, conversation_id, call_id, tool, operation, args_summary,
-      decision, rule, risk, actor, approver, net, time, created_at, decided_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      decision, rule, risk, actor, approver, net, user_id, time, created_at, decided_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `),
   updateApprovalDecision: db.prepare(`
     UPDATE approval_decisions
@@ -318,7 +332,7 @@ const stmt = {
   `),
   latestApprovalDecisions: db.prepare(`
     SELECT decision_id, conversation_id, call_id, tool, operation, args_summary,
-           decision, rule, risk, actor, approver, net, time, created_at, decided_at
+           decision, rule, risk, actor, approver, net, user_id, time, created_at, decided_at
     FROM approval_decisions ORDER BY id DESC LIMIT ?
   `),
   expirePendingApprovalDecisions: db.prepare(`
@@ -326,6 +340,10 @@ const stmt = {
     SET decision = 'expired', approver = ?, decided_at = ?
     WHERE decision = 'pending'
   `),
+  listAuditMissingUser: db.prepare("SELECT id, actor FROM audit WHERE user_id = '' AND actor != ''"),
+  listApprovalMissingUser: db.prepare("SELECT id, actor FROM approval_decisions WHERE user_id = '' AND actor != ''"),
+  setAuditUserId: db.prepare('UPDATE audit SET user_id = ? WHERE id = ?'),
+  setApprovalUserId: db.prepare('UPDATE approval_decisions SET user_id = ? WHERE id = ?'),
   putState: db.prepare(`
     INSERT INTO app_state (key, value, updated_at) VALUES (?, ?, ?)
     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
@@ -526,6 +544,7 @@ export function appendAudit(entry) {
     String(entry.object || ''),
     String(entry.result || ''),
     String(entry.net || ''),
+    String(entry.userId || ''),
     Number(entry.createdAt || Date.now())
   )
 }
@@ -538,6 +557,7 @@ export function latestAudit(limit = 80) {
     object: row.object,
     result: row.result,
     net: row.net,
+    userId: row.user_id || '',
   }))
 }
 
@@ -565,6 +585,7 @@ export function appendApprovalDecision(entry = {}) {
     String(entry.actor || ''),
     String(entry.approver || ''),
     String(entry.net || ''),
+    String(entry.userId || ''),
     String(entry.time || ''),
     Number(entry.createdAt || Date.now()),
     entry.decidedAt ? Number(entry.decidedAt) : null
@@ -598,6 +619,7 @@ export function latestApprovalDecisions(limit = 50) {
     actor: row.actor,
     approver: row.approver,
     net: row.net,
+    userId: row.user_id || '',
     time: row.time,
     createdAt: row.created_at,
     decidedAt: row.decided_at || 0,
@@ -606,6 +628,33 @@ export function latestApprovalDecisions(limit = 50) {
 
 export function expirePendingApprovalDecisions(approver = 'system-restart') {
   stmt.expirePendingApprovalDecisions.run(String(approver), Date.now())
+}
+
+/* 旧记录回填：审计/审批决策中无 user_id 的行，按操作人姓名或用户名匹配账号后回填；
+   匹配不到的保持空字符串，不臆造归属。仅启动时执行一次。 */
+export function backfillActorUserIds() {
+  const byName = new Map()
+  const byUser = new Map()
+  for (const row of stmt.listAccounts.all()) {
+    if (row.name) byName.set(String(row.name).trim(), row.id)
+    if (row.username) byUser.set(String(row.username).trim().toLowerCase(), row.id)
+  }
+  const match = (actor) => {
+    const a = String(actor || '').trim()
+    if (!a) return ''
+    return byName.get(a) || byUser.get(a.toLowerCase()) || ''
+  }
+  let auditN = 0
+  let approvalN = 0
+  for (const r of stmt.listAuditMissingUser.all()) {
+    const uid = match(r.actor)
+    if (uid) { stmt.setAuditUserId.run(uid, r.id); auditN += 1 }
+  }
+  for (const r of stmt.listApprovalMissingUser.all()) {
+    const uid = match(r.actor)
+    if (uid) { stmt.setApprovalUserId.run(uid, r.id); approvalN += 1 }
+  }
+  return { audit: auditN, approval: approvalN }
 }
 
 /* ------------------------------ accounts -------------------------------- */

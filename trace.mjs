@@ -79,6 +79,34 @@ function number(value) {
   return Number.isFinite(n) ? n : 0
 }
 
+function contentText(content) {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  return content
+    .map((block) => (block && block.type === 'text' ? String(block.text || '') : ''))
+    .join('')
+}
+
+/** 统计已落库事件中的工具结果外置与压缩裁剪，不估算节省的 token。 */
+function retentionStats(events) {
+  let spillCalls = 0
+  let spillOmittedBytes = 0
+  let prunedResults = 0
+  let compactions = 0
+  for (const event of (Array.isArray(events) ? events : [])) {
+    if (!event || typeof event !== 'object') continue
+    if (event.type === 'compaction/prune') prunedResults += 1
+    if (event.type === 'compaction/summary') compactions += 1
+    if (event.type !== 'tool/result' && event.type !== 'tool/ptc-dispatch') continue
+    const text = contentText(event.data?.message?.content ?? event.data?.content)
+    if (!text.includes('Full formatted result stored at:')) continue
+    spillCalls += 1
+    const omitted = text.match(/\(Omitted (\d+) bytes\./)
+    if (omitted) spillOmittedBytes += number(omitted[1])
+  }
+  return { spillCalls, spillOmittedBytes, prunedResults, compactions }
+}
+
 /** 从真实 SDK 结果计算本轮统计；不产生任何估算以外的演示值。 */
 export function buildRunStats({ startedAt, endedAt, model, contextText, steps, usage, events, taskClass = '', imageCount = 0, modelReason = '', replyChars = 0, finishReason = '' }) {
   const durationMs = Math.max(0, number(endedAt) - number(startedAt))
@@ -86,6 +114,7 @@ export function buildRunStats({ startedAt, endedAt, model, contextText, steps, u
   const eventRows = Array.isArray(events) ? events : []
   const toolCalls = eventRows.filter((e) => e && e.type === 'tool/call').length
   const toolFailures = stepRows.filter((s) => s && s.status === 'fail').length
+  const retention = retentionStats(eventRows)
   const u = usage && typeof usage === 'object' ? usage : null
   const input = u ? number(u.inputTokens) : 0
   const cacheRead = u ? number(u.cacheReadTokens) : 0
@@ -107,6 +136,10 @@ export function buildRunStats({ startedAt, endedAt, model, contextText, steps, u
     steps: stepRows.length,
     toolCalls,
     toolFailures,
+    spillCalls: retention.spillCalls,
+    spillOmittedBytes: retention.spillOmittedBytes,
+    prunedResults: retention.prunedResults,
+    compactions: retention.compactions,
     eventCount: eventRows.length,
     taskClass: String(taskClass || ''),
     imageCount: Number(imageCount) || 0,

@@ -1,0 +1,5 @@
+"use strict";var __esbuild_esm_mermaid_nm;(__esbuild_esm_mermaid_nm||={}).mermaid=(()=>{var SGe=Object.create;var Ix=Object.defineProperty;var wGe=Object.getOwnPropertyDescriptor;var kGe=Object.getOwn
+TAIL
+tion generator. Adapted from Framer.js, copyright Koen Bok. MIT License: http://en.wikipedia.org/wiki/MIT_License *)
+*/
+globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;

@@ -1,0 +1,13 @@
+{
+  "name": "@jg/dsh-tool-router",
+  "version": "0.1.0",
+  "description": "Per-turn tool visibility routing for the JG DSH profile",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js"
+  },
+  "files": [
+    "lib/index.js"
+  ]
+}

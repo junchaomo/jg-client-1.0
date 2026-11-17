@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url'
 import {
   SESSION_TTL_MS, appendAudit, appendApprovalDecision, auditCount, backupNow, cleanupSessions, clearAudit, clearSessions, closeStore, createSession,
   createImageAsset, createImageComment, createImageJob, createImageRevision, createImageTemplate, deleteFile, getImageAsset, getImageTemplate, imageRevisionCount, listImageAssets, listImageComments, listImageRevisions, listApprovedImageTemplates, listAllImageTemplates, listImageTemplatesByApplicant, reviewImageTemplate, offlineImageTemplate, publishImageTemplate,
-  dataDirPath, deleteSession, expirePendingApprovalDecisions, getAccount, getAccountByRole, getAccountByUsername, getFile, getSession, latestApprovalDecisions, latestAudit,
+  dataDirPath, deleteSession, expirePendingApprovalDecisions, backfillActorUserIds, getAccount, getAccountByRole, getAccountByUsername, getFile, getSession, latestApprovalDecisions, latestAudit,
   listAccounts, listFiles, loadState, putFile, readFileBuffer, saveState, touchSession,
   softDeleteImageAsset, updateImageAssetLatest, updateImageJob,
   updateAccountSecret, updateApprovalDecision, updateSessionNet, upsertAccount, setAccountPassword, setAccountUsername,
@@ -23,6 +23,7 @@ import {
 } from './db.mjs'
 import { normalizeVisualInput, parseStoredVisual, VISUAL_TYPE_LABELS, visualError } from './visuals.mjs'
 import { describeToolCall, summarizeToolCall } from './approval-rules.mjs'
+import { mergeToolPolicies, runCodeLimitForTurn, toolPolicyForTurn } from './tool-policy.mjs'
 import {
   academy, academyStats, accessAnomalies, aiTools,
   apps, auditSeed, automations, cloudCredentials, cloudPolicy, cloudSessions,
@@ -40,19 +41,22 @@ import { FORMAT_REGISTRY, detectDataFormat, exportDataFormat, extractDataFormat,
 import { checkProjectDeliverables } from './deliverable-check.mjs'
 import { inspectGeoFiles } from './gis-datasets.mjs'
 import { HARNESS_BASE_SERVICES, runHarnessService } from './harness-services.mjs'
-import { ModelError, chatCompletion, resolveModelConfig, routeModel } from './model.mjs'
-import { ImageProviderError, editImage, editImageWithMask, generateImage, imageModelStatus } from './image-providers.mjs'
+import { ModelError, chatCompletion, classifyTask, resolveModelConfig, routeModel } from './model.mjs'
+import { ImageProviderError, editImage, editImageInRegion, generateImage, imageModelStatus } from './image-providers.mjs'
 import { prepareSpeech, modelStatus, transcribeSpeech } from './speech.mjs'
 import { pinyin } from 'pinyin-pro'
 import { HarnessError, cancelRun, closeHarness, closeHarnessForHome, dshBin, runAgent, stopBackgroundRuntime } from './harness.mjs'
 import { extractAppPackage, extractBundlePackage, extractSkillPackage, inspectPluginZip } from './plugin-scan.mjs'
 import {
-  AS_APPS_ROOT, appAvailable, appCapabilities, appManifest, appRoot, appVersionDir, callAppTool, currentAppInfo,
+  AS_APPS_ROOT, appAvailable, appCapabilities, appManifest, appRoot, appVersionDir, callAppTool, currentAppInfo, dataDirFor,
   heartbeatApp, reconcileAppsOnBoot, releaseApp, runtimeState, setCurrentAppVersion,
   shutdownApps, startApp, sweepApps, uninstallApp, verifyAppContext,
 } from './as-runtime.mjs'
 import { activeGrantFor, createGrant, grantView, listGrants, mintDataToken, revokeGrant, verifyDataToken } from './app-data-grants.mjs'
 import { buildRunStats, buildSessionLogArchive, listTraces, newTraceId as makeTraceId, readTrace, writeTrace } from './trace.mjs'
+import { summarizeUsage } from './usage-summary.mjs'
+import { priceImage, pricingSummary } from './pricing.mjs'
+import { createPricingWatch } from './price-watch.mjs'
 import { execTerminal, resetTerminal, terminalStatus } from './terminal.mjs'
 import { consoleRoles, consoleNav, consoleModules, consoleSections, consoleScopeOptions } from './console.mjs'
 
@@ -61,6 +65,10 @@ const publicDir = join(root, 'public')
 // 启动恢复（recoverPersistedConversations）会早于后续常量初始化调用该目录，
 // 因此必须在这里先完成定义，避免从磁盘恢复会话时触发 TDZ。
 const USER_AGENT_ROOT = join(dataDirPath(), 'agents')
+const pricingWatch = createPricingWatch({
+  dataDir: dataDirPath(),
+  catalog: pricingSummary(),
+})
 function userAgentHome(userId) {
   return join(USER_AGENT_ROOT, String(userId || 'guest'))
 }
@@ -127,6 +135,27 @@ function imageGenerationStatus(user, net) {
 
 function imageFileUrl(fileId) {
   return fileId ? `/api/images/file?id=${encodeURIComponent(fileId)}` : ''
+}
+
+function imageCostFields(image, width, height, inputImages = 0) {
+  const priced = priceImage({
+    model: image?.modelId || image?.model || '',
+    width: image?.width || width,
+    height: image?.height || height,
+    inputImages,
+  })
+  return {
+    priced: priced.priced,
+    costCny: priced.priced ? priced.costCny : null,
+    costCredits: priced.priced ? priced.costCredits : null,
+    costBreakdownCny: priced.costBreakdownCny,
+    costBreakdownCredits: priced.costBreakdownCredits,
+    pricingModel: priced.pricingModel,
+    pricingTier: priced.pricingTier,
+    tier: priced.tier,
+    pricingNote: priced.pricingNote,
+    pricingReason: priced.reason,
+  }
 }
 
 function imageTemplatePublic(template) {
@@ -511,6 +540,146 @@ const liveAcademy = academy.map((a) => ({ ...a }))
 /* 补齐 PRD 缺口所需的可变状态：消息中心、模型配置、工具台账、资源版本与授权、组织职能授权 */
 const liveMessages = messagesSeed.map((m) => ({ ...m }))
 const liveModelConfig = new Map()
+/* 模型网关共享模型注册表：管理员在管理中心维护，按用途绑定对话模块或图像生成模块。
+   apiKey 只保存在服务端凭证库，下发到前端时脱敏。 */
+const liveSharedModels = new Map()
+/* 浏览器扩展白名单注册表：平台（hub）审核收录后，登录用户可在会话内启用 / 停用；
+   管理员可上架、下架与远程移除。扩展脚本只在浏览器隔离分区运行，不接触中枢会话与密钥。 */
+const BROWSER_EXT_SEED = [
+  { id: 'ext-audit', name: '企业审计水印', desc: '对企业站点自动叠加水印并留痕', version: '1.0.0', permissions: ['tabs', 'storage'], hostAccess: 'https://*/*', status: 'listed' },
+  { id: 'ext-json', name: 'JSON 格式化', desc: '格式化接口返回与调试数据', version: '1.0.0', permissions: ['storage'], hostAccess: 'https://*/*', status: 'listed' },
+  { id: 'ext-ad', name: '广告拦截', desc: '拦截弹窗与追踪脚本（网络请求权限，需管理员评估）', version: '1.0.0', permissions: ['declarativeNetRequest', 'storage'], hostAccess: 'https://*/*', status: 'disabled' },
+]
+const liveBrowserExts = new Map(BROWSER_EXT_SEED.map((x) => [x.id, {
+  owner: 'hub', requestedBy: 'hub', reviewedBy: 'hub', reviewedAt: new Date().toISOString(),
+  extPath: '', note: '', userOn: {}, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), ...x,
+}]))
+
+/* 本人操作历史台账：云浏览器网页、应用视图、企业系统会话的导航记录 + 访问时正文快照。
+   严格按 userId 隔离；AI 工具只读当前用户本人记录，不做管理员放宽。快照有保留期限，过期自动清理。 */
+const HISTORY_RETENTION_MS = Math.max(24 * 3600 * 1000, Number(process.env.JG_HISTORY_RETENTION_MS || 30 * 24 * 3600 * 1000))
+const HISTORY_MAX_SNAPSHOT = 20000
+/* 历史台账正文只存摘要（前若干字），不存全文；AI 据此判断页面主题，完整内容以访问时页面为准。 */
+const HISTORY_SNAPSHOT_SUMMARY = 500
+const HISTORY_MAX_PER_USER = 500
+const HISTORY_SENSITIVE_QUERY = /token|secret|password|passwd|pwd|auth|apikey|api_key|credential|ticket/i
+const liveHistory = new Map()
+
+function historyClip(text, max) {
+  return String(text || '').replace(/\s+/g, ' ').trim().slice(0, max)
+}
+
+function historySanitizeUrl(url) {
+  try {
+    const u = new URL(String(url || ''))
+    for (const key of [...u.searchParams.keys()]) {
+      if (HISTORY_SENSITIVE_QUERY.test(key)) u.searchParams.set(key, '***')
+    }
+    return u.toString()
+  } catch (_) { return String(url || '') }
+}
+
+function historyKindOf(kind) {
+  return ['web', 'app', 'session'].includes(String(kind)) ? String(kind) : 'web'
+}
+
+function historyPrune(userId) {
+  const now = Date.now()
+  for (const [id, rec] of liveHistory) {
+    if (rec.userId === userId && now - Number(rec.createdAt || 0) > HISTORY_RETENTION_MS) liveHistory.delete(id)
+  }
+}
+
+function historyVisibleRecord(rec) {
+  return {
+    id: rec.id, kind: rec.kind, appId: rec.appId || '', systemId: rec.systemId || '',
+    url: rec.url, title: rec.title, snapshotText: rec.snapshotText || '',
+    createdAt: rec.createdAt,
+  }
+}
+
+function historyListForUser(user, { kind = '', q = '', limit = 50 } = {}) {
+  historyPrune(user.id)
+  const needle = String(q || '').trim().toLowerCase()
+  let items = [...liveHistory.values()].filter((rec) => rec.userId === user.id)
+  if (kind) items = items.filter((rec) => rec.kind === kind)
+  if (needle) {
+    items = items.filter((rec) => [rec.url, rec.title, rec.snapshotText].join(' ').toLowerCase().includes(needle))
+  }
+  items.sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0))
+  const n = Math.max(1, Math.min(200, Number(limit) || 50))
+  return items.slice(0, n).map(historyVisibleRecord)
+}
+
+/* 审计与审批决策：仅按当前用户 ID 归属过滤；旧库无 userId 的记录不返回给任何账号。 */
+function auditListForUser(user, { q = '', limit = 50 } = {}) {
+  const stored = latestAudit(200)
+  const seen = new Set()
+  const out = []
+  for (const r of [...audit, ...stored]) {
+    if (r.userId !== user.id) continue
+    const key = `${r.time}|${r.action}|${r.object}|${r.actor}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push({
+      time: r.time, actor: r.actor, action: r.action, object: r.object,
+      result: r.result, net: r.net, createdAt: Number(r.createdAt || 0),
+    })
+  }
+  const needle = String(q || '').trim().toLowerCase()
+  const filtered = needle ? out.filter((r) => [r.action, r.object, r.result, r.actor].join(' ').toLowerCase().includes(needle)) : out
+  filtered.sort((a, b) => b.createdAt - a.createdAt)
+  const n = Math.max(1, Math.min(200, Number(limit) || 50))
+  return filtered.slice(0, n)
+}
+
+function approvalListForUser(user, { q = '', limit = 50 } = {}) {
+  const mine = latestApprovalDecisions(200).filter((r) => r.userId === user.id)
+  const needle = String(q || '').trim().toLowerCase()
+  const items = needle
+    ? mine.filter((r) => [r.tool, r.operation, r.argsSummary, r.decision, r.rule, r.actor].join(' ').toLowerCase().includes(needle))
+    : mine
+  const n = Math.max(1, Math.min(200, Number(limit) || 50))
+  return items.slice(0, n).map((r) => ({
+    decisionId: r.decisionId, tool: r.tool, operation: r.operation, argsSummary: r.argsSummary,
+    decision: r.decision, rule: r.rule, risk: r.risk, actor: r.actor, approver: r.approver,
+    net: r.net, time: r.time, createdAt: r.createdAt,
+  }))
+}
+
+function historyUpsert(user, input) {
+  const kind = historyKindOf(input.kind)
+  const url = historySanitizeUrl(input.url)
+  const title = historyClip(input.title, 200)
+  const snapshotText = historyClip(input.snapshotText, HISTORY_SNAPSHOT_SUMMARY)
+  const appId = String(input.appId || '').slice(0, 80)
+  const systemId = String(input.systemId || '').slice(0, 80)
+  if (!url && !title) return null
+  historyPrune(user.id)
+  const existing = [...liveHistory.values()].find((rec) => rec.userId === user.id && rec.kind === kind && rec.url === url)
+  const now = Date.now()
+  if (existing) {
+    existing.title = title || existing.title
+    existing.snapshotText = snapshotText || existing.snapshotText
+    existing.appId = appId || existing.appId
+    existing.systemId = systemId || existing.systemId
+    existing.createdAt = now
+    return historyVisibleRecord(existing)
+  }
+  const rec = {
+    id: `HIS-${randomBytes(8).toString('hex')}`,
+    userId: user.id, kind, appId, systemId, url, title, snapshotText,
+    createdAt: now,
+  }
+  liveHistory.set(rec.id, rec)
+  // 单用户条目上限：超出时删除最旧记录。
+  const mine = [...liveHistory.values()].filter((r) => r.userId === user.id).sort((a, b) => Number(a.createdAt) - Number(b.createdAt))
+  while (mine.length > HISTORY_MAX_PER_USER) {
+    const oldest = mine.shift()
+    liveHistory.delete(oldest.id)
+  }
+  return historyVisibleRecord(rec)
+}
 /** 平台级 Agent 运行时设置：新会话默认值 + 文件变更摘要开关 */
 const DEFAULT_RUNTIME_SETTINGS = Object.freeze({
   defaultPolicy: 'auto',
@@ -1302,6 +1471,7 @@ clearDemoData()
 // 重启会丢弃内存里的待审批交互；将上一进程遗留的 pending 记录收口为 expired，
 // 避免审计列表长期显示“待审批”。
 expirePendingApprovalDecisions('system-restart')
+try { const b = backfillActorUserIds(); if (b.audit || b.approval) console.log(`[db] 回填审计/审批归属：audit ${b.audit}，approval ${b.approval}`) } catch {}
 recoverChatRunTasks()
 recoverPersistedConversations()
 for (const a of liveAutomations) if (a && a.status === 'active' && !a.nextRunAt) scheduleAutomationNext(a, Date.now())
@@ -1666,6 +1836,9 @@ function snapshotPersistentState() {
     academy: liveAcademy,
     messages: liveMessages,
     modelConfig: [...liveModelConfig.entries()],
+    sharedModels: [...liveSharedModels.values()],
+    browserExts: [...liveBrowserExts.values()],
+    history: [...liveHistory.values()],
     runtimeSettings: { ...runtimeSettings },
     agentPresets: agentPresets.map((p) => ({ ...p })),
     toolLedger: liveToolLedger,
@@ -1793,6 +1966,15 @@ function hydratePersistentState() {
 
   replaceMap(readNotifications, Object.fromEntries(snap.readNotifications || []))
   replaceMap(liveModelConfig, Object.fromEntries(snap.modelConfig || []))
+  for (const rec of Array.isArray(snap.sharedModels) ? snap.sharedModels : []) {
+    if (rec && rec.id) liveSharedModels.set(rec.id, rec)
+  }
+  for (const rec of Array.isArray(snap.browserExts) ? snap.browserExts : []) {
+    if (rec && rec.id) liveBrowserExts.set(rec.id, rec)
+  }
+  for (const rec of Array.isArray(snap.history) ? snap.history : []) {
+    if (rec && rec.id && rec.userId) liveHistory.set(rec.id, rec)
+  }
   replaceMap(liveEditRequests, Object.fromEntries(snap.editRequests || []))
   replaceMap(liveDownloadRequests, Object.fromEntries(snap.downloadRequests || []))
   replaceMap(resourceReads, Object.fromEntries(snap.resourceReads || []))
@@ -1842,6 +2024,267 @@ function canSee(user, resource, net) {
 
 function canManage(user) {
   return user.visibleModules.includes('admin')
+}
+
+/* ---------------- 模型网关模型注册表 ----------------
+ * 用途：chat 中枢对话模块（仅管理员维护，平台共享）；image 生图模块、app 应用模块
+ * （开放给登录用户，各自保存自己的 Key；管理员可见全部）。 */
+const SHARED_PURPOSES = ['chat', 'image', 'app']
+function normalizeSharedPurpose(value) {
+  return SHARED_PURPOSES.includes(value) ? value : 'chat'
+}
+function sharedModelSecretTail(key) {
+  const k = String(key || '').trim()
+  return k && k.length > 8 ? `${k.slice(0, 3)}••••••••${k.slice(-4)}` : ''
+}
+function presetApiKey(rec) {
+  if (!rec) return ''
+  if (rec.apiKey) return String(rec.apiKey).trim()
+  for (const name of rec.keyEnvs || (rec.keyEnv ? [rec.keyEnv] : [])) {
+    const value = String(process.env[name] || '').trim()
+    if (value) return value
+  }
+  return ''
+}
+function sharedModelSafe(rec) {
+  if (!rec) return null
+  const { apiKey, ...rest } = rec
+  const key = presetApiKey(rec)
+  return {
+    ...rest,
+    apiKeySaved: Boolean(key),
+    apiKeyMask: rec.preset ? '' : sharedModelSecretTail(apiKey),
+    configured: Boolean(key || rec.builtinProvider),
+    scope: rec.preset ? 'preset' : 'custom',
+  }
+}
+function sharedModelVisible(rec, user) {
+  if (!rec) return false
+  if (rec.preset) return true
+  if (canManage(user)) return true
+  return rec.owner === user.id
+}
+function listSharedModels(user) {
+  return [...liveSharedModels.values()].filter((rec) => sharedModelVisible(rec, user))
+}
+/** 用户级配置优先，其次平台共享（hub）记录。 */
+function defaultSharedModel(purpose, userId) {
+  if (userId) {
+    for (const rec of liveSharedModels.values()) {
+      if (rec.enabled && rec.purpose === purpose && rec.owner === userId) {
+        return { ...rec, apiKey: presetApiKey(rec) }
+      }
+    }
+  }
+  for (const rec of liveSharedModels.values()) {
+    if (rec.enabled && rec.purpose === purpose && rec.owner === 'hub') {
+      return { ...rec, apiKey: presetApiKey(rec) }
+    }
+  }
+  return null
+}
+function canEditSharedModel(rec, user) {
+  if (!rec || rec.preset) return false
+  return canManage(user) || rec.owner === user.id
+}
+
+/* 系统预设模型：全平台公共模型，只有预设进入公共池；个人自定义模型永远只属于本人。 */
+const SYSTEM_PRESETS = [
+  {
+    id: 'sys-chat-deepseek-flash', purpose: 'chat', preset: true,
+    label: 'DeepSeek V4.1 Flash', provider: 'DeepSeek', providerLabel: '深度求索',
+    endpoint: 'https://api.deepseek.com', model: 'deepseek-flash',
+    keyEnvs: ['DEEPSEEK_API_KEY', 'JG_MODEL_API_KEY'],
+    role: '默认通用', note: '默认通用问答模型，长上下文稳定',
+  },
+  {
+    id: 'sys-chat-qwen4-max', purpose: 'chat', preset: true,
+    label: 'Qwen4-Max', provider: 'Qwen', providerLabel: '阿里云百炼',
+    endpoint: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen4-max',
+    keyEnvs: ['QWEN_API_KEY', 'DASHSCOPE_API_KEY'],
+    role: '专业多模态', note: '多模态理解与专业问答',
+  },
+  {
+    id: 'sys-chat-kimi-k3.1-pro', purpose: 'chat', preset: true,
+    label: 'Kimi K3.1 Pro', provider: 'Moonshot', providerLabel: '月之暗面',
+    endpoint: 'https://api.moonshot.cn/v1', model: 'kimi-k3.1-pro',
+    keyEnvs: ['KIMI_API_KEY', 'MOONSHOT_API_KEY'],
+    role: '高级推理', note: '复杂推理与长文档分析',
+  },
+  {
+    id: 'sys-chat-glm-5.3-flash', purpose: 'chat', preset: true,
+    label: 'GLM 5.3 Flash', provider: 'Zhipu', providerLabel: '智谱 AI',
+    endpoint: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-5.3-flash',
+    keyEnvs: ['GLM_API_KEY', 'ZHIPU_API_KEY'],
+    role: 'Agent 执行', note: '工具调用与 Agent 执行',
+  },
+  {
+    id: 'sys-image-seedream-5-5', purpose: 'image', preset: true,
+    label: 'Seedream 5.5', provider: 'seedream', providerLabel: '火山方舟',
+    model: 'doubao-seedream-5-5-261028', keyEnvs: ['SEEDREAM_IMAGE_API_KEY'],
+    builtinProvider: 'seedream-5.5', role: '默认生图 / 多参考图 / 单图编辑',
+    note: '用于建筑效果图、景观效果图与参考图生成',
+  },
+  {
+    id: 'sys-image-qwen-image-3-0-pro', purpose: 'image', preset: true,
+    label: 'Qwen-Image 3.0 Pro', provider: 'qwen', providerLabel: '阿里云百炼',
+    model: 'qwen-image-3.0-pro', keyEnvs: ['QWEN_IMAGE_API_KEY'],
+    builtinProvider: 'qwen-image', role: '专业图文 / 图像编辑',
+    note: '用于规划方案示意图、汇报插图、信息图与局部编辑',
+  },
+]
+
+function seedSystemPresets() {
+  const now = new Date().toISOString()
+  for (const preset of SYSTEM_PRESETS) {
+    const previous = liveSharedModels.get(preset.id)
+    liveSharedModels.set(preset.id, {
+      ...preset,
+      owner: 'hub',
+      enabled: previous ? previous.enabled !== false : true,
+      createdAt: previous?.createdAt || now,
+      updatedAt: now,
+      apiKey: '',
+    })
+  }
+}
+
+/** 对话模型相对成本倍率：以 Kimi K3.1 Pro 的综合单价（输入、输出各半）为 1.00x。 */
+function chatModelMultipliers() {
+  const rows = pricingSummary().launchModels || []
+  const blended = (row) => {
+    const rate = row.rates || row.offPeak || row.peak || {}
+    return (Number(rate.cacheMiss || 0) + Number(rate.output || 0)) / 2
+  }
+  const kimi = rows.find((row) => row.model === 'kimi-k3.1-pro')
+  const base = kimi ? blended(kimi) : 0
+  const map = new Map()
+  for (const row of rows) {
+    const cost = blended(row)
+    map.set(row.model, base > 0 ? Number((cost / base).toFixed(2)) : null)
+  }
+  return map
+}
+
+/** 当前账号可见的模型目录：系统预设 + 本人自定义；管理员可看到全部自定义但仍有归属标记。 */
+function modelCatalog(user) {
+  const multipliers = chatModelMultipliers()
+  const personal = liveModelConfig.get(user.id) || {}
+  const personalKey = String(personal.apiKey || '').trim()
+  const all = [...liveSharedModels.values()].filter((rec) => sharedModelVisible(rec, user)).map((rec) => {
+    const safe = sharedModelSafe(rec)
+    // DeepSeek 系统预设允许用当前账号已保存的 Key 兜底；其他预设仍需对应环境变量密钥。
+    const keyReady = safe.configured || (rec.id === 'sys-chat-deepseek-flash' && Boolean(personalKey))
+    return {
+      ...safe,
+      configured: keyReady,
+      own: rec.owner === user.id,
+      multiplier: rec.purpose === 'chat' ? (multipliers.get(rec.model) ?? null) : null,
+      multiplierNote: rec.purpose === 'chat' ? '相对 Kimi K3.1 Pro 综合单价（输入、输出各半）' : '',
+      keySource: rec.preset ? (safe.configured ? 'env' : personalKey && rec.id === 'sys-chat-deepseek-flash' ? 'account' : 'missing') : (safe.configured ? 'vault' : 'missing'),
+    }
+  })
+  return {
+    presets: all.filter((rec) => rec.scope === 'preset'),
+    custom: all.filter((rec) => rec.scope === 'custom'),
+    chat: all.filter((rec) => rec.purpose === 'chat' && rec.enabled),
+    image: all.filter((rec) => rec.purpose === 'image' && rec.enabled && rec.configured),
+    canManage: canManage(user),
+  }
+}
+
+/** 解析对话模型：显式 modelRef 只允许系统预设或本人模型；DeepSeek 预设可用账号 Key 兜底。 */
+function resolveChatModel(modelRef, userId) {
+  const id = String(modelRef || '').trim()
+  const personal = liveModelConfig.get(userId) || {}
+  if (id) {
+    const rec = liveSharedModels.get(id)
+    if (rec && rec.purpose === 'chat' && rec.enabled && (rec.owner === 'hub' || rec.owner === userId)) {
+      const apiKey = presetApiKey(rec) || (rec.id === 'sys-chat-deepseek-flash' ? String(personal.apiKey || '').trim() : '')
+      if (apiKey && rec.endpoint && rec.model) {
+        return { apiKey, baseUrl: rec.endpoint, model: rec.model, label: rec.label, modelRef: rec.id, source: rec.preset ? 'preset' : 'personal' }
+      }
+    }
+    return null
+  }
+  const fallback = [...liveSharedModels.values()].find((rec) => rec.preset && rec.purpose === 'chat' && rec.enabled && rec.id === 'sys-chat-deepseek-flash')
+    || [...liveSharedModels.values()].find((rec) => rec.preset && rec.purpose === 'chat' && rec.enabled)
+  if (fallback) {
+    const apiKey = presetApiKey(fallback) || (fallback.id === 'sys-chat-deepseek-flash' ? String(personal.apiKey || '').trim() : '')
+    if (apiKey) return { apiKey, baseUrl: fallback.endpoint, model: fallback.model, label: fallback.label, modelRef: fallback.id, source: 'preset' }
+  }
+  return null
+}
+
+/** 应用可选模型：系统预设 + 应用所属账号的个人模型；应用本身只保存 modelRef。 */
+function appModelRef(app, userId) {
+  const ref = String(app?.modelRef || '').trim()
+  if (ref && ref !== 'auto') return ref
+  return 'sys-chat-deepseek-flash'
+}
+
+seedSystemPresets()
+
+/* ---------------- 云浏览器扩展市场（独立注册表，审核在管理中心） ---------------- */
+const EXT_HIGH_RISK_PERMS = ['cookies', 'webRequest', 'declarativeNetRequest', 'scripting']
+function extHighRisk(rec) {
+  return (rec.permissions || []).some((p) => EXT_HIGH_RISK_PERMS.includes(p)) || String(rec.hostAccess || '').includes('<all_urls>')
+}
+function browserExtSafe(rec) {
+  if (!rec) return null
+  const { extPath, ...rest } = rec
+  return { ...rest, highRisk: extHighRisk(rec), extPath: '' }
+}
+function extVisible(rec, user) {
+  if (canManage(user)) return true
+  if (rec.status === 'listed') return true
+  return rec.requestedBy === user.id || rec.owner === user.id
+}
+function listBrowserExts(user) {
+  return [...liveBrowserExts.values()].filter((rec) => extVisible(rec, user))
+}
+/** 当前会话应加载的扩展：已上架且用户未停用。 */
+function activeBrowserExts(userId) {
+  return [...liveBrowserExts.values()].filter((rec) => rec.status === 'listed' && rec.userOn?.[userId] !== false)
+}
+/** 代理取模型：指定 modelId 时校验用途、启用与归属可见性；否则按用途取用户级优先、平台共享兜底。 */
+function resolveSharedModel(purpose, modelId, userId) {
+  const personal = liveModelConfig.get(userId) || {}
+  const accountKey = String(personal.apiKey || '').trim()
+  if (modelId) {
+    const rec = liveSharedModels.get(String(modelId))
+    const purposeOk = rec && (rec.purpose === purpose || (purpose === 'app' && (rec.purpose === 'chat' || rec.purpose === 'app')))
+    if (rec && purposeOk && rec.enabled && (rec.owner === 'hub' || rec.owner === userId)) {
+      const apiKey = presetApiKey(rec) || (rec.id === 'sys-chat-deepseek-flash' ? accountKey : '')
+      return { ...rec, apiKey }
+    }
+    return null
+  }
+  return defaultSharedModel(purpose, userId)
+}
+/** 个人保存的 Key/端点/模型优先；缺失字段回退到模型网关里启用的共享对话模型。 */
+function mergedUserChatConfig(userId) {
+  const personal = liveModelConfig.get(userId) || {}
+  const shared = defaultSharedModel('chat')
+  if (!shared) return personal
+  return {
+    ...personal,
+    apiKey: personal.apiKey || shared.apiKey,
+    endpoint: personal.endpoint || shared.endpoint,
+    baseUrl: personal.baseUrl || shared.endpoint,
+    defaultModel: personal.defaultModel || shared.model,
+  }
+}
+function sanitizeSharedModelInput(body, existing = {}) {
+  const label = String(body.label || existing.label || '').trim().slice(0, 40)
+  const purpose = normalizeSharedPurpose(body.purpose || existing.purpose)
+  const provider = String(body.provider || existing.provider || '').trim().slice(0, 40)
+  const endpoint = String(body.endpoint || existing.endpoint || '').trim().slice(0, 240)
+  const model = String(body.model || existing.model || '').trim().slice(0, 80)
+  const enabled = body.enabled === undefined ? Boolean(existing.enabled ?? true) : Boolean(body.enabled)
+  const note = String(body.note || existing.note || '').trim().slice(0, 120)
+  const apiKey = body.apiKey && !String(body.apiKey).includes('•') ? String(body.apiKey).trim() : (existing.apiKey || '')
+  return { label, purpose, provider, endpoint, model, enabled, note, apiKey }
 }
 
 function userDepartments(user) {
@@ -2032,6 +2475,9 @@ const GUEST_GUARD = {
   'POST /api/mcp/approval': 'ai',
   'GET /api/as/capabilities': 'skills',
   'POST /api/as/call': 'skills',
+  'POST /api/as/model/chat': 'skills',
+  'POST /api/as/model/image': 'skills',
+  'POST /api/as/model/app': 'skills',
   'GET /api/as/approvals': 'skills',
   'POST /api/as/approvals': 'skills',
   'POST /api/as/approvals/decide': 'skills',
@@ -2051,6 +2497,7 @@ function logAudit(user, action, object, result, net = 'inet') {
   const entry = {
     time: new Date().toLocaleTimeString('zh-CN', { hour12: false }),
     actor: user.name,
+    userId: user.id,
     action,
     object,
     result,
@@ -2404,6 +2851,7 @@ function recordApprovalDecision(entry = {}) {
       actor: entry.actor || '',
       approver: entry.approver || '',
       net: entry.net || 'inet',
+      userId: entry.userId || '',
       time: new Date().toISOString(),
       createdAt: Date.now(),
       decidedAt: entry.decision && entry.decision !== 'pending' ? Date.now() : 0,
@@ -2646,6 +3094,117 @@ function isDateTimeLookup(text) {
     || /^(现在|当前)(是)?(几点|时间)$/.test(source)
 }
 
+const QUICK_DIRECT_SYSTEM = [
+  '你是九规智能中枢的对话助手。',
+  '请用简洁、准确的中文回答。不要声称调用过未使用的工具、检索过未访问的数据或读过不存在的文件；不确定时直接说明。',
+  '用户明确要求“一句话”或“简短”时，只给一句结论，不展开分点或清单。',
+  '不要自行编造“回答生成时间”“数据更新时间”“来源 URL”等元信息；用户未要求时不要输出这些字段。',
+].join('\n')
+
+/** 短概念问答即使带问号也不应拉入 74KB 的 PTC 固定前缀；时效、工具和产品内部问题仍走 Harness。 */
+const QUICK_CHAT_BLOCK_PATTERNS = [
+  /今天|明天|昨天|现在|最新|实时|近期|新闻|股价|汇率|油价|金价|天气|气温|政策|公告|通知|航班|高铁|限行/i,
+  /查询|搜索|检索|资料|文件|项目|数据|表格|文档|工具|插件|技能|代码|脚本|命令|执行|创建|修改|删除|生成|分析|上传|下载|部署|安装|测试|接口|函数|报错/i,
+  /九规|中枢|平台|系统功能|本项目|当前项目/i,
+  /Harness|DSH|PTC|仓库|server\.mjs|app\.js|固定前缀|工具结果|Token 面板|Token 计量|Token 使用|上下文压缩|模型调度/i,
+]
+const QUICK_CHAT_PATTERNS = [
+  /^(什么是|什么叫|解释|介绍|简述|说明|为什么|如何|怎么|区别|优缺点|原理|概念|定义)/i,
+  /(什么是|什么叫|有什么区别|优缺点|原理是什么|概念是什么|定义是什么)/i,
+]
+function isQuickChatPrompt(source, { mode = 'chat', projectId = '' } = {}) {
+  const text = String(source || '').trim()
+  if (!text || text.length > 120) return false
+  if (QUICK_CHAT_BLOCK_PATTERNS.some((pattern) => pattern.test(text))) return false
+  if (QUICK_CHAT_PATTERNS.some((pattern) => pattern.test(text))) return true
+  return classifyTask(text, { mode, projectId }) === 'quick'
+}
+
+/** 轻量快速问答只带最近几轮，不启动 DSH，也不注入工具/Skill 清单。 */
+function quickHistoryText(text) {
+  return String(text || '')
+    .replace(/^回答生成时间[：:].*$/gm, '')
+    .replace(/^数据更新时间[：:].*$/gm, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
+function quickDirectMessages(conv, text) {
+  const prior = Array.isArray(conv?.messages) ? conv.messages.slice(0, -1) : []
+  const history = prior
+    .filter((message) => message?.role === 'user' || message?.role === 'assistant')
+    .slice(conv?.dshSessionId ? -2 : -6)
+    .map((message) => ({
+      role: message.role,
+      content: (message.role === 'assistant' ? quickHistoryText(message.text) : String(message.text || '')).slice(0, 1200),
+    }))
+  return [{ role: 'system', content: QUICK_DIRECT_SYSTEM }, ...history, { role: 'user', content: String(text || '') }]
+}
+
+/** 轻量直连历史（未经过 DSH 的轮次）；转 Harness 时补最近几轮，避免已有会话上下文断裂。 */
+function quickHistoryContext(conv) {
+  const turns = Array.isArray(conv?.lightTurns) ? conv.lightTurns.slice(-4) : []
+  if (turns.length) {
+    const rows = turns.map((turn) => [
+      `用户：${String(turn?.user || '').slice(0, 800)}`,
+      `助手：${quickHistoryText(turn?.assistant).slice(0, 800)}`,
+    ].join('\n'))
+    return `轻量直连历史（未经过 DSH 的最近轮次，仅用于承接上下文，不要当作工具结果）：\n${rows.join('\n\n')}`
+  }
+  if (conv?.dshSessionId) return ''
+  const prior = Array.isArray(conv?.messages) ? conv.messages.slice(0, -1) : []
+  const rows = prior
+    .filter((message) => message?.role === 'user' || message?.role === 'assistant')
+    .slice(-4)
+    .map((message) => `${message.role === 'user' ? '用户' : '助手'}：${(message.role === 'assistant' ? quickHistoryText(message.text) : String(message.text || '')).slice(0, 800)}`)
+  return rows.length ? `轻量直连历史（上一轮未经过 DSH，仅用于承接上下文）：\n${rows.join('\n')}` : ''
+}
+
+/** 把 OpenAI 兼容 usage 映射成产品口径；缓存命中与新增输入分开，不重复计算。 */
+function quickUsage(rawUsage) {
+  const raw = rawUsage && typeof rawUsage === 'object' ? rawUsage : {}
+  const outputTokens = Number(raw.completion_tokens || raw.output_tokens || 0)
+  const cacheReadTokens = Number(raw.prompt_cache_hit_tokens || raw.cache_read_tokens || 0)
+  const promptTokens = Number(raw.prompt_tokens || raw.input_tokens || 0)
+  const cacheMissTokens = Number(raw.prompt_cache_miss_tokens || 0)
+  const cacheWriteTokens = Number(raw.prompt_cache_write_tokens || raw.cache_write_tokens || 0)
+  const inputTokens = cacheMissTokens || Math.max(0, promptTokens - cacheReadTokens)
+  const totalTokens = Number(raw.total_tokens || (inputTokens + outputTokens + cacheReadTokens))
+  return { calls: 1, inputTokens, outputTokens, totalTokens, cacheReadTokens, cacheWriteTokens, reasoningTokens: Number(raw.reasoning_tokens || 0) }
+}
+
+async function tryQuickModelReply({ text, body, mode, projectId, deepThink, webSearch, regenerate, conv, modelCfg }) {
+  // 无工具短问答即使已有 DSH 会话也走轻量直连；这些轮次由 lightTurns 记录，转 Harness 时补入上下文。
+  if (mode !== 'chat' || projectId || deepThink || webSearch || regenerate) return null
+  if (conv?.agentPresetId) return null
+  if (Array.isArray(body?.refs) && body.refs.length) return null
+  if (Array.isArray(body?.images) && body.images.length) return null
+  const requestedTools = Array.isArray(body?.tools) ? body.tools.filter(Boolean) : []
+  if (requestedTools.some((id) => id !== 'T-DATA')) return null
+  const source = String(text || '').trim()
+  if (!source || source.length > 120) return null
+  if (!isQuickChatPrompt(source, { mode, projectId })) return null
+  const quickRoute = routeModel({ baseModel: modelCfg.model, text: source, mode, projectId })
+  const startedAt = Date.now()
+  const result = await chatCompletion({
+    messages: quickDirectMessages(conv, source),
+    model: quickRoute.model,
+    apiKey: modelCfg.apiKey,
+    baseUrl: modelCfg.baseUrl,
+    timeoutMs: modelCfg.timeoutMs,
+    temperature: 0.2,
+  })
+  const reply = String(result.content || '').trim()
+  if (!reply) return null // 空回复不冒充成功，交回 Harness 用配置模型重试。
+  return {
+    kind: 'model-quick',
+    reply,
+    model: result.model || quickRoute.model,
+    steps: [{ tool: '模型直连', detail: `${result.model || quickRoute.model} · 无工具 · ${quickRoute.reason}`, status: 'ok', ms: Date.now() - startedAt }],
+    usage: quickUsage(result.usage),
+  }
+}
+
 function directDateTimeReply(text) {
   const now = new Date()
   const stamp = cnDateTime(now)
@@ -2687,7 +3246,10 @@ async function tryDirectReply({ text, body, mode, projectId, deepThink, webSearc
   // 一旦出现附件、插件、项目、工作模式、深度思索或显式网页搜索，立即交回 Harness；
   // 不能为了省 token 把真正需要工具链的任务降级成直连应答。
   if (mode !== 'chat' || projectId || deepThink || webSearch || regenerate) return null
-  if (Array.isArray(body?.tools) && body.tools.length) return null
+  // 前端默认携带 T-DATA；它只是默认工具，不应阻断问候/日期/天气这些确定性直连。
+  // 用户显式选择了其他工具时，仍交回 Harness，避免把真正的工具任务降级。
+  const requestedTools = Array.isArray(body?.tools) ? body.tools.filter(Boolean) : []
+  if (requestedTools.some((id) => id !== 'T-DATA')) return null
   if (Array.isArray(body?.refs) && body.refs.length) return null
   if (Array.isArray(body?.images) && body.images.length) return null
   const source = String(text || '').trim()
@@ -3111,13 +3673,13 @@ function contentDisposition(name) {
 const REG_KIND_LABEL = { pure: '普通数据', deliverable: '成果数据', service: '数据服务' }
 const ZONE_LABEL = { intranet: '内部目录', gov: '政务网', inet: '互联网' }
 const MAP_CATALOG_LABEL = {
-  satellite: '01 卫星影像',
-  current: '02 现状数据',
-  planning: '03 规划数据',
-  construction: '04 建设工程数据',
-  management: '05 管理数据',
-  socioeconomic: '06 社会经济数据',
-  threeD: '07 三维数据',
+  satellite: '卫星影像',
+  current: '现状数据',
+  planning: '规划数据',
+  construction: '建设工程数据',
+  management: '管理数据',
+  socioeconomic: '社会经济数据',
+  threeD: '三维数据',
 }
 const zoneLabel = (z) => ZONE_LABEL[z] || z
 
@@ -3802,7 +4364,7 @@ async function runAutomation(a, trigger = 'manual') {
     return { ok: false, error: task.reason, task }
   }
 
-  const modelCfg = resolveModelConfig({ userConfig: liveModelConfig.get(user.id) || {}, request: {} })
+  const modelCfg = resolveModelConfig({ userConfig: mergedUserChatConfig(user.id), request: {} })
   if (modelCfg.source === 'none') {
     task.state = 'failed'
     task.reason = '当前账号没有配置模型密钥，定时任务无法执行'
@@ -3878,6 +4440,7 @@ async function runAutomation(a, trigger = 'manual') {
               rule,
               risk: evaluation.risk,
               actor: user.name,
+              userId: user.id,
               approver: 'policy:task-scope',
               net: 'inet',
             })
@@ -4375,6 +4938,16 @@ function ensureManagedModelPlugins(home) {
   const profileDir = join(home, 'profiles', RUNTIME_PROFILE)
   const patchPath = join(profileDir, 'cordis.patch.yml')
   if (!existsSync(patchPath)) return false
+  // 本地插件必须落在 dsh profile 自己的 node_modules 里；只放 dsh-runtime
+  // 的副本无法被 profile 的解析器找到。每次启动按版本化源码覆盖，保证账号一致。
+  const spillAgeSource = join(root, 'plugins', 'jg-spill-age')
+  const spillAgeTarget = join(profileDir, 'node_modules', '@jg', 'dsh-spill-age')
+  if (existsSync(join(spillAgeSource, 'package.json')) && existsSync(join(spillAgeSource, 'lib', 'index.js'))) {
+    try {
+      mkdirSync(dirname(spillAgeTarget), { recursive: true })
+      cpSync(spillAgeSource, spillAgeTarget, { recursive: true, force: true })
+    } catch {}
+  }
   let current = readFileSync(patchPath, 'utf8')
   let changed = false
   if (!current.includes('fs-observation-policy-guard')) {
@@ -4400,6 +4973,41 @@ function ensureManagedModelPlugins(home) {
       "      name: '@deepseek-ai/dsh-tool-executor-ptc'",
       '      config:',
       '        maxParallelSubCalls: 10',
+      '',
+    ].join('\n')
+    current = `${current}${current.endsWith('\n') ? '' : '\n'}${block}`
+    changed = true
+  }
+  // 长任务里单个工具结果会被后续每次模型调用重复携带；把默认 12.5k 的外置阈值
+  // 收敛到 6k，仍保留首尾和完整 spill 文件路径，不覆盖账号已有的自定义 spill-policy。
+  if (!current.includes('jg-spill-inline-budget') && !/(^|\n)- id: spill-policy(?=\s|$)/.test(current)) {
+    const block = [
+      '',
+      '# jg-spill-inline-budget: 工具结果超过约 6k 估算 token 时保留首尾，并把完整原文落到会话级 spill 文件；',
+      '# 长任务仍可用 read/grep 取回全文，避免每次模型调用重复携带大段文件/日志。',
+      '- id: spill-policy',
+      '  config:',
+      '    maxInlineTokens: 6000',
+      '',
+    ].join('\n')
+    current = `${current}${current.endsWith('\n') ? '' : '\n'}${block}`
+    changed = true
+  }
+  // 按龄外置是独立本地插件：旧结果超过 8 次模型调用且超过 6k 字符时，
+  // 替换为 3k 头 + 1.5k 尾和完整 spill 路径。插件源码在 plugins/jg-spill-age，
+  // 运行时副本在 dsh-runtime/node_modules/@jg/dsh-spill-age。
+  if (!current.includes('jg-spill-age') && !/(^|\n)\s*- id: jg-spill-age(?=\s|$)/.test(current)) {
+    const block = [
+      '',
+      '# jg-spill-age: 按龄外置旧工具结果，保留最近 8 次模型调用的完整结果。',
+      '- insert:',
+      '    - id: jg-spill-age',
+      "      name: '@jg/dsh-spill-age'",
+      '      config:',
+      '        ageCalls: 8',
+      '        ageMinChars: 6000',
+      '        ageHeadChars: 3000',
+      '        ageTailChars: 1500',
       '',
     ].join('\n')
     current = `${current}${current.endsWith('\n') ? '' : '\n'}${block}`
@@ -4728,6 +5336,7 @@ function requestAppApproval({ appId, tool, args, user, net = 'inet' }) {
     rule: 'app-side-effect',
     risk: 'high',
     actor: user?.name || '',
+    userId: user?.id || '',
     approver: 'pending',
     net,
   })
@@ -5088,65 +5697,115 @@ const api = {
   'GET /api/usage/summary': (req, res) => {
     const user = roleOf(req)
     const mine = conversations.filter((conv) => conv.userId === user.id)
-    const totals = { requests: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0 }
-    const models = new Map()
-    const records = []
-    let assistantMessages = 0
-    let usageMessages = 0
-    for (const conv of mine) {
-      for (const message of (conv.messages || [])) {
-        if (message.role !== 'assistant') continue
-        assistantMessages += 1
-        const usage = message.usage
-        if (!usage || typeof usage !== 'object') continue
-        const input = Number(usage.inputTokens ?? usage.prompt_tokens ?? usage.input_tokens ?? 0) || 0
-        const output = Number(usage.outputTokens ?? usage.completion_tokens ?? usage.output_tokens ?? 0) || 0
-        const total = Number(usage.totalTokens ?? usage.total_tokens ?? (input + output)) || 0
-        const calls = Number(usage.calls ?? 1) || 1
-        if (!input && !output && !total && !usage.calls) continue
-        usageMessages += 1
-        totals.requests += calls
-        totals.inputTokens += input
-        totals.outputTokens += output
-        totals.totalTokens += total || input + output
-        totals.cacheReadTokens += Number(usage.cacheReadTokens ?? usage.cache_read_tokens ?? 0) || 0
-        totals.cacheWriteTokens += Number(usage.cacheWriteTokens ?? usage.cache_write_tokens ?? 0) || 0
-        totals.reasoningTokens += Number(usage.reasoningTokens ?? usage.reasoning_tokens ?? 0) || 0
-        const modelName = String(message.model || conv.model || '未记录模型')
-        const entry = models.get(modelName) || { model: modelName, requests: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0 }
-        entry.requests += calls
-        entry.inputTokens += input
-        entry.outputTokens += output
-        entry.totalTokens += total || input + output
-        models.set(modelName, entry)
-        records.push({
-          conversationId: conv.id,
-          conversationTitle: conv.title || '未命名会话',
-          at: message.usageAt ? new Date(message.usageAt).toISOString() : '',
-          time: message.time || '',
-          model: modelName,
-          calls,
-          inputTokens: input,
-          outputTokens: output,
-          totalTokens: total || input + output,
-        })
-      }
-    }
-    records.sort((a, b) => String(b.at || b.time).localeCompare(String(a.at || a.time)))
-    logAudit(user, 'usage.summary', user.id, `requests=${totals.requests}`, netOf(req))
+    const summary = summarizeUsage(mine)
+    logAudit(user, 'usage.summary', user.id, `requests=${summary.totals.requests}`, netOf(req))
     json(res, 200, {
       ok: true,
       user: user.name,
-      totals,
-      models: [...models.values()].sort((a, b) => b.totalTokens - a.totalTokens),
-      records: records.slice(0, 50),
-      coverage: {
-        conversations: mine.length,
-        assistantMessages,
-        usageMessages,
-        note: usageMessages ? '仅统计 DSH 实际返回 usage 的轮次，未返回 usage 的历史轮次不估算、不补齐。' : '当前账号尚无带真实 usage 的模型轮次；发起一次模型对话后才会产生计量数据。',
-      },
+      generatedAt: new Date().toISOString(),
+      ...summary,
     })
+  },
+  'GET /api/admin/cost-analysis': (req, res) => {
+    const user = roleOf(req)
+    if (!canManage(user)) return json(res, 403, { error: '仅管理员可查看平台 API 成本分析' })
+    const summary = summarizeUsage(conversations)
+    const catalog = new Map((summary.pricing?.textModels || []).map((row) => [row.model, row]))
+    const models = (summary.models || [])
+      .filter((row) => Number(row.requests || 0) > 0 || Number(row.totalTokens || 0) > 0)
+      .map((row) => {
+      const pricingModel = row.pricingModel || row.model
+      const price = catalog.get(pricingModel) || null
+      return {
+        ...row,
+        pricingModel,
+        provider: price?.provider || '',
+        providerLabel: price?.providerLabel || '未计价模型',
+        displayName: price?.displayName || row.model,
+        tier: row.tier || price?.tier || '',
+        billingMode: price?.billingMode || '',
+        billingNote: price?.billingNote || '',
+        unitPrice: price
+          ? {
+              rates: price.rates || null,
+              offPeak: price.offPeak || null,
+              peak: price.peak || null,
+              tiers: price.tiers || null,
+              currency: 'CNY',
+              unit: 'per 1M tokens',
+            }
+          : null,
+      }
+    })
+    const providerMap = new Map()
+    for (const row of models) {
+      const key = row.providerLabel || '未计价模型'
+      const item = providerMap.get(key) || {
+        provider: row.provider || '',
+        providerLabel: key,
+        requests: 0,
+        totalTokens: 0,
+        cacheReadTokens: 0,
+        costCny: 0,
+        costCredits: 0,
+        pricedRequests: 0,
+        unpricedRequests: 0,
+        models: 0,
+      }
+      item.requests += row.requests || 0
+      item.totalTokens += row.totalTokens || 0
+      item.cacheReadTokens += row.cacheReadTokens || 0
+      item.costCny = Number((item.costCny + Number(row.costCny || 0)).toFixed(6))
+      item.costCredits = Number((item.costCny * 100).toFixed(2))
+      item.pricedRequests += row.pricedRequests || 0
+      item.unpricedRequests += row.unpricedRequests || 0
+      item.models += 1
+      providerMap.set(key, item)
+    }
+    const byProvider = [...providerMap.values()].sort((a, b) => b.costCny - a.costCny)
+    logAudit(user, 'cost.analysis', user.id, `models=${models.length} cny=${summary.totals.costCny}`, netOf(req))
+    json(res, 200, {
+      ok: true,
+      scope: 'platform',
+      scopeLabel: '平台全部会话（管理员可见）',
+      generatedAt: new Date().toISOString(),
+      credits: summary.credits,
+      totals: summary.totals,
+      models,
+      byProvider,
+      pricing: summary.pricing,
+      baseline: summary.baseline,
+      coverage: summary.coverage,
+      note: '人民币实价来自已落库的真实 usage 与各厂商官方价目；无 usage 的调用保持未计价，不估算。',
+    })
+  },
+  'GET /api/admin/pricing/status': async (req, res) => {
+    const user = roleOf(req)
+    if (!canManage(user)) return json(res, 403, { error: '仅管理员可查看价格源状态' })
+    const status = await pricingWatch.snapshot()
+    json(res, 200, { ok: true, ...status, catalog: pricingSummary() })
+  },
+  'POST /api/admin/pricing/check': async (req, res) => {
+    const user = roleOf(req)
+    if (!canManage(user)) return json(res, 403, { error: '仅管理员可触发价格源检查' })
+    const state = await pricingWatch.check()
+    logAudit(user, 'pricing.check', user.id, `alerts=${(state.alerts || []).length}`, netOf(req))
+    json(res, 200, {
+      ok: true,
+      lastCheckedAt: state.lastCheckedAt,
+      alerts: state.alerts || [],
+      sources: Object.values(state.sources || {}),
+    })
+  },
+  'POST /api/admin/pricing/ack': async (req, res) => {
+    const user = roleOf(req)
+    if (!canManage(user)) return json(res, 403, { error: '仅管理员可确认价格源变更' })
+    const body = JSON.parse(req.__body || '{}')
+    const sourceId = String(body.sourceId || '').trim()
+    if (!sourceId) return json(res, 400, { error: '缺少 sourceId' })
+    const status = await pricingWatch.acknowledge(sourceId, body.note)
+    logAudit(user, 'pricing.ack', sourceId, String(body.note || '').slice(0, 80), netOf(req))
+    json(res, 200, { ok: true, ...status, catalog: pricingSummary() })
   },
   'GET /api/bootstrap': (req, res) => {
     const session = sessionOf(req)
@@ -5186,6 +5845,7 @@ const api = {
       tasks: user.id === 'guest' ? [] : liveTasks,
       tools: conf.tools,
       models: user.id === 'guest' ? [] : conf.models,
+      modelGateway: user.id === 'guest' ? { presets: [], custom: [], chat: [], image: [] } : modelCatalog(user),
       imageGeneration: imageGenerationStatus(user, net),
       groupModels: conf.models,
       ownApiRequired: user.id === 'guest',
@@ -6156,6 +6816,133 @@ const api = {
     if (!context) return json(res, 401, { error: '中枢账号上下文无效或已过期', code: 'AS_CONTEXT_INVALID' })
     return json(res, 200, { ok: true, appId: context.appId, userId: context.userId, exp: context.exp })
   },
+  /**
+   * 中枢回环代理（对话）：AS 子进程不带中枢会话与模型密钥，凭上下文令牌经此调用
+   * 模型网关注册表里启用的对话模型；密钥只保留在中枢进程，不下发给应用。
+   */
+  'POST /api/as/model/chat': async (req, res) => {
+    const body = JSON.parse(req.__body || '{}')
+    const appId = String(body.appId || '').trim()
+    const contextToken = String(body.contextToken || req.headers['x-as-context'] || '').trim()
+    if (!appId || !contextToken) return json(res, 400, { error: '缺少应用上下文', code: 'AS_CONTEXT_MISSING' })
+    const context = verifyAppContext(contextToken, appId)
+    if (!context) return json(res, 401, { error: '中枢账号上下文无效或已过期', code: 'AS_CONTEXT_INVALID' })
+    const record = resolveSharedModel('chat', body.modelRef || body.modelId, context.userId)
+    if (!record || record.purpose !== 'chat' || !record.enabled) return json(res, 503, { error: '模型网关未启用可用的对话模型', code: 'SHARED_CHAT_MODEL_MISSING' })
+    const messages = Array.isArray(body.messages) ? body.messages : []
+    if (!messages.length) return json(res, 400, { error: '模型请求缺少消息', code: 'MODEL_BAD_REQUEST' })
+    try {
+      const probe = await chatCompletion({
+        messages,
+        model: record.model,
+        apiKey: record.apiKey,
+        baseUrl: record.endpoint,
+        timeoutMs: Number(body.timeoutMs) || 60000,
+        temperature: Number(body.temperature ?? 0.3),
+      })
+      logAudit({ id: context.userId, name: context.userId, visibleModules: [] }, 'as.model.chat', `${appId} ${record.label}`, 'allow', netOf(req))
+      return json(res, 200, { ok: true, content: probe.content, model: probe.model, latencyMs: probe.latencyMs })
+    } catch (error) {
+      logAudit({ id: context.userId, name: context.userId, visibleModules: [] }, 'as.model.chat', `${appId} ${record.label}`, `deny(${error.code || 'MODEL_ERROR'})`, netOf(req))
+      return json(res, error instanceof ModelError ? error.status : 502, { error: error.message, code: error.code || 'MODEL_ERROR' })
+    }
+  },
+  /**
+   * 中枢回环代理（图像生成）：应用经上下文令牌调用模型网关注册表的图像模型；
+   * 注册表记录了独立的图像 API 端点、模型与密钥，密钥不离开中枢进程。
+   */
+  'POST /api/as/model/image': async (req, res) => {
+    const body = JSON.parse(req.__body || '{}')
+    const appId = String(body.appId || '').trim()
+    const contextToken = String(body.contextToken || req.headers['x-as-context'] || '').trim()
+    if (!appId || !contextToken) return json(res, 400, { error: '缺少应用上下文', code: 'AS_CONTEXT_MISSING' })
+    const context = verifyAppContext(contextToken, appId)
+    if (!context) return json(res, 401, { error: '中枢账号上下文无效或已过期', code: 'AS_CONTEXT_INVALID' })
+    const record = resolveSharedModel('image', body.modelId, context.userId)
+    if (!record || record.purpose !== 'image' || !record.enabled) return json(res, 503, { error: '模型网关未启用可用的图像模型', code: 'SHARED_IMAGE_MODEL_MISSING' })
+    const prompt = String(body.prompt || '').trim()
+    if (!prompt) return json(res, 400, { error: '请先描述要生成的图像', code: 'IMAGE_PROMPT_REQUIRED' })
+    const size = `${Number(body.width) || 1024}x${Number(body.height) || 1024}`
+    try {
+      // 注册表自定义图像 API（OpenAI Images 兼容）：端点、模型、密钥均来自服务端注册表。
+      if (record.apiKey && record.endpoint) {
+        const endpoint = record.endpoint.endsWith('/images/generations') ? record.endpoint : `${record.endpoint.replace(/\/$/, '')}/images/generations`
+        const upstream = await fetch(endpoint, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', authorization: `Bearer ${record.apiKey}` },
+          body: JSON.stringify({ model: record.model, prompt, size, n: 1, response_format: 'b64_json' }),
+          signal: AbortSignal.timeout(Number(body.timeoutMs) || 120_000),
+        })
+        const rawText = await upstream.text()
+        let payload = null
+        try { payload = rawText ? JSON.parse(rawText) : null } catch { /* 保留原文 */ }
+        if (!upstream.ok) {
+          const message = payload?.error?.message || payload?.message || rawText.slice(0, 240)
+          throw new ImageProviderError(`图像模型返回 ${upstream.status}：${message}`, { code: 'IMAGE_PROVIDER_ERROR', status: upstream.status })
+        }
+        const item = payload?.data?.[0] || {}
+        let dataUrl = item.b64_json ? `data:${item.mime || 'image/png'};base64,${item.b64_json}` : ''
+        if (!dataUrl && item.url) {
+          const imgResp = await fetch(item.url, { signal: AbortSignal.timeout(60_000) })
+          const buf = Buffer.from(await imgResp.arrayBuffer())
+          dataUrl = `data:${imgResp.headers.get('content-type') || 'image/png'};base64,${buf.toString('base64')}`
+        }
+        if (!dataUrl) throw new ImageProviderError('图像模型未返回图像内容', { code: 'IMAGE_PROVIDER_NO_IMAGE', status: 502 })
+        logAudit({ id: context.userId, name: context.userId, visibleModules: [] }, 'as.model.image', `${appId} ${record.label}`, 'allow', netOf(req))
+        return json(res, 200, { ok: true, dataUrl, model: record.model, modelId: record.id, provider: record.provider || 'openai', width: Number(body.width) || 1024, height: Number(body.height) || 1024 })
+      }
+      // 未在注册表填写端点/密钥时，回退到中枢内置图像 Provider（环境变量配置）。
+      const image = await generateImage({
+        modelId: record.builtinProvider || body.modelId || record.modelId || '',
+        prompt,
+        ratio: body.ratio || '1:1',
+        width: Number(body.width) || 1024,
+        height: Number(body.height) || 1024,
+        seed: Number(body.seed) || 0,
+        referenceImages: Array.isArray(body.referenceImages) ? body.referenceImages : [],
+      })
+      const imageBuffer = image.buffer ? `data:${image.mime || 'image/png'};base64,${Buffer.from(image.buffer).toString('base64')}` : (image.dataUrl || '')
+      logAudit({ id: context.userId, name: context.userId, visibleModules: [] }, 'as.model.image', `${appId} ${record.label}`, 'allow', netOf(req))
+      return json(res, 200, { ok: true, dataUrl: imageBuffer, model: image.model, modelId: image.modelId, provider: image.provider, width: image.width, height: image.height, requestId: image.requestId })
+    } catch (error) {
+      logAudit({ id: context.userId, name: context.userId, visibleModules: [] }, 'as.model.image', `${appId} ${record.label}`, `deny(${error.code || 'IMAGE_ERROR'})`, netOf(req))
+      return json(res, error instanceof ImageProviderError ? error.status : 502, { error: error.message, code: error.code || 'IMAGE_PROVIDER_ERROR' })
+    }
+  },
+  /**
+   * 中枢回环代理（应用模块）：应用经上下文令牌调用“应用模块”配置的模型 API
+   * （OpenAI Chat Completions 兼容）；密钥只保留在中枢进程，不下发给应用。
+   */
+  'POST /api/as/model/app': async (req, res) => {
+    const body = JSON.parse(req.__body || '{}')
+    const appId = String(body.appId || '').trim()
+    const contextToken = String(body.contextToken || req.headers['x-as-context'] || '').trim()
+    if (!appId || !contextToken) return json(res, 400, { error: '缺少应用上下文', code: 'AS_CONTEXT_MISSING' })
+    const context = verifyAppContext(contextToken, appId)
+    if (!context) return json(res, 401, { error: '中枢账号上下文无效或已过期', code: 'AS_CONTEXT_INVALID' })
+    const appRecord = liveApps.find((item) => item.id === appId) || null
+    const ref = body.modelRef || body.modelId || appModelRef(appRecord, context.userId)
+    const record = resolveSharedModel('app', ref, context.userId)
+    if (!record || !['app', 'chat'].includes(record.purpose) || !record.enabled) return json(res, 503, { error: '模型网关未启用可用的应用模块模型', code: 'SHARED_APP_MODEL_MISSING' })
+    const messages = Array.isArray(body.messages) ? body.messages : []
+    if (!messages.length) return json(res, 400, { error: '模型请求缺少消息', code: 'MODEL_BAD_REQUEST' })
+    if (!record.apiKey) return json(res, 503, { error: '所选模型未配置密钥', code: 'MODEL_KEY_MISSING' })
+    try {
+      const probe = await chatCompletion({
+        messages,
+        model: record.model,
+        apiKey: record.apiKey,
+        baseUrl: record.endpoint,
+        timeoutMs: Number(body.timeoutMs) || 60000,
+        temperature: Number(body.temperature ?? 0.3),
+      })
+      logAudit({ id: context.userId, name: context.userId, visibleModules: [] }, 'as.model.app', `${appId} ${record.label}`, 'allow', netOf(req))
+      return json(res, 200, { ok: true, content: probe.content, model: probe.model, latencyMs: probe.latencyMs })
+    } catch (error) {
+      logAudit({ id: context.userId, name: context.userId, visibleModules: [] }, 'as.model.app', `${appId} ${record.label}`, `deny(${error.code || 'MODEL_ERROR'})`, netOf(req))
+      return json(res, error instanceof ModelError ? error.status : 502, { error: error.message, code: error.code || 'MODEL_ERROR' })
+    }
+  },
   'POST /api/as/start': async (req, res) => {
     const user = roleOf(req)
     const body = JSON.parse(req.__body || '{}')
@@ -6730,7 +7517,36 @@ const api = {
     const user = roleOf(req)
     const net = netOf(req)
     const list = liveApps.filter((a) => ((a.nets || []).includes(net)) && (a.status === 'published' || canManage(user)))
-    json(res, 200, { items: list, canManage: canManage(user) })
+    json(res, 200, {
+      items: list.map((app) => {
+        const ref = appModelRef(app, user.id)
+        const model = liveSharedModels.get(ref)
+        return { ...app, modelRef: ref, modelLabel: model?.label || '默认通用模型' }
+      }),
+      canManage: canManage(user),
+    })
+  },
+  'POST /api/apps/model': (req, res) => {
+    const user = roleOf(req)
+    const body = JSON.parse(req.__body || '{}')
+    const app = liveApps.find((item) => item.id === body.id)
+    if (!app) return json(res, 404, { error: '应用不存在', code: 'APP_NOT_FOUND' })
+    if (!canManage(user) && !String(app.maintainer || '').includes(user.name)) {
+      return json(res, 403, { error: '只有应用维护人或管理员可以设置应用模型', code: 'FORBIDDEN' })
+    }
+    const ref = String(body.modelRef || '').trim()
+    if (!ref) return json(res, 400, { error: '请选择模型', code: 'MODEL_REF_REQUIRED' })
+    const record = resolveSharedModel('app', ref, user.id)
+    if (!record || !['app', 'chat'].includes(record.purpose)) {
+      return json(res, 404, { error: '所选模型不在智能中枢的可选范围内', code: 'MODEL_REF_INVALID' })
+    }
+    // 应用只保存模型引用，不保存 provider / endpoint / apiKey。
+    app.modelRef = record.id
+    app.modelProvider = ''
+    app.modelEndpoint = ''
+    app.modelApiKey = ''
+    logAudit(user, 'app.model', `${app.id}:${record.id}`, 'allow', netOf(req))
+    json(res, 200, { ok: true, id: app.id, modelRef: record.id, modelLabel: record.label, message: '应用模型已更新；provider 与密钥由智能中枢托管' })
   },
   'GET /api/app': (req, res, url) => {
     const id = url.searchParams.get('id')
@@ -7390,7 +8206,7 @@ const api = {
       executionPolicy = requestedPolicy
       conv = {
         id: requestedId || `C-${Date.now()}`, title: text.length > 26 ? `${text.slice(0, 26)}…` : text,
-        time: new Date().toLocaleTimeString('zh-CN', { hour12: false }).slice(0, 5), createdAt: new Date().toISOString(), model: deepThink ? 'DeepSeek Reasoner' : (networks[net].models.find((m) => m.id === body.model)?.label || networks[net].models[0].label),
+        time: new Date().toLocaleTimeString('zh-CN', { hour12: false }).slice(0, 5), createdAt: new Date().toISOString(), model: deepThink ? 'DeepSeek Reasoner' : (liveSharedModels.get(String(body.model || ''))?.label || networks[net].models.find((m) => m.id === body.model)?.label || networks[net].models[0].label),
         turns: 0, status: 'running', workspace: '默认工作区', projectId: projectId || null, mode,
         taskMode, resolvedMode: mode, modeReason: route.reason,
         executionPolicy, agentPresetId: requestedPreset?.id || '', agentPresetName: requestedPreset?.name || '', messages: [], reasoningEffort: deepThink ? 'high' : effortLevel, deepThink, userId: String(user.id),
@@ -7446,10 +8262,22 @@ const api = {
     }
     conv.status = 'running'
     activeRuns.add(conv.id)
-    let modelCfg = resolveModelConfig({
-      userConfig: liveModelConfig.get(user.id) || {},
-      request: { ownApiKey: requestKey, modelName: body.modelName },
-    })
+    const requestedRef = String(body.modelRef || body.model || '').trim()
+    const picked = requestedRef && liveSharedModels.has(requestedRef) ? resolveChatModel(requestedRef, user.id) : null
+    if (requestedRef && liveSharedModels.has(requestedRef) && !picked) {
+      conv.status = 'failed'
+      activeRuns.delete(conv.id)
+      return json(res, 403, {
+        error: '所选模型不可用或不属于当前账号。请从智能中枢的预设模型或本人自定义模型中选择。',
+        code: 'MODEL_REF_UNAVAILABLE',
+      })
+    }
+    let modelCfg = picked
+      ? { ...picked, timeoutMs: 60000 }
+      : resolveModelConfig({
+        userConfig: mergedUserChatConfig(user.id),
+        request: { ownApiKey: requestKey, modelName: body.modelName },
+      })
     if (modelCfg.source === 'none') {
       conv.status = 'failed'
       activeRuns.delete(conv.id)
@@ -7465,7 +8293,7 @@ const api = {
         conv.status = 'failed'
         activeRuns.delete(conv.id)
         return json(res, 409, {
-          error: '当前模型网关不支持深度思索。深度思索需要 DeepSeek 推理模型（deepseek-reasoner），请切换到 DeepSeek 官方端点后再使用。',
+          error: '当前所选模型不支持深度思索。深度思索需要 DeepSeek 推理模型（deepseek-reasoner），请切换到 DeepSeek V4.1 Flash 或本人 DeepSeek 兼容模型后再使用。',
           code: 'DEEP_THINK_UNSUPPORTED',
         })
       }
@@ -7476,7 +8304,15 @@ const api = {
     // 直连快速通道：天气/日期/问候等确定性事实不进入 Harness，零模型调用；
     // 一旦直连数据不可用（城市不明、接口失败、需要工具链），直接落到下面的 Harness 分支。
     const directStartedAt = Date.now()
-    const direct = await tryDirectReply({ text, body, mode, projectId, deepThink, webSearch, regenerate })
+    let direct = await tryDirectReply({ text, body, mode, projectId, deepThink, webSearch, regenerate })
+    if (!direct) {
+      try {
+        direct = await tryQuickModelReply({ text, body, mode, projectId, deepThink, webSearch, regenerate, conv, modelCfg })
+      } catch (error) {
+        // 轻量直连失败不能改变任务语义，直接落回 Harness。
+        console.warn('[jg-server] quick model reply failed, falling back to harness:', error?.message || error)
+      }
+    }
     if (direct) {
       let directMessageId = ''
       try {
@@ -7494,8 +8330,8 @@ const api = {
           replyChars: direct.reply.length,
           finishReason: 'completed',
         })
-        runStats.modelCalls = 0
-        runStats.toolCalls = direct.steps.length
+        runStats.modelCalls = direct.kind === 'model-quick' ? 1 : 0
+        runStats.toolCalls = direct.kind === 'model-quick' ? 0 : direct.steps.length
         const assistantMsg = {
           id: directMessageId,
           role: 'assistant', text: direct.reply,
@@ -7514,6 +8350,12 @@ const api = {
           direct: true,
         }
         conv.messages.push(assistantMsg)
+        if (direct.kind === 'model-quick') {
+          conv.lightTurns = [
+            ...(Array.isArray(conv.lightTurns) ? conv.lightTurns : []),
+            { user: String(text || '').slice(0, 2000), assistant: String(direct.reply || '').slice(0, 2000), at: Date.now() },
+          ].slice(-6)
+        }
         conv.turns = Math.ceil(conv.messages.length / 2)
         conv.status = 'done'
         conv.model = direct.model
@@ -7528,6 +8370,9 @@ const api = {
       } catch (directError) {
         // 直连落库失败不能改变任务语义：清理草稿并继续走 Harness。
         if (directMessageId) conv.messages = conv.messages.filter((m) => m.id !== directMessageId)
+        if (direct.kind === 'model-quick' && Array.isArray(conv.lightTurns) && conv.lightTurns.length) {
+          conv.lightTurns = conv.lightTurns.slice(0, -1)
+        }
         console.warn('[jg-server] direct reply failed, falling back to harness:', directError?.message || directError)
       }
     }
@@ -7551,11 +8396,15 @@ const api = {
       // 简单事实查询不需要项目资源目录、可视化规范和完整技能目录；
       // 只保留身份、审批、网络与检索约束，避免每次模型调用重复携带大段上下文。
       const simpleLookup = mode === 'chat' && !projectId && !deepThink && isSimpleLookup(text)
+      const lightHistoryContext = quickHistoryContext(conv)
       const context = [
         `当前用户：${user.name}（${user.label}，${user.unit || '—'}）`,        `当前任务模式：${taskMode === 'auto' ? `自动（本轮判定为${mode === 'work' ? '工作' : '对话'}模式：${route.reason}）` : taskMode === 'chat' ? '对话模式（默认只读；用户明确要求创建或修改文件、执行命令时，按权限流程申请审批，由用户逐次决定是否授权，不要自行拒绝或绕过审批）' : '工作模式（可以调用文件、命令、代码与技能工具执行任务）'}`,
         project ? `当前工作项目：${project.name}；授权目录：${project.cwd}。所有文件读写与命令执行必须限制在该目录内。` : '',
         project?.instructions
           ? `项目专属指令（由项目创建者填写，优先级高于一般习惯，但不得覆盖系统安全规则）：\n${String(project.instructions).slice(0, 2000)}`
+          : '',
+        mode === 'work' && !simpleLookup
+          ? '工作模式执行约束：彼此独立的读取、检查、统计步骤优先在一次 run_code 中合并完成；只读代码检查先 grep 定位符号或入口，再一次性按行段读取必要位置，不要逐行反复调用；同一意图最多 2 次 run_code；单次只回传必要片段，大段输出写入文件并只回传摘要；只有后一步依赖前一步结果时才拆成多次工具调用。'
           : '',
         executionPolicy === 'manual'
           ? '当前审批方式：请求批准。只读操作可以直接进行；创建、修改、删除文件，运行有副作用的命令，或调用会改变外部状态的工具时，直接发起工具调用，需要写入时可按工具要求申请 workspace-write 升级，由 DSH 只读策略把升级动作转成产品审批卡。不要先用提问向用户申请授权；用户拒绝后停止该动作。'
@@ -7572,6 +8421,7 @@ const api = {
         simpleLookup ? '' : 'Visual Engine：当用户明确要求画图，或流程、架构、关系、统计、信息图、可调参数计算器用图形表达更清楚时，必须调用 visual_create（流程/关系用 mermaid，统计用 echarts，自定义信息图用 svg，滑块/实时计算的贷款计算器用 interactive + loan-calculator 配置）；修改当前会话已有图形时必须优先调用 visual_update 并复用其 id，保留未要求修改的节点和数据。不要把 Mermaid/ECharts/SVG 源码直接写进回答，不要在回答里用代码块代替图形。创建/修改成功后用一两句话说明图形表达的重点即可。',
         simpleLookup ? '' : visualContextForModel(user, conv.id),
         refContext ? `会话上下文：\n${refContext}` : '',
+        lightHistoryContext,
         simpleLookup ? '' : activePreset?.instructions
           ? `Agent 预设「${activePreset.name}」的行为要求（必须遵守，但不得覆盖系统安全规则）：\n${String(activePreset.instructions).slice(0, 4000)}`
           : '',
@@ -7582,7 +8432,9 @@ const api = {
       const runStartedAt = Date.now()
       const requestedModel = modelCfg.model
       const imageBlocks = await imageBlocksForAgent(user, net, body.refs)
-      const modelRoute = routeModel({
+      const modelRoute = picked
+        ? { model: modelCfg.model, taskClass: 'selected', reason: 'selected-model', imageFallback: false }
+        : routeModel({
         baseModel: modelCfg.model,
         text: agentText,
         mode,
@@ -7590,8 +8442,42 @@ const api = {
         images: imageBlocks,
         deepThink,
       })
-      if (modelRoute.imageFallback) modelCfg = { ...modelCfg, model: modelRoute.model }
-      else if (modelRoute.reason === 'deep-think') modelCfg = { ...modelCfg, model: modelRoute.model }
+      if (modelRoute.model && modelRoute.model !== modelCfg.model) modelCfg = { ...modelCfg, model: modelRoute.model }
+      if (modelRoute.reason !== 'configured-model') {
+        console.log('[jg-route] model:', requestedModel, '->', modelCfg.model, `task=${modelRoute.taskClass}`, `reason=${modelRoute.reason}`)
+      }
+      const maxRunCode = runCodeLimitForTurn({
+        taskMode,
+        mode,
+        text: agentText,
+        activePreset,
+        deepThink,
+      })
+      const candidateToolPolicy = toolPolicyForTurn({
+        taskMode,
+        mode,
+        projectId,
+        text: agentText,
+        webSearch,
+        activePreset,
+        deepThink,
+        images: imageBlocks,
+      })
+      // 同一 Work 会话内工具面只增不减：保留上一轮顺序，把新意图追加到末尾，
+      // 避免每轮策略切换重写工具 Schema 前缀，抵消 API 缓存。
+      let toolPolicy = candidateToolPolicy
+      let toolPolicyMode = 'turn'
+      if (mode === 'work' && !activePreset && !deepThink && candidateToolPolicy.startsWith('allow=')) {
+        const mergedToolPolicy = mergeToolPolicies(conv.toolPolicy, candidateToolPolicy)
+        if (mergedToolPolicy) {
+          toolPolicy = mergedToolPolicy
+          conv.toolPolicy = mergedToolPolicy
+          toolPolicyMode = mergedToolPolicy === candidateToolPolicy ? 'turn' : 'session-union'
+        }
+      } else if (!candidateToolPolicy) {
+        conv.toolPolicy = ''
+      }
+      console.log('[jg-toolset] policy:', mode, toolPolicy ? `${toolPolicy.slice(0, 60)}…` : 'none', 'runCodeLimit:', maxRunCode, 'stable:', toolPolicyMode)
       // 本轮执行前先记录工作目录快照，执行后对比出真实新增/修改/删除。
       const treeBefore = runtimeSettings.workspaceChanges ? snapshotTree(conv.agentCwd) : null
       const result = await runAgent({
@@ -7608,6 +8494,8 @@ const api = {
         // 显式 Chat 固定只读；Auto 误路由为 chat 时，只允许通过审批卡单次放行。
         permissionPreset: mode === 'chat' ? 'read-only' : '',
         maxToolCalls: forcedMaxToolCalls || (simpleLookup ? 6 : taskMode === 'chat' ? 30 : projectId ? 100 : 60),
+        maxRunCode,
+        toolPolicy,
         runKey: conv.id,
         runtimeScope: conv.id,
         onStart: (dshSessionId) => markChatRunStarted(chatTask, dshSessionId),
@@ -7630,6 +8518,7 @@ const api = {
                 rule,
                 risk: evaluation.risk,
                 actor: user.name,
+                userId: user.id,
                 approver: 'pending',
                 net,
               })
@@ -7754,6 +8643,7 @@ const api = {
       if (titleLooksUsable) conv.title = aiTitle.slice(0, 80)
       if (regenerate) conv.messages[regenerateIndex] = assistantMsg
       else conv.messages.push(assistantMsg)
+      if (Array.isArray(conv.lightTurns) && conv.lightTurns.length) conv.lightTurns = []
       conv.turns = Math.ceil(conv.messages.length / 2)
       conv.status = 'done'
       conv.model = result.model
@@ -9152,6 +10042,7 @@ const api = {
           : undefined,
       })
       const ext = image.mime === 'image/png' ? 'png' : image.mime === 'image/webp' ? 'webp' : 'jpg'
+      const cost = imageCostFields(image, width, height, referenceImages.length)
       const assetId = newFileId('IMG')
       const name = `AI-${new Date().toISOString().slice(0, 19).replace(/[T:]/g, '')}-${seed}.${ext}`
       const meta = putFile({
@@ -9197,7 +10088,7 @@ const api = {
         modelId: image.modelId,
         finishedAt: Date.now(),
       })
-      logAudit(user, 'image.generate', `${assetId}:${image.modelId}:${ratio}:${seed}`, `allow(${meta.size})`, net)
+      logAudit(user, 'image.generate', `${assetId}:${image.modelId}:${ratio}:${seed}`, `allow(${meta.size};cost=${cost.costCny ?? 'unpriced'})`, net)
       return json(res, 200, {
         ok: true,
         image: {
@@ -9218,6 +10109,7 @@ const api = {
           model: image.model,
           modelId: image.modelId,
           requestId: image.requestId || '',
+          cost: cost,
           revision: 1,
           versions: 1,
           jobId,
@@ -9301,6 +10193,7 @@ const api = {
         seed,
       })
       const ext = image.mime === 'image/png' ? 'png' : image.mime === 'image/webp' ? 'webp' : 'jpg'
+      const cost = imageCostFields(image, width, height, 1)
       const fileId = newFileId('IMG')
       const name = `AI-${new Date().toISOString().slice(0, 19).replace(/[T:]/g, '')}-${seed}.${ext}`
       const meta = putFile({
@@ -9349,7 +10242,7 @@ const api = {
         modelId: image.modelId,
         finishedAt: Date.now(),
       })
-      logAudit(user, 'image.edit', `${asset.id}:v${revision}:${image.modelId}`, `allow(${meta.size})`, net)
+      logAudit(user, 'image.edit', `${asset.id}:v${revision}:${image.modelId}`, `allow(${meta.size};cost=${cost.costCny ?? 'unpriced'})`, net)
       return json(res, 200, {
         ok: true,
         image: {
@@ -9370,6 +10263,7 @@ const api = {
           model: image.model,
           modelId: image.modelId,
           requestId: image.requestId || '',
+          cost: cost,
           revision,
           versions: imageRevisionCount(asset.id),
           jobId,
@@ -9396,15 +10290,23 @@ const api = {
   'POST /api/images/mask-edit': async (req, res) => {
     const user = roleOf(req)
     const net = netOf(req)
+    const status = imageGenerationStatus(user, net)
+    if (!status.enabled) return json(res, 403, { error: status.reason, code: 'IMAGE_DISABLED' })
     const body = JSON.parse(req.__body || '{}')
     const assetId = String(body.assetId || body.id || '').trim()
     const prompt = String(body.prompt || '').trim()
     const maskDataUrl = String(body.maskDataUrl || '').trim()
+    const requestedModelId = String(body.modelId || '').trim()
     if (!assetId) return json(res, 400, { error: '缺少要编辑的图像资产', code: 'IMAGE_ASSET_REQUIRED' })
-    if (!prompt) return json(res, 400, { error: '请先描述选区里要修改成什么', code: 'IMAGE_MASK_PROMPT_REQUIRED' })
-    if (prompt.length > 800) return json(res, 400, { error: '局部编辑要求不能超过 800 个字符', code: 'IMAGE_MASK_PROMPT_TOO_LONG' })
+    if (!prompt) return json(res, 400, { error: '请先描述选区里要修改成什么', code: 'IMAGE_REGION_PROMPT_REQUIRED' })
+    if (prompt.length > 800) return json(res, 400, { error: '局部编辑要求不能超过 800 个字符', code: 'IMAGE_REGION_PROMPT_TOO_LONG' })
     if (!/^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(maskDataUrl)) {
-      return json(res, 400, { error: '选区 Mask 无效', code: 'IMAGE_MASK_INVALID' })
+      return json(res, 400, { error: '选区 Mask 无效', code: 'IMAGE_REGION_MASK_INVALID' })
+    }
+    const maskBuffer = Buffer.from(maskDataUrl.split(',')[1] || '', 'base64')
+    if (!maskBuffer.length) return json(res, 400, { error: '选区为空', code: 'IMAGE_REGION_MASK_EMPTY' })
+    if (maskBuffer.length > 10 * 1024 * 1024) {
+      return json(res, 413, { error: '选区 Mask 超过 10 MB', code: 'IMAGE_REGION_MASK_TOO_LARGE' })
     }
     const asset = getImageAsset(assetId)
     if (!asset || asset.deletedAt != null || asset.owner !== user.name) {
@@ -9415,43 +10317,21 @@ const api = {
     if (!sourceMeta || !sourceBuffer || sourceMeta.deletedAt != null) {
       return json(res, 404, { error: '待编辑的图像文件不存在或已失效', code: 'IMAGE_FILE_NOT_FOUND' })
     }
-    const sharp = getSharp()
-    if (!sharp) {
-      return json(res, 503, { error: '当前环境缺少图像处理组件，无法校验选区', code: 'IMAGE_MASK_UNAVAILABLE' })
+    // 选区编辑只落在预设图像模型上：和整图编辑同一套选择规则，不隐式切换第三方 Provider。
+    const editModel = status.models.find((model) => model.configured && model.capabilities?.edit && (!requestedModelId || model.id === requestedModelId || model.model === requestedModelId))
+    if (!editModel) {
+      const selected = requestedModelId ? status.models.find((model) => model.id === requestedModelId || model.model === requestedModelId) : null
+      if (selected && !selected.configured) {
+        return json(res, 503, { error: `${selected.label} 尚未配置，无法执行选区局部重绘`, code: 'IMAGE_MODEL_NOT_CONFIGURED' })
+      }
+      if (selected && !selected.capabilities?.edit) {
+        return json(res, 400, { error: `${selected.label} 暂未开放图像编辑`, code: 'IMAGE_EDIT_UNSUPPORTED' })
+      }
+      return json(res, 400, { error: '当前没有可用的图像编辑模型', code: 'IMAGE_EDIT_UNAVAILABLE' })
     }
     const style = asset.style || '写实'
-    let maskBuffer = Buffer.from(maskDataUrl.split(',')[1] || '', 'base64')
-    if (!maskBuffer.length || maskBuffer.length > 10 * 1024 * 1024) {
-      return json(res, 400, { error: '选区 Mask 为空或超过 10 MB', code: 'IMAGE_MASK_TOO_LARGE' })
-    }
-    let sourceMetaInfo
-    let maskMetaInfo
-    let normalizedMask
-    try {
-      sourceMetaInfo = await sharp(sourceBuffer).metadata()
-      maskMetaInfo = await sharp(maskBuffer).metadata()
-      const width = Number(sourceMetaInfo.width || 0)
-      const height = Number(sourceMetaInfo.height || 0)
-      if (width < 512 || height < 512 || width > 4096 || height > 4096) {
-        return json(res, 400, { error: '当前图片尺寸不适合局部重绘，宽度和高度需在 512–4096 像素之间', code: 'IMAGE_MASK_SOURCE_SIZE_UNSUPPORTED' })
-      }
-      normalizedMask = await sharp(maskBuffer)
-        .resize(width, height, { fit: 'fill', kernel: 'nearest' })
-        .greyscale()
-        .threshold(128)
-        .png()
-        .toBuffer()
-      if (!normalizedMask.length) throw new Error('empty mask')
-      sourceMetaInfo.width = width
-      sourceMetaInfo.height = height
-    } catch (error) {
-      if (error instanceof ImageProviderError) throw error
-      return json(res, 400, { error: `选区 Mask 无法处理：${error?.message || error}`, code: 'IMAGE_MASK_INVALID' })
-    }
-    const normalizedMaskDataUrl = `data:image/png;base64,${normalizedMask.toString('base64')}`
-    const width = sourceMetaInfo.width
-    const height = sourceMetaInfo.height
     const ratio = IMAGE_RATIOS[asset.ratio] ? asset.ratio : '1:1'
+    const [width, height] = await editOutputSize(sourceBuffer, ...IMAGE_RATIOS[ratio])
     const jobId = newFileId('IJOB')
     createImageJob({
       id: jobId,
@@ -9459,26 +10339,31 @@ const api = {
       net,
       assetId: asset.id,
       kind: 'mask-edit',
-      provider: 'wanx',
-      modelId: 'wanx-edit',
+      provider: editModel.provider,
+      modelId: editModel.id,
       prompt,
-      params: { ratio, style, width, height, maskWidth: maskMetaInfo.width, maskHeight: maskMetaInfo.height, sourceFileId: asset.fileId, sourceRevision: asset.revision },
+      params: { ratio, style, width, height, sourceFileId: asset.fileId, sourceRevision: asset.revision, selection: 'browser-canvas' },
     })
     try {
-      const image = await editImageWithMask({
+      const image = await editImageInRegion({
+        modelId: editModel.id,
         prompt,
         imageBuffer: sourceBuffer,
         imageMime: sourceMeta.mime,
-        maskDataUrl: normalizedMaskDataUrl,
-        width,
-        height,
+        maskBuffer,
       })
-      const ext = image.mime === 'image/png' ? 'png' : image.mime === 'image/webp' ? 'webp' : 'jpg'
+      const region = image.region || { x: 0, y: 0, width, height }
+      const cost = imageCostFields(
+        { ...image, width: region.width, height: region.height },
+        region.width,
+        region.height,
+        1,
+      )
       const fileId = newFileId('IMG')
-      const name = `AI-${new Date().toISOString().slice(0, 19).replace(/[T:]/g, '')}-${jobId.slice(-6)}.${ext}`
+      const name = `AI-${new Date().toISOString().slice(0, 19).replace(/[T:]/g, '')}-${jobId.slice(-6)}.png`
       const meta = putFile({
-        id: fileId, name, mime: image.mime, buffer: image.buffer, owner: user.name, net,
-        note: `imagemask:${image.provider}/${image.model};modelId=${image.modelId};source=${asset.id}:v${asset.revision};ratio=${ratio};style=${style}`,
+        id: fileId, name, mime: 'image/png', buffer: image.buffer, owner: user.name, net,
+        note: `imageregion:${image.provider}/${image.model};modelId=${image.modelId};source=${asset.id}:v${asset.revision};ratio=${ratio};style=${style};region=${region.x},${region.y},${region.width},${region.height}`,
       })
       const revision = Number(asset.revision || 1) + 1
       createImageRevision({
@@ -9493,8 +10378,17 @@ const api = {
         model: image.model,
         modelId: image.modelId,
         seed: 0,
-        params: { sourceFileId: asset.fileId, sourceRevision: asset.revision, width, height, mask: 'browser-canvas', requestId: image.requestId || '', taskId: image.taskId || '' },
-        note: `局部选区编辑 v${revision}`,
+        params: {
+          sourceFileId: asset.fileId,
+          sourceRevision: asset.revision,
+          width,
+          height,
+          mask: 'browser-canvas',
+          region,
+          wholeImage: Boolean(image.wholeImage),
+          requestId: image.requestId || '',
+        },
+        note: `选区局部重绘 v${revision}`,
         createdBy: user.name,
       })
       updateImageAssetLatest(asset.id, user.name, {
@@ -9516,7 +10410,7 @@ const api = {
         modelId: image.modelId,
         finishedAt: Date.now(),
       })
-      logAudit(user, 'image.mask-edit', `${asset.id}:v${revision}:${image.modelId}`, `allow(${meta.size})`, net)
+      logAudit(user, 'image.region-edit', `${asset.id}:v${revision}:${image.modelId}`, `allow(${meta.size};region=${region.width}x${region.height};cost=${cost.costCny ?? 'unpriced'})`, net)
       return json(res, 200, {
         ok: true,
         image: {
@@ -9536,6 +10430,8 @@ const api = {
           model: image.model,
           modelId: image.modelId,
           requestId: image.requestId || '',
+          cost: cost,
+          region,
           revision,
           versions: imageRevisionCount(asset.id),
           jobId,
@@ -9544,9 +10440,9 @@ const api = {
       })
     } catch (error) {
       const timedOut = error?.name === 'TimeoutError' || error?.name === 'AbortError'
-      const message = timedOut ? '局部重绘模型调用超时，请稍后重试' : String(error?.message || error)
+      const message = timedOut ? '选区重绘的模型调用超时，请稍后重试' : String(error?.message || error)
       updateImageJob(jobId, { status: 'failed', error: message, finishedAt: Date.now() })
-      logAudit(user, 'image.mask-edit', `${asset.id}:wanx-edit`, 'deny', net)
+      logAudit(user, 'image.region-edit', `${asset.id}:${editModel.id}`, 'deny', net)
       const statusCode = error instanceof ImageProviderError ? error.status : 502
       return json(res, statusCode, {
         ok: false,
@@ -10488,6 +11384,7 @@ const api = {
         rule: 'mcp-non-side-effect',
         risk: 'low',
         actor: user.name,
+        userId: user.id,
         approver: 'policy:mcp',
         net: netOf(req),
       })
@@ -10516,6 +11413,7 @@ const api = {
       rule: 'external-side-effect',
       risk: 'high',
       actor: user.name,
+      userId: user.id,
       approver: 'pending',
       net: netOf(req),
     })
@@ -10551,6 +11449,63 @@ const api = {
       const result = { apps: appToolCatalog(user) }
       logAudit(user, 'ai.invoke', name, 'allow', netOf(req))
       return json(res, 200, { ok: true, tool: name, actor: `${user.name}（${user.unit}）`, result })
+    }
+    if (name === 'history_list') {
+      // 仅按当前用户 ID 过滤；管理员身份同样只能读本人记录，不做跨用户放宽。
+      const items = historyListForUser(user, {
+        kind: String(args.kind || ''), q: String(args.q || ''), limit: String(args.limit || 50),
+      })
+      logAudit(user, 'ai.invoke', name, `allow(${items.length})`, netOf(req))
+      return json(res, 200, { ok: true, tool: name, actor: `${user.name}（${user.unit}）`, result: { items } })
+    }
+    if (name === 'audit_list' || name === 'approval_list') {
+      // 仅按当前用户 ID 归属过滤；无 userId 的旧记录不返回，管理员同样不可跨账号读取。
+      const items = name === 'audit_list'
+        ? auditListForUser(user, { q: String(args.q || ''), limit: String(args.limit || 50) })
+        : approvalListForUser(user, { q: String(args.q || ''), limit: String(args.limit || 50) })
+      logAudit(user, 'ai.invoke', name, `allow(${items.length})`, netOf(req))
+      return json(res, 200, { ok: true, tool: name, actor: `${user.name}（${user.unit}）`, result: { items } })
+    }
+    if (name === 'app_data_list' || name === 'app_data_read') {
+      const appKey = String(args.appId || '')
+      const item = liveMarket.find((x) => x.kind === 'app' && (x.appId === appKey || x.id === appKey))
+      if (!item) return json(res, 404, { error: '应用不存在', code: 'AS_APP_NOT_FOUND' })
+      if (!appAccessibleForUser(item, user)) return json(res, 403, { error: '当前账号尚未安装该应用', code: 'AS_NOT_INSTALLED' })
+      const appId = item.appId || item.id
+      let root
+      try { root = realpathSync(dataDirFor(appId, user.id)) } catch (_) { root = '' }
+      if (!root || !existsSync(root)) {
+        logAudit(user, 'ai.invoke', name, 'deny(no-data-dir)', netOf(req))
+        return json(res, 200, { ok: true, tool: name, actor: `${user.name}（${user.unit}）`, result: { appId, files: [] } })
+      }
+      if (name === 'app_data_list') {
+        const files = []
+        for (const entry of readdirSync(root, { withFileTypes: true })) {
+          if (entry.name.startsWith('.')) continue
+          const sub = join(root, entry.name)
+          let size = 0
+          try { if (entry.isFile()) size = statSync(sub).size } catch (_) {}
+          files.push({ path: entry.name, isDir: entry.isDirectory(), size })
+        }
+        logAudit(user, 'ai.invoke', name, `allow(${files.length})`, netOf(req))
+        return json(res, 200, { ok: true, tool: name, actor: `${user.name}（${user.unit}）`, result: { appId, files } })
+      }
+      const rel = String(args.path || '').replace(/\\/g, '/').replace(/^\/+/, '')
+      const target = join(root, rel || '.')
+      if (!isInsidePath(root, target)) return json(res, 403, { error: '路径超出本人应用数据目录', code: 'PATH_OUT_OF_SCOPE' })
+      let realTarget
+      try { realTarget = realpathSync(target) } catch (_) { return json(res, 404, { error: '文件不存在', code: 'APP_DATA_NOT_FOUND' }) }
+      if (!isInsidePath(root, realTarget)) return json(res, 403, { error: '路径超出本人应用数据目录', code: 'PATH_OUT_OF_SCOPE' })
+      if (!existsSync(realTarget) || statSync(realTarget).isDirectory()) return json(res, 404, { error: '文件不存在或为目录', code: 'APP_DATA_NOT_FOUND' })
+      const APP_DATA_TEXT_EXT = ['.json', '.txt', '.csv', '.md', '.log', '.yaml', '.yml', '.xml', '.ini']
+      const ext = extname(realTarget).toLowerCase()
+      if (!APP_DATA_TEXT_EXT.includes(ext)) return json(res, 415, { error: '仅支持读取文本类应用数据文件', code: 'APP_DATA_TYPE_UNSUPPORTED' })
+      const MAX_APP_DATA_BYTES = 256 * 1024
+      const st = statSync(realTarget)
+      if (st.size > MAX_APP_DATA_BYTES) return json(res, 413, { error: '文件超过只读大小上限', code: 'APP_DATA_TOO_LARGE' })
+      const content = readFileSync(realTarget, 'utf8').slice(0, HISTORY_MAX_SNAPSHOT)
+      logAudit(user, 'ai.invoke', name, `allow(${appId}:${rel})`, netOf(req))
+      return json(res, 200, { ok: true, tool: name, actor: `${user.name}（${user.unit}）`, result: { appId, path: rel, size: st.size, content } })
     }
     if (name === 'app_call' || appDynamic) {
       const appKey = name === 'app_call' ? String(args.appId || '') : appDynamic.appId
@@ -10589,7 +11544,7 @@ const api = {
     if (!tool) return json(res, 404, { error: '工具不存在', hint: '先调用 GET /api/ai/tools 获取可用工具' })
     const TOOL_MODULE = { 云空间: 'drive', 通知公告: 'notice', 教学园地: 'academy', 通讯录: 'contacts', 即时通讯: 'im', 任务: 'tasks', 智能笔记本: 'knowledge', 数据中心: 'datacenter' }
     // 平台基础服务不属于任何业务模块：只要当前账号已登录，就按服务自身的资源边界校验。
-    const PLATFORM_BASE_TOOLS = new Set(['format_capabilities', 'format_inspect', 'format_extract', 'format_export', 'code_review', 'visual_create', 'visual_update', 'visual_get', 'visual_export', 'visual_save'])
+    const PLATFORM_BASE_TOOLS = new Set(['format_capabilities', 'format_inspect', 'format_extract', 'format_export', 'code_review', 'visual_create', 'visual_update', 'visual_get', 'visual_export', 'visual_save', 'history_list', 'audit_list', 'approval_list', 'app_data_list', 'app_data_read'])
     if (!PLATFORM_BASE_TOOLS.has(name) && !user.visibleModules.includes(TOOL_MODULE[tool.target] || 'tasks')) {
       logAudit(user, 'ai.invoke', name, 'deny(403)', netOf(req))
       return json(res, 403, { error: `当前角色无权调用「${tool.label}」` })
@@ -10866,6 +11821,212 @@ const api = {
       return json(res, error instanceof ModelError ? error.status : 502, { error: error.message, code: error.code || 'MODEL_ERROR' })
     }
   },
+  'GET /api/admin/shared-models': (req, res) => {
+    const user = roleOf(req)
+    json(res, 200, { ...modelCatalog(user) })
+  },
+  'GET /api/models': (req, res) => {
+    const user = roleOf(req)
+    json(res, 200, { ok: true, ...modelCatalog(user) })
+  },
+  'POST /api/admin/shared-models': (req, res) => {
+    const user = roleOf(req)
+    if (user.id === 'guest') return json(res, 403, { error: '访客不能配置模型 API', code: 'FORBIDDEN' })
+    const body = JSON.parse(req.__body || '{}')
+    const existing = body.id ? liveSharedModels.get(String(body.id)) : null
+    if (body.id && !existing) return json(res, 404, { error: '模型记录不存在', code: 'MODEL_NOT_FOUND' })
+    if (existing && !canEditSharedModel(existing, user)) return json(res, 403, { error: '只能修改本人配置的模型', code: 'FORBIDDEN' })
+    const fields = sanitizeSharedModelInput(body, existing || {})
+    if (!fields.label) return json(res, 400, { error: '模型名称必填', code: 'MODEL_LABEL_REQUIRED' })
+    if (!fields.endpoint) return json(res, 400, { error: '接口地址必填', code: 'MODEL_ENDPOINT_REQUIRED' })
+    if (!fields.model) return json(res, 400, { error: '模型 ID 必填', code: 'MODEL_MODEL_REQUIRED' })
+    if (!fields.apiKey && !existing?.apiKey) return json(res, 400, { error: 'API Key 必填（服务端凭证库托管，不下发明文）', code: 'MODEL_KEY_REQUIRED' })
+    const id = existing ? existing.id : `M-${Date.now().toString(36)}-${randomBytes(3).toString('hex')}`
+    // 用户自定义模型固定归属本人，永不进入平台公共池；系统预设不可通过该接口创建或改写。
+    const record = { ...(existing || {}), ...fields, owner: existing ? existing.owner : user.id, preset: false, id, updatedAt: new Date().toISOString() }
+    if (!existing) record.createdAt = record.updatedAt
+    liveSharedModels.set(id, record)
+    logAudit(user, existing ? 'shared-model.update' : 'shared-model.create', `${record.purpose}:${record.label}`, 'allow', netOf(req))
+    json(res, 200, { ok: true, item: sharedModelSafe(record), message: existing ? '模型配置已更新' : '模型 API 已加入模型网关（仅本人可见）' })
+  },
+  'POST /api/admin/shared-models/delete': (req, res) => {
+    const user = roleOf(req)
+    const body = JSON.parse(req.__body || '{}')
+    const id = String(body.id || '')
+    const existing = liveSharedModels.get(id)
+    if (!existing) return json(res, 404, { error: '模型记录不存在', code: 'MODEL_NOT_FOUND' })
+    if (!canEditSharedModel(existing, user)) return json(res, 403, { error: '只能删除本人配置的模型', code: 'FORBIDDEN' })
+    liveSharedModels.delete(id)
+    logAudit(user, 'shared-model.delete', `${existing.purpose}:${existing.label}`, 'allow', netOf(req))
+    json(res, 200, { ok: true, message: '模型 API 已从模型网关移除' })
+  },
+  'POST /api/admin/shared-models/test': async (req, res) => {
+    const user = roleOf(req)
+    const body = JSON.parse(req.__body || '{}')
+    const record = body.id ? liveSharedModels.get(String(body.id)) : null
+    if (record && !canEditSharedModel(record, user)) return json(res, 403, { error: '只能测试本人配置的模型', code: 'FORBIDDEN' })
+    const fields = record ? sanitizeSharedModelInput(body, record) : sanitizeSharedModelInput(body, {})
+    if (!fields.apiKey) return json(res, 400, { error: '未配置 API Key，无法测试', code: 'MODEL_KEY_MISSING' })
+    if (fields.purpose === 'image') {
+      // 图像模型不发起真实生图探测（避免产生计费），只校验配置完整性并回显现有 provider 状态。
+      const status = imageModelStatus()
+      return json(res, 200, { ok: true, purpose: 'image', message: '图像模型配置完整；实际生图由图像生成模块在调用时探测', providers: status })
+    }
+    try {
+      const probe = await chatCompletion({
+        messages: [{ role: 'user', content: '只回复“连接正常”四个字。' }],
+        model: fields.model, apiKey: fields.apiKey, baseUrl: fields.endpoint, timeoutMs: 30000,
+      })
+      logAudit(user, 'shared-model.test', `${fields.purpose}:${fields.label}`, 'allow', netOf(req))
+      return json(res, 200, { ok: true, latency: `${probe.latencyMs} ms`, message: `连接正常 · ${probe.latencyMs} ms · ${probe.model} 可用`, reply: probe.content })
+    } catch (error) {
+      logAudit(user, 'shared-model.test', `${fields.purpose}:${fields.label}`, `deny(${error.code || 'MODEL_ERROR'})`, netOf(req))
+      return json(res, error instanceof ModelError ? error.status : 502, { error: error.message, code: error.code || 'MODEL_ERROR' })
+    }
+  },
+  /* 云浏览器扩展市场：清单浏览 / 会话启停 / 申请提交；审核动作在管理中心。 */
+  'GET /api/browser-exts': (req, res) => {
+    const user = roleOf(req)
+    const items = listBrowserExts(user).map((rec) => ({ ...browserExtSafe(rec), active: rec.status === 'listed' && rec.userOn?.[user.id] !== false }))
+    json(res, 200, { items, canManage: canManage(user) })
+  },
+  'POST /api/browser-exts/toggle': (req, res) => {
+    const user = roleOf(req)
+    if (user.id === 'guest') return json(res, 403, { error: '访客不能启用扩展', code: 'FORBIDDEN' })
+    const body = JSON.parse(req.__body || '{}')
+    const rec = liveBrowserExts.get(String(body.id || ''))
+    if (!rec) return json(res, 404, { error: '扩展不存在', code: 'EXT_NOT_FOUND' })
+    if (rec.status !== 'listed') return json(res, 403, { error: '该扩展尚未通过审核，不能启用', code: 'EXT_NOT_LISTED' })
+    const on = body.on !== false
+    rec.userOn = { ...(rec.userOn || {}), [user.id]: on }
+    rec.updatedAt = new Date().toISOString()
+    logAudit(user, on ? 'browser-ext.enable' : 'browser-ext.disable', rec.id, 'allow', netOf(req))
+    json(res, 200, { ok: true, item: browserExtSafe(rec), active: on })
+  },
+  'POST /api/browser-exts/request': (req, res) => {
+    const user = roleOf(req)
+    if (user.id === 'guest') return json(res, 403, { error: '访客不能提交扩展申请', code: 'FORBIDDEN' })
+    const body = JSON.parse(req.__body || '{}')
+    const KNOWN = ['tabs', 'storage', 'cookies', 'webRequest', 'declarativeNetRequest', 'scripting', 'history', 'bookmarks']
+    const name = String(body.name || '').trim().slice(0, 40)
+    if (!name) return json(res, 400, { error: '扩展名称必填', code: 'EXT_NAME_REQUIRED' })
+    const permissions = [...new Set((body.permissions || []).map((p) => String(p)).filter((p) => KNOWN.includes(p)))].slice(0, 8)
+    const id = `EXT-${Date.now().toString(36)}-${randomBytes(3).toString('hex')}`
+    const now = new Date().toISOString()
+    const record = {
+      id, name, desc: String(body.desc || '').trim().slice(0, 120), version: String(body.version || '1.0.0').trim().slice(0, 20),
+      permissions, hostAccess: String(body.hostAccess || 'https://*/*').trim().slice(0, 120),
+      extPath: '', status: 'pending', owner: user.id, requestedBy: user.id, reviewedBy: '', reviewedAt: '',
+      note: String(body.note || '').trim().slice(0, 120), userOn: {}, createdAt: now, updatedAt: now,
+    }
+    liveBrowserExts.set(id, record)
+    logAudit(user, 'browser-ext.request', name, 'allow', netOf(req))
+    json(res, 200, { ok: true, item: browserExtSafe(record), message: '扩展申请已提交，等待管理中心审核' })
+  },
+  'GET /api/browser-exts/active': (req, res) => {
+    const user = roleOf(req)
+    const items = activeBrowserExts(user.id).map((rec) => ({ id: rec.id, name: rec.name, extPath: String(rec.extPath || '') }))
+    json(res, 200, { items })
+  },
+  /* 管理中心审核台：批准 / 拒绝下架 / 移除。 */
+  'POST /api/admin/browser-exts/review': (req, res) => {
+    const user = roleOf(req)
+    if (!canManage(user)) return json(res, 403, { error: '仅管理角色可审核扩展', code: 'FORBIDDEN' })
+    const body = JSON.parse(req.__body || '{}')
+    const rec = liveBrowserExts.get(String(body.id || ''))
+    if (!rec) return json(res, 404, { error: '扩展不存在', code: 'EXT_NOT_FOUND' })
+    const action = body.action === 'approve' ? 'approve' : body.action === 'reject' ? 'reject' : ''
+    if (!action) return json(res, 400, { error: '审核动作无效', code: 'EXT_ACTION_INVALID' })
+    const now = new Date().toISOString()
+    rec.status = action === 'approve' ? 'listed' : 'disabled'
+    rec.reviewedBy = user.id
+    rec.reviewedAt = now
+    rec.note = String(body.note || rec.note || '').trim().slice(0, 120)
+    rec.extPath = action === 'approve' ? String(body.extPath || rec.extPath || '').trim().slice(0, 240) : rec.extPath
+    rec.updatedAt = now
+    logAudit(user, action === 'approve' ? 'browser-ext.approve' : 'browser-ext.reject', rec.id, 'allow', netOf(req))
+    json(res, 200, { ok: true, item: browserExtSafe(rec), message: action === 'approve' ? '扩展已上架到扩展市场' : '扩展已拒绝并下架' })
+  },
+  'POST /api/admin/browser-exts/delete': (req, res) => {
+    const user = roleOf(req)
+    if (!canManage(user)) return json(res, 403, { error: '仅管理角色可移除扩展', code: 'FORBIDDEN' })
+    const body = JSON.parse(req.__body || '{}')
+    const rec = liveBrowserExts.get(String(body.id || ''))
+    if (!rec) return json(res, 404, { error: '扩展不存在', code: 'EXT_NOT_FOUND' })
+    liveBrowserExts.delete(rec.id)
+    logAudit(user, 'browser-ext.delete', rec.id, 'allow', netOf(req))
+    json(res, 200, { ok: true, message: '扩展已移除' })
+  },
+  /* 本人操作历史：仅按当前用户 ID 过滤，不提供跨用户检索，管理员身份同样不放宽。 */
+  'GET /api/history': (req, res) => {
+    const user = roleOf(req)
+    const items = historyListForUser(user, {
+      kind: req.searchParams.get('kind') || '',
+      q: req.searchParams.get('q') || '',
+      limit: req.searchParams.get('limit') || 50,
+    })
+    json(res, 200, { items })
+  },
+  'POST /api/history/report': (req, res) => {
+    const user = roleOf(req)
+    const body = JSON.parse(req.__body || '{}')
+    const incoming = Array.isArray(body.items) ? body.items : [body]
+    const saved = []
+    for (const item of incoming.slice(0, 20)) {
+      const rec = historyUpsert(user, item || {})
+      if (rec) saved.push(rec)
+    }
+    logAudit(user, 'history.report', `${saved.length} 条`, 'allow', netOf(req))
+    json(res, 200, { ok: true, count: saved.length, items: saved })
+  },
+  'DELETE /api/history': (req, res) => {
+    const user = roleOf(req)
+    for (const [id, rec] of liveHistory) {
+      if (rec.userId === user.id) liveHistory.delete(id)
+    }
+    logAudit(user, 'history.clear', '本人历史已清除', 'allow', netOf(req))
+    json(res, 200, { ok: true, message: '本人操作历史已清除' })
+  },
+  /* 本人应用生产数据：只读，目录根限定 apps/<应用>/users/<本人>；不跨应用、不跨用户、不开放写。 */
+  'GET /api/app-data': (req, res) => {
+    const user = roleOf(req)
+    const appKey = req.searchParams.get('appId') || ''
+    const item = liveMarket.find((x) => x.kind === 'app' && (x.appId === appKey || x.id === appKey))
+    if (!item) return json(res, 404, { error: '应用不存在', code: 'AS_APP_NOT_FOUND' })
+    if (!appAccessibleForUser(item, user)) return json(res, 403, { error: '当前账号尚未安装该应用', code: 'AS_NOT_INSTALLED' })
+    const appId = item.appId || item.id
+    let root = ''
+    try { root = existsSync(dataDirFor(appId, user.id)) ? realpathSync(dataDirFor(appId, user.id)) : '' } catch (_) {}
+    if (!root) return json(res, 200, { appId, files: [] })
+    const rel = String(req.searchParams.get('path') || '').replace(/\\/g, '/').replace(/^\/+/, '')
+    if (!rel) {
+      const files = []
+      for (const entry of readdirSync(root, { withFileTypes: true })) {
+        if (entry.name.startsWith('.')) continue
+        const sub = join(root, entry.name)
+        let size = 0
+        try { if (entry.isFile()) size = statSync(sub).size } catch (_) {}
+        files.push({ path: entry.name, isDir: entry.isDirectory(), size })
+      }
+      logAudit(user, 'app.data.list', appId, `allow(${files.length})`, netOf(req))
+      return json(res, 200, { appId, files })
+    }
+    const target = join(root, rel)
+    if (!isInsidePath(root, target)) return json(res, 403, { error: '路径超出本人应用数据目录', code: 'PATH_OUT_OF_SCOPE' })
+    let realTarget
+    try { realTarget = realpathSync(target) } catch (_) { return json(res, 404, { error: '文件不存在', code: 'APP_DATA_NOT_FOUND' }) }
+    if (!isInsidePath(root, realTarget)) return json(res, 403, { error: '路径超出本人应用数据目录', code: 'PATH_OUT_OF_SCOPE' })
+    if (!existsSync(realTarget) || statSync(realTarget).isDirectory()) return json(res, 404, { error: '文件不存在或为目录', code: 'APP_DATA_NOT_FOUND' })
+    const APP_DATA_TEXT_EXT = ['.json', '.txt', '.csv', '.md', '.log', '.yaml', '.yml', '.xml', '.ini']
+    const ext = extname(realTarget).toLowerCase()
+    if (!APP_DATA_TEXT_EXT.includes(ext)) return json(res, 415, { error: '仅支持读取文本类应用数据文件', code: 'APP_DATA_TYPE_UNSUPPORTED' })
+    const MAX_APP_DATA_BYTES = 256 * 1024
+    const st = statSync(realTarget)
+    if (st.size > MAX_APP_DATA_BYTES) return json(res, 413, { error: '文件超过只读大小上限', code: 'APP_DATA_TOO_LARGE' })
+    const content = readFileSync(realTarget, 'utf8').slice(0, HISTORY_MAX_SNAPSHOT)
+    logAudit(user, 'app.data.read', `${appId}:${rel}`, 'allow', netOf(req))
+    json(res, 200, { appId, path: rel, size: st.size, content })
+  },
   'GET /api/tool-ledger': (req, res) => {
     const user = roleOf(req)
     if (!canManage(user)) return json(res, 403, { error: '工具台账仅管理角色可见' })
@@ -11068,7 +12229,7 @@ const server = createServer(async (req, res) => {
 
     // 保留登录前的三个入口：读取引导、选网络、选角色；其余 API 必须先有服务端会话。
     const publicApi = new Set(['GET /api/captcha', 'GET /api/bootstrap', 'POST /api/login', 'POST /api/network', 'POST /api/logout'])
-    const appDataApi = new Set(['POST /api/app-data/token', 'POST /api/app-data/query', 'POST /api/as/verify-context'])
+    const appDataApi = new Set(['POST /api/app-data/token', 'POST /api/app-data/query', 'POST /api/as/verify-context', 'POST /api/as/model/chat', 'POST /api/as/model/image', 'POST /api/as/model/app'])
     const mcpToken = process.env.JG_MCP_TOKEN || ''
     const viaMcp = Boolean(mcpToken) && String(req.headers['x-jg-mcp-token'] || '') === mcpToken
     if (!publicApi.has(key) && !appDataApi.has(key) && !viaMcp && !sessionOf(req)) {
@@ -11155,6 +12316,7 @@ server.listen(port, '127.0.0.1', () => {
   cleanupSessions()
   ensureNativeSessionSearch()
   refreshRuntimeConfigDump()
+  pricingWatch.start()
   reconcileAppsOnBoot().catch((err) => console.error('[as-runtime] reconcile failed:', err && err.message ? err.message : err))
   const asSweepTimer = setInterval(() => {
     try { sweepApps() } catch (err) { console.error('[as-runtime] sweep failed:', err && err.message ? err.message : err) }

@@ -5,20 +5,31 @@
  */
 
 /**
- * 轻量模型路由：只做能力兜底，不替代用户配置。
+ * 轻量模型路由：能力优先，价格其次，且在不确定时保留用户配置。
  * - 图片请求：当前模型没有图片输入能力时，回退到声明了 text+image 的 deepseek-flash。
  * - 深度思索：固定使用 deepseek-reasoner。
+ * - 快速问答：在质量下限足够时降级到最便宜的 flash。
+ * - 检索任务：仅当用户配置了更贵的 pro 时，降到 chat；普通配置不动。
+ * - Work 任务：保留用户配置，避免为省成本牺牲代码/文件任务质量。
  * - 其余任务保留用户配置的模型；分类结果只用于 trace 和预算观察。
  */
 const MODEL_CAPABILITIES = {
-  'deepseek-flash': { images: true, label: 'DeepSeek-V4.1-Flash' },
-  'deepseek-chat': { images: false, label: 'DeepSeek-Chat' },
-  'deepseek-v4-pro': { images: false, label: 'DeepSeek-V4-Pro' },
-  'deepseek-reasoner': { images: false, label: 'DeepSeek-Reasoner' },
+  // costRank / qualityRank 是相对档位，不是账单价：1 最便宜/最基础，数字越大越贵、能力越强。
+  'deepseek-flash': { images: true, label: 'DeepSeek-V4.1-Flash', costRank: 1, qualityRank: 1 },
+  'deepseek-chat': { images: false, label: 'DeepSeek-Chat', costRank: 2, qualityRank: 2 },
+  'deepseek-v4-pro': { images: false, label: 'DeepSeek-V4-Pro', costRank: 3, qualityRank: 3 },
+  'deepseek-reasoner': { images: false, label: 'DeepSeek-Reasoner', costRank: 4, qualityRank: 4 },
+}
+
+const TASK_QUALITY_FLOOR = { quick: 1, retrieval: 2 }
+const COST_ROUTE_TARGET = { quick: 'deepseek-flash', retrieval: 'deepseek-chat' }
+
+function modelMeta(model) {
+  return MODEL_CAPABILITIES[String(model || '').trim()] || null
 }
 
 export function modelSupportsImages(model) {
-  return Boolean(MODEL_CAPABILITIES[String(model || '').trim()]?.images)
+  return Boolean(modelMeta(model)?.images)
 }
 
 export function classifyTask(text, { mode = 'chat', projectId = '', images = [] } = {}) {
@@ -33,10 +44,26 @@ export function classifyTask(text, { mode = 'chat', projectId = '', images = [] 
 export function routeModel({ baseModel = 'deepseek-flash', text = '', mode = 'chat', projectId = '', images = [], deepThink = false } = {}) {
   const base = String(baseModel || 'deepseek-flash').trim() || 'deepseek-flash'
   const taskClass = classifyTask(text, { mode, projectId, images })
-  if (Array.isArray(images) && images.length && !modelSupportsImages(base)) {
+  const hasImages = Array.isArray(images) && images.length > 0
+  if (hasImages && (!modelSupportsImages(base) || (deepThink && !modelSupportsImages('deepseek-reasoner')))) {
     return { model: 'deepseek-flash', taskClass: 'vision', reason: 'image-capability-fallback', imageFallback: true }
   }
   if (deepThink) return { model: 'deepseek-reasoner', taskClass, reason: 'deep-think', imageFallback: false }
+
+  const baseMeta = modelMeta(base)
+  const target = COST_ROUTE_TARGET[taskClass]
+  const targetMeta = modelMeta(target)
+  if (baseMeta && targetMeta && target !== base) {
+    const floor = TASK_QUALITY_FLOOR[taskClass] || 0
+    if (targetMeta.qualityRank >= floor && targetMeta.costRank < baseMeta.costRank) {
+      return {
+        model: target,
+        taskClass,
+        reason: `${taskClass}-cost`,
+        imageFallback: false,
+      }
+    }
+  }
   return { model: base, taskClass, reason: 'configured-model', imageFallback: false }
 }
 

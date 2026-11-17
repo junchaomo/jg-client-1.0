@@ -5,7 +5,7 @@
  * 本文件不改变任何前端页面；只负责把 /api/chat 的请求交给 Harness。
  */
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { fileURLToPath } from 'node:url'
@@ -17,6 +17,23 @@ const sdkEntry = join(runtimeRoot, 'node_modules', '@deepseek-ai', 'dsh-sdk-clie
 export const dshBin = join(runtimeRoot, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
 const baseHome = process.env.JG_DSH_HOME || join(dataDirPath(), 'dsh-home')
 const workspace = process.env.JG_DSH_WORKSPACE || join(dataDirPath(), 'dsh-workspace')
+
+/**
+ * 每轮工具策略通过会话级文件传给 DSH 插件。
+ * SDK 的 session/query 不把自定义命令交给模型，直接调用 /jg-toolset 会变成用户消息，
+ * 因此改为在 agent/pre-step 前由 jg-tool-router 读取该文件并执行 tools.restrict()。
+ */
+function writeToolPolicyFile(dshHome, sessionId, policy, maxRunCode = 0) {
+  if (!dshHome || !sessionId) return
+  const dir = join(dshHome, 'jg-tool-policies')
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, `${sessionId}.json`), JSON.stringify({
+    policy: String(policy || ''),
+    maxRunCode: Math.max(0, Number(maxRunCode) || 0),
+    updatedAt: Date.now(),
+  }))
+}
+
 
 export class HarnessError extends Error {
   constructor(message, { code = 'HARNESS_ERROR', status = 502, detail = null } = {}) {
@@ -578,7 +595,7 @@ export async function runtimeRequest(method, params = {}, cfg = {}) {
  * 在 DSH 会话中运行一轮 agent。已存在 dshSessionId 时续用同一会话，
  * 不存在时自动创建新会话并返回 id。
  */
-export async function runAgent({ apiKey, baseUrl, model, text, sessionId, context, images, handlers, reasoningEffort, cwd, agentsHome = '', dshHome = '', executionPolicy = 'auto', permissionPreset = '', runKey = '', runtimeScope = '', maxToolCalls = 0, onStart = null, shouldCancel = null }) {
+export async function runAgent({ apiKey, baseUrl, model, text, sessionId, context, images, handlers, reasoningEffort, cwd, agentsHome = '', dshHome = '', executionPolicy = 'auto', permissionPreset = '', runKey = '', runtimeScope = '', maxToolCalls = 0, maxRunCode = 0, toolPolicy = '', onStart = null, shouldCancel = null }) {
   if (!apiKey) throw new HarnessError('没有可用的模型密钥', { code: 'MODEL_KEY_MISSING', status: 503 })
   const effort = ['off', 'low', 'medium', 'high', 'max'].includes(String(reasoningEffort || '')) ? String(reasoningEffort) : ''
   const cfg = { apiKey, baseUrl, model, reasoningEffort: effort, agentsHome, dshHome, conversationId: String(runKey || '') }
@@ -650,6 +667,9 @@ export async function runAgent({ apiKey, baseUrl, model, text, sessionId, contex
   try {
     let session
     if (sessionId) {
+      // 策略文件必须在 agent 创建/恢复前写好：agent/created 监听器会在第一次
+      // tools.resolve() 之前收窄工具集，避免首步仍携带全量工具 schema。
+      if (toolPolicy !== undefined) writeToolPolicyFile(dshHome, sessionId, toolPolicy, maxRunCode)
       try {
         // resumeSession 会从 DSH_HOME 恢复历史；直接 run(sessionId) 只能复用当前进程内的会话。
         session = await harness.resumeSession(sessionId)
@@ -659,12 +679,16 @@ export async function runAgent({ apiKey, baseUrl, model, text, sessionId, contex
       }
     } else {
       session = harness.session()
+      // 新会话也先落策略再执行 /permission；/permission 本身会创建 agent，
+      // 若等到之后才写策略，首步工具集已经按全量解析完毕。
+      if (toolPolicy !== undefined) writeToolPolicyFile(dshHome, session.id, toolPolicy, maxRunCode)
     }
     // 通过 DSH 原生 Session Working Directory 绑定真实执行目录。
     if (cwd) await session.setWorkingDirectory(cwd)
     // DSH 原生权限预设：Auto 使用 workspace-write 沙箱，工作区内读写/测试/构建由沙箱直接放行；
     // 越界、外部写入和权限升级仍由 DSH 的 approval/request 升级到产品审批。手动模式保持 read-only。
     await session.run(`/permission ${resolvedPermissionPreset}`)
+    if (toolPolicy !== undefined) writeToolPolicyFile(dshHome, session.id, toolPolicy, maxRunCode)
     if (planActivate) await session.run('/plan')
     // 记录本轮正在执行的 SDK 会话，供产品按会话调用原生 session/cancel。
     if (entry && runKey) entry.runs.set(String(runKey), { sessionId: String(session.id), startedAt: Date.now() })
@@ -688,6 +712,7 @@ export async function runAgent({ apiKey, baseUrl, model, text, sessionId, contex
         const session = harness.session()
         if (cwd) await session.setWorkingDirectory(cwd)
         await session.run(`/permission ${resolvedPermissionPreset}`)
+        if (toolPolicy !== undefined) writeToolPolicyFile(dshHome, session.id, toolPolicy, maxRunCode)
         if (planActivate) await session.run('/plan')
         if (entry && runKey) entry.runs.set(String(runKey), { sessionId: String(session.id), startedAt: Date.now() })
         if (typeof onStart === 'function') onStart(String(session.id))

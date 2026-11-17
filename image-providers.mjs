@@ -6,6 +6,10 @@
  * 不回退到其他 Provider。
  */
 
+import { createRequire } from 'node:module'
+
+const requireFromHere = createRequire(import.meta.url)
+
 const DEFAULT_TIMEOUT_MS = 120_000
 const MAX_IMAGE_BYTES = 24 * 1024 * 1024
 const MAX_EDIT_INPUT_BYTES = 10 * 1024 * 1024
@@ -46,7 +50,7 @@ function createDefinitions() {
       endpoint: configuredValue('SEEDREAM_IMAGE_ENDPOINT', 'https://ark.cn-beijing.volces.com/api/v3/images/generations'),
       apiKey: envValue('SEEDREAM_IMAGE_API_KEY'),
       keyEnv: 'SEEDREAM_IMAGE_API_KEY',
-      capabilities: { generate: true, edit: false, references: true },
+      capabilities: { generate: true, edit: true, references: true },
     },
   ]
 }
@@ -506,149 +510,242 @@ export async function editImage({
       promptExtend: false,
     })
   }
+  if (def.provider === 'seedream') {
+    // 火山方舟把“单图生图”作为编辑入口：image + 指令 prompt，同一 endpoint。
+    return callSeedream(def, {
+      prompt: cleanPrompt,
+      ratio,
+      width,
+      height,
+      seed,
+      timeoutMs: effectiveTimeout,
+      referenceImages: [sourceImage],
+    })
+  }
   throw new ImageProviderError(`图像模型 ${def.label} 的图像编辑尚未接入`, {
     code: 'IMAGE_EDIT_PROVIDER_UNSUPPORTED',
     status: 501,
   })
 }
 
-export async function editImageWithMask({
+let sharpLib
+function getSharpLib() {
+  if (sharpLib !== undefined) return sharpLib
+  try { sharpLib = requireFromHere('./dsh-runtime/node_modules/sharp') } catch { sharpLib = null }
+  return sharpLib
+}
+
+// 选区编辑只把选区所在的矩形区域交给当前选中的预设图像模型，再按选区像素合成回原图。
+// 因此选区外像素保持原样，也不需要任何第三方 Mask 模型。
+const REGION_RATIOS = {
+  '1:1': [1, 1],
+  '4:3': [4, 3],
+  '3:4': [3, 4],
+  '4:5': [4, 5],
+  '16:9': [16, 9],
+  '9:16': [9, 16],
+  '3:2': [3, 2],
+}
+
+function nearestRegionRatio(width, height) {
+  let best = null
+  for (const [key, [rw, rh]] of Object.entries(REGION_RATIOS)) {
+    const diff = Math.abs(Math.log((width / height) / (rw / rh)))
+    if (!best || diff < best.diff) best = { key, diff, target: rw / rh }
+  }
+  return best
+}
+
+function expandRectToRatio(rect, maxWidth, maxHeight, target) {
+  let width = rect.width
+  let height = rect.height
+  if (width / height < target) width = Math.round(height * target)
+  else height = Math.round(width / target)
+  if (width > maxWidth) {
+    width = maxWidth
+    height = Math.round(width / target)
+  }
+  if (height > maxHeight) {
+    height = maxHeight
+    width = Math.round(height * target)
+  }
+  width = Math.max(rect.width, Math.min(maxWidth, width))
+  height = Math.max(rect.height, Math.min(maxHeight, height))
+  const left = Math.max(0, Math.min(maxWidth - width, Math.round(rect.left - (width - rect.width) / 2)))
+  const top = Math.max(0, Math.min(maxHeight - height, Math.round(rect.top - (height - rect.height) / 2)))
+  return { left, top, width, height }
+}
+
+/**
+ * 选区局部重绘：用 mask（白色=编辑区）定位矩形选区，裁剪后交给选中的预设模型编辑，
+ * 再把结果按 mask 羽化边界合成回原图，选区外的像素保持原样。
+ */
+export async function editImageInRegion({
+  modelId = '',
   prompt = '',
   imageBuffer = null,
   imageMime = 'image/png',
-  maskDataUrl = '',
-  width = 1024,
-  height = 1024,
-  timeoutMs = Number(process.env.WANX_IMAGE_TIMEOUT_MS || 180_000),
+  maskBuffer = null,
+  timeoutMs = Number(process.env.JG_IMAGE_EDIT_TIMEOUT_MS || 240_000),
 } = {}) {
-  const apiKey = envValue('QWEN_IMAGE_API_KEY')
-  if (!apiKey) {
-    throw new ImageProviderError('尚未配置 QWEN_IMAGE_API_KEY，无法调用万相局部重绘', {
-      code: 'IMAGE_MASK_PROVIDER_NOT_CONFIGURED',
+  const sharp = getSharpLib()
+  if (!sharp) {
+    throw new ImageProviderError('当前环境缺少图像合成组件，无法执行选区局部重绘', {
+      code: 'IMAGE_REGION_UNAVAILABLE',
       status: 503,
     })
   }
   const cleanPrompt = String(prompt || '').trim()
   if (!cleanPrompt) {
-    throw new ImageProviderError('请先描述选区里要修改成什么', { code: 'IMAGE_MASK_PROMPT_REQUIRED', status: 400 })
+    throw new ImageProviderError('请先描述选区里要修改成什么', { code: 'IMAGE_REGION_PROMPT_REQUIRED', status: 400 })
   }
   if (cleanPrompt.length > 800) {
-    throw new ImageProviderError('局部编辑要求不能超过 800 个字符', { code: 'IMAGE_MASK_PROMPT_TOO_LONG', status: 400 })
+    throw new ImageProviderError('局部编辑要求不能超过 800 个字符', { code: 'IMAGE_REGION_PROMPT_TOO_LONG', status: 400 })
   }
   if (!imageBuffer || !Buffer.isBuffer(imageBuffer) || imageBuffer.length < MIN_IMAGE_BYTES) {
-    throw new ImageProviderError('待编辑图像不存在或内容过小', { code: 'IMAGE_MASK_SOURCE_MISSING', status: 400 })
+    throw new ImageProviderError('待编辑图像不存在或内容过小', { code: 'IMAGE_REGION_SOURCE_MISSING', status: 400 })
   }
   if (imageBuffer.length > MAX_EDIT_INPUT_BYTES) {
-    throw new ImageProviderError('待编辑图像超过 10 MB，无法提交给局部重绘模型', { code: 'IMAGE_MASK_INPUT_TOO_LARGE', status: 413 })
+    throw new ImageProviderError('待编辑图像超过 10 MB，无法做选区局部重绘', { code: 'IMAGE_REGION_INPUT_TOO_LARGE', status: 413 })
   }
   const mime = String(imageMime || '').split(';')[0].trim().toLowerCase()
   if (!ALLOWED_MIME.has(mime)) {
-    throw new ImageProviderError(`待编辑图像格式不支持：${mime || '未知类型'}`, { code: 'IMAGE_MASK_SOURCE_MIME_UNSUPPORTED', status: 400 })
+    throw new ImageProviderError(`待编辑图像格式不支持：${mime || '未知类型'}`, { code: 'IMAGE_REGION_SOURCE_MIME_UNSUPPORTED', status: 400 })
   }
-  const cleanMask = String(maskDataUrl || '')
-  if (!/^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(cleanMask)) {
-    throw new ImageProviderError('选区 Mask 不是有效的 PNG/JPEG/WebP data URL', { code: 'IMAGE_MASK_INVALID', status: 400 })
+  if (!maskBuffer || !Buffer.isBuffer(maskBuffer) || !maskBuffer.length) {
+    throw new ImageProviderError('选区为空', { code: 'IMAGE_REGION_MASK_EMPTY', status: 400 })
   }
-  const maskBytes = Math.floor(cleanMask.length * 3 / 4)
-  if (maskBytes > MAX_EDIT_INPUT_BYTES) {
-    throw new ImageProviderError('选区 Mask 超过 10 MB', { code: 'IMAGE_MASK_TOO_LARGE', status: 413 })
+  if (maskBuffer.length > MAX_EDIT_INPUT_BYTES) {
+    throw new ImageProviderError('选区 Mask 超过 10 MB', { code: 'IMAGE_REGION_MASK_TOO_LARGE', status: 413 })
   }
-  const model = envValue('WANX_IMAGE_EDIT_MODEL', 'wanx2.1-imageedit')
-  const endpoint = envValue('WANX_IMAGE_EDIT_ENDPOINT', 'https://dashscope.aliyuncs.com/api/v1/services/aigc/image2image/image-synthesis')
-  const taskBase = envValue('WANX_IMAGE_EDIT_TASK_ENDPOINT', endpoint.replace('/services/aigc/image2image/image-synthesis', '/tasks'))
-  const effectiveTimeout = Math.max(30_000, Math.min(300_000, Number(timeoutMs) || 180_000))
-  const sourceDataUrl = `data:${mime};base64,${imageBuffer.toString('base64')}`
-  let createResponse
+  let sourceMeta
   try {
-    createResponse = await fetch(endpoint, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        authorization: `Bearer ${apiKey}`,
-        'X-DashScope-Async': 'enable',
-      },
-      body: JSON.stringify({
-        model,
-        input: {
-          function: 'description_edit_with_mask',
-          prompt: cleanPrompt,
-          base_image_url: sourceDataUrl,
-          mask_image_url: cleanMask,
-        },
-        parameters: {
-          n: 1,
-          watermark: false,
-          ...(Number(width) >= 512 && Number(height) >= 512 ? { size: `${Math.round(Number(width))}*${Math.round(Number(height))}` } : {}),
-        },
-      }),
-      signal: AbortSignal.timeout(Math.min(30_000, effectiveTimeout)),
-    })
+    sourceMeta = await sharp(imageBuffer).metadata()
   } catch (error) {
-    throw new ImageProviderError(`无法连接万相局部重绘接口：${error?.message || error}`, {
-      code: 'IMAGE_MASK_PROVIDER_UNREACHABLE',
-      status: 502,
+    throw new ImageProviderError(`待编辑图像无法解析：${error?.message || error}`, { code: 'IMAGE_REGION_SOURCE_UNREADABLE', status: 400 })
+  }
+  const width = Number(sourceMeta.width || 0)
+  const height = Number(sourceMeta.height || 0)
+  if (width < 128 || height < 128 || width > 4096 || height > 4096) {
+    throw new ImageProviderError('当前图片尺寸不适合选区局部重绘，宽度和高度需在 128–4096 像素之间', {
+      code: 'IMAGE_REGION_SOURCE_SIZE_UNSUPPORTED',
+      status: 400,
     })
   }
-  const createPayload = await responseJson(createResponse)
-  if (!createResponse.ok) {
-    throw new ImageProviderError(createPayload?.message || `万相局部重绘创建任务失败（HTTP ${createResponse.status}）`, {
-      code: createPayload?.code || 'IMAGE_MASK_CREATE_FAILED',
-      status: createResponse.status >= 400 && createResponse.status < 500 ? 400 : 502,
+  const maskRaw = await sharp(maskBuffer)
+    .resize(width, height, { fit: 'fill', kernel: 'nearest' })
+    .greyscale()
+    .threshold(128)
+    .raw()
+    .toBuffer({ resolveWithObject: true })
+  const pixels = maskRaw.data
+  let minX = width
+  let minY = height
+  let maxX = -1
+  let maxY = -1
+  let marked = 0
+  for (let y = 0; y < height; y += 1) {
+    const row = y * width
+    for (let x = 0; x < width; x += 1) {
+      if (pixels[row + x]) {
+        marked += 1
+        if (x < minX) minX = x
+        if (x > maxX) maxX = x
+        if (y < minY) minY = y
+        if (y > maxY) maxY = y
+      }
+    }
+  }
+  if (!marked || maxX < 0 || maxY < 0) {
+    throw new ImageProviderError('选区里没有任何内容，请先在图上画出要修改的区域', { code: 'IMAGE_REGION_MASK_EMPTY', status: 400 })
+  }
+  const coverage = marked / (width * height)
+  if (coverage >= 0.92) {
+    // 几乎整图：直接整图编辑，不再裁剪，避免无意义的放大与合成。
+    const image = await editImage({
+      modelId,
+      prompt: cleanPrompt,
+      imageBuffer,
+      imageMime: mime,
+      ratio: nearestRegionRatio(width, height).key,
+      width,
+      height,
+      timeoutMs,
     })
-  }
-  const taskId = String(createPayload?.output?.task_id || '')
-  if (!taskId) {
-    throw new ImageProviderError('万相局部重绘未返回 task_id', { code: 'IMAGE_MASK_TASK_MISSING', status: 502 })
-  }
-  const deadline = Date.now() + effectiveTimeout
-  let lastStatus = 'PENDING'
-  while (Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 2000))
-    let pollResponse
-    try {
-      pollResponse = await fetch(`${taskBase}/${encodeURIComponent(taskId)}`, {
-        headers: { authorization: `Bearer ${apiKey}` },
-        signal: AbortSignal.timeout(20_000),
-      })
-    } catch (error) {
-      throw new ImageProviderError(`查询万相局部重绘任务失败：${error?.message || error}`, {
-        code: 'IMAGE_MASK_POLL_FAILED',
-        status: 502,
-      })
-    }
-    const payload = await responseJson(pollResponse)
-    if (!pollResponse.ok) {
-      throw new ImageProviderError(payload?.message || `查询万相任务失败（HTTP ${pollResponse.status}）`, {
-        code: payload?.code || 'IMAGE_MASK_POLL_FAILED',
-        status: 502,
-      })
-    }
-    lastStatus = String(payload?.output?.task_status || '')
-    if (lastStatus === 'SUCCEEDED') {
-      const resultUrl = String(payload?.output?.results?.find?.((item) => item?.url)?.url || '')
-      if (!resultUrl) {
-        throw new ImageProviderError('万相局部重绘成功但未返回图像 URL', { code: 'IMAGE_MASK_RESULT_EMPTY', status: 502 })
-      }
-      const downloaded = await downloadImage(resultUrl, Math.max(10_000, deadline - Date.now()))
-      return {
-        ...downloaded,
-        provider: 'wanx',
-        providerLabel: '阿里云百炼 · 万相',
-        model,
-        modelId: 'wanx-edit',
-        requestId: String(payload.request_id || ''),
-        taskId,
-      }
-    }
-    if (lastStatus === 'FAILED' || lastStatus === 'CANCELED') {
-      throw new ImageProviderError(
-        payload?.output?.message || `万相局部重绘任务${lastStatus === 'CANCELED' ? '已取消' : '失败'}`,
-        { code: payload?.output?.code || 'IMAGE_MASK_TASK_FAILED', status: 502 },
-      )
+    return {
+      ...image,
+      width,
+      height,
+      region: { x: 0, y: 0, width, height },
+      wholeImage: true,
     }
   }
-  throw new ImageProviderError(`万相局部重绘任务超时（最后状态 ${lastStatus || '未知'}）`, {
-    code: 'IMAGE_MASK_TIMEOUT',
-    status: 504,
+  const spanWidth = maxX - minX + 1
+  const spanHeight = maxY - minY + 1
+  if (spanWidth < 16 || spanHeight < 16) {
+    throw new ImageProviderError('选区太小，请扩大选区后再重绘', { code: 'IMAGE_REGION_TOO_SMALL', status: 400 })
+  }
+  const pad = Math.max(12, Math.round(Math.max(spanWidth, spanHeight) * 0.08))
+  const right = Math.min(width, maxX + pad + 1)
+  const bottom = Math.min(height, maxY + pad + 1)
+  const baseRect = {
+    left: Math.max(0, minX - pad),
+    top: Math.max(0, minY - pad),
+    width: right - Math.max(0, minX - pad),
+    height: bottom - Math.max(0, minY - pad),
+  }
+  const ratio = nearestRegionRatio(baseRect.width, baseRect.height)
+  const rect = expandRectToRatio(baseRect, width, height, ratio.target)
+  const cropBuffer = await sharp(imageBuffer).extract(rect).png().toBuffer()
+  const minSide = Math.min(rect.width, rect.height)
+  const sendBuffer = minSide < 512
+    ? await sharp(cropBuffer).resize(
+      Math.round(rect.width * (512 / minSide)),
+      Math.round(rect.height * (512 / minSide)),
+      { fit: 'fill' },
+    ).png().toBuffer()
+    : cropBuffer
+  const regionPrompt = `${cleanPrompt}\n\n（上图是从一张更大的原图里裁出的局部区域，尺寸 ${rect.width}×${rect.height}。只修改这块区域里需要改的内容，保持原有的透视、光照、材质与纹理，让边缘和周围自然衔接。）`
+  const edited = await editImage({
+    modelId,
+    prompt: regionPrompt,
+    imageBuffer: sendBuffer,
+    imageMime: 'image/png',
+    ratio: ratio.key,
+    width: rect.width,
+    height: rect.height,
+    timeoutMs,
   })
+  const editedResized = await sharp(edited.buffer)
+    .resize(rect.width, rect.height, { fit: 'fill' })
+    .removeAlpha()
+    .toBuffer()
+  const maskPatch = await sharp(maskBuffer)
+    .resize(width, height, { fit: 'fill', kernel: 'nearest' })
+    .greyscale()
+    .extract(rect)
+    .blur(1.4)
+    .raw()
+    .toBuffer()
+  const patch = await sharp(editedResized)
+    .joinChannel(maskPatch, { raw: { width: rect.width, height: rect.height, channels: 1 } })
+    .png()
+    .toBuffer()
+  const composed = await sharp(imageBuffer)
+    .composite([{ input: patch, left: rect.left, top: rect.top, blend: 'over' }])
+    .png()
+    .toBuffer({ resolveWithObject: true })
+  return {
+    buffer: composed.data,
+    mime: 'image/png',
+    width,
+    height,
+    provider: edited.provider,
+    providerLabel: edited.providerLabel,
+    model: edited.model,
+    modelId: edited.modelId,
+    requestId: String(edited.requestId || ''),
+    region: { x: rect.left, y: rect.top, width: rect.width, height: rect.height },
+    coverage,
+  }
 }

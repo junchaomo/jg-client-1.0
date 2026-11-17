@@ -1105,6 +1105,11 @@ export const aiTools = [
   { name: 'visual_export', label: '导出可视化', target: '平台', args: '{"id":"VIS-...","format":"svg"}', desc: '登记可视化导出请求；前端按 SVG/PNG 实际导出，不依赖外部渲染服务。' },
   { name: 'visual_save', label: '保存可视化成果', target: '平台', args: '{"id":"VIS-...","name":"成果名称"}', desc: '把会话内临时可视化保存为长期成果，可自定义名称并保留版本历史。' },
   { name: 'task_create', label: '创建任务', target: '任务', args: '{"title":"...","prompt":"..."}', desc: '把一段需求登记为任务并分配执行，返回任务编号与初始状态。' },
+  { name: 'history_list', label: '检索本人操作历史', target: '平台', args: '{"kind":"web","q":"体检","limit":20}', desc: '检索当前用户本人访问过的网页、应用与系统会话记录，返回 URL、标题、访问时间与当时正文快照；仅返回本人记录，不提供跨用户检索。' },
+  { name: 'audit_list', label: '检索本人审计记录', target: '平台', args: '{"q":"文件","limit":20}', desc: '检索当前用户本人触发的操作审计记录（动作、对象、结果、网络归属、时间）；仅返回本人记录，管理员同样不可跨账号读取。' },
+  { name: 'approval_list', label: '检索本人审批决策记录', target: '平台', args: '{"q":"写操作","limit":20}', desc: '检索当前用户本人相关的工具审批决策记录（工具、操作、参数摘要、风险、放行/待审结果、审批人、时间）；仅返回本人记录。' },
+  { name: 'app_data_list', label: '列出本人应用数据文件', target: '平台', args: '{"appId":"as-sample"}', desc: '列出当前用户本人在指定已安装应用数据目录下的文件（相对路径、大小）；只读，不跨应用或跨用户。' },
+  { name: 'app_data_read', label: '读取本人应用数据文件', target: '平台', args: '{"appId":"as-sample","path":"records.json"}', desc: '读取本人应用数据目录内的文本类文件内容；路径越界拒绝，限制文件大小；只读，不修改应用数据。' },
 ]
 
 

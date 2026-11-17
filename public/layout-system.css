@@ -206,6 +206,7 @@
 #app.layout-shell .settings-main,
 #app.layout-shell .pl-main,
 #app.layout-shell .mc-main,
+#app.layout-shell .dc-main,
 #app.layout-shell .im-right {
   width: 100% !important;
   max-width: none !important;

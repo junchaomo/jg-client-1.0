@@ -450,26 +450,30 @@
 
 /* 单条会话内的轮次导航：长对话左侧短刻度，悬停看摘要，点击回到对应一轮。 */
 .chat { position: relative; }
-.chat.has-nav .chat-msgs { padding-left: 30px; }
+.chat.has-nav .chat-msgs { padding-left: 32px; }
 .chat-nav {
   position: absolute;
   left: 4px;
-  width: 22px;
+  width: 24px;
   z-index: 4;
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
+  gap: 0;
+  height: auto;
+  max-height: 420px;
   padding: 4px 0;
   overflow-y: auto;
+  overscroll-behavior: contain;
   scrollbar-width: none;
   -ms-overflow-style: none;
 }
 .chat-nav::-webkit-scrollbar { display: none; }
 .chat-nav-mark {
   flex: none;
-  width: 22px;
-  height: 12px;
+  width: 24px;
+  height: var(--chat-nav-step, 8px);
   padding: 0;
   border: 0;
   background: transparent;
@@ -488,13 +492,13 @@
 }
 .chat-nav-mark:hover::before,
 .chat-nav-mark.hover::before,
-.chat-nav-mark.on::before { width: 10px; background: #1f2328; }
+.chat-nav-mark.on::before { width: 14px; background: var(--accent, #2f6fed); }
 .chat-nav-mark:focus-visible {
   outline: 2px solid color-mix(in srgb, var(--accent, #2f6fed) 32%, #fff);
   outline-offset: 1px;
   border-radius: 4px;
 }
-.chat-nav-mark[aria-current="true"]::before { width: 10px; background: #1f2328; }
+.chat-nav-mark[aria-current="true"]::before { width: 14px; background: var(--accent, #2f6fed); }
 .chat-nav-target { animation: chat-nav-target 1.2s ease; }
 @keyframes chat-nav-target {
   0%, 100% { background: transparent; }
@@ -550,6 +554,10 @@
   color: #8a9099;
   font-size: 11px;
   line-height: 1.4;
+}
+@media (max-width: 720px) {
+  .chat-nav { display: none !important; }
+  .chat.has-nav .chat-msgs { padding-left: 0; }
 }
 @media (prefers-reduced-motion: reduce) {
   .chat-nav-card, .chat-nav-card.on, .chat-nav-mark::before { transition: none !important; }

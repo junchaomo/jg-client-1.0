@@ -150,7 +150,7 @@ function dataRootFor(id) {
   return root
 }
 
-function dataDirFor(id, userId) {
+export function dataDirFor(id, userId) {
   const dir = join(dataRootFor(id), safeUser(userId))
   mkdirSync(dir, { recursive: true })
   return dir

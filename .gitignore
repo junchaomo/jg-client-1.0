@@ -18,3 +18,13 @@ data/
 *.key
 *.pem
 *.p12
+
+# 运行日志与本地临时产物
+*.log
+.workperf.*
+*.bak-*
+public/.*-audit.txt
+tmp-*.mjs
+
+# 本地 GIS 运行时（GDAL / Python 二进制，按环境单独安装）
+vendor/gis/

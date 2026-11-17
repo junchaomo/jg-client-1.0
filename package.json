@@ -9,7 +9,9 @@
     "test:as-smoke": "node scripts/as-smoke.mjs",
     "eval:baseline": "node evals/run.mjs",
     "test:visual": "node --test tests/visual-engine.test.mjs",
-    "test:image": "node --test tests/image-providers.test.mjs"
+    "test:image": "node --test tests/image-providers.test.mjs",
+    "test:usage": "node --test tests/usage-summary.test.mjs",
+    "test:runstats": "node --test tests/run-stats.test.mjs"
   },
   "devDependencies": {
     "electron": "45.2.1"
