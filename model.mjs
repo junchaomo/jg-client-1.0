@@ -32,13 +32,77 @@ export function modelSupportsImages(model) {
   return Boolean(modelMeta(model)?.images)
 }
 
+/**
+ * 意图判定只在 model.mjs 做一次：Auto 路由、轻量直连资格、模型分级都复用同一套规则，
+ * 避免同一句话在不同层被三份词表判出不同结果。
+ * 判定原则：看“动作 + 对象”，不看单个名词——出现“数据”不等于要检索数据。
+ */
+const WORK_INTENT_PATTERNS = [
+  /(创建|新建|生成|写入|保存|修改|编辑|删除|移动|复制|重命名|导出|转换)[^。\n]{0,24}(文件|文档|表格|目录|文件夹|代码|脚本|图片|报告|PPT|Word|Excel|CSV|Markdown|md)/i,
+  /(把|将)[^。\n]{0,12}(文件|文档|表格|报告|数据|图片)[^。\n]{0,12}(导出|转换|转成|保存|另存|压缩|打包)/i,
+  /(运行|执行|跑一下|编译|构建|安装|部署|测试)[^。\n]{0,24}(命令|脚本|代码|程序|项目|服务|测试|构建)/i,
+  /(分析|处理|整理|统计|汇总|清洗|合并|拆分)[^。\n]{0,24}(数据|表格|文件|日志|CSV|Excel|项目|数量|记录|清单|名单)/i,
+  /(批量|遍历|扫描|自动化|多步骤|工作流)/i,
+  /(打包|压缩|构建|编译|部署|安装|发布|上传|下载|迁移|备份|恢复|做成[^。\n]{0,12}插件|插件[^。\n]{0,12}上传)/i,
+  /\b(?:npm|pnpm|node|python|pip|git|pwsh|powershell|bash|apply_patch)\b/i,
+  /```/,
+]
+
+/** 组织数据类查询：能力挂在本机 MCP 工具上，对话模式不加载，必须进工作模式。 */
+const RETRIEVAL_INTENT_PATTERNS = [
+  /(查询|查一下|查查|检索|搜索|调取|列出|找一下|帮我查|看看)[^。\n]{0,20}(通讯录|联系人|联系方式|电话|工号|同事|部门|组织架构|公告|通知|制度|教学|课程|云空间|文档库|资源库|知识库)/i,
+  /通讯录|联系人|工号/i,
+]
+
+/** 实时/时效性内容：对话模式没有检索通道，直连回答会凭空编，必须交给带工具的路径。 */
+const LIVE_DATA_PATTERNS = [
+  /今天|明天|昨天|现在|最新|实时|近期|新闻|股价|汇率|油价|金价|天气|气温|政策|公告|通知|航班|高铁|限行/i,
+]
+
+/** 需要工作区或产品自身上下文的问题：直连模型看不到仓库，只能说出泛泛而谈的答案。 */
+const WORKSPACE_CONTEXT_PATTERNS = [
+  /九规|中枢|平台|系统功能|本项目|当前项目/i,
+  /Harness|DSH|PTC|仓库|server\.mjs|app\.js|固定前缀|工具结果|Token 面板|Token 计量|Token 使用|上下文压缩|模型调度/i,
+  /代码|脚本|报错|调试|接口|函数|构建|部署|插件|技能清单/i,
+]
+
+export function hasWorkIntent(text) {
+  const input = String(text || '')
+  return WORK_INTENT_PATTERNS.some((pattern) => pattern.test(input))
+    || RETRIEVAL_INTENT_PATTERNS.some((pattern) => pattern.test(input))
+}
+
+export function needsLiveData(text) {
+  return LIVE_DATA_PATTERNS.some((pattern) => pattern.test(String(text || '')))
+}
+
+export function needsWorkspaceContext(text) {
+  return WORKSPACE_CONTEXT_PATTERNS.some((pattern) => pattern.test(String(text || '')))
+}
+
 export function classifyTask(text, { mode = 'chat', projectId = '', images = [] } = {}) {
   const input = String(text || '')
   if (Array.isArray(images) && images.length) return 'vision'
-  if (projectId || mode === 'work' || /代码|脚本|报错|调试|构建|测试|部署|接口|函数|文件|目录|写入|创建|修改|删除|命令|执行/i.test(input)) return 'work'
-  if (/查询|搜索|检索|资料|公告|通知|资源|数据|通讯录/i.test(input)) return 'retrieval'
+  if (projectId || mode === 'work') return 'work'
+  if (RETRIEVAL_INTENT_PATTERNS.some((pattern) => pattern.test(input))) return 'retrieval'
+  if (hasWorkIntent(input)) return 'work'
+  if (needsWorkspaceContext(input)) return 'work'
   if (input.length <= 48 && !/[?？]/i.test(input)) return 'quick'
   return 'chat'
+}
+
+/**
+ * 轻量直连资格：对话模式、无项目、无附件/引用、长度有限，且不含工具、实时数据或工作区上下文。
+ * 这是“这句话能否不启 Harness 直接答”的唯一判定，服务端不再自建词表。
+ */
+export function isDirectAnswerable(text, { mode = 'chat', projectId = '' } = {}) {
+  const input = String(text || '').trim()
+  if (mode !== 'chat' || projectId) return false
+  if (!input || input.length > 120) return false
+  if (hasWorkIntent(input)) return false
+  if (needsLiveData(input)) return false
+  if (needsWorkspaceContext(input)) return false
+  return true
 }
 
 export function routeModel({ baseModel = 'deepseek-flash', text = '', mode = 'chat', projectId = '', images = [], deepThink = false } = {}) {

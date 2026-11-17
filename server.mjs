@@ -42,7 +42,7 @@ import { FORMAT_REGISTRY, detectDataFormat, exportDataFormat, extractDataFormat,
 import { checkProjectDeliverables } from './deliverable-check.mjs'
 import { inspectGeoFiles } from './gis-datasets.mjs'
 import { HARNESS_BASE_SERVICES, runHarnessService } from './harness-services.mjs'
-import { ModelError, chatCompletion, chatCompletionStream, classifyTask, resolveModelConfig, routeModel } from './model.mjs'
+import { ModelError, chatCompletion, chatCompletionStream, hasWorkIntent, isDirectAnswerable, resolveModelConfig, routeModel } from './model.mjs'
 import { ImageProviderError, editImage, editImageInRegion, generateImage, imageModelStatus } from './image-providers.mjs'
 import { prepareSpeech, modelStatus, transcribeSpeech } from './speech.mjs'
 import { pinyin } from 'pinyin-pro'
@@ -2905,18 +2905,7 @@ function explicitHighRiskRequest(text) {
 }
 
 /** Auto Task Router：规则优先，只有出现明确的文件、命令、数据处理或多步骤意图才升级到 Work。 */
-const WORK_INTENT_PATTERNS = [
-  /(创建|新建|生成|写入|保存|修改|编辑|删除|移动|复制|重命名|导出|转换)[^。\n]{0,24}(文件|文档|表格|目录|文件夹|代码|脚本|图片|报告|PPT|Word|Excel|CSV|Markdown|md)/i,
-  /(运行|执行|跑一下|编译|构建|安装|部署|测试)[^。\n]{0,24}(命令|脚本|代码|程序|项目|服务|测试|构建)/i,
-  /(分析|处理|整理|统计|汇总|清洗|合并|拆分)[^。\n]{0,24}(数据|表格|文件|日志|CSV|Excel)/i,
-  /(批量|遍历|扫描|自动化|多步骤|工作流)/i,
-  /* 组织数据类查询必须进工作模式：这些能力挂在本机 MCP 工具上，对话模式不加载，
-     判成 chat 会让模型拿不到工具而去翻源码。 */
-  /(查询|查一下|查查|检索|搜索|调取|看看|列出|找一下|帮我查)[^。\n]{0,20}(通讯录|联系人|联系方式|电话|工号|同事|部门|组织架构|公告|通知|制度|教学|课程|云空间|文档库|资源库)/i,
-  /(打包|压缩|构建|编译|部署|安装|发布|上传|下载|迁移|备份|恢复|做成[^。\n]{0,12}插件|插件[^。\n]{0,12}上传)/i,
-  /\b(?:npm|pnpm|node|python|pip|git|pwsh|powershell|bash|apply_patch)\b/i,
-  /```/,
-]
+/* 意图判定统一在 model.mjs 的 hasWorkIntent 中；这里只保留说明，避免出现第二份词表。 */
 
 /** 简单事实查询：只走一次或少量检索，不展开多步规划。 */
 const SIMPLE_QUERY_PATTERNS = [
@@ -3117,25 +3106,9 @@ const QUICK_DIRECT_SYSTEM = [
   '不要自行编造“回答生成时间”“数据更新时间”“来源 URL”等元信息；用户未要求时不要输出这些字段。',
 ].join('\n')
 
-/** 短概念问答即使带问号也不应拉入 74KB 的 PTC 固定前缀；时效、工具和产品内部问题仍走 Harness。 */
-const QUICK_CHAT_BLOCK_PATTERNS = [
-  /今天|明天|昨天|现在|最新|实时|近期|新闻|股价|汇率|油价|金价|天气|气温|政策|公告|通知|航班|高铁|限行/i,
-  /查询|搜索|检索|资料|文件|项目|表格|文档|工具|插件|技能|代码|脚本|命令|执行|创建|修改|删除|生成|上传|下载|部署|安装|测试|接口|函数|报错/i,
-  /九规|中枢|平台|系统功能|本项目|当前项目/i,
-  /Harness|DSH|PTC|仓库|server\.mjs|app\.js|固定前缀|工具结果|Token 面板|Token 计量|Token 使用|上下文压缩|模型调度/i,
-]
-const QUICK_CHAT_PATTERNS = [
-  /^(什么是|什么叫|解释|介绍|简述|说明|为什么|如何|怎么|区别|优缺点|原理|概念|定义)/i,
-  /(什么是|什么叫|有什么区别|优缺点|原理是什么|概念是什么|定义是什么)/i,
-]
+/** 短概念问答即使带问号也不应拉入 74KB 的 PTC 固定前缀；资格判定统一交给 model.mjs。 */
 function isQuickChatPrompt(source, { mode = 'chat', projectId = '' } = {}) {
-  const text = String(source || '').trim()
-  if (!text || text.length > 120) return false
-  if (QUICK_CHAT_BLOCK_PATTERNS.some((pattern) => pattern.test(text))) return false
-  if (QUICK_CHAT_PATTERNS.some((pattern) => pattern.test(text))) return true
-  const taskClass = classifyTask(text, { mode, projectId })
-  // 对话模式下没有检索/工具通道，retrieval 型措辞也只是知识问答，照样可以轻量直连。
-  return taskClass === 'quick' || taskClass === 'chat' || (mode === 'chat' && !projectId && taskClass === 'retrieval')
+  return isDirectAnswerable(source, { mode, projectId })
 }
 
 /** 轻量快速问答只带最近几轮，不启动 DSH，也不注入工具/Skill 清单。 */
@@ -3408,7 +3381,7 @@ function resolveTaskMode(text, requested, projectId) {
   // 项目会话本身绑定了一个真实工作区；Auto 不应把它降格为只读问答，
   // 否则打包、构建、写文件会在执行中被只读沙箱静默拒绝。
   if (projectId) return { requested: 'auto', mode: 'work', reason: '已绑定项目工作区，按工作模式执行' }
-  const hits = WORK_INTENT_PATTERNS.filter((pattern) => pattern.test(String(text || ''))).length
+  const hits = hasWorkIntent(text) ? 1 : 0
   if (hits > 0) {
     return {
       requested: 'auto',
