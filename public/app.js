@@ -245,6 +245,50 @@ async function api(path, options = {}) {
   return { ok: res.ok, status: res.status, body }
 }
 
+/** 对话请求：服务端回 SSE 时按 delta 增量回调；否则退回一次性 JSON。 */
+async function postChat(payload, { onDelta } = {}) {
+  const res = await fetch('/api/chat', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    credentials: 'same-origin',
+    body: JSON.stringify(payload),
+  })
+  const type = res.headers.get('content-type') || ''
+  if (!res.ok || !type.includes('text/event-stream')) {
+    const body = await res.json().catch(() => ({}))
+    return { ok: res.ok, status: res.status, body }
+  }
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let result = null
+  let failure = null
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const parts = buffer.split('\n\n')
+    buffer = parts.pop() || ''
+    for (const part of parts) {
+      const lines = part.split('\n')
+      const event = (lines.find((line) => line.startsWith('event:')) || '').slice(6).trim()
+      const data = lines.filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trim()).join('')
+      if (!data) continue
+      let parsed = null
+      try { parsed = JSON.parse(data) } catch { continue }
+      if (event === 'delta') {
+        if (parsed.text && typeof onDelta === 'function') onDelta(parsed.text)
+      } else if (event === 'done') {
+        result = parsed
+      } else if (event === 'error') {
+        failure = parsed
+      }
+    }
+  }
+  if (result) return { ok: true, status: 200, body: result, streamed: true }
+  return { ok: false, status: 502, body: { error: failure?.error || '流式输出中断，请重试' }, streamed: true }
+}
+
 /** 直传二进制文件到本地服务端；返回 file 元数据（id/size/sha256）。 */
 async function uploadBinaryFile(file, kind = 'chat') {
   const name = encodeURIComponent(file.name || 'upload.bin')
@@ -5044,28 +5088,50 @@ async function sendMessage(text, options = {}) {
   renderView()
   startInteractionPoll()
 
-  const res = await api('/api/chat', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      text,
-      conversationId: state.conversation?.id,
-      model: state.composerModel,
-      tools: state.composerTools,
-      reasoningEffort: state.reasoningEffort || 'medium',
-      deepThink: Boolean(state.deepThink),
-      ownApiKey: localStorage.getItem('jg.ownKey') || '',
-      refs,
-      mode: state.taskMode || 'auto',
-      projectId: state.activeProjectId || state.conversation?.projectId || '',
-      executionPolicy: state.executionPolicy,
-      presetId: state.agentPresetId || '',
-      webSearch: Boolean(state.webSearch),
-      idempotencyKey,
-      regenerate,
-      messageIndex,
-    }),
+  /* 先放一条占位气泡：服务端走 SSE 时正文会直接长在这里，不再等整段答案。 */
+  let streamDraft = null
+  if (!regenerate) {
+    streamDraft = { role: 'assistant', text: '', time: '刚刚', createdAt: new Date().toISOString(), steps: [], citations: [], streaming: true }
+    conv.messages.push(streamDraft)
+    renderView()
+  }
+  let streamRenderQueued = false
+  const scheduleStreamRender = () => {
+    if (streamRenderQueued) return
+    streamRenderQueued = true
+    setTimeout(() => { streamRenderQueued = false; renderStream() }, 80)
+  }
+
+  const res = await postChat({
+    text,
+    conversationId: state.conversation?.id,
+    model: state.composerModel,
+    tools: state.composerTools,
+    reasoningEffort: state.reasoningEffort || 'medium',
+    deepThink: Boolean(state.deepThink),
+    ownApiKey: localStorage.getItem('jg.ownKey') || '',
+    refs,
+    mode: state.taskMode || 'auto',
+    projectId: state.activeProjectId || state.conversation?.projectId || '',
+    executionPolicy: state.executionPolicy,
+    presetId: state.agentPresetId || '',
+    webSearch: Boolean(state.webSearch),
+    idempotencyKey,
+    regenerate,
+    messageIndex,
+    stream: !regenerate,
+  }, {
+    onDelta: (delta) => {
+      if (!streamDraft) return
+      streamDraft.text += delta
+      scheduleStreamRender()
+    },
   }).catch((error) => ({ ok: false, status: 0, body: { error: error?.message || '网络请求失败，请稍后重试' } }))
+
+  if (streamDraft) {
+    const draftIndex = conv.messages.indexOf(streamDraft)
+    if (draftIndex >= 0) conv.messages.splice(draftIndex, 1)
+  }
 
   stopInteractionPoll()
   state.pendingInteraction = null
@@ -5099,6 +5165,9 @@ async function sendMessage(text, options = {}) {
       draft: res.body.draft,
       steps: res.body.steps || [],
     }
+  } else if (res.streamed) {
+    /* SSE 已逐段显示，不再整段重放动画。 */
+    renderView()
   } else {
     const last = regenerate
       ? state.conversation.messages[Number(messageIndex)]

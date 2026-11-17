@@ -182,3 +182,101 @@ export async function chatCompletion({ messages, model, apiKey, baseUrl, timeout
     upstreamStatus: response.status,
   }
 }
+
+/** 流式对话：逐段回调 onDelta，最终返回完整正文与 usage；不改变调用方的用量口径。 */
+export async function chatCompletionStream({ messages, model, apiKey, baseUrl, timeoutMs = 60000, temperature = 0.3, onDelta = null }) {
+  if (!apiKey) {
+    throw new ModelError('未配置模型密钥：请在启动环境设置 JG_MODEL_API_KEY，或在「设置 · 模型与密钥」保存个人 Key 后重试', {
+      code: 'MODEL_KEY_MISSING',
+      status: 503,
+    })
+  }
+  if (!Array.isArray(messages) || !messages.length) {
+    throw new ModelError('模型请求缺少消息', { code: 'MODEL_BAD_REQUEST', status: 400 })
+  }
+  const endpoint = endpointOf(baseUrl)
+  const startedAt = Date.now()
+  let response
+  try {
+    response = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        accept: 'text/event-stream',
+        authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model,
+        messages,
+        temperature,
+        stream: true,
+        stream_options: { include_usage: true },
+      }),
+      signal: AbortSignal.timeout(timeoutMs),
+    })
+  } catch (error) {
+    const timeout = error && (error.name === 'TimeoutError' || error.name === 'AbortError')
+    throw new ModelError(timeout ? `模型网关超时（${Math.round(timeoutMs / 1000)} 秒）` : `模型网关不可达：${error?.message || error}`, {
+      code: timeout ? 'MODEL_TIMEOUT' : 'MODEL_UNREACHABLE',
+      status: timeout ? 504 : 502,
+      detail: endpoint,
+    })
+  }
+  if (!response.ok) {
+    const rawText = await response.text().catch(() => '')
+    let payload = null
+    try { payload = rawText ? JSON.parse(rawText) : null } catch { /* 保留原文用于错误提示 */ }
+    const upstream = payload?.error?.message || payload?.message || rawText.slice(0, 240)
+    const code = response.status === 401 || response.status === 403 ? 'MODEL_AUTH_FAILED'
+      : response.status === 429 ? 'MODEL_RATE_LIMITED'
+        : response.status >= 500 ? 'MODEL_UPSTREAM_ERROR' : 'MODEL_BAD_REQUEST'
+    throw new ModelError(`模型网关返回 ${response.status}${upstream ? `：${upstream}` : ''}`, {
+      code,
+      status: response.status === 401 || response.status === 403 ? 502 : response.status,
+      detail: endpoint,
+    })
+  }
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let content = ''
+  let usage = null
+  let resolvedModel = model
+  let firstDeltaMs = null
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const parts = buffer.split('\n\n')
+    buffer = parts.pop() || ''
+    for (const part of parts) {
+      const lines = part.split('\n')
+      const dataLines = lines.filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trim())
+      if (!dataLines.length) continue
+      const data = dataLines.join('')
+      if (data === '[DONE]') continue
+      let chunk = null
+      try { chunk = JSON.parse(data) } catch { continue }
+      if (chunk?.model) resolvedModel = chunk.model
+      if (chunk?.usage) usage = chunk.usage
+      const delta = extractContent(chunk)
+      if (delta) {
+        if (firstDeltaMs === null) firstDeltaMs = Date.now() - startedAt
+        content += delta
+        if (typeof onDelta === 'function') onDelta(delta)
+      }
+    }
+  }
+  const text = content.trim()
+  if (!text) {
+    throw new ModelError('模型返回了空内容', { code: 'MODEL_EMPTY', status: 502, detail: endpoint })
+  }
+  return {
+    content: text,
+    model: resolvedModel,
+    usage,
+    latencyMs: Date.now() - startedAt,
+    firstDeltaMs,
+    upstreamStatus: response.status,
+  }
+}

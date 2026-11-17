@@ -42,7 +42,7 @@ import { FORMAT_REGISTRY, detectDataFormat, exportDataFormat, extractDataFormat,
 import { checkProjectDeliverables } from './deliverable-check.mjs'
 import { inspectGeoFiles } from './gis-datasets.mjs'
 import { HARNESS_BASE_SERVICES, runHarnessService } from './harness-services.mjs'
-import { ModelError, chatCompletion, classifyTask, resolveModelConfig, routeModel } from './model.mjs'
+import { ModelError, chatCompletion, chatCompletionStream, classifyTask, resolveModelConfig, routeModel } from './model.mjs'
 import { ImageProviderError, editImage, editImageInRegion, generateImage, imageModelStatus } from './image-providers.mjs'
 import { prepareSpeech, modelStatus, transcribeSpeech } from './speech.mjs'
 import { pinyin } from 'pinyin-pro'
@@ -3120,7 +3120,7 @@ const QUICK_DIRECT_SYSTEM = [
 /** 短概念问答即使带问号也不应拉入 74KB 的 PTC 固定前缀；时效、工具和产品内部问题仍走 Harness。 */
 const QUICK_CHAT_BLOCK_PATTERNS = [
   /今天|明天|昨天|现在|最新|实时|近期|新闻|股价|汇率|油价|金价|天气|气温|政策|公告|通知|航班|高铁|限行/i,
-  /查询|搜索|检索|资料|文件|项目|数据|表格|文档|工具|插件|技能|代码|脚本|命令|执行|创建|修改|删除|生成|分析|上传|下载|部署|安装|测试|接口|函数|报错/i,
+  /查询|搜索|检索|资料|文件|项目|表格|文档|工具|插件|技能|代码|脚本|命令|执行|创建|修改|删除|生成|上传|下载|部署|安装|测试|接口|函数|报错/i,
   /九规|中枢|平台|系统功能|本项目|当前项目/i,
   /Harness|DSH|PTC|仓库|server\.mjs|app\.js|固定前缀|工具结果|Token 面板|Token 计量|Token 使用|上下文压缩|模型调度/i,
 ]
@@ -3133,7 +3133,9 @@ function isQuickChatPrompt(source, { mode = 'chat', projectId = '' } = {}) {
   if (!text || text.length > 120) return false
   if (QUICK_CHAT_BLOCK_PATTERNS.some((pattern) => pattern.test(text))) return false
   if (QUICK_CHAT_PATTERNS.some((pattern) => pattern.test(text))) return true
-  return classifyTask(text, { mode, projectId }) === 'quick'
+  const taskClass = classifyTask(text, { mode, projectId })
+  // 对话模式下没有检索/工具通道，retrieval 型措辞也只是知识问答，照样可以轻量直连。
+  return taskClass === 'quick' || taskClass === 'chat' || (mode === 'chat' && !projectId && taskClass === 'retrieval')
 }
 
 /** 轻量快速问答只带最近几轮，不启动 DSH，也不注入工具/Skill 清单。 */
@@ -3189,7 +3191,7 @@ function quickUsage(rawUsage) {
   return { calls: 1, inputTokens, outputTokens, totalTokens, cacheReadTokens, cacheWriteTokens, reasoningTokens: Number(raw.reasoning_tokens || 0) }
 }
 
-async function tryQuickModelReply({ text, body, mode, projectId, deepThink, webSearch, regenerate, conv, modelCfg }) {
+function planQuickModelReply({ text, body, mode, projectId, deepThink, webSearch, regenerate, conv, modelCfg }) {
   // 无工具短问答即使已有 DSH 会话也走轻量直连；这些轮次由 lightTurns 记录，转 Harness 时补入上下文。
   if (mode !== 'chat' || projectId || deepThink || webSearch || regenerate) return null
   if (conv?.agentPresetId) return null
@@ -3201,24 +3203,148 @@ async function tryQuickModelReply({ text, body, mode, projectId, deepThink, webS
   if (!source || source.length > 120) return null
   if (!isQuickChatPrompt(source, { mode, projectId })) return null
   const quickRoute = routeModel({ baseModel: modelCfg.model, text: source, mode, projectId })
+  return { quickRoute, messages: quickDirectMessages(conv, source), source }
+}
+
+function quickReplyFromResult(result, plan, startedAt) {
+  return {
+    kind: 'model-quick',
+    reply: String(result.content || '').trim(),
+    model: result.model || plan.quickRoute.model,
+    steps: [{ tool: '模型直连', detail: `${result.model || plan.quickRoute.model} · 无工具 · ${plan.quickRoute.reason}`, status: 'ok', ms: Date.now() - startedAt }],
+    usage: quickUsage(result.usage),
+  }
+}
+
+async function completeQuickModelReply(plan, modelCfg) {
   const startedAt = Date.now()
   const result = await chatCompletion({
-    messages: quickDirectMessages(conv, source),
-    model: quickRoute.model,
+    messages: plan.messages,
+    model: plan.quickRoute.model,
     apiKey: modelCfg.apiKey,
     baseUrl: modelCfg.baseUrl,
     timeoutMs: modelCfg.timeoutMs,
     temperature: 0.2,
   })
-  const reply = String(result.content || '').trim()
-  if (!reply) return null // 空回复不冒充成功，交回 Harness 用配置模型重试。
-  return {
-    kind: 'model-quick',
-    reply,
-    model: result.model || quickRoute.model,
-    steps: [{ tool: '模型直连', detail: `${result.model || quickRoute.model} · 无工具 · ${quickRoute.reason}`, status: 'ok', ms: Date.now() - startedAt }],
-    usage: quickUsage(result.usage),
+  const direct = quickReplyFromResult(result, plan, startedAt)
+  return direct.reply ? direct : null // 空回复不冒充成功，交回 Harness 用配置模型重试。
+}
+
+async function tryQuickModelReply(params) {
+  const plan = planQuickModelReply(params)
+  if (!plan) return null
+  return completeQuickModelReply(plan, params.modelCfg)
+}
+
+/** 直连回复落库（流式与非流式共用），失败时清理草稿并把异常抛回调用方。 */
+function commitDirectReply({ conv, direct, text, user, mode, taskMode, project, net, startedAt }) {
+  let directMessageId = ''
+  try {
+    directMessageId = `M-${Date.now().toString(36).toUpperCase()}-${randomBytes(3).toString('hex').toUpperCase()}`
+    const finishedAt = new Date()
+    const runStats = buildRunStats({
+      startedAt,
+      endedAt: finishedAt.getTime(),
+      model: direct.model,
+      contextText: '',
+      steps: direct.steps,
+      usage: direct.usage,
+      events: [],
+      taskClass: `direct-${direct.kind}`,
+      replyChars: direct.reply.length,
+      finishReason: 'completed',
+    })
+    runStats.modelCalls = direct.kind === 'model-quick' ? 1 : 0
+    runStats.toolCalls = direct.kind === 'model-quick' ? 0 : direct.steps.length
+    const assistantMsg = {
+      id: directMessageId,
+      role: 'assistant', text: direct.reply,
+      time: finishedAt.toLocaleTimeString('zh-CN', { hour12: false }).slice(0, 5),
+      createdAt: finishedAt.toISOString(),
+      elapsedMs: runStats.durationMs,
+      steps: direct.steps,
+      subagents: [], workflows: [], todos: [], jobs: [], deliverables: [], visuals: [],
+      workspaceChanges: [], citations: [],
+      model: direct.model,
+      usage: direct.usage,
+      usageAt: finishedAt.getTime(),
+      traceId: '',
+      runStats,
+      taskClass: `direct-${direct.kind}`,
+      direct: true,
+    }
+    conv.messages.push(assistantMsg)
+    if (direct.kind === 'model-quick') {
+      conv.lightTurns = [
+        ...(Array.isArray(conv.lightTurns) ? conv.lightTurns : []),
+        { user: String(text || '').slice(0, 2000), assistant: String(direct.reply || '').slice(0, 2000), at: Date.now() },
+      ].slice(-6)
+    }
+    conv.turns = Math.ceil(conv.messages.length / 2)
+    conv.status = 'done'
+    conv.model = direct.model
+    conv.deepThink = false
+    const chatRun = startChatRunTask({ conv, user, text, mode, taskMode, target: direct.place || project?.name || '' })
+    markChatRunStarted(chatRun, 'direct')
+    finishChatRunTask(chatRun, { steps: direct.steps.length, reply: direct.reply })
+    activeRuns.delete(conv.id)
+    persistPersistentState()
+    logAudit(user, 'chat.direct', conv.id, `${direct.kind}:${direct.place || direct.model}`, net)
+    return { ok: true, conversation: conv, reply: direct.reply, steps: direct.steps, citations: [] }
+  } catch (error) {
+    if (directMessageId) conv.messages = conv.messages.filter((m) => m.id !== directMessageId)
+    if (direct.kind === 'model-quick' && Array.isArray(conv.lightTurns) && conv.lightTurns.length) {
+      conv.lightTurns = conv.lightTurns.slice(0, -1)
+    }
+    throw error
   }
+}
+
+/** 轻量直连的流式版本：先推 delta，再把落库后的完整会话作为 done 事件发出。 */
+async function streamQuickReply({ res, conv, plan, modelCfg, text, user, mode, taskMode, project, net }) {
+  const startedAt = Date.now()
+  openSse(res)
+  sseSend(res, 'meta', { conversationId: conv.id, model: plan.quickRoute.model, kind: 'model-quick' })
+  let result
+  try {
+    result = await chatCompletionStream({
+      messages: plan.messages,
+      model: plan.quickRoute.model,
+      apiKey: modelCfg.apiKey,
+      baseUrl: modelCfg.baseUrl,
+      timeoutMs: modelCfg.timeoutMs,
+      temperature: 0.2,
+      onDelta: (delta) => sseSend(res, 'delta', { text: delta }),
+    })
+  } catch (error) {
+    conv.status = 'failed'
+    activeRuns.delete(conv.id)
+    persistPersistentState()
+    sseSend(res, 'error', { error: error?.message || '模型流式输出失败', code: error?.code || 'MODEL_STREAM_FAILED' })
+    res.end()
+    return
+  }
+  const direct = quickReplyFromResult(result, plan, startedAt)
+  if (!direct.reply) {
+    conv.status = 'failed'
+    activeRuns.delete(conv.id)
+    persistPersistentState()
+    sseSend(res, 'error', { error: '模型返回了空内容', code: 'MODEL_EMPTY' })
+    res.end()
+    return
+  }
+  let payload
+  try {
+    payload = commitDirectReply({ conv, direct, text, user, mode, taskMode, project, net, startedAt })
+  } catch (error) {
+    conv.status = 'failed'
+    activeRuns.delete(conv.id)
+    sseSend(res, 'error', { error: error?.message || '回复落库失败', code: 'PERSIST_FAILED' })
+    res.end()
+    return
+  }
+  sseSend(res, 'done', payload)
+  res.end()
 }
 
 function directDateTimeReply(text) {
@@ -3653,6 +3779,23 @@ function json(res, status, body) {
     'cache-control': 'no-store',
   })
   res.end(payload)
+}
+
+/* SSE：首字尽快到达前端，衰减“整段答案一次性跳出”的等待感。 */
+function openSse(res) {
+  res.writeHead(200, {
+    'content-type': 'text/event-stream; charset=utf-8',
+    'cache-control': 'no-cache, no-transform',
+    connection: 'keep-alive',
+    'x-accel-buffering': 'no',
+  })
+  if (typeof res.flushHeaders === 'function') res.flushHeaders()
+}
+
+function sseSend(res, event, data) {
+  try {
+    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
+  } catch { /* 客户端断开时不再抛错 */ }
 }
 
 function newFileId(prefix = 'F') {
@@ -8310,6 +8453,23 @@ const api = {
     // 直连快速通道：天气/日期/问候等确定性事实不进入 Harness，零模型调用；
     // 一旦直连数据不可用（城市不明、接口失败、需要工具链），直接落到下面的 Harness 分支。
     const directStartedAt = Date.now()
+    /* 前端声明 stream=true 且本轮属于轻量直连时，改走 SSE：首字即达，答案不再整段等一下。
+       不满足轻量直连条件的轮次（工具、项目、深度思索等）保持原有一次性返回。 */
+    if (body.stream === true) {
+      const streamPlan = planQuickModelReply({ text, body, mode, projectId, deepThink, webSearch, regenerate, conv, modelCfg })
+      if (streamPlan) {
+        await streamQuickReply({ res, conv, plan: streamPlan, modelCfg, text, user, mode, taskMode, project, net })
+        return
+      }
+      if (process.env.JG_STREAM_DEBUG === '1') {
+        console.log('[jg-server] stream skipped:', JSON.stringify({
+          mode, projectId: projectId || '', deepThink: !!deepThink, webSearch: !!webSearch, regenerate: !!regenerate,
+          preset: conv?.agentPresetId || '', tools: Array.isArray(body?.tools) ? body.tools : null,
+          refs: Array.isArray(body?.refs) ? body.refs.length : 0, images: Array.isArray(body?.images) ? body.images.length : 0,
+          textLen: String(text || '').length,
+        }))
+      }
+    }
     let direct = await tryDirectReply({ text, body, mode, projectId, deepThink, webSearch, regenerate })
     if (!direct) {
       try {
@@ -8320,65 +8480,10 @@ const api = {
       }
     }
     if (direct) {
-      let directMessageId = ''
       try {
-        directMessageId = `M-${Date.now().toString(36).toUpperCase()}-${randomBytes(3).toString('hex').toUpperCase()}`
-        const finishedAt = new Date()
-        const runStats = buildRunStats({
-          startedAt: directStartedAt,
-          endedAt: finishedAt.getTime(),
-          model: direct.model,
-          contextText: '',
-          steps: direct.steps,
-          usage: direct.usage,
-          events: [],
-          taskClass: `direct-${direct.kind}`,
-          replyChars: direct.reply.length,
-          finishReason: 'completed',
-        })
-        runStats.modelCalls = direct.kind === 'model-quick' ? 1 : 0
-        runStats.toolCalls = direct.kind === 'model-quick' ? 0 : direct.steps.length
-        const assistantMsg = {
-          id: directMessageId,
-          role: 'assistant', text: direct.reply,
-          time: finishedAt.toLocaleTimeString('zh-CN', { hour12: false }).slice(0, 5),
-          createdAt: finishedAt.toISOString(),
-          elapsedMs: runStats.durationMs,
-          steps: direct.steps,
-          subagents: [], workflows: [], todos: [], jobs: [], deliverables: [], visuals: [],
-          workspaceChanges: [], citations: [],
-          model: direct.model,
-          usage: direct.usage,
-          usageAt: finishedAt.getTime(),
-          traceId: '',
-          runStats,
-          taskClass: `direct-${direct.kind}`,
-          direct: true,
-        }
-        conv.messages.push(assistantMsg)
-        if (direct.kind === 'model-quick') {
-          conv.lightTurns = [
-            ...(Array.isArray(conv.lightTurns) ? conv.lightTurns : []),
-            { user: String(text || '').slice(0, 2000), assistant: String(direct.reply || '').slice(0, 2000), at: Date.now() },
-          ].slice(-6)
-        }
-        conv.turns = Math.ceil(conv.messages.length / 2)
-        conv.status = 'done'
-        conv.model = direct.model
-        conv.deepThink = false
-        chatTask = startChatRunTask({ conv, user, text, mode, taskMode, target: direct.place || project?.name || '' })
-        markChatRunStarted(chatTask, 'direct')
-        finishChatRunTask(chatTask, { steps: direct.steps.length, reply: direct.reply })
-        activeRuns.delete(conv.id)
-        persistPersistentState()
-        logAudit(user, 'chat.direct', conv.id, `${direct.kind}:${direct.place || direct.model}`, net)
-        return json(res, 200, { ok: true, conversation: conv, reply: direct.reply, steps: direct.steps, citations: [] })
+        const payload = commitDirectReply({ conv, direct, text, user, mode, taskMode, project, net, startedAt: directStartedAt })
+        return json(res, 200, payload)
       } catch (directError) {
-        // 直连落库失败不能改变任务语义：清理草稿并继续走 Harness。
-        if (directMessageId) conv.messages = conv.messages.filter((m) => m.id !== directMessageId)
-        if (direct.kind === 'model-quick' && Array.isArray(conv.lightTurns) && conv.lightTurns.length) {
-          conv.lightTurns = conv.lightTurns.slice(0, -1)
-        }
         console.warn('[jg-server] direct reply failed, falling back to harness:', directError?.message || directError)
       }
     }
