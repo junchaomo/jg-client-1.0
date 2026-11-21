@@ -59,6 +59,12 @@ contextBridge.exposeInMainWorld('jgClient', {
       ipcRenderer.on('browser:find-result', handler)
       return () => ipcRenderer.removeListener('browser:find-result', handler)
     },
+    onNewWindow: (callback) => {
+      if (typeof callback !== 'function') return () => {}
+      const handler = (_event, payload) => callback(payload?.url)
+      ipcRenderer.on('browser:new-window', handler)
+      return () => ipcRenderer.removeListener('browser:new-window', handler)
+    },
   },
   asApp: {
     open: (payload = {}) => ipcRenderer.send('app:open', payload),

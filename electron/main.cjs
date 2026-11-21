@@ -100,9 +100,46 @@ function resolveNodeExe() {
   return process.execPath
 }
 
+function findMediakitCli() {
+  const configured = String(process.env.MEDIAKIT_CLI_PATH || '').trim()
+  if (configured && fs.existsSync(configured)) return configured
+  const roots = [
+    path.join(process.env.LOCALAPPDATA || '', 'Doubao', 'User Data', 'Default', 'sandbox_envs_dir', 'envs'),
+    path.join(process.env.LOCALAPPDATA || '', 'Doubao', 'User Data', 'Default', 'sandbox_envs_dir'),
+  ].filter(Boolean)
+  const seen = new Set()
+  const walk = (dir, depth) => {
+    if (depth > 6 || seen.has(dir)) return ''
+    seen.add(dir)
+    let entries = []
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch (_) { return '' }
+    for (const entry of entries) {
+      if (entry.name.toLowerCase() === 'mediakit-cli.exe') return path.join(dir, entry.name)
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue
+      const found = walk(path.join(dir, entry.name), depth + 1)
+      if (found) return found
+    }
+    return ''
+  }
+  for (const root of roots) {
+    if (!fs.existsSync(root)) continue
+    const found = walk(root, 0)
+    if (found) return found
+  }
+  return ''
+}
+
 function startServer(port) {
   const nodeExe = resolveNodeExe()
   const env = { ...process.env, PORT: String(port), JG_SERVER_ORIGIN: 'client' }
+  const mediakit = findMediakitCli()
+  if (mediakit) {
+    env.MEDIAKIT_CLI_PATH = mediakit
+    env.PATH = `${path.dirname(mediakit)}${path.delimiter}${env.PATH || ''}`
+    env.Path = `${path.dirname(mediakit)}${path.delimiter}${env.Path || env.PATH || ''}`
+  }
   delete env.ELECTRON_RUN_AS_NODE
   serverProcess = spawn(nodeExe, [ENTRY], {
     cwd: ROOT,
@@ -148,7 +185,7 @@ function waitForServer(port, timeoutMs = 15000) {
   })
 }
 
-function probeHealth(port, timeoutMs = 1500) {
+function probeHealthOnce(port, timeoutMs) {
   return new Promise((resolve) => {
     const request = http.get({ host: '127.0.0.1', port, path: '/api/health', timeout: timeoutMs }, (response) => {
       let body = ''
@@ -166,6 +203,37 @@ function probeHealth(port, timeoutMs = 1500) {
     request.on('error', () => resolve(false))
     request.on('timeout', () => { request.destroy(); resolve(false) })
   })
+}
+
+/**
+ * 服务在跑长任务时可能几秒不响应；1.5 秒探活失败就起第二套服务，会同时写同一个 SQLite。
+ * 这里放宽单次超时并重试，宁可多等十几秒，也不要多起一个实例。
+ */
+async function probeHealth(port, timeoutMs = 5000, attempts = 3) {
+  for (let i = 0; i < attempts; i += 1) {
+    if (await probeHealthOnce(port, timeoutMs)) return true
+    if (i < attempts - 1) await new Promise((r) => setTimeout(r, 800))
+  }
+  return false
+}
+
+function readServerPidInfo() {
+  try {
+    const raw = fs.readFileSync(path.join(ROOT, 'data', 'run', 'server.pid'), 'utf8')
+    const parsed = JSON.parse(raw)
+    return parsed && Number.isFinite(Number(parsed.pid)) ? parsed : null
+  } catch (_) {
+    return null
+  }
+}
+
+function isProcessAlive(pid) {
+  try {
+    process.kill(Number(pid), 0)
+    return true
+  } catch (_) {
+    return false
+  }
 }
 
 function installBridge(contents) {
@@ -316,7 +384,11 @@ function ensureBrowserView() {
     hookBrowserDownloads(browserView.webContents.session)
     browserView.setBackgroundColor('#ffffff')
     browserView.webContents.setWindowOpenHandler(({ url }) => {
-      if (/^https?:\/\//i.test(url)) shell.openExternal(url)
+      const target = String(url || '')
+      // 页面内 target=_blank / window.open 的新窗口：回传渲染进程，在云浏览器网页标签内打开，不交由系统默认浏览器。
+      if (/^https?:\/\//i.test(target) && mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('browser:new-window', { url: target })
+      }
       return { action: 'deny' }
     })
     browserView.webContents.on('will-navigate', (event, url) => {
@@ -505,7 +577,7 @@ function windowChromeOptions() {
   // 并且在最大化、还原时自动切换图标，不需要在页面里自绘窗口按钮。
   return {
     titleBarStyle: 'hidden',
-    titleBarOverlay: { color: '#eef2f8', symbolColor: '#3a3f45', height: 38 },
+    titleBarOverlay: { color: '#ffffff', symbolColor: '#3a3f45', height: 38 },
   }
 }
 
@@ -888,9 +960,20 @@ if (!hasLock) {
 
     try {
       /* 已经有健康的本机服务就复用，不再另起一套：两套服务会同时写同一个 SQLite。 */
+      const pidInfo = readServerPidInfo()
+      const holderAlive = Boolean(pidInfo && isProcessAlive(pidInfo.pid))
       if (await probeHealth(PREFERRED_PORT)) {
         serverPort = PREFERRED_PORT
         console.log(`[jg-server] 复用已在运行的本机服务 http://127.0.0.1:${serverPort}`)
+      } else if (holderAlive) {
+        /* 进程还活着但暂时没响应（长任务、正在启动）：等它恢复，不能再起第二套。 */
+        serverPort = PREFERRED_PORT
+        try {
+          await waitForServer(serverPort, 30000)
+          console.log(`[jg-server] 等待已有服务恢复 pid=${pidInfo.pid}`)
+        } catch (_) {
+          console.error(`[jg-server] 已有服务 pid=${pidInfo.pid} 存活但 30 秒无响应，避免重复实例不再自动重启`)
+        }
       } else {
         serverPort = PREFERRED_PORT
         startServer(serverPort)

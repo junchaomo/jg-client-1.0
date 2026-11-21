@@ -18,6 +18,11 @@ import { normalizeAppCapabilities } from './app-contract.mjs'
 export const AS_APPS_ROOT = join(dataDirPath(), 'apps')
 const LEASE_TTL_MS = Math.max(10000, Number(process.env.AS_LEASE_TTL_MS || 45000))
 const STOP_GRACE_MS = Math.max(5000, Number(process.env.AS_STOP_GRACE_MS || 30000))
+/* 常驻托管：中枢进程运行期间，已启动并通过健康检查的应用进程一直留在后台，
+   不因视图关闭、心跳丢失或前端页面刷新而回收；只有显式停止、账号切换、
+   版本切换、卸载、进程自身崩溃或中枢退出时才回收。
+   设 AS_NO_PERSIST=1 可回退到旧的“无租约进宽限期回收”模式。 */
+const PERSISTENT = process.env.AS_NO_PERSIST !== '1'
 const START_TIMEOUT_MS = Math.max(5000, Number(process.env.AS_START_TIMEOUT_MS || 30000))
 /* 启动超时上限：应用可以在 app.json 里申报更长的健康检查时间，但不能无限期停在 starting。
    申报值与上限之间取小，得到的那个数字会写进 runtime.json 的 startTimeoutMs，
@@ -150,6 +155,27 @@ function dataRootFor(id) {
   return root
 }
 
+/* 应用上下文密钥落盘复用：令牌只在高频重启的应用/中枢之间流转，
+   每次重启换密钥会让正在跑的任务中途 401（识别跑一半失败）。
+   密钥固定后，旧令牌只在首次迁移那一轮失效。 */
+function appSecretFile(id) {
+  return join(appRoot(id), '.app-secret')
+}
+
+function loadAppSecret(id) {
+  try {
+    const value = readFileSync(appSecretFile(id), 'utf8').trim()
+    if (/^[a-f0-9]{64}$/.test(value)) return value
+  } catch {}
+  return ''
+}
+
+function saveAppSecret(id, secret) {
+  try {
+    writeFileSync(appSecretFile(id), secret, { mode: 0o600 })
+  } catch {}
+}
+
 export function dataDirFor(id, userId) {
   const dir = join(dataRootFor(id), safeUser(userId))
   mkdirSync(dir, { recursive: true })
@@ -164,6 +190,34 @@ function userUrl(base, userId, token = '') {
     return url.toString()
   } catch {
     return base
+  }
+}
+
+/**
+ * 给应用签发长期模型令牌：应用进程可能连续跑几小时，1 小时的上下文令牌在任务中途就会过期，
+ * 过期表现是"识别跑一半报 401"，很难查。模型令牌只用于模型入口，仍绑定同一个 appId + 账号。
+ */
+export function mintAppModelToken(id, userId, ttlMs = 30 * 24 * 60 * 60 * 1000) {
+  const appId = safeId(id)
+  const secret = APP_SECRETS.get(appId) || loadAppSecret(appId)
+  if (!secret) throw new Error('应用进程未启动或已停止，无法签发模型令牌')
+  return signContext(appId, userId, secret, ttlMs)
+}
+
+export function appModelTokenValid(token, id) {
+  return Boolean(verifyAppContext(token, id))
+}
+
+/** 模型令牌自带 appId，调用方不必再传；伪造的令牌在验签这步就会被拒。 */
+export function verifyAppModelToken(token) {
+  const encoded = String(token || '').split('.')[0]
+  if (!encoded) return null
+  try {
+    const payload = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8'))
+    if (!payload?.appId) return null
+    return verifyAppContext(token, payload.appId)
+  } catch {
+    return null
   }
 }
 
@@ -199,7 +253,11 @@ function verifyContextToken(token, appId, secret) {
 /** 服务端校验应用上下文令牌；应用拿用户上下文换短期数据令牌时使用。 */
 export function verifyAppContext(token, appId) {
   const id = safeId(appId)
-  const secret = APP_SECRETS.get(id)
+  let secret = APP_SECRETS.get(id)
+  if (!secret) {
+    secret = loadAppSecret(id)
+    if (secret) APP_SECRETS.set(id, secret)
+  }
   return secret ? verifyContextToken(String(token || ''), id, secret) : null
 }
 
@@ -415,6 +473,7 @@ export function runtimeState(id) {
     url: String(state.url || ''),
     pid: alive ? pid : 0,
     leaseCount: leaseCount(id),
+    persistent: Boolean(state.persistent) || PERSISTENT,
     health: status === 'running' ? 'running' : (state.lastError ? 'error' : 'stopped'),
     lastError: String(state.lastError || ''),
     startedAt: state.startedAt || '',
@@ -434,7 +493,7 @@ export async function startApp({ id, userId }) {
     const manifest = info.manifest
     const existing = readRuntime(appId)
     if (existing?.status === 'running' && pidAlive(existing.pid)) {
-      const existingSecret = APP_SECRETS.get(appId)
+      const existingSecret = APP_SECRETS.get(appId) || loadAppSecret(appId)
       const existingUser = safeUser(existing.activeUser)
       /* 应用数据按中枢账号隔离：同一应用进程只能服务一个账号的数据目录。
          账号切换时销毁旧进程与租约，按新账号的数据目录重新冷启动，避免 A 的项目落进 B 的库。 */
@@ -447,6 +506,7 @@ export async function startApp({ id, userId }) {
           lastHeartbeat: Date.now(),
           status: 'running',
           stopAt: 0,
+          persistent: true,
           owner: RUNTIME_OWNER,
           ownerPid: RUNTIME_OWNER_PID,
           dataRoot,
@@ -462,8 +522,9 @@ export async function startApp({ id, userId }) {
       leaseSet(appId).clear()
     }
     if (existing?.pid && pidAlive(existing.pid)) killTree(existing.pid)
-    const contextSecret = randomBytes(32).toString('hex')
+    const contextSecret = loadAppSecret(appId) || randomBytes(32).toString('hex')
     APP_SECRETS.set(appId, contextSecret)
+    saveAppSecret(appId, contextSecret)
     const paths = manifestPaths(info)
     const host = String(manifest.host || '127.0.0.1')
     const port = await getFreePort(host)
@@ -506,6 +567,7 @@ export async function startApp({ id, userId }) {
         leaseCount: leaseCount(appId),
         lastHeartbeat: Date.now(),
         lastError: '',
+        persistent: true,
       })
       const contextToken = signContext(appId, userId, contextSecret, CONTEXT_TTL_MS)
       return { leaseId, url: userUrl(url, userId, contextToken), port, pid: child.pid, status: 'running', dataRoot, dataDir, contextToken }
@@ -588,11 +650,17 @@ export function heartbeatApp({ id, leaseId }) {
   const appId = safeId(id)
   const state = readRuntime(appId)
   if (!state?.pid || !pidAlive(state.pid)) return { ok: false, code: 'AS_NOT_RUNNING', status: 'stopped' }
-  const lease = leaseSet(appId).get(leaseId)
-  if (!lease) return { ok: false, code: 'AS_LEASE_LOST', status: state.status }
+  let lease = leaseSet(appId).get(leaseId)
+  if (!lease) {
+    /* 租约随前端内存/心跳漂移丢失，但进程仍由中枢托管：自动重新认领一条租约，
+       不让一次心跳断连变成“租约失效”。返回新 leaseId 供前端替换本地记录。 */
+    const userId = safeUser(state.activeUser || 'guest')
+    leaseId = addLease(appId, userId)
+    lease = leaseSet(appId).get(leaseId)
+  }
   lease.lastSeen = Date.now()
   writeRuntime(appId, { leaseCount: leaseCount(appId), lastHeartbeat: lease.lastSeen })
-  return { ok: true, leaseCount: leaseCount(appId), url: userUrl(state.url, lease.userId), status: 'running' }
+  return { ok: true, leaseId, leaseCount: leaseCount(appId), url: userUrl(state.url, lease.userId), status: 'running' }
 }
 
 export function releaseApp({ id, leaseId, force = false }) {
@@ -606,14 +674,17 @@ export function releaseApp({ id, leaseId, force = false }) {
     writeRuntime(appId, { status: 'stopped', pid: 0, stopAt: 0, leaseCount: 0 })
     return { stopped: true, status: 'stopped', leaseCount: 0 }
   }
-  if (force || count === 0) {
-    const stopAt = force ? 0 : Date.now() + STOP_GRACE_MS
-    writeRuntime(appId, { status: force ? 'stopping' : 'running', leaseCount: count, stopAt })
-    if (force) {
-      killTree(state.pid)
-      writeRuntime(appId, { status: 'stopped', pid: 0, stopAt: 0, leaseCount: 0 })
-      return { stopped: true, status: 'stopped', leaseCount: 0 }
-    }
+  if (force) {
+    killTree(state.pid)
+    writeRuntime(appId, { status: 'stopped', pid: 0, stopAt: 0, leaseCount: 0 })
+    return { stopped: true, status: 'stopped', leaseCount: 0 }
+  }
+  /* 常驻托管：普通视图释放只清占用计数，不进宽限期、不杀进程，应用继续留在后台；
+     仅显式 force（停止应用、账号切换、版本切换、卸载）才在上文回收。
+     非常驻模式（AS_NO_PERSIST=1）保留旧的“无租约进宽限期”行为。 */
+  if (!PERSISTENT && count === 0) {
+    const stopAt = Date.now() + STOP_GRACE_MS
+    writeRuntime(appId, { status: 'running', leaseCount: count, stopAt })
   } else {
     writeRuntime(appId, { leaseCount: count, stopAt: 0 })
   }
@@ -653,7 +724,9 @@ export function sweepApps(now = Date.now()) {
       changed += 1
       continue
     }
-    if (state.status === 'running' && !leases.size) {
+    /* 常驻托管：无租约只是“当前没有界面连着”，不回收进程；
+       非常驻模式（AS_NO_PERSIST=1）才按宽限期回收无人进程。 */
+    if (!PERSISTENT && state.status === 'running' && !leases.size) {
       const stopAt = Number(state.stopAt || 0) || now + STOP_GRACE_MS
       if (state.stopAt !== stopAt) writeRuntime(id, { stopAt })
       if (now >= stopAt) {
@@ -712,6 +785,51 @@ export async function reconcileAppsOnBoot() {
   }
   LEASES.clear()
   return { cleaned }
+}
+
+/** 可切换的版本目录（versions/ 下每个含 app.json 的版本）。 */
+export function appVersionList(id) {
+  const appId = safeId(id)
+  try {
+    return readdirSync(join(appRoot(appId), 'versions'), { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && existsSync(join(appRoot(appId), 'versions', entry.name, 'app.json')))
+      .map((entry) => entry.name)
+      .sort()
+  } catch {
+    return []
+  }
+}
+
+/**
+ * 切换应用版本（更新 / 回滚都走这一条）。
+ *
+ * 版本目录只读、账号数据不在版本目录里，所以切换只是改 current.json 指向；
+ * 但运行中的进程是旧版本起的（已加载旧入口代码），必须一并回收，
+ * 否则"界面显示已更新、实际还在跑旧代码"，这类不一致最难排查。
+ */
+export function switchAppVersion(id, version) {
+  const appId = safeId(id)
+  const target = String(version || '').trim()
+  if (!target) throw new Error('缺少目标版本')
+  const versionRoot = setCurrentAppVersion(appId, target)
+  const state = readRuntime(appId)
+  let stopped = false
+  if (state?.pid && pidAlive(state.pid)) {
+    killTree(state.pid)
+    stopped = true
+  }
+  APP_SECRETS.delete(appId)
+  leaseSet(appId).clear()
+  writeRuntime(appId, {
+    status: 'stopped',
+    pid: 0,
+    port: 0,
+    version: target,
+    stopAt: Date.now(),
+    leaseCount: 0,
+    lastError: stopped ? `已切换版本到 v${target}，旧版本进程已停止，下次启动使用新版本` : '',
+  })
+  return { version: target, versionRoot, stopped }
 }
 
 /**

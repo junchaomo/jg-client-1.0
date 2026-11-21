@@ -359,6 +359,240 @@ def convert_datasets(paths, out_dir, target, name='数据'):
     }
 
 
+# ------------------------- 地下管网：保 Z 读取 -------------------------
+# 与 inspect/convert 不同，管网读取不能 force_2d：管点与管线的 Z（高程）
+# 是三维建模与断面/净距分析的唯一依据，压平后就无法恢复。
+PIPE_MAX_FEATURES = 200000
+
+
+def geometry_coords_z(geom):
+    """返回 [(x, y, z)]；z 缺失时给 None，绝不补 0（0 会被当成合法高程）。"""
+    if geom is None or geom.is_empty:
+        return []
+    kind = geom.geom_type
+    if kind == 'Point':
+        coords = [geom.coords[0]]
+    elif kind == 'LineString':
+        coords = list(geom.coords)
+    elif kind == 'LinearRing':
+        coords = list(geom.coords)
+    elif kind == 'MultiLineString':
+        coords = list(geom.geoms[0].coords) if len(geom.geoms) else []
+    elif kind == 'MultiPoint':
+        coords = [part.coords[0] for part in geom.geoms]
+    else:
+        return []
+    out = []
+    for coordinate in coords:
+        out.append([
+            float(coordinate[0]),
+            float(coordinate[1]),
+            float(coordinate[2]) if len(coordinate) > 2 else None,
+        ])
+    return out
+
+
+def pipe_read_dataset(path, layer_filter=None, max_features=None):
+    layers = pyogrio.list_layers(path)
+    points = []
+    lines = []
+    layer_rows = []
+    fields = []
+    crs = ''
+    bounds = None
+    geometry_kinds = {}
+    truncated = False
+    for layer_name, layer_geometry_type in layers:
+        if layer_filter and str(layer_name) not in layer_filter:
+            continue
+        info = pyogrio.read_info(path, layer=layer_name)
+        count = int(info.get('features') or 0)
+        if count == 0:
+            continue
+        if not crs:
+            crs = str(info.get('crs') or '')
+        total_bound = info.get('total_bounds')
+        if total_bound and len(total_bound) == 4:
+            box = [float(value) for value in total_bound]
+            bounds = box if bounds is None else [
+                min(bounds[0], box[0]), min(bounds[1], box[1]),
+                max(bounds[2], box[2]), max(bounds[3], box[3]),
+            ]
+        raw_fields = info.get('fields')
+        layer_fields = [str(name) for name in ([] if raw_fields is None else raw_fields)]
+        for field in layer_fields:
+            if field not in fields:
+                fields.append(field)
+        meta, fids, geometry, field_data = pyogrio.raw.read(
+            path,
+            layer=layer_name,
+            max_features=max_features,
+            force_2d=False,
+            return_fids=True,
+            datetime_as_string=True,
+        )
+        raw_names = meta.get('fields')
+        field_names = [str(name) for name in (raw_names if raw_names is not None else [])]
+        layer_counts = {'points': 0, 'lines': 0, 'ignored': 0}
+        for index, raw_geometry in enumerate(geometry):
+            if raw_geometry is None:
+                continue
+            try:
+                geom = wkb.loads(bytes(raw_geometry))
+            except Exception:
+                continue
+            if geom.is_empty:
+                continue
+            coords = geometry_coords_z(geom)
+            if not coords:
+                layer_counts['ignored'] += 1
+                continue
+            properties = {'layer': str(layer_name), 'fid': int(fids[index])}
+            for column, values in zip(field_names, field_data):
+                if column in properties:
+                    continue
+                properties[column] = scalar(values[index])
+            kind = geom.geom_type
+            geometry_kinds[kind] = geometry_kinds.get(kind, 0) + 1
+            if kind in ('Point', 'MultiPoint') and len(coords) == 1:
+                points.append({'coords': coords[0], 'properties': properties, 'layer': str(layer_name)})
+                layer_counts['points'] += 1
+            elif kind in ('LineString', 'MultiLineString', 'LinearRing'):
+                lines.append({'coords': coords, 'properties': properties, 'layer': str(layer_name)})
+                layer_counts['lines'] += 1
+            else:
+                layer_counts['ignored'] += 1
+        if max_features and count > max_features:
+            truncated = True
+        layer_rows.append({
+            'name': str(layer_name),
+            'geometryType': str(layer_geometry_type or info.get('geometry_type') or '未知'),
+            'features': count,
+            'crs': str(info.get('crs') or ''),
+            'fields': layer_fields,
+            'points': layer_counts['points'],
+            'lines': layer_counts['lines'],
+            'ignored': layer_counts['ignored'],
+        })
+    if not points and not lines:
+        raise RuntimeError(f'数据集 {Path(path).name} 中没有可读取的点或线要素')
+    return {
+        'name': Path(path).name,
+        'kind': kind_of(path),
+        'driver': str(pyogrio.read_info(path, layer=layers[0][0]).get('driver') or ''),
+        'crs': crs,
+        'bbox': [round(value, 6) for value in bounds] if bounds else None,
+        'fields': fields,
+        'layers': layer_rows,
+        'geometryKinds': geometry_kinds,
+        'points': points,
+        'lines': lines,
+        'truncated': truncated,
+    }
+
+
+def pipe_read(paths, layer_filter=None, max_features=None, display_name=None):
+    payloads = [pipe_read_dataset(path, layer_filter=layer_filter, max_features=max_features) for path in paths]
+    multiple = len(payloads) > 1
+    points = []
+    lines = []
+    layer_rows = []
+    fields = []
+    crs_values = []
+    bounds = None
+    truncated = False
+    for payload in payloads:
+        if payload['crs'] and payload['crs'] not in ('', '未声明') and payload['crs'] not in crs_values:
+            crs_values.append(payload['crs'])
+        truncated = truncated or bool(payload['truncated'])
+        if payload['bbox']:
+            box = payload['bbox']
+            bounds = list(box) if bounds is None else [
+                min(bounds[0], box[0]), min(bounds[1], box[1]),
+                max(bounds[2], box[2]), max(bounds[3], box[3]),
+            ]
+        for field in payload['fields']:
+            if field not in fields:
+                fields.append(field)
+        for layer in payload['layers']:
+            row = dict(layer)
+            row['dataset'] = payload['name']
+            layer_rows.append(row)
+        for item in payload['points']:
+            item = dict(item)
+            item['dataset'] = payload['name']
+            points.append(item)
+        for item in payload['lines']:
+            item = dict(item)
+            item['dataset'] = payload['name']
+            lines.append(item)
+    if not points and not lines:
+        raise RuntimeError('没有可读取的管网要素')
+    return {
+        'name': display_name or payloads[0]['name'],
+        'sourceFiles': [payload['name'] for payload in payloads],
+        'crs': crs_values[0] if len(crs_values) == 1 else (' / '.join(crs_values) if crs_values else '未声明'),
+        'crsList': crs_values,
+        'crsMixed': len(crs_values) > 1,
+        'bbox': bounds,
+        'fields': fields,
+        'layers': layer_rows,
+        'points': points,
+        'lines': lines,
+        'pointCount': len(points),
+        'lineCount': len(lines),
+        'truncated': truncated,
+        'sourceCount': len(payloads),
+        'multiple': multiple,
+    }
+
+
+def read_csv_text(path):
+    with open(path, 'rb') as handle:
+        raw = handle.read()
+    for encoding in ('utf-8-sig', 'utf-8', 'gb18030', 'gbk', 'latin-1'):
+        try:
+            return raw.decode(encoding), encoding
+        except UnicodeDecodeError:
+            continue
+    return raw.decode('utf-8', errors='replace'), 'utf-8-replace'
+
+
+def csv_tables(paths, max_rows=None):
+    import csv
+    import io
+    tables = []
+    for path in paths:
+        text, encoding = read_csv_text(path)
+        sample = text[:20000]
+        delimiter = ','
+        for candidate in (',', '\t', ';', '|'):
+            if candidate in sample:
+                delimiter = candidate
+                break
+        reader = csv.reader(io.StringIO(text), delimiter=delimiter)
+        rows = []
+        headers = []
+        for index, row in enumerate(reader):
+            if index == 0:
+                headers = [str(cell).strip() for cell in row]
+                continue
+            if max_rows and len(rows) >= max_rows:
+                break
+            if not any(str(cell).strip() for cell in row):
+                continue
+            rows.append([str(cell).strip() for cell in row])
+        tables.append({
+            'name': Path(path).name,
+            'encoding': encoding,
+            'delimiter': delimiter,
+            'headers': headers,
+            'rows': rows,
+            'rowCount': len(rows),
+        })
+    return {'tables': tables}
+
+
 def load_manifest(arg):
     if str(arg).startswith('@'):
         with open(str(arg)[1:], 'r', encoding='utf-8') as handle:
@@ -367,13 +601,21 @@ def load_manifest(arg):
 
 
 def main():
-    if len(sys.argv) < 3 or sys.argv[1] not in ('inspect', 'export', 'convert'):
-        raise SystemExit('usage: gis-bridge.py inspect|export|convert @manifest.json')
+    commands = ('inspect', 'export', 'convert', 'pipe-inspect', 'pipe-read', 'csv-read')
+    if len(sys.argv) < 3 or sys.argv[1] not in commands:
+        raise SystemExit('usage: gis-bridge.py inspect|export|convert|pipe-inspect|pipe-read|csv-read @manifest.json')
     manifest = load_manifest(sys.argv[2])
     paths = [str(path) for path in (manifest.get('paths') or []) if str(path)]
     if not paths:
         raise SystemExit('manifest.paths 为空')
     command = sys.argv[1]
+    if command == 'csv-read':
+        raw_max = manifest.get('maxRows')
+        max_rows = int(raw_max) if raw_max is not None else None
+        if max_rows is not None and max_rows <= 0:
+            max_rows = None
+        print(json.dumps(csv_tables(paths, max_rows), ensure_ascii=False, separators=(',', ':')))
+        return
     if command == 'convert':
         result = convert_datasets(
             paths,
@@ -381,6 +623,20 @@ def main():
             str(manifest.get('target') or 'gdb'),
             str(manifest.get('name') or '数据'),
         )
+        print(json.dumps(result, ensure_ascii=False, separators=(',', ':')))
+        return
+    if command in ('pipe-inspect', 'pipe-read'):
+        layer_filter = manifest.get('layers') or None
+        raw_max = manifest.get('maxFeatures')
+        max_features = int(raw_max) if raw_max is not None else None
+        if max_features is not None and max_features <= 0:
+            max_features = None
+        result = pipe_read(paths, layer_filter=layer_filter, max_features=max_features, display_name=manifest.get('name'))
+        if command == 'pipe-inspect':
+            result = dict(result)
+            result['points'] = result['points'][:200]
+            result['lines'] = result['lines'][:200]
+            result['preview'] = True
         print(json.dumps(result, ensure_ascii=False, separators=(',', ':')))
         return
     max_features = manifest.get('maxFeatures')

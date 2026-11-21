@@ -14,6 +14,8 @@ export const CHAT_CORE_TOOLS = [
   'present', 'ask_user_question', 'todo_write', 'skill', 'working_directory', 'pwsh',
   'session_search',
   'web_fetch',
+  'mcp__jg__memory_write', 'mcp__jg__memory_search', 'mcp__jg__memory_list', 'mcp__jg__memory_forget',
+  'mcp__jg__app_data_list', 'mcp__jg__app_data_read', 'mcp__jg__app_data_query', 'mcp__jg__capability_list',
   'mcp__jg__drive_read', 'mcp__jg__drive_search',
   'mcp__jg__format_capabilities', 'mcp__jg__format_export', 'mcp__jg__format_extract', 'mcp__jg__format_inspect',
   'mcp__jg__resource_query', 'mcp__jg__task_create',
@@ -33,6 +35,8 @@ export const WORK_CORE_TOOLS = [
   'read', 'read_image', 'write', 'edit', 'apply_patch', 'glob', 'grep',
   'present', 'ask_user_question', 'todo_write', 'skill', 'working_directory', 'pwsh',
   'session_search', 'web_fetch', 'workflow', 'create_goal', 'update_goal',
+  'mcp__jg__memory_write', 'mcp__jg__memory_search', 'mcp__jg__memory_list', 'mcp__jg__memory_forget',
+  'mcp__jg__app_data_list', 'mcp__jg__app_data_read', 'mcp__jg__app_data_query', 'mcp__jg__capability_list',
   'mcp__jg__drive_read', 'mcp__jg__drive_search',
   'mcp__jg__format_capabilities', 'mcp__jg__format_export', 'mcp__jg__format_extract', 'mcp__jg__format_inspect',
   'mcp__jg__resource_query', 'mcp__jg__task_create',
@@ -50,7 +54,7 @@ export const WORK_VISUAL_TOOLS = [
 export const WORK_SCHEDULE_TOOLS = ['schedule_create', 'schedule_edit', 'schedule_list', 'schedule_view']
 export const WORK_SCHEDULE_READ_TOOLS = ['schedule_list', 'schedule_view']
 
-export const WORK_APP_TOOLS = ['mcp__jg__app_call']
+export const WORK_APP_TOOLS = ['mcp__jg__app_list', 'mcp__jg__app_call']
 export const WORK_REVIEW_TOOLS = ['mcp__jg__code_review']
 export const WORK_CONTACT_TOOLS = ['mcp__jg__contacts_find']
 export const WORK_ACADEMY_TOOLS = ['mcp__jg__academy_search']
@@ -72,7 +76,7 @@ const WORK_SCHEDULE_WRITE_RE = /创建|新建|安排|添加|修改|编辑|调整
 const SCHEDULE_READ_QUERY_RE = /是否有安排|有什么安排|有哪些安排|有没有安排|有无安排|日程安排/g
 const NEGATED_SCHEDULE_ACTION_RE = /(?:不要|不|无需|禁止)(?:创建|新建|安排|添加|修改|编辑|调整|删除|取消|提醒|定时|预约)(?:[、,，或和]?\s*(?:创建|新建|安排|添加|修改|编辑|调整|删除|取消|提醒|定时|预约))*/g
 const WORK_PLUGIN_RE = /插件|市场|worktree|工作树|打包|发布(?:插件|版本)|上传(?:插件|版本)/i
-const WORK_APP_RE = /小程序|应用(?:包|市场|接入|详情|能力)|能力包|能力清单|manifest|发布(?:应用|小程序)|上传(?:应用|小程序)/i
+const WORK_APP_RE = /小程序|应用(?:包|市场|接入|详情|能力)|应用[^。\n]{0,8}(?:输出|数据|结果|产物)|能力包|能力清单|manifest|发布(?:应用|小程序)|上传(?:应用|小程序)/i
 const WORK_REVIEW_RE = /代码审查|审查|review|MR\b|PR\b|diff/i
 const WORK_CONTACT_RE = /联系人|通讯录|找人|联系方式|同事/i
 const WORK_ACADEMY_RE = /培训|课程|学院|学习|考试/i

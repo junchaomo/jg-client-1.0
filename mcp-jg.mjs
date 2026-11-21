@@ -164,6 +164,16 @@ const tools = [
     inputSchema: { type: 'object', properties: {} },
   },
   {
+    name: 'capability_list',
+    description: '统一列出当前账号可用的应用、插件和技能：应用能力、插件调用方式、已安装技能名称。需要跨应用找能力、确认某应用能做什么、找技能时先调用本工具。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        type: { type: 'string', enum: ['all', 'app', 'plugin', 'skill'], description: '只看某一类能力；默认 all' },
+      },
+    },
+  },
+  {
     name: 'app_call',
     description: '调用当前账号已安装 AS 应用的业务工具；AS 负责懒启动、账号上下文、租约和回收。先调用 app_list 获取 appId/tool。',
     inputSchema: {
@@ -176,6 +186,75 @@ const tools = [
       },
       required: ['appId', 'tool'],
     },
+  },
+  {
+    name: 'app_data_list',
+    description: '只读列出当前账号在已安装应用中的数据文件（outputs/ 与 data/），用于查看某应用最近一次输出、历史记录或结果文件。可只查一个应用，也可不传 appId 列出全部已安装应用。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        appId: { type: 'string', description: '应用 ID；不传则列出当前账号全部已安装应用的数据文件' },
+        limit: { type: 'number', description: '最多返回文件数，默认 50，最大 100' },
+      },
+    },
+  },
+  {
+    name: 'app_data_read',
+    description: '只读读取当前账号某个应用数据目录下的文本文件（CSV/JSON/TXT/MD/LOG 等）。先用 app_data_list 找到 path，再传 appId + path；不要用它读取代码、配置、日志或二进制文件。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        appId: { type: 'string', description: '应用 ID，例如 traffic-flow' },
+        path: { type: 'string', description: '相对应用数据目录的文件路径，来自 app_data_list 返回的 path' },
+        maxBytes: { type: 'number', description: '最多读取字节数，默认 512KB，最大 512KB' },
+      },
+      required: ['appId', 'path'],
+    },
+  },
+  {
+    name: 'app_data_query',
+    description: '对当前账号某个应用数据目录下的 SQLite 数据库执行只读 SELECT 查询；默认返回表清单。先用 app_data_list 找到数据库 path，再传 appId + path + sql。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        appId: { type: 'string', description: '应用 ID，例如 jg-material-studio' },
+        path: { type: 'string', description: '相对应用数据目录的 SQLite 文件路径，来自 app_data_list 返回的 path' },
+        sql: { type: 'string', description: '只允许 SELECT / WITH 查询；不传则列出表清单' },
+        limit: { type: 'number', description: '返回行数上限，默认 100，最大 200' },
+      },
+      required: ['appId', 'path'],
+    },
+  },
+  {
+    name: 'memory_write',
+    description: '长期记忆：保存跨会话稳定的用户偏好、身份事实、长期约束或已定决策。仅当用户明确要求“记住”，或表达“以后都/默认/我不喜欢/我们单位…”等长期信息时调用；不要保存一次性任务内容、临时上下文、密码/密钥/身份证等敏感信息。相同内容会自动去重更新。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        content: { type: 'string', description: '一条独立、可复述的事实或偏好，尽量一句话，不要堆叠多个主题' },
+        kind: { type: 'string', enum: ['preference', 'fact', 'decision', 'entity', 'task'], description: '偏好/事实/决策/实体/长期任务约束' },
+        scope: { type: 'string', enum: ['global', 'project', 'conversation'], description: '默认 global；仅当前项目有效用 project 并填 projectId' },
+        projectId: { type: 'string', description: 'scope=project 时的项目 ID' },
+        tags: { type: 'array', items: { type: 'string' }, description: '可选标签，最多 8 个' },
+        pinned: { type: 'boolean', description: '是否每轮固定注入（谨慎使用，最多几条）' },
+      },
+      required: ['content'],
+    },
+  },
+  {
+    name: 'memory_search',
+    description: '长期记忆：按语义检索当前用户的记忆。用户问“你记得我什么/我的偏好/上次定的口径”，或当前任务需要历史约束时，先调用本工具，不要凭空编造。',
+    inputSchema: { type: 'object', properties: { query: { type: 'string', description: '检索问题或关键词' }, limit: { type: 'number', description: '返回条数，默认 8' } }, required: ['query'] },
+  },
+  {
+    name: 'memory_list',
+    description: '长期记忆：列出当前账号已保存的记忆（可按关键词过滤），用于核对或回答“你记得哪些”。',
+    inputSchema: { type: 'object', properties: { query: { type: 'string', description: '可选关键词' }, limit: { type: 'number', description: '默认 100' } } },
+  },
+  {
+    name: 'memory_forget',
+    description: '长期记忆：归档一条记忆。仅当用户明确要求“忘掉/删除这条记忆”时调用，优先用 memory_search 找到 id 再传 id；不要自行清理无关记忆。',
+    inputSchema: { type: 'object', properties: { id: { type: 'string', description: '记忆 ID' }, query: { type: 'string', description: '没有 id 时按最匹配的一条归档' } } },
   },
 ]
 

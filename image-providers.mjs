@@ -7,6 +7,7 @@
  */
 
 import { createRequire } from 'node:module'
+import { createHash, createHmac } from 'node:crypto'
 
 const requireFromHere = createRequire(import.meta.url)
 
@@ -50,7 +51,7 @@ function createDefinitions() {
       endpoint: configuredValue('SEEDREAM_IMAGE_ENDPOINT', 'https://ark.cn-beijing.volces.com/api/v3/images/generations'),
       apiKey: envValue('SEEDREAM_IMAGE_API_KEY'),
       keyEnv: 'SEEDREAM_IMAGE_API_KEY',
-      capabilities: { generate: true, edit: true, references: true },
+      capabilities: { generate: true, edit: true, references: true, layers: true },
     },
   ]
 }
@@ -528,6 +529,109 @@ export async function editImage({
   })
 }
 
+function b64ToLayerImage(b64) {
+  const buffer = Buffer.from(b64, 'base64')
+  if (buffer.length < MIN_IMAGE_BYTES || buffer.length > MAX_IMAGE_BYTES) {
+    throw new ImageProviderError('图层模型返回的图片大小异常', { code: 'IMAGE_PROVIDER_EMPTY_IMAGE', status: 502 })
+  }
+  return { buffer, mime: 'image/png' }
+}
+
+function normalizeLayerBox(box) {
+  if (!box || typeof box !== 'object') return {}
+  const pick = (value) => Array.isArray(value) ? value.map((n) => Number(n) || 0) : []
+  const out = {}
+  if (box.absolute) out.absolute = pick(box.absolute)
+  if (box.normalized) out.normalized = pick(box.normalized)
+  return out
+}
+
+/**
+ * 图层拆分：把单张图交给支持 layer_decomposition 的 Seedream 模型，
+ * 返回 1 张底图（z_index=0）与若干带透明通道的独立图层（含叠放顺序、边界框、名称、描述）。
+ */
+export async function decomposeImage({
+  modelId = '',
+  prompt = '',
+  imageBuffer = null,
+  imageMime = 'image/png',
+  timeoutMs = Number(process.env.JG_IMAGE_DECOMPOSE_TIMEOUT_MS || 240_000),
+} = {}) {
+  refreshDefinitions()
+  const def = getImageModel(modelId)
+  if (def.provider !== 'seedream' || !def.capabilities.layers) {
+    throw new ImageProviderError('当前图像模型不支持图层拆分', { code: 'IMAGE_LAYER_UNSUPPORTED', status: 501 })
+  }
+  if (!imageBuffer || !Buffer.isBuffer(imageBuffer) || imageBuffer.length < MIN_IMAGE_BYTES) {
+    throw new ImageProviderError('待拆分图像不存在或内容过小', { code: 'IMAGE_LAYER_SOURCE_MISSING', status: 400 })
+  }
+  if (imageBuffer.length > MAX_EDIT_INPUT_BYTES) {
+    throw new ImageProviderError('待拆分图像超过 10 MB，无法提交给图像模型', { code: 'IMAGE_LAYER_INPUT_TOO_LARGE', status: 413 })
+  }
+  const mime = String(imageMime || '').split(';')[0].trim().toLowerCase()
+  if (!ALLOWED_MIME.has(mime)) {
+    throw new ImageProviderError(`待拆分图像格式不支持：${mime || '未知类型'}`, { code: 'IMAGE_LAYER_SOURCE_MIME_UNSUPPORTED', status: 400 })
+  }
+  const sourceImage = `data:${mime};base64,${imageBuffer.toString('base64')}`
+  const cleanPrompt = String(prompt || '').trim()
+  const body = {
+    model: def.model,
+    image: sourceImage,
+    layer_decomposition: true,
+    size: '2K',
+    output_format: 'png',
+    response_format: 'url',
+    watermark: false,
+  }
+  if (cleanPrompt) body.prompt = cleanPrompt
+  const effectiveTimeout = Math.max(30_000, Math.min(300_000, Number(timeoutMs) || DEFAULT_TIMEOUT_MS))
+  const response = await callProvider(def, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${def.apiKey}` },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(effectiveTimeout),
+  })
+  const payload = await responseJson(response)
+  if (!response.ok || payload.error) {
+    const message = String(payload?.error?.message || payload?.error || `HTTP ${response.status}`)
+    throw new ImageProviderError(`图层拆分失败：${message}`, {
+      code: 'IMAGE_PROVIDER_ERROR',
+      status: response.status >= 400 && response.status < 500 ? 400 : 502,
+    })
+  }
+  const items = Array.isArray(payload.data) ? payload.data : []
+  if (!items.length) {
+    throw new ImageProviderError('图层拆分模型未返回任何图层', { code: 'IMAGE_LAYER_NO_RESULT', status: 502 })
+  }
+  let base = null
+  const layers = []
+  for (const item of items) {
+    const url = typeof item?.url === 'string' ? item.url : ''
+    const b64 = typeof item?.b64_json === 'string' ? item.b64_json : ''
+    if (!url && !b64) continue
+    const image = url ? await downloadImage(url, effectiveTimeout) : b64ToLayerImage(b64)
+    const zIndex = Number.isInteger(Number(item?.z_index)) ? Number(item.z_index) : layers.length + 1
+    const layer = {
+      ...image,
+      zIndex,
+      box: normalizeLayerBox(item?.bounding_box),
+      name: String(item?.name || ''),
+      description: String(item?.description || ''),
+      width: Number(item?.size?.width) || 0,
+      height: Number(item?.size?.height) || 0,
+      provider: def.provider,
+      providerLabel: def.providerLabel,
+      model: def.model,
+      modelId: def.id,
+    }
+    if (zIndex === 0) base = layer
+    else layers.push(layer)
+  }
+  if (!base) throw new ImageProviderError('图层拆分模型未返回底图', { code: 'IMAGE_LAYER_NO_BASE', status: 502 })
+  layers.sort((a, b) => a.zIndex - b.zIndex)
+  return { base, layers, requestId: String(payload.request_id || payload.id || '') }
+}
+
 let sharpLib
 function getSharpLib() {
   if (sharpLib !== undefined) return sharpLib
@@ -747,5 +851,246 @@ export async function editImageInRegion({
     requestId: String(edited.requestId || ''),
     region: { x: rect.left, y: rect.top, width: rect.width, height: rect.height },
     coverage,
+  }
+}
+
+// ===== 火山视觉服务（visual.volcengineapi.com，IAM AK/SK 签名）：官方扩图 + Seedream 基模超清 =====
+
+const VOLC_VISUAL_REGION = envValue('VOLC_VISUAL_REGION', 'cn-north-1')
+const VOLC_VISUAL_SERVICE = 'cv'
+const VOLC_VISUAL_VERSION = '2022-08-31'
+
+function visualCredentials() {
+  return {
+    ak: envValue('VOLC_VISUAL_AK'),
+    sk: envValue('VOLC_VISUAL_SK'),
+    host: envValue('VOLC_VISUAL_HOST', 'visual.volcengineapi.com'),
+  }
+}
+
+export function visualStatus() {
+  const { ak, sk } = visualCredentials()
+  const configured = Boolean(ak && sk)
+  return {
+    configured,
+    akEnv: 'VOLC_VISUAL_AK',
+    skEnv: 'VOLC_VISUAL_SK',
+    disabledReason: configured ? '' : '尚未配置火山视觉服务 AK/SK（VOLC_VISUAL_AK / VOLC_VISUAL_SK）',
+  }
+}
+
+function volcSha256Hex(content) {
+  return createHash('sha256').update(content, 'utf8').digest('hex')
+}
+
+function volcHmac(key, data) {
+  return createHmac('sha256', key).update(data, 'utf8').digest()
+}
+
+function volcNormQuery(params) {
+  return Object.keys(params).sort()
+    .map((key) => `${encodeURIComponent(key)}=${encodeURIComponent(params[key])}`)
+    .join('&')
+}
+
+function volcStamp(date) {
+  const pad = (n) => String(n).padStart(2, '0')
+  return `${date.getUTCFullYear()}${pad(date.getUTCMonth() + 1)}${pad(date.getUTCDate())}T${pad(date.getUTCHours())}${pad(date.getUTCMinutes())}${pad(date.getUTCSeconds())}Z`
+}
+
+async function volcVisualCall(action, bodyObj, timeoutMs) {
+  const { ak, sk, host } = visualCredentials()
+  if (!ak || !sk) {
+    throw new ImageProviderError('火山视觉服务尚未配置 AK/SK', { code: 'IMAGE_VISUAL_NOT_CONFIGURED', status: 503 })
+  }
+  const method = 'POST'
+  const path = '/'
+  const query = { Action: action, Version: VOLC_VISUAL_VERSION }
+  const queryString = volcNormQuery(query)
+  const body = JSON.stringify(bodyObj)
+  const date = new Date()
+  const xDate = volcStamp(date)
+  const shortDate = xDate.slice(0, 8)
+  const payloadHash = volcSha256Hex(body)
+  const headers = [
+    `content-type:application/json`,
+    `host:${host}`,
+    `x-content-sha256:${payloadHash}`,
+    `x-date:${xDate}`,
+  ]
+  const signedHeaders = 'content-type;host;x-content-sha256;x-date'
+  const canonicalRequest = [method, path, queryString, headers.join('\n'), '', signedHeaders, payloadHash].join('\n')
+  const credentialScope = `${shortDate}/${VOLC_VISUAL_REGION}/${VOLC_VISUAL_SERVICE}/request`
+  const stringToSign = ['HMAC-SHA256', xDate, credentialScope, volcSha256Hex(canonicalRequest)].join('\n')
+  const kDate = volcHmac(sk, shortDate)
+  const kRegion = volcHmac(kDate, VOLC_VISUAL_REGION)
+  const kService = volcHmac(kRegion, VOLC_VISUAL_SERVICE)
+  const kSigning = volcHmac(kService, 'request')
+  const signature = createHmac('sha256', kSigning).update(stringToSign, 'utf8').digest('hex')
+  const authorization = `HMAC-SHA256 Credential=${ak}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`
+
+  const base = host.includes('://') ? host : `https://${host}`
+  let response
+  try {
+    response = await fetch(`${base}${path}?${queryString}`, {
+      method,
+      headers: {
+        'content-type': 'application/json',
+        'host': host,
+        'x-date': xDate,
+        'x-content-sha256': payloadHash,
+        authorization,
+      },
+      body,
+      signal: AbortSignal.timeout(timeoutMs),
+    })
+  } catch (error) {
+    throw new ImageProviderError(`无法连接火山视觉服务：${error?.message || error}`, { code: 'IMAGE_VISUAL_UNREACHABLE', status: 502 })
+  }
+  const payload = await responseJson(response)
+  if (payload && Number(payload.code) !== 10000) {
+    const message = String(payload.message || payload.code || `HTTP ${response.status}`)
+    throw new ImageProviderError(`视觉服务失败：${message}`, {
+      code: 'IMAGE_VISUAL_ERROR',
+      status: response.status >= 400 && response.status < 500 ? 400 : 502,
+    })
+  }
+  if (!response.ok) {
+    throw new ImageProviderError(`视觉服务返回 HTTP ${response.status}`, { code: 'IMAGE_VISUAL_BAD_STATUS', status: 502 })
+  }
+  return payload
+}
+
+async function visualResultImage(data, timeoutMs, fallbackMime) {
+  const url = Array.isArray(data?.image_urls) && typeof data.image_urls[0] === 'string' ? data.image_urls[0] : ''
+  const b64 = Array.isArray(data?.binary_data_base64) && typeof data.binary_data_base64[0] === 'string' ? data.binary_data_base64[0] : ''
+  if (!url && !b64) {
+    throw new ImageProviderError('视觉服务未返回图像数据', { code: 'IMAGE_VISUAL_NO_IMAGE', status: 502 })
+  }
+  if (url) return downloadImage(url, timeoutMs)
+  const buffer = Buffer.from(b64, 'base64')
+  if (buffer.length < MIN_IMAGE_BYTES || buffer.length > MAX_IMAGE_BYTES) {
+    throw new ImageProviderError('视觉服务返回的图片大小异常', { code: 'IMAGE_VISUAL_EMPTY_IMAGE', status: 502 })
+  }
+  return { buffer, mime: fallbackMime }
+}
+
+function visualInputCheck(imageBuffer, imageMime, prefix) {
+  if (!imageBuffer || !Buffer.isBuffer(imageBuffer) || imageBuffer.length < MIN_IMAGE_BYTES) {
+    throw new ImageProviderError('待处理图像不存在或内容过小', { code: `${prefix}_SOURCE_MISSING`, status: 400 })
+  }
+  if (imageBuffer.length > MAX_EDIT_INPUT_BYTES) {
+    throw new ImageProviderError('待处理图像超过 10 MB', { code: `${prefix}_INPUT_TOO_LARGE`, status: 413 })
+  }
+  const mime = String(imageMime || '').split(';')[0].trim().toLowerCase()
+  if (!ALLOWED_MIME.has(mime)) {
+    throw new ImageProviderError(`待处理图像格式不支持：${mime || '未知类型'}`, { code: `${prefix}_SOURCE_MIME_UNSUPPORTED`, status: 400 })
+  }
+  return mime
+}
+
+/**
+ * 官方智能扩图：原图保持不变，按四边比例向外生成延展区域。
+ * expand 为单边相对原图边长的比例（0,1]，四边使用同一值即等比扩展。
+ */
+export async function expandImage({
+  imageBuffer = null,
+  imageMime = 'image/png',
+  prompt = '',
+  expand = 0.1,
+  top = null,
+  bottom = null,
+  left = null,
+  right = null,
+  maxWidth = 1920,
+  maxHeight = 1920,
+  timeoutMs = Number(process.env.JG_IMAGE_EXPAND_TIMEOUT_MS || 180_000),
+} = {}) {
+  const mime = visualInputCheck(imageBuffer, imageMime, 'IMAGE_EXPAND')
+  const base = Math.max(0.05, Math.min(1, Number(expand) || 0.1))
+  const side = (value) => (value == null ? base : Math.max(0, Math.min(1, Number(value) || 0)))
+  const padTop = side(top)
+  const padBottom = side(bottom)
+  const padLeft = side(left)
+  const padRight = side(right)
+  const cleanPrompt = String(prompt || '').trim().slice(0, 100)
+  const effectiveTimeout = Math.max(30_000, Math.min(300_000, Number(timeoutMs) || DEFAULT_TIMEOUT_MS))
+  const payload = await volcVisualCall('CVProcess', {
+    req_key: 'i2i_outpainting',
+    binary_data_base64: [imageBuffer.toString('base64')],
+    custom_prompt: cleanPrompt,
+    top: padTop,
+    bottom: padBottom,
+    left: padLeft,
+    right: padRight,
+    max_width: Math.max(640, Math.min(4096, Number(maxWidth) || 1920)),
+    max_height: Math.max(640, Math.min(4096, Number(maxHeight) || 1920)),
+    return_url: true,
+  }, effectiveTimeout)
+  const image = await visualResultImage(payload?.data, effectiveTimeout, 'image/jpeg')
+  return {
+    ...image,
+    provider: 'volc-visual',
+    providerLabel: '火山视觉扩图',
+    model: 'i2i_outpainting',
+    modelId: 'i2i_outpainting',
+    requestId: String(payload?.data?.request_id || payload?.request_id || ''),
+  }
+}
+
+const UPSCALE_REQ_KEY = 'jimeng_i2i_seed3_tilesr_cvtob'
+
+async function sleep(ms) {
+  await new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/**
+ * Seedream 基模智能超清：提交异步任务后轮询结果，输出 4K/8K。
+ */
+export async function upscaleImage({
+  imageBuffer = null,
+  imageMime = 'image/png',
+  resolution = '4k',
+  scale = 50,
+  timeoutMs = Number(process.env.JG_IMAGE_UPSCALE_TIMEOUT_MS || 240_000),
+} = {}) {
+  const mime = visualInputCheck(imageBuffer, imageMime, 'IMAGE_UPSCALE')
+  const res = ['4k', '8k'].includes(String(resolution)) ? String(resolution) : '4k'
+  const detail = Math.max(0, Math.min(100, Number(scale) || 50))
+  const effectiveTimeout = Math.max(30_000, Math.min(300_000, Number(timeoutMs) || DEFAULT_TIMEOUT_MS))
+  const submit = await volcVisualCall('CVSync2AsyncSubmitTask', {
+    req_key: UPSCALE_REQ_KEY,
+    binary_data_base64: [imageBuffer.toString('base64')],
+    resolution: res,
+    scale: detail,
+  }, effectiveTimeout)
+  const taskId = String(submit?.data?.task_id || '')
+  if (!taskId) throw new ImageProviderError('超清任务未返回任务编号', { code: 'IMAGE_UPSCALE_NO_TASK', status: 502 })
+
+  const deadline = Date.now() + effectiveTimeout
+  let resultData = null
+  while (Date.now() < deadline) {
+    await sleep(2000)
+    const poll = await volcVisualCall('CVSync2AsyncGetResult', {
+      req_key: UPSCALE_REQ_KEY,
+      task_id: taskId,
+      req_json: JSON.stringify({ return_url: true }),
+    }, effectiveTimeout)
+    const data = poll?.data
+    const status = String(data?.status || '')
+    if (status === 'done') { resultData = data; break }
+    if (status === 'not_found' || status === 'expired') {
+      throw new ImageProviderError(`超清任务${status === 'expired' ? '已过期' : '不存在'}`, { code: 'IMAGE_UPSCALE_TASK_LOST', status: 502 })
+    }
+  }
+  if (!resultData) throw new ImageProviderError('超清任务处理超时', { code: 'IMAGE_UPSCALE_TIMEOUT', status: 502 })
+  const image = await visualResultImage(resultData, effectiveTimeout, 'image/png')
+  return {
+    ...image,
+    provider: 'volc-visual',
+    providerLabel: 'Seedream 智能超清',
+    model: UPSCALE_REQ_KEY,
+    modelId: UPSCALE_REQ_KEY,
+    requestId: taskId,
   }
 }

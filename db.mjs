@@ -108,6 +108,30 @@ db.exec(`
     updated_at INTEGER NOT NULL
   );
 
+  CREATE TABLE IF NOT EXISTS memories (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'fact',
+    scope TEXT NOT NULL DEFAULT 'global',
+    scope_ref TEXT NOT NULL DEFAULT '',
+    text TEXT NOT NULL,
+    normalized TEXT NOT NULL,
+    tags TEXT NOT NULL DEFAULT '',
+    source_conversation_id TEXT NOT NULL DEFAULT '',
+    source_message_id TEXT NOT NULL DEFAULT '',
+    confidence REAL NOT NULL DEFAULT 0.8,
+    pinned INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'active',
+    embedding TEXT NOT NULL DEFAULT '',
+    embedding_model TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    last_used_at INTEGER NOT NULL DEFAULT 0,
+    use_count INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(user_id, normalized)
+  );
+  CREATE INDEX IF NOT EXISTS idx_memories_user ON memories(user_id, status, updated_at DESC);
+
   CREATE TABLE IF NOT EXISTS files (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -137,6 +161,56 @@ db.exec(`
     note TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (file_id, version)
   );
+
+  CREATE TABLE IF NOT EXISTS drive_index_chunks (
+    item_id TEXT NOT NULL,
+    chunk_no INTEGER NOT NULL,
+    content TEXT NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (item_id, chunk_no)
+  );
+
+  CREATE TABLE IF NOT EXISTS drive_index_meta (
+    item_id TEXT PRIMARY KEY,
+    file_id TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending',
+    chunk_count INTEGER NOT NULL DEFAULT 0,
+    error TEXT NOT NULL DEFAULT '',
+    updated_at INTEGER NOT NULL
+  );
+
+  CREATE VIRTUAL TABLE IF NOT EXISTS drive_fts USING fts5(
+    item_id UNINDEXED,
+    chunk_no UNINDEXED,
+    tokens,
+    tokenize='unicode61 remove_diacritics 0'
+  );
+
+  CREATE TABLE IF NOT EXISTS drive_search_logs (
+    id TEXT PRIMARY KEY,
+    user TEXT NOT NULL,
+    space TEXT NOT NULL DEFAULT '',
+    query TEXT NOT NULL DEFAULT '',
+    mode TEXT NOT NULL DEFAULT 'all',
+    total INTEGER NOT NULL DEFAULT 0,
+    items_json TEXT NOT NULL DEFAULT '[]',
+    created_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_drive_search_logs_time ON drive_search_logs(created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_drive_search_logs_user ON drive_search_logs(user, created_at DESC);
+
+  CREATE TABLE IF NOT EXISTS drive_search_clicks (
+    id TEXT PRIMARY KEY,
+    search_id TEXT NOT NULL,
+    user TEXT NOT NULL,
+    item_id TEXT NOT NULL,
+    position INTEGER NOT NULL DEFAULT 0,
+    action TEXT NOT NULL DEFAULT 'open',
+    created_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_drive_search_clicks_search ON drive_search_clicks(search_id);
+  CREATE INDEX IF NOT EXISTS idx_drive_search_clicks_time ON drive_search_clicks(created_at DESC);
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_drive_search_clicks_unique ON drive_search_clicks(search_id, item_id, action);
 
   CREATE TABLE IF NOT EXISTS visual_artifacts (
     id TEXT PRIMARY KEY,
@@ -241,6 +315,31 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_image_comments_asset ON image_comments(asset_id, created_at ASC);
 
+  CREATE TABLE IF NOT EXISTS image_layers (
+    id TEXT PRIMARY KEY,
+    asset_id TEXT NOT NULL,
+    owner TEXT NOT NULL DEFAULT '',
+    net TEXT NOT NULL DEFAULT '',
+    kind TEXT NOT NULL DEFAULT 'layer',
+    z_order INTEGER NOT NULL DEFAULT 1,
+    name TEXT NOT NULL DEFAULT '',
+    file_id TEXT NOT NULL DEFAULT '',
+    box TEXT NOT NULL DEFAULT '{}',
+    visible INTEGER NOT NULL DEFAULT 1,
+    opacity INTEGER NOT NULL DEFAULT 100,
+    blend_mode TEXT NOT NULL DEFAULT 'normal',
+    locked INTEGER NOT NULL DEFAULT 0,
+    rotation REAL NOT NULL DEFAULT 0,
+    provider TEXT NOT NULL DEFAULT '',
+    model TEXT NOT NULL DEFAULT '',
+    model_id TEXT NOT NULL DEFAULT '',
+    description TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    deleted_at INTEGER
+  );
+  CREATE INDEX IF NOT EXISTS idx_image_layers_asset ON image_layers(asset_id, z_order ASC, deleted_at);
+
   CREATE TABLE IF NOT EXISTS image_templates (
     id TEXT PRIMARY KEY,
     title TEXT NOT NULL,
@@ -259,6 +358,134 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_image_templates_status ON image_templates(status, created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_image_templates_applicant ON image_templates(applicant, created_at DESC);
+
+  -- 地下管网模块（方案见 docs/地下管网三维模块方案-2026-11-18.md）
+  CREATE TABLE IF NOT EXISTS pipeline_datasets (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    source_file TEXT NOT NULL DEFAULT '',
+    crs TEXT NOT NULL DEFAULT '',
+    datum TEXT NOT NULL DEFAULT '',
+    pipe_major TEXT NOT NULL DEFAULT '',
+    point_count INTEGER NOT NULL DEFAULT 0,
+    line_count INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'imported',
+    note TEXT NOT NULL DEFAULT '',
+    meta TEXT NOT NULL DEFAULT '{}',
+    owner TEXT NOT NULL DEFAULT '',
+    net TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    deleted_at INTEGER
+  );
+  CREATE INDEX IF NOT EXISTS idx_pipe_datasets_owner ON pipeline_datasets(owner, updated_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_pipe_datasets_deleted ON pipeline_datasets(deleted_at);
+
+  CREATE TABLE IF NOT EXISTS pipe_nodes (
+    id TEXT PRIMARY KEY,
+    dataset_id TEXT NOT NULL,
+    node_code TEXT NOT NULL DEFAULT '',
+    category TEXT NOT NULL DEFAULT '',
+    x REAL,
+    y REAL,
+    ground_elev REAL,
+    z REAL,
+    cover_depth REAL,
+    cover_material TEXT NOT NULL DEFAULT '',
+    cover_size TEXT NOT NULL DEFAULT '',
+    chamber_shape TEXT NOT NULL DEFAULT '',
+    chamber_size TEXT NOT NULL DEFAULT '',
+    road TEXT NOT NULL DEFAULT '',
+    address TEXT NOT NULL DEFAULT '',
+    owner TEXT NOT NULL DEFAULT '',
+    build_year TEXT NOT NULL DEFAULT '',
+    survey_date TEXT NOT NULL DEFAULT '',
+    survey_unit TEXT NOT NULL DEFAULT '',
+    angle REAL,
+    status TEXT NOT NULL DEFAULT '',
+    attrs TEXT NOT NULL DEFAULT '{}',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    deleted_at INTEGER
+  );
+  CREATE INDEX IF NOT EXISTS idx_pipe_nodes_dataset ON pipe_nodes(dataset_id, deleted_at);
+  CREATE INDEX IF NOT EXISTS idx_pipe_nodes_code ON pipe_nodes(dataset_id, node_code);
+
+  CREATE TABLE IF NOT EXISTS pipe_lines (
+    id TEXT PRIMARY KEY,
+    dataset_id TEXT NOT NULL,
+    line_code TEXT NOT NULL DEFAULT '',
+    node_start TEXT NOT NULL DEFAULT '',
+    node_end TEXT NOT NULL DEFAULT '',
+    pipe_major TEXT NOT NULL DEFAULT '',
+    material TEXT NOT NULL DEFAULT '',
+    profile_type TEXT NOT NULL DEFAULT '',
+    profile_size TEXT NOT NULL DEFAULT '',
+    wall_thickness TEXT NOT NULL DEFAULT '',
+    bury_type TEXT NOT NULL DEFAULT '',
+    start_depth REAL,
+    end_depth REAL,
+    start_elev REAL,
+    end_elev REAL,
+    flow_dir TEXT NOT NULL DEFAULT '-1',
+    length REAL,
+    hole_count INTEGER NOT NULL DEFAULT 0,
+    cab_count INTEGER NOT NULL DEFAULT 0,
+    pressure TEXT NOT NULL DEFAULT '',
+    voltage TEXT NOT NULL DEFAULT '',
+    owner TEXT NOT NULL DEFAULT '',
+    road TEXT NOT NULL DEFAULT '',
+    build_year TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT '',
+    line_style TEXT NOT NULL DEFAULT '',
+    geom TEXT NOT NULL DEFAULT '',
+    attrs TEXT NOT NULL DEFAULT '{}',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    deleted_at INTEGER
+  );
+  CREATE INDEX IF NOT EXISTS idx_pipe_lines_dataset ON pipe_lines(dataset_id, deleted_at);
+  CREATE INDEX IF NOT EXISTS idx_pipe_lines_major ON pipe_lines(dataset_id, pipe_major);
+
+  CREATE TABLE IF NOT EXISTS pipe_topology (
+    id TEXT PRIMARY KEY,
+    dataset_id TEXT NOT NULL,
+    node_id TEXT NOT NULL,
+    neighbor_node_id TEXT NOT NULL,
+    line_id TEXT NOT NULL DEFAULT '',
+    pipe_major TEXT NOT NULL DEFAULT '',
+    directed INTEGER NOT NULL DEFAULT 0
+  );
+  CREATE INDEX IF NOT EXISTS idx_pipe_topology_node ON pipe_topology(dataset_id, node_id);
+
+  CREATE TABLE IF NOT EXISTS pipe_check_issues (
+    id TEXT PRIMARY KEY,
+    dataset_id TEXT NOT NULL,
+    issue_type TEXT NOT NULL DEFAULT '',
+    severity TEXT NOT NULL DEFAULT '中',
+    node_id TEXT NOT NULL DEFAULT '',
+    line_id TEXT NOT NULL DEFAULT '',
+    message TEXT NOT NULL DEFAULT '',
+    resolved INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_pipe_issues_dataset ON pipe_check_issues(dataset_id, resolved);
+
+  -- 专业分析结果：断面/净距/碰撞/开挖，参数与结果整体留档，供报告与追溯复用。
+  CREATE TABLE IF NOT EXISTS pipe_analysis_runs (
+    id TEXT PRIMARY KEY,
+    dataset_id TEXT NOT NULL,
+    analysis_type TEXT NOT NULL,
+    params TEXT NOT NULL DEFAULT '{}',
+    result TEXT NOT NULL DEFAULT '{}',
+    summary TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'done',
+    owner TEXT NOT NULL DEFAULT '',
+    net TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL,
+    deleted_at INTEGER
+  );
+  CREATE INDEX IF NOT EXISTS idx_pipe_analysis_dataset ON pipe_analysis_runs(dataset_id, analysis_type, created_at DESC);
 `)
 
 // 兼容 P0-2 之前已经建好的 sessions 表：补 account_id 列。
@@ -287,6 +514,8 @@ for (const sql of [
 for (const sql of [
   "ALTER TABLE audit ADD COLUMN user_id TEXT NOT NULL DEFAULT ''",
   "ALTER TABLE approval_decisions ADD COLUMN user_id TEXT NOT NULL DEFAULT ''",
+  'ALTER TABLE image_layers ADD COLUMN rotation REAL NOT NULL DEFAULT 0',
+  "ALTER TABLE pipeline_datasets ADD COLUMN meta TEXT NOT NULL DEFAULT '{}'",
 ]) {
   try {
     db.exec(sql)
@@ -466,6 +695,21 @@ const stmt = {
   `),
   getImageComment: db.prepare('SELECT * FROM image_comments WHERE id = ?'),
   listImageComments: db.prepare('SELECT * FROM image_comments WHERE asset_id = ? ORDER BY created_at ASC'),
+  insertImageLayer: db.prepare(`
+    INSERT INTO image_layers (
+      id, asset_id, owner, net, kind, z_order, name, file_id, box, visible, opacity,
+      blend_mode, locked, rotation, provider, model, model_id, description, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `),
+  getImageLayer: db.prepare('SELECT * FROM image_layers WHERE id = ?'),
+  listImageLayers: db.prepare('SELECT * FROM image_layers WHERE asset_id = ? AND deleted_at IS NULL ORDER BY z_order ASC, created_at ASC'),
+  updateImageLayerMeta: db.prepare(`
+    UPDATE image_layers SET
+      name = ?, box = ?, visible = ?, opacity = ?, blend_mode = ?, locked = ?, rotation = ?, z_order = ?, description = ?, updated_at = ?
+    WHERE id = ? AND deleted_at IS NULL
+  `),
+  softDeleteImageLayer: db.prepare('UPDATE image_layers SET deleted_at = ?, updated_at = ? WHERE id = ? AND owner = ? AND deleted_at IS NULL'),
+  deleteImageLayersByAsset: db.prepare('UPDATE image_layers SET deleted_at = ?, updated_at = ? WHERE asset_id = ? AND deleted_at IS NULL'),
   insertImageTemplate: db.prepare(`
     INSERT INTO image_templates (
       id, title, category, ratio, prompt, description, preview_file_id, source_asset_id,
@@ -488,6 +732,127 @@ const stmt = {
     UPDATE image_templates SET status = 'approved', reviewer = ?, review_note = '', reviewed_at = ?
     WHERE id = ? AND status = 'offline'
   `),
+  deleteImageTemplate: db.prepare('DELETE FROM image_templates WHERE id = ?'),
+
+  insertPipelineDataset: db.prepare(`
+    INSERT INTO pipeline_datasets (
+      id, name, source_file, crs, datum, pipe_major, point_count, line_count,
+      status, note, meta, owner, net, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `),
+  getPipelineDataset: db.prepare('SELECT * FROM pipeline_datasets WHERE id = ?'),
+  listPipelineDatasets: db.prepare(`
+    SELECT * FROM pipeline_datasets
+    WHERE owner = ? AND deleted_at IS NULL
+    ORDER BY updated_at DESC LIMIT ?
+  `),
+  softDeletePipelineDataset: db.prepare(`
+    UPDATE pipeline_datasets SET deleted_at = ?, updated_at = ?
+    WHERE id = ? AND owner = ? AND deleted_at IS NULL
+  `),
+  updatePipelineDatasetCounts: db.prepare(`
+    UPDATE pipeline_datasets SET point_count = ?, line_count = ?, updated_at = ? WHERE id = ?
+  `),
+  updatePipelineDatasetMeta: db.prepare(`
+    UPDATE pipeline_datasets SET meta = ?, status = ?, note = ?, updated_at = ? WHERE id = ?
+  `),
+
+  insertPipeNode: db.prepare(`
+    INSERT INTO pipe_nodes (
+      id, dataset_id, node_code, category, x, y, ground_elev, z, cover_depth,
+      cover_material, cover_size, chamber_shape, chamber_size, road, address, owner,
+      build_year, survey_date, survey_unit, angle, status, attrs, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `),
+  getPipeNode: db.prepare('SELECT * FROM pipe_nodes WHERE id = ? AND deleted_at IS NULL'),
+  listPipeNodes: db.prepare(`
+    SELECT * FROM pipe_nodes
+    WHERE dataset_id = ? AND deleted_at IS NULL
+    ORDER BY rowid LIMIT ?
+  `),
+  countPipeNodes: db.prepare('SELECT COUNT(*) AS n FROM pipe_nodes WHERE dataset_id = ? AND deleted_at IS NULL'),
+  deletePipeNodesByDataset: db.prepare('DELETE FROM pipe_nodes WHERE dataset_id = ?'),
+
+  insertPipeLine: db.prepare(`
+    INSERT INTO pipe_lines (
+      id, dataset_id, line_code, node_start, node_end, pipe_major, material, profile_type,
+      profile_size, wall_thickness, bury_type, start_depth, end_depth, start_elev, end_elev,
+      flow_dir, length, hole_count, cab_count, pressure, voltage, owner, road, build_year,
+      status, line_style, geom, attrs, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `),
+  getPipeLine: db.prepare('SELECT * FROM pipe_lines WHERE id = ? AND deleted_at IS NULL'),
+  listPipeLines: db.prepare(`
+    SELECT * FROM pipe_lines
+    WHERE dataset_id = ? AND deleted_at IS NULL
+    ORDER BY rowid LIMIT ?
+  `),
+  countPipeLines: db.prepare('SELECT COUNT(*) AS n FROM pipe_lines WHERE dataset_id = ? AND deleted_at IS NULL'),
+  deletePipeLinesByDataset: db.prepare('DELETE FROM pipe_lines WHERE dataset_id = ?'),
+
+  deletePipeTopologyByDataset: db.prepare('DELETE FROM pipe_topology WHERE dataset_id = ?'),
+  insertPipeTopology: db.prepare(`
+    INSERT INTO pipe_topology (id, dataset_id, node_id, neighbor_node_id, line_id, pipe_major, directed)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `),
+  listPipeTopology: db.prepare('SELECT * FROM pipe_topology WHERE dataset_id = ? ORDER BY node_id'),
+
+  insertPipeIssue: db.prepare(`
+    INSERT INTO pipe_check_issues (id, dataset_id, issue_type, severity, node_id, line_id, message, resolved, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `),
+  listPipeIssues: db.prepare(`
+    SELECT * FROM pipe_check_issues
+    WHERE dataset_id = ? AND (? = -1 OR resolved = ?)
+    ORDER BY created_at DESC LIMIT ?
+  `),
+  resolvePipeIssue: db.prepare('UPDATE pipe_check_issues SET resolved = 1 WHERE id = ?'),
+  deletePipeIssuesByDataset: db.prepare('DELETE FROM pipe_check_issues WHERE dataset_id = ?'),
+
+  insertPipeAnalysisRun: db.prepare(`
+    INSERT INTO pipe_analysis_runs (
+      id, dataset_id, analysis_type, params, result, summary, status, owner, net, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `),
+  getPipeAnalysisRun: db.prepare('SELECT * FROM pipe_analysis_runs WHERE id = ? AND deleted_at IS NULL'),
+  listPipeAnalysisRuns: db.prepare(`
+    SELECT * FROM pipe_analysis_runs
+    WHERE dataset_id = ? AND (? = '' OR analysis_type = ?) AND deleted_at IS NULL
+    ORDER BY created_at DESC LIMIT ?
+  `),
+  softDeletePipeAnalysisRun: db.prepare('UPDATE pipe_analysis_runs SET deleted_at = ? WHERE id = ? AND owner = ?'),
+
+  deleteDriveChunks: db.prepare('DELETE FROM drive_index_chunks WHERE item_id = ?'),
+  insertDriveChunk: db.prepare('INSERT INTO drive_index_chunks (item_id, chunk_no, content, updated_at) VALUES (?, ?, ?, ?)'),
+  getDriveChunk: db.prepare('SELECT content FROM drive_index_chunks WHERE item_id = ? AND chunk_no = ?'),
+  deleteDriveFts: db.prepare('DELETE FROM drive_fts WHERE item_id = ?'),
+  insertDriveFts: db.prepare('INSERT INTO drive_fts (item_id, chunk_no, tokens) VALUES (?, ?, ?)'),
+  searchDriveFts: db.prepare('SELECT item_id, chunk_no, bm25(drive_fts) AS score FROM drive_fts WHERE drive_fts MATCH ? ORDER BY score LIMIT ?'),
+  upsertDriveIndexMeta: db.prepare(`
+    INSERT INTO drive_index_meta (item_id, file_id, status, chunk_count, error, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(item_id) DO UPDATE SET
+      file_id = excluded.file_id,
+      status = excluded.status,
+      chunk_count = excluded.chunk_count,
+      error = excluded.error,
+      updated_at = excluded.updated_at
+  `),
+  getDriveIndexMeta: db.prepare('SELECT * FROM drive_index_meta WHERE item_id = ?'),
+  listDriveIndexMeta: db.prepare('SELECT * FROM drive_index_meta ORDER BY updated_at DESC'),
+  deleteDriveIndexMeta: db.prepare('DELETE FROM drive_index_meta WHERE item_id = ?'),
+
+  insertDriveSearchLog: db.prepare(`
+    INSERT INTO drive_search_logs (id, user, space, query, mode, total, items_json, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `),
+  insertDriveSearchClick: db.prepare(`
+    INSERT OR IGNORE INTO drive_search_clicks (id, search_id, user, item_id, position, action, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `),
+  getDriveSearchLog: db.prepare('SELECT * FROM drive_search_logs WHERE id = ?'),
+  listDriveSearchLogs: db.prepare('SELECT * FROM drive_search_logs WHERE created_at >= ? ORDER BY created_at DESC LIMIT ?'),
+  listDriveSearchClicks: db.prepare('SELECT * FROM drive_search_clicks WHERE created_at >= ? ORDER BY created_at DESC LIMIT ?'),
 }
 
 /* ------------------------------- sessions ------------------------------- */
@@ -760,6 +1125,143 @@ export function loadState(key) {
   } catch {
     return null
   }
+}
+
+/* ------------------------------ memories -------------------------------- */
+
+function memoryNormalize(text = '') {
+  return String(text || '')
+    .toLowerCase()
+    .replace(/[\s\u3000]+/g, '')
+    .replace(/[，。！？、；：""''（）()\[\]{}<>《》\-—…·,.!?;:'"()]/g, '')
+    .slice(0, 400)
+}
+
+function memoryMeta(row) {
+  if (!row) return null
+  return {
+    id: row.id,
+    userId: row.user_id,
+    kind: row.kind,
+    scope: row.scope,
+    scopeRef: row.scope_ref || '',
+    text: row.text,
+    tags: row.tags ? row.tags.split(',').filter(Boolean) : [],
+    sourceConversationId: row.source_conversation_id || '',
+    sourceMessageId: row.source_message_id || '',
+    confidence: Number(row.confidence),
+    pinned: Boolean(row.pinned),
+    status: row.status,
+    hasEmbedding: Boolean(row.embedding),
+    embeddingModel: row.embedding_model || '',
+    createdAt: Number(row.created_at),
+    updatedAt: Number(row.updated_at),
+    lastUsedAt: Number(row.last_used_at || 0),
+    useCount: Number(row.use_count || 0),
+  }
+}
+
+const memorySql = {
+  getById: db.prepare('SELECT * FROM memories WHERE id = ? AND user_id = ?'),
+  getByNormalized: db.prepare('SELECT * FROM memories WHERE user_id = ? AND normalized = ?'),
+  insert: db.prepare(`
+    INSERT INTO memories (id, user_id, kind, scope, scope_ref, text, normalized, tags, source_conversation_id, source_message_id, confidence, pinned, status, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
+    ON CONFLICT(user_id, normalized) DO UPDATE SET
+      text = excluded.text, kind = excluded.kind, scope = excluded.scope, scope_ref = excluded.scope_ref,
+      tags = excluded.tags, confidence = excluded.confidence, pinned = MAX(memories.pinned, excluded.pinned),
+      status = 'active', updated_at = excluded.updated_at
+  `),
+  listByUser: db.prepare("SELECT * FROM memories WHERE user_id = ? AND status = 'active' ORDER BY pinned DESC, updated_at DESC LIMIT ?"),
+  search: db.prepare("SELECT * FROM memories WHERE user_id = ? AND status = 'active' AND (text LIKE ? OR tags LIKE ?) ORDER BY pinned DESC, updated_at DESC LIMIT ?"),
+  archive: db.prepare("UPDATE memories SET status = 'archived', updated_at = ? WHERE id = ? AND user_id = ?"),
+  remove: db.prepare('DELETE FROM memories WHERE id = ? AND user_id = ?'),
+  touch: db.prepare('UPDATE memories SET last_used_at = ?, use_count = use_count + 1 WHERE id = ?'),
+  setEmbedding: db.prepare('UPDATE memories SET embedding = ?, embedding_model = ? WHERE id = ? AND user_id = ?'),
+  listEmbeddings: db.prepare("SELECT id, embedding FROM memories WHERE user_id = ? AND status = 'active' ORDER BY updated_at DESC LIMIT ?"),
+  count: db.prepare("SELECT COUNT(*) AS count FROM memories WHERE user_id = ? AND status = 'active'"),
+}
+
+/**
+ * 写入或更新一条长期记忆（按用户 + 规范化文本去重）。
+ * 返回 { item, created }，created 表示是否新建。
+ */
+export function upsertMemory(input = {}) {
+  const userId = String(input.userId || '').trim()
+  const text = String(input.text || '').trim().slice(0, 400)
+  if (!userId || !text) throw new Error('memory 需要 userId 与 text')
+  const normalized = memoryNormalize(text)
+  const existing = memorySql.getByNormalized.get(userId, normalized)
+  const now = Date.now()
+  const id = existing?.id || `MEM-${randomBytes(8).toString('hex')}`
+  memorySql.insert.run(
+    id,
+    userId,
+    ['preference', 'fact', 'decision', 'entity', 'task'].includes(String(input.kind || '')) ? String(input.kind) : 'fact',
+    input.scope === 'project' || input.scope === 'conversation' ? input.scope : 'global',
+    String(input.scopeRef || '').slice(0, 120),
+    text,
+    normalized,
+    Array.isArray(input.tags) ? input.tags.map((x) => String(x).trim()).filter(Boolean).slice(0, 8).join(',') : String(input.tags || '').slice(0, 200),
+    String(input.sourceConversationId || '').slice(0, 80),
+    String(input.sourceMessageId || '').slice(0, 120),
+    Math.min(1, Math.max(0, Number(input.confidence ?? 0.8))),
+    input.pinned ? 1 : 0,
+    existing?.created_at || now,
+    now
+  )
+  return { item: memoryMeta(memorySql.getById.get(id, userId)), created: !existing }
+}
+
+export function getMemory(userId, id) {
+  return memoryMeta(memorySql.getById.get(String(userId || ''), String(id || '')))
+}
+
+export function listMemories({ userId = '', q = '', limit = 100 } = {}) {
+  const max = Math.min(500, Math.max(1, Number(limit) || 100))
+  if (String(q || '').trim()) {
+    const like = `%${String(q).trim().slice(0, 60)}%`
+    return memorySql.search.all(String(userId), like, like, max).map(memoryMeta)
+  }
+  return memorySql.listByUser.all(String(userId), max).map(memoryMeta)
+}
+
+export function listActiveMemories(userId, limit = 500) {
+  const max = Math.min(2000, Math.max(1, Number(limit) || 500))
+  return memorySql.listByUser.all(String(userId), max).map(memoryMeta)
+}
+
+export function touchMemories(ids = []) {
+  const now = Date.now()
+  for (const id of ids.slice(0, 20)) memorySql.touch.run(now, String(id))
+}
+
+export function archiveMemory(userId, id) {
+  const info = memorySql.archive.run(Date.now(), String(id || ''), String(userId || ''))
+  return info.changes > 0
+}
+
+export function deleteMemory(userId, id) {
+  const info = memorySql.remove.run(String(id || ''), String(userId || ''))
+  return info.changes > 0
+}
+
+export function setMemoryEmbedding(userId, id, embedding, model = '') {
+  memorySql.setEmbedding.run(JSON.stringify(embedding || []), String(model || ''), String(id || ''), String(userId || ''))
+}
+
+export function listMemoryEmbeddings(userId, limit = 600) {
+  const max = Math.min(2000, Math.max(1, Number(limit) || 600))
+  const rows = memorySql.listEmbeddings.all(String(userId || ''), max)
+  return rows.map((row) => {
+    let vec = null
+    try { vec = row.embedding ? JSON.parse(row.embedding) : null } catch { vec = null }
+    return { id: row.id, embedding: Array.isArray(vec) && vec.length ? vec : null }
+  })
+}
+
+export function memoryCount(userId) {
+  return Number(memorySql.count.get(String(userId || ''))?.count || 0)
 }
 
 /* ---------------------------- visual artifacts ---------------------------- */
@@ -1037,6 +1539,308 @@ export function fileCount() {
   return Number(stmt.countFiles.get().count || 0)
 }
 
+/* ------------------------- drive full-text index ------------------------- */
+
+function driveIndexMetaOf(row) {
+  if (!row) return null
+  return {
+    itemId: row.item_id,
+    fileId: row.file_id || '',
+    status: row.status || 'pending',
+    chunkCount: Number(row.chunk_count || 0),
+    error: row.error || '',
+    updatedAt: Number(row.updated_at || 0),
+  }
+}
+
+export function setDriveIndexStatus(itemId, { fileId = '', status = 'pending', chunkCount = 0, error = '' } = {}) {
+  const id = String(itemId || '')
+  if (!id) return null
+  stmt.upsertDriveIndexMeta.run(id, String(fileId || ''), String(status || 'pending'), Math.max(0, Number(chunkCount) || 0), String(error || '').slice(0, 400), Date.now())
+  return driveIndexMetaOf(stmt.getDriveIndexMeta.get(id))
+}
+
+export function getDriveIndexMeta(itemId) {
+  return driveIndexMetaOf(stmt.getDriveIndexMeta.get(String(itemId || '')))
+}
+
+export function listDriveIndexMeta() {
+  return stmt.listDriveIndexMeta.all().map(driveIndexMetaOf).filter(Boolean)
+}
+
+/**
+ * 原子替换一个云空间条目的正文索引。chunks 每项为 { content, tokens }。
+ * 失败时保留旧索引并抛出异常，避免搜索命中半成品。
+ */
+export function replaceDriveIndex(itemId, fileId, chunks = []) {
+  const id = String(itemId || '')
+  if (!id) throw new Error('drive index requires itemId')
+  const prepared = chunks.map((chunk) => ({
+    content: String(chunk?.content || ''),
+    tokens: String(chunk?.tokens || '').trim(),
+  })).filter((chunk) => chunk.content && chunk.tokens)
+  const now = Date.now()
+  db.exec('BEGIN IMMEDIATE')
+  try {
+    stmt.deleteDriveChunks.run(id)
+    stmt.deleteDriveFts.run(id)
+    prepared.forEach((chunk, index) => {
+      stmt.insertDriveChunk.run(id, index, chunk.content, now)
+      stmt.insertDriveFts.run(id, index, chunk.tokens)
+    })
+    stmt.upsertDriveIndexMeta.run(id, String(fileId || ''), prepared.length ? 'ready' : 'empty', prepared.length, '', now)
+    db.exec('COMMIT')
+  } catch (error) {
+    try { db.exec('ROLLBACK') } catch { /* ignore rollback failure */ }
+    throw error
+  }
+  return driveIndexMetaOf(stmt.getDriveIndexMeta.get(id))
+}
+
+export function deleteDriveIndex(itemId) {
+  const id = String(itemId || '')
+  if (!id) return false
+  db.exec('BEGIN IMMEDIATE')
+  try {
+    stmt.deleteDriveChunks.run(id)
+    stmt.deleteDriveFts.run(id)
+    stmt.deleteDriveIndexMeta.run(id)
+    db.exec('COMMIT')
+  } catch (error) {
+    try { db.exec('ROLLBACK') } catch { /* ignore rollback failure */ }
+    throw error
+  }
+  return true
+}
+
+export function searchDriveIndex(match, limit = 80) {
+  const query = String(match || '').trim()
+  if (!query) return []
+  const max = Math.min(200, Math.max(1, Number(limit) || 80))
+  return stmt.searchDriveFts.all(query, max).map((row) => ({
+    itemId: row.item_id,
+    chunkNo: Number(row.chunk_no || 0),
+    score: Number(row.score || 0),
+  }))
+}
+
+export function getDriveIndexChunk(itemId, chunkNo) {
+  const row = stmt.getDriveChunk.get(String(itemId || ''), Number(chunkNo) || 0)
+  return row ? String(row.content || '') : ''
+}
+
+/* --------------------- drive search telemetry --------------------- */
+
+export function logDriveSearch({ id, user, space = '', query = '', mode = 'all', total = 0, items = [] } = {}) {
+  const searchId = String(id || '')
+  if (!searchId) return null
+  const payload = (Array.isArray(items) ? items : []).slice(0, 40).map((item, index) => ({
+    itemId: String(item.itemId || item.id || ''),
+    name: String(item.name || '').slice(0, 160),
+    position: index + 1,
+    matchedBy: String(item.matchedBy || ''),
+    rankReason: String(item.rankReason || ''),
+    rankCode: String(item.rankCode || ''),
+    rankScore: Number(item.rankScore || 0),
+    matchedChunks: Number(item.matchedChunks || 0),
+    duplicateCount: Number(item.duplicateCount || 0),
+    features: item.features || null,
+  })).filter((item) => item.itemId)
+  const now = Date.now()
+  stmt.insertDriveSearchLog.run(
+    searchId,
+    String(user || ''),
+    String(space || ''),
+    String(query || '').slice(0, 200),
+    String(mode || 'all'),
+    Math.max(0, Number(total) || 0),
+    JSON.stringify(payload),
+    now,
+  )
+  return searchId
+}
+
+export function getDriveSearchLog(id) {
+  const row = stmt.getDriveSearchLog.get(String(id || ''))
+  if (!row) return null
+  let items = []
+  try { items = JSON.parse(row.items_json || '[]') } catch { items = [] }
+  return {
+    id: row.id,
+    user: row.user,
+    space: row.space,
+    query: row.query,
+    mode: row.mode,
+    total: Number(row.total || 0),
+    items,
+    createdAt: Number(row.created_at || 0),
+  }
+}
+
+export function logDriveSearchClick({ id, searchId, user, itemId, position = 0, action = 'open' } = {}) {
+  const clickId = String(id || '')
+  const sid = String(searchId || '')
+  if (!clickId || !sid) return false
+  const result = stmt.insertDriveSearchClick.run(
+    clickId,
+    sid,
+    String(user || ''),
+    String(itemId || ''),
+    Math.max(0, Number(position) || 0),
+    String(action || 'open').slice(0, 40),
+    Date.now(),
+  )
+  return Number(result.changes || 0) > 0
+}
+
+export function getDriveSearchAnalytics({ days = 30, limit = 3000 } = {}) {
+  const windowDays = Math.min(365, Math.max(1, Number(days) || 30))
+  const since = Date.now() - windowDays * 86400000
+  const logLimit = Math.min(10000, Math.max(1, Number(limit) || 3000))
+  const logs = stmt.listDriveSearchLogs.all(since, logLimit).map((row) => {
+    let items = []
+    try { items = JSON.parse(row.items_json || '[]') } catch { items = [] }
+    return { ...row, items }
+  })
+  const clicks = stmt.listDriveSearchClicks.all(since, Math.min(20000, logLimit * 3)).map((row) => ({
+    ...row,
+    position: Number(row.position || 0),
+    createdAt: Number(row.created_at || 0),
+  }))
+  const clicksBySearch = new Map()
+  for (const click of clicks) {
+    const list = clicksBySearch.get(click.search_id) || []
+    list.push(click)
+    clicksBySearch.set(click.search_id, list)
+  }
+  const itemsBySearch = new Map(logs.map((log) => [
+    log.id,
+    new Map(log.items.map((item) => [item.itemId, item])),
+  ]))
+  const positions = new Map()
+  const matched = new Map()
+  const reasons = new Map()
+  const queries = new Map()
+  const clickedItems = new Map()
+  let searchClicks = 0
+  let searchesWithClick = 0
+  let noResult = 0
+  for (const log of logs) {
+    const logClicks = clicksBySearch.get(log.id) || []
+    searchClicks += logClicks.length
+    if (logClicks.length) searchesWithClick += 1
+    if (!Number(log.total || 0)) noResult += 1
+    for (const item of log.items) {
+      const p = positions.get(item.position || 0) || { position: item.position || 0, shown: 0, clicks: 0 }
+      p.shown += 1
+      positions.set(p.position, p)
+      const m = matched.get(item.matchedBy || 'unknown') || { key: item.matchedBy || 'unknown', shown: 0, clicks: 0 }
+      m.shown += 1
+      matched.set(m.key, m)
+      const r = reasons.get(item.rankCode || item.rankReason || 'unknown') || { key: item.rankCode || item.rankReason || 'unknown', shown: 0, clicks: 0 }
+      r.shown += 1
+      reasons.set(r.key, r)
+    }
+    const q = queries.get(log.query) || { query: log.query, searches: 0, clicks: 0, noResult: 0 }
+    q.searches += 1
+    q.clicks += logClicks.length
+    if (!Number(log.total || 0)) q.noResult += 1
+    queries.set(log.query, q)
+    for (const click of logClicks) {
+      const item = itemsBySearch.get(log.id)?.get(click.item_id)
+      if (!item) continue
+      const p = positions.get(item.position) || { position: item.position, shown: 0, clicks: 0 }
+      p.clicks += 1
+      positions.set(p.position, p)
+      const m = matched.get(item.matchedBy || 'unknown') || { key: item.matchedBy || 'unknown', shown: 0, clicks: 0 }
+      m.clicks += 1
+      matched.set(m.key, m)
+      const r = reasons.get(item.rankCode || item.rankReason || 'unknown') || { key: item.rankCode || item.rankReason || 'unknown', shown: 0, clicks: 0 }
+      r.clicks += 1
+      reasons.set(r.key, r)
+      const ci = clickedItems.get(item.itemId) || {
+        itemId: item.itemId, name: item.name, clicks: 0, bestPosition: item.position,
+        matchedBy: item.matchedBy, rankCode: item.rankCode,
+      }
+      ci.clicks += 1
+      ci.bestPosition = Math.min(ci.bestPosition || item.position, item.position)
+      clickedItems.set(item.itemId, ci)
+    }
+  }
+  const rate = (clicks, shown) => shown ? Math.round((clicks / shown) * 10000) / 10000 : 0
+  return {
+    days: windowDays,
+    since,
+    searches: logs.length,
+    clicks: searchClicks,
+    searchesWithClick,
+    searchCtr: rate(searchesWithClick, logs.length),
+    clicksPerSearch: logs.length ? Math.round((searchClicks / logs.length) * 10000) / 10000 : 0,
+    noResult,
+    noResultRate: rate(noResult, logs.length),
+    users: new Set(logs.map((log) => log.user)).size,
+    positions: [...positions.values()].sort((a, b) => a.position - b.position).map((p) => ({ ...p, ctr: rate(p.clicks, p.shown) })),
+    matchedBy: [...matched.values()].map((m) => ({ ...m, ctr: rate(m.clicks, m.shown) })),
+    rankCodes: [...reasons.values()].sort((a, b) => b.shown - a.shown).map((r) => ({ ...r, ctr: rate(r.clicks, r.shown) })),
+    topQueries: [...queries.values()].sort((a, b) => b.searches - a.searches || b.clicks - a.clicks).slice(0, 30).map((q) => ({ ...q, ctr: rate(q.clicks, q.searches) })),
+    topClickedItems: [...clickedItems.values()].sort((a, b) => b.clicks - a.clicks).slice(0, 20),
+    recentSearches: logs.slice(0, 20).map((log) => ({
+      id: log.id,
+      query: log.query,
+      total: Number(log.total || 0),
+      clicks: (clicksBySearch.get(log.id) || []).length,
+      createdAt: Number(log.created_at || 0),
+    })),
+  }
+}
+
+/* 给后续人工/离线调权重用的原始样本：每次搜索的展示特征 + 用户实际点开的条目。 */
+export function getDriveSearchTraining({ days = 30, limit = 500 } = {}) {
+  const windowDays = Math.min(365, Math.max(1, Number(days) || 30))
+  const since = Date.now() - windowDays * 86400000
+  const logLimit = Math.min(5000, Math.max(1, Number(limit) || 500))
+  const logs = stmt.listDriveSearchLogs.all(since, logLimit).map((row) => {
+    let items = []
+    try { items = JSON.parse(row.items_json || '[]') } catch { items = [] }
+    return { ...row, items }
+  })
+  const clicks = stmt.listDriveSearchClicks.all(since, Math.min(20000, logLimit * 3))
+  const clickedBySearch = new Map()
+  for (const click of clicks) {
+    const set = clickedBySearch.get(click.search_id) || new Set()
+    set.add(click.item_id)
+    clickedBySearch.set(click.search_id, set)
+  }
+  return {
+    days: windowDays,
+    searches: logs.map((log) => {
+      const clicked = clickedBySearch.get(log.id) || new Set()
+      return {
+        searchId: log.id,
+        user: log.user,
+        space: log.space,
+        query: log.query,
+        mode: log.mode,
+        total: Number(log.total || 0),
+        createdAt: Number(log.created_at || 0),
+        clickedItemIds: [...clicked],
+        items: log.items.map((item) => ({
+          position: item.position,
+          itemId: item.itemId,
+          name: item.name,
+          matchedBy: item.matchedBy,
+          rankCode: item.rankCode,
+          rankScore: item.rankScore,
+          matchedChunks: item.matchedChunks,
+          duplicateCount: item.duplicateCount,
+          features: item.features,
+          clicked: clicked.has(item.itemId),
+        })),
+      }
+    }),
+  }
+}
+
 /* ----------------------------- image assets ----------------------------- */
 
 function imageAssetOf(row) {
@@ -1225,6 +2029,103 @@ export function listImageComments(assetId) {
   return stmt.listImageComments.all(String(assetId || '')).map(imageCommentOf)
 }
 
+function imageLayerOf(row) {
+  if (!row) return null
+  let box = {}
+  try { box = JSON.parse(row.box || '{}') } catch { box = {} }
+  return {
+    id: row.id,
+    assetId: row.asset_id,
+    owner: row.owner,
+    net: row.net,
+    kind: row.kind,
+    zOrder: Number(row.z_order),
+    name: row.name,
+    fileId: row.file_id,
+    box,
+    visible: Number(row.visible) === 1,
+    opacity: Number(row.opacity),
+    blendMode: row.blend_mode,
+    locked: Number(row.locked) === 1,
+    rotation: Number(row.rotation || 0),
+    provider: row.provider,
+    model: row.model,
+    modelId: row.model_id,
+    description: row.description,
+    createdAt: Number(row.created_at),
+    updatedAt: Number(row.updated_at),
+    deletedAt: row.deleted_at == null ? null : Number(row.deleted_at),
+  }
+}
+
+export function createImageLayer(input = {}) {
+  const now = Number(input.createdAt || Date.now())
+  const id = String(input.id || '')
+  const box = typeof input.box === 'string' ? input.box : JSON.stringify(input.box || {})
+  stmt.insertImageLayer.run(
+    id,
+    String(input.assetId || ''),
+    String(input.owner || ''),
+    String(input.net || ''),
+    String(input.kind || 'layer'),
+    Number(input.zOrder || 1),
+    String(input.name || ''),
+    String(input.fileId || ''),
+    box,
+    input.visible === false ? 0 : 1,
+    Number(input.opacity == null ? 100 : input.opacity),
+    String(input.blendMode || 'normal'),
+    input.locked === true ? 1 : 0,
+    Number(input.rotation || 0),
+    String(input.provider || ''),
+    String(input.model || ''),
+    String(input.modelId || ''),
+    String(input.description || ''),
+    now,
+    now
+  )
+  return imageLayerOf(stmt.getImageLayer.get(id))
+}
+
+export function getImageLayer(id) {
+  return imageLayerOf(stmt.getImageLayer.get(String(id || '')))
+}
+
+export function listImageLayers(assetId) {
+  return stmt.listImageLayers.all(String(assetId || '')).map(imageLayerOf)
+}
+
+export function updateImageLayer(id, owner, patch = {}) {
+  const current = getImageLayer(id)
+  if (!current || current.owner !== String(owner || '') || current.deletedAt != null) return null
+  const box = typeof patch.box === 'string' ? patch.box : JSON.stringify(patch.box == null ? current.box : patch.box)
+  const result = stmt.updateImageLayerMeta.run(
+    String(patch.name == null ? current.name : patch.name),
+    box,
+    patch.visible == null ? (current.visible ? 1 : 0) : (patch.visible ? 1 : 0),
+    Number(patch.opacity == null ? current.opacity : patch.opacity),
+    String(patch.blendMode || current.blendMode),
+    patch.locked == null ? (current.locked ? 1 : 0) : (patch.locked ? 1 : 0),
+    Number(patch.rotation == null ? current.rotation : patch.rotation),
+    Number(patch.zOrder == null ? current.zOrder : patch.zOrder),
+    String(patch.description == null ? current.description : patch.description),
+    Date.now(),
+    String(id || '')
+  )
+  if (!Number(result.changes || 0)) return null
+  return getImageLayer(id)
+}
+
+export function softDeleteImageLayer(id, owner) {
+  const result = stmt.softDeleteImageLayer.run(Date.now(), Date.now(), String(id || ''), String(owner || ''))
+  if (!Number(result.changes || 0)) return null
+  return true
+}
+
+export function deleteImageLayersByAsset(assetId) {
+  return stmt.deleteImageLayersByAsset.run(Date.now(), Date.now(), String(assetId || ''))
+}
+
 function imageTemplateOf(row) {
   if (!row) return null
   return {
@@ -1300,6 +2201,11 @@ export function publishImageTemplate(id, reviewer) {
   const result = stmt.publishImageTemplate.run(String(reviewer || ''), Date.now(), String(id || ''))
   if (!Number(result.changes || 0)) return null
   return getImageTemplate(id)
+}
+
+export function deleteImageTemplate(id) {
+  const result = stmt.deleteImageTemplate.run(String(id || ''))
+  return Number(result.changes || 0) > 0
 }
 
 export function createImageJob(input = {}) {
@@ -1463,4 +2369,357 @@ export function dataDirPath() {
 
 export function databasePath() {
   return dbPath
+}
+
+/* ------------------------------ 地下管网 ------------------------------ */
+
+function pipelineDatasetOf(row) {
+  if (!row) return null
+  return {
+    id: row.id,
+    name: row.name,
+    sourceFile: row.source_file,
+    crs: row.crs,
+    datum: row.datum,
+    pipeMajor: row.pipe_major,
+    pointCount: Number(row.point_count),
+    lineCount: Number(row.line_count),
+    status: row.status,
+    note: row.note,
+    meta: pipeJson(row.meta, {}),
+    owner: row.owner,
+    net: row.net,
+    createdAt: Number(row.created_at),
+    updatedAt: Number(row.updated_at),
+  }
+}
+
+export function createPipelineDataset(input = {}) {
+  const now = Number(input.createdAt || Date.now())
+  const id = String(input.id || `PIPE-${randomBytes(8).toString('hex')}`)
+  stmt.insertPipelineDataset.run(
+    id,
+    String(input.name || '未命名管网数据集'),
+    String(input.sourceFile || ''),
+    String(input.crs || ''),
+    String(input.datum || ''),
+    String(input.pipeMajor || ''),
+    Number(input.pointCount || 0),
+    Number(input.lineCount || 0),
+    String(input.status || 'imported'),
+    String(input.note || ''),
+    JSON.stringify(input.meta || {}),
+    String(input.owner || ''),
+    String(input.net || ''),
+    now,
+    now
+  )
+  return pipelineDatasetOf(stmt.getPipelineDataset.get(id))
+}
+
+export function updatePipelineDatasetMeta(id, { meta, status, note } = {}) {
+  const row = stmt.getPipelineDataset.get(String(id || ''))
+  if (!row) return null
+  stmt.updatePipelineDatasetMeta.run(
+    JSON.stringify(meta === undefined ? pipeJson(row.meta, {}) : meta),
+    String(status || row.status || 'imported'),
+    String(note === undefined ? row.note || '' : note),
+    Date.now(),
+    String(id || '')
+  )
+  return pipelineDatasetOf(stmt.getPipelineDataset.get(String(id || '')))
+}
+
+export function getPipelineDataset(id) {
+  return pipelineDatasetOf(stmt.getPipelineDataset.get(String(id || '')))
+}
+
+export function listPipelineDatasets({ owner = '', limit = 50 } = {}) {
+  const safeLimit = Math.max(1, Math.min(Number(limit) || 50, 200))
+  return stmt.listPipelineDatasets.all(String(owner || ''), safeLimit).map(pipelineDatasetOf)
+}
+
+export function softDeletePipelineDataset(id, owner) {
+  const row = stmt.getPipelineDataset.get(String(id || ''))
+  if (!row) return null
+  const result = stmt.softDeletePipelineDataset.run(Date.now(), Date.now(), String(id || ''), String(owner || ''))
+  if (!Number(result.changes || 0)) return null
+  return pipelineDatasetOf(stmt.getPipelineDataset.get(String(id || '')))
+}
+
+export function updatePipelineDatasetCounts(id, pointCount, lineCount) {
+  stmt.updatePipelineDatasetCounts.run(Number(pointCount || 0), Number(lineCount || 0), Date.now(), String(id || ''))
+  return pipelineDatasetOf(stmt.getPipelineDataset.get(String(id || '')))
+}
+
+function pipeNum(value) {
+  const n = Number(value)
+  return Number.isFinite(n) ? n : null
+}
+
+function pipeJson(text, fallback) {
+  try { return JSON.parse(text || JSON.stringify(fallback)) } catch { return fallback }
+}
+
+function pipeNodeOf(row) {
+  if (!row) return null
+  return {
+    id: row.id,
+    datasetId: row.dataset_id,
+    nodeCode: row.node_code,
+    category: row.category,
+    x: pipeNum(row.x),
+    y: pipeNum(row.y),
+    groundElev: pipeNum(row.ground_elev),
+    z: pipeNum(row.z),
+    coverDepth: pipeNum(row.cover_depth),
+    coverMaterial: row.cover_material,
+    coverSize: row.cover_size,
+    chamberShape: row.chamber_shape,
+    chamberSize: row.chamber_size,
+    road: row.road,
+    address: row.address,
+    owner: row.owner,
+    buildYear: row.build_year,
+    surveyDate: row.survey_date,
+    surveyUnit: row.survey_unit,
+    angle: pipeNum(row.angle),
+    status: row.status,
+    attrs: pipeJson(row.attrs, {}),
+    createdAt: Number(row.created_at),
+    updatedAt: Number(row.updated_at),
+  }
+}
+
+function pipeLineOf(row) {
+  if (!row) return null
+  return {
+    id: row.id,
+    datasetId: row.dataset_id,
+    lineCode: row.line_code,
+    nodeStart: row.node_start,
+    nodeEnd: row.node_end,
+    pipeMajor: row.pipe_major,
+    material: row.material,
+    profileType: row.profile_type,
+    profileSize: row.profile_size,
+    wallThickness: row.wall_thickness,
+    buryType: row.bury_type,
+    startDepth: pipeNum(row.start_depth),
+    endDepth: pipeNum(row.end_depth),
+    startElev: pipeNum(row.start_elev),
+    endElev: pipeNum(row.end_elev),
+    flowDir: row.flow_dir,
+    length: pipeNum(row.length),
+    holeCount: Number(row.hole_count),
+    cabCount: Number(row.cab_count),
+    pressure: row.pressure,
+    voltage: row.voltage,
+    owner: row.owner,
+    road: row.road,
+    buildYear: row.build_year,
+    status: row.status,
+    lineStyle: row.line_style,
+    geom: pipeJson(row.geom, null),
+    attrs: pipeJson(row.attrs, {}),
+    createdAt: Number(row.created_at),
+    updatedAt: Number(row.updated_at),
+  }
+}
+
+function pipeIssueOf(row) {
+  if (!row) return null
+  return {
+    id: row.id,
+    datasetId: row.dataset_id,
+    issueType: row.issue_type,
+    severity: row.severity,
+    nodeId: row.node_id,
+    lineId: row.line_id,
+    message: row.message,
+    resolved: Number(row.resolved) === 1,
+    createdAt: Number(row.created_at),
+  }
+}
+
+export function insertPipeNode(datasetId, input = {}) {
+  const now = Number(input.createdAt || Date.now())
+  const id = String(input.id || `NODE-${randomBytes(6).toString('hex')}`)
+  stmt.insertPipeNode.run(
+    id,
+    String(datasetId || ''),
+    String(input.nodeCode || ''),
+    String(input.category || ''),
+    pipeNum(input.x), pipeNum(input.y), pipeNum(input.groundElev), pipeNum(input.z), pipeNum(input.coverDepth),
+    String(input.coverMaterial || ''), String(input.coverSize || ''),
+    String(input.chamberShape || ''), String(input.chamberSize || ''),
+    String(input.road || ''), String(input.address || ''), String(input.owner || ''),
+    String(input.buildYear || ''), String(input.surveyDate || ''), String(input.surveyUnit || ''),
+    pipeNum(input.angle), String(input.status || ''),
+    JSON.stringify(input.attrs || {}), now, now
+  )
+  return pipeNodeOf(stmt.getPipeNode.get(id))
+}
+
+export function getPipeNode(id) {
+  return pipeNodeOf(stmt.getPipeNode.get(String(id || '')))
+}
+
+export function listPipeNodes(datasetId, { limit = 1000 } = {}) {
+  const safeLimit = Math.max(1, Math.min(Number(limit) || 1000, 5000))
+  return stmt.listPipeNodes.all(String(datasetId || ''), safeLimit).map(pipeNodeOf)
+}
+
+export function countPipeNodes(datasetId) {
+  return Number(stmt.countPipeNodes.get(String(datasetId || '')).n)
+}
+
+export function insertPipeLine(datasetId, input = {}) {
+  const now = Number(input.createdAt || Date.now())
+  const id = String(input.id || `LINE-${randomBytes(6).toString('hex')}`)
+  stmt.insertPipeLine.run(
+    id,
+    String(datasetId || ''),
+    String(input.lineCode || ''),
+    String(input.nodeStart || ''),
+    String(input.nodeEnd || ''),
+    String(input.pipeMajor || ''),
+    String(input.material || ''),
+    String(input.profileType || ''),
+    String(input.profileSize || ''),
+    String(input.wallThickness || ''),
+    String(input.buryType || ''),
+    pipeNum(input.startDepth), pipeNum(input.endDepth), pipeNum(input.startElev), pipeNum(input.endElev),
+    String(input.flowDir ?? '-1'),
+    pipeNum(input.length),
+    Number(input.holeCount || 0), Number(input.cabCount || 0),
+    String(input.pressure || ''), String(input.voltage || ''),
+    String(input.owner || ''), String(input.road || ''), String(input.buildYear || ''),
+    String(input.status || ''), String(input.lineStyle || ''),
+    typeof input.geom === 'string' ? input.geom : JSON.stringify(input.geom || null),
+    JSON.stringify(input.attrs || {}), now, now
+  )
+  return pipeLineOf(stmt.getPipeLine.get(id))
+}
+
+export function getPipeLine(id) {
+  return pipeLineOf(stmt.getPipeLine.get(String(id || '')))
+}
+
+export function listPipeLines(datasetId, { limit = 1000 } = {}) {
+  const safeLimit = Math.max(1, Math.min(Number(limit) || 1000, 5000))
+  return stmt.listPipeLines.all(String(datasetId || ''), safeLimit).map(pipeLineOf)
+}
+
+export function countPipeLines(datasetId) {
+  return Number(stmt.countPipeLines.get(String(datasetId || '')).n)
+}
+
+export function replacePipeTopology(datasetId, edges = []) {
+  const ds = String(datasetId || '')
+  stmt.deletePipeTopologyByDataset.run(ds)
+  for (const edge of edges) {
+    stmt.insertPipeTopology.run(
+      String(edge.id || `TOPO-${randomBytes(6).toString('hex')}`),
+      ds,
+      String(edge.nodeId || ''),
+      String(edge.neighborNodeId || ''),
+      String(edge.lineId || ''),
+      String(edge.pipeMajor || ''),
+      Number(edge.directed || 0)
+    )
+  }
+  return stmt.listPipeTopology.all(ds)
+}
+
+export function listPipeTopology(datasetId) {
+  return stmt.listPipeTopology.all(String(datasetId || ''))
+}
+
+export function insertPipeIssue(datasetId, input = {}) {
+  const id = String(input.id || `ISSUE-${randomBytes(6).toString('hex')}`)
+  const now = Number(input.createdAt || Date.now())
+  stmt.insertPipeIssue.run(
+    id,
+    String(datasetId || ''),
+    String(input.issueType || ''),
+    String(input.severity || '中'),
+    String(input.nodeId || ''),
+    String(input.lineId || ''),
+    String(input.message || ''),
+    Number(input.resolved || 0),
+    now
+  )
+  return pipeIssueOf({
+    id, dataset_id: String(datasetId || ''), issue_type: String(input.issueType || ''),
+    severity: String(input.severity || '中'), node_id: String(input.nodeId || ''),
+    line_id: String(input.lineId || ''), message: String(input.message || ''),
+    resolved: Number(input.resolved || 0), created_at: now,
+  })
+}
+
+export function listPipeIssues(datasetId, { resolved = -1, limit = 500 } = {}) {
+  const safeLimit = Math.max(1, Math.min(Number(limit) || 500, 2000))
+  const state = resolved === -1 ? -1 : Number(resolved ? 1 : 0)
+  return stmt.listPipeIssues.all(String(datasetId || ''), state, state, safeLimit).map(pipeIssueOf)
+}
+
+export function resolvePipeIssue(id) {
+  stmt.resolvePipeIssue.run(String(id || ''))
+}
+
+export function clearPipelineFeatures(datasetId) {
+  const ds = String(datasetId || '')
+  stmt.deletePipeNodesByDataset.run(ds)
+  stmt.deletePipeLinesByDataset.run(ds)
+  stmt.deletePipeTopologyByDataset.run(ds)
+  stmt.deletePipeIssuesByDataset.run(ds)
+}
+
+function pipeAnalysisOf(row) {
+  if (!row) return null
+  return {
+    id: row.id,
+    datasetId: row.dataset_id,
+    type: row.analysis_type,
+    params: pipeJson(row.params, {}),
+    result: pipeJson(row.result, {}),
+    summary: row.summary,
+    status: row.status,
+    owner: row.owner,
+    net: row.net,
+    createdAt: Number(row.created_at),
+  }
+}
+
+export function insertPipeAnalysisRun(input = {}) {
+  const id = String(input.id || `ANALYSIS-${randomBytes(6).toString('hex')}`)
+  stmt.insertPipeAnalysisRun.run(
+    id,
+    String(input.datasetId || ''),
+    String(input.type || ''),
+    JSON.stringify(input.params || {}),
+    JSON.stringify(input.result || {}),
+    String(input.summary || ''),
+    String(input.status || 'done'),
+    String(input.owner || ''),
+    String(input.net || ''),
+    Number(input.createdAt || Date.now())
+  )
+  return pipeAnalysisOf(stmt.getPipeAnalysisRun.get(id))
+}
+
+export function getPipeAnalysisRun(id) {
+  return pipeAnalysisOf(stmt.getPipeAnalysisRun.get(String(id || '')))
+}
+
+export function listPipeAnalysisRuns(datasetId, { type = '', limit = 50 } = {}) {
+  const safeLimit = Math.max(1, Math.min(Number(limit) || 50, 200))
+  const kind = String(type || '')
+  return stmt.listPipeAnalysisRuns.all(String(datasetId || ''), kind, kind, safeLimit).map(pipeAnalysisOf)
+}
+
+export function softDeletePipeAnalysisRun(id, owner) {
+  const result = stmt.softDeletePipeAnalysisRun.run(Date.now(), String(id || ''), String(owner || ''))
+  return Number(result.changes || 0) ? true : false
 }

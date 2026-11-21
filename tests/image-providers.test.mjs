@@ -15,6 +15,8 @@ let baseUrl = ''
 let server
 let qwenRequest = null
 let seedreamRequest = null
+let visualRequests = []
+let upscalePollCount = 0
 let imageProviders
 let editResultPng = null
 let regionSourcePng = null
@@ -84,6 +86,21 @@ before(async () => {
         }))
         return
       }
+      const action = new URL(req.url, 'http://x').searchParams.get('Action')
+      if (action) {
+        visualRequests.push({ action, body: parsed })
+        res.writeHead(200, { 'content-type': 'application/json' })
+        if (action === 'CVProcess') {
+          res.end(JSON.stringify({ code: 10000, data: { image_urls: [`${baseUrl}/edit-result.png`], request_id: 'visual-req-1' }, request_id: 'visual-req-1' }))
+        } else if (action === 'CVSync2AsyncSubmitTask') {
+          res.end(JSON.stringify({ code: 10000, data: { task_id: 'task-1' } }))
+        } else {
+          upscalePollCount += 1
+          const status = upscalePollCount === 1 ? 'generating' : 'done'
+          res.end(JSON.stringify({ code: 10000, data: { status, ...(status === 'done' ? { image_urls: [`${baseUrl}/edit-result.png`] } : {}) } }))
+        }
+        return
+      }
       res.writeHead(404)
       res.end('not found')
     })
@@ -94,6 +111,9 @@ before(async () => {
   process.env.QWEN_IMAGE_ENDPOINT = `${baseUrl}/qwen-image`
   process.env.SEEDREAM_IMAGE_API_KEY = 'test-seedream-key'
   process.env.SEEDREAM_IMAGE_ENDPOINT = `${baseUrl}/seedream-image`
+  process.env.VOLC_VISUAL_AK = 'test-ak'
+  process.env.VOLC_VISUAL_SK = 'test-sk'
+  process.env.VOLC_VISUAL_HOST = baseUrl
   imageProviders = await import('../image-providers.mjs')
 })
 
@@ -265,4 +285,58 @@ test('未知图像模型被拒绝，不会回退到其他 Provider', async () =>
     () => imageProviders.generateImage({ modelId: 'not-a-model', prompt: '测试', timeoutMs: 5000 }),
     (error) => error.code === 'IMAGE_MODEL_UNKNOWN' && error.status === 400,
   )
+})
+
+test('视觉服务扩图：提交 i2i_outpainting 纯 base64，解析返回图', async () => {
+  assert.equal(imageProviders.visualStatus().configured, true)
+  const result = await imageProviders.expandImage({
+    imageBuffer: IMAGE_BYTES,
+    imageMime: 'image/png',
+    prompt: '延续海边场景',
+    expand: 0.2,
+    timeoutMs: 5000,
+  })
+  const req = visualRequests.find((item) => item.action === 'CVProcess')
+  assert.equal(req.body.req_key, 'i2i_outpainting')
+  assert.equal(typeof req.body.binary_data_base64[0], 'string')
+  assert.equal(req.body.binary_data_base64[0].startsWith('data:'), false)
+  assert.equal(req.body.top, 0.2)
+  assert.equal(req.body.bottom, 0.2)
+  assert.equal(req.body.left, 0.2)
+  assert.equal(req.body.right, 0.2)
+  assert.equal(result.provider, 'volc-visual')
+  assert.equal(result.modelId, 'i2i_outpainting')
+  assert.ok(result.buffer.length >= 8 * 1024)
+})
+
+test('视觉服务超清：提交任务后轮询到 done，返回高清图', async () => {
+  upscalePollCount = 0
+  const result = await imageProviders.upscaleImage({
+    imageBuffer: IMAGE_BYTES,
+    imageMime: 'image/png',
+    resolution: '4k',
+    scale: 50,
+    timeoutMs: 5000,
+  })
+  const submit = visualRequests.find((item) => item.action === 'CVSync2AsyncSubmitTask')
+  assert.equal(submit.body.req_key, 'jimeng_i2i_seed3_tilesr_cvtob')
+  assert.equal(submit.body.resolution, '4k')
+  const polls = visualRequests.filter((item) => item.action === 'CVSync2AsyncGetResult')
+  assert.equal(polls.length, 2)
+  assert.equal(result.modelId, 'jimeng_i2i_seed3_tilesr_cvtob')
+  assert.equal(result.requestId, 'task-1')
+})
+
+test('视觉服务未配置 AK/SK 时拒绝，不发起请求', async () => {
+  const savedAk = process.env.VOLC_VISUAL_AK
+  const savedSk = process.env.VOLC_VISUAL_SK
+  delete process.env.VOLC_VISUAL_AK
+  delete process.env.VOLC_VISUAL_SK
+  await assert.rejects(
+    () => imageProviders.expandImage({ imageBuffer: IMAGE_BYTES, imageMime: 'image/png', timeoutMs: 5000 }),
+    (error) => error.code === 'IMAGE_VISUAL_NOT_CONFIGURED' && error.status === 503,
+  )
+  process.env.VOLC_VISUAL_AK = savedAk
+  process.env.VOLC_VISUAL_SK = savedSk
+  assert.equal(imageProviders.visualStatus().configured, true)
 })

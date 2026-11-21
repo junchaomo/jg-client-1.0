@@ -81,9 +81,25 @@
 
 .search-section { padding: 6px 0 2px; }
 .search-section-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   padding: 8px 12px 6px;
   color: #6b7280;
   font: 500 13px/1.4 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+}
+.search-section-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: #f2f3f5;
+  color: #6b7280;
+  font: 500 11px/1 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  box-sizing: border-box;
 }
 
 .search-row {
@@ -124,13 +140,40 @@
 .search-row-ico.bubble { color: #4b5563; }
 .search-row-ico.bubble svg { width: 20px; height: 20px; }
 
+.search-row-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
 .search-row-main {
   flex: 1;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font: 500 15px/1.45 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  font: 500 15px/1.35 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+}
+.search-row-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 500 15px/1.35 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+}
+.search-row-snippet {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #7b818a;
+  font: 400 12.5px/1.35 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+}
+.search-row-title mark,
+.search-row-snippet mark {
+  padding: 0 2px;
+  border-radius: 3px;
+  background: #fff0b8;
+  color: inherit;
 }
 
 .search-row-meta {
@@ -158,6 +201,15 @@
   text-align: center;
   font: 400 14px/1.7 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
 }
+.search-loading { padding: 26px 20px; }
+.search-warn {
+  margin: 6px 12px 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #fff8e6;
+  color: #8a5b00;
+  font: 400 12.5px/1.55 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+}
 
 .search-tabs {
   flex: none;
@@ -169,8 +221,15 @@
   border-top: 1px solid #ededee;
   background: #fff;
   box-sizing: border-box;
+  overflow-x: auto;
+  scrollbar-width: none;
 }
+.search-tabs::-webkit-scrollbar { display: none; }
 .search-tab {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   border: 0;
   border-radius: 999px;
   padding: 7px 13px;
@@ -182,6 +241,19 @@
 .search-tab:hover { background: #f4f5f6; color: #111827; }
 .search-tab.on { background: #eff0f2; color: #111827; font-weight: 600; }
 .search-tab:focus-visible { outline: 2px solid #111827; outline-offset: 2px; }
+.search-tab-count {
+  display: none;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: #e5e7eb;
+  color: #4b5563;
+  font: 500 11px/18px "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  text-align: center;
+  box-sizing: border-box;
+}
+.search-tab-count.on { display: inline-block; }
 
 @media (max-width: 640px) {
   .search-overlay { padding: 12px; }
@@ -192,7 +264,7 @@
   }
   .search-top { min-height: 60px; padding: 0 16px; }
   .search-input { font-size: 19px; }
-  .search-row-main { font-size: 14px; }
+  .search-row-title { font-size: 14px; }
   .search-row-meta { max-width: 34%; }
   .search-tabs { min-height: 50px; padding: 0 12px; }
 }

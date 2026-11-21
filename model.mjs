@@ -46,6 +46,17 @@ const WORK_INTENT_PATTERNS = [
   /(打包|压缩|构建|编译|部署|安装|发布|上传|下载|迁移|备份|恢复|做成[^。\n]{0,12}插件|插件[^。\n]{0,12}上传)/i,
   /\b(?:npm|pnpm|node|python|pip|git|pwsh|powershell|bash|apply_patch)\b/i,
   /```/,
+  // 定时任务必须进 Harness：quick-direct 分支没有工具面，会把“建定时任务”答成“我无法创建”。
+  /(定时任务|定时推送|定期任务|日程提醒|每日推送|日报推送)/i,
+  /(新建|创建|添加|设置|安排|取消|修改|删除|调整)[^。\n]{0,16}(定时|提醒|日程|预约)/i,
+  /(每天|每周|每月|每年)[^。\n]{0,16}(推送|提醒|汇总|日报|任务)/i,
+  // 长期记忆必须进 Harness：quick-direct 没有工具面，会把“记住”答成“没有写入入口”。
+  /(长期记忆|记忆库|记住|记一下|记入|忘掉这?条?记忆|memory_(?:write|search|list|forget))/i,
+  // 应用输出/应用数据必须进 Harness：quick-direct 没有工具面，读不到应用自己的结果文件。
+  /(应用|app)[^。\n]{0,18}(输出|数据|结果|产物)|(输出|数据|结果|产物)[^。\n]{0,12}(应用|app)|app_data_(?:list|read)/i,
+  // 明确要求读文件/目录/README 或查看当前工作区，直连模型看不到本机文件。
+  /(读取|读一下|查看|打开|列出)[^。\n]{0,20}(文件|目录|文件夹|README|代码|行)/i,
+  /(当前目录|工作目录|仓库根目录)/i,
 ]
 
 /** 组织数据类查询：能力挂在本机 MCP 工具上，对话模式不加载，必须进工作模式。 */
@@ -184,7 +195,7 @@ function extractContent(payload) {
   return ''
 }
 
-export async function chatCompletion({ messages, model, apiKey, baseUrl, timeoutMs = 60000, temperature = 0.3 }) {
+export async function chatCompletion({ messages, model, apiKey, baseUrl, timeoutMs = 60000, temperature = 0.3, maxTokens = undefined, responseFormat = undefined, enableThinking = undefined }) {
   if (!apiKey) {
     throw new ModelError('未配置模型密钥：请在启动环境设置 JG_MODEL_API_KEY，或在「设置 · 模型与密钥」保存个人 Key 后重试', {
       code: 'MODEL_KEY_MISSING',
@@ -209,6 +220,10 @@ export async function chatCompletion({ messages, model, apiKey, baseUrl, timeout
         messages,
         temperature,
         stream: false,
+        ...(Number.isFinite(Number(maxTokens)) && Number(maxTokens) > 0 ? { max_tokens: Number(maxTokens) } : {}),
+        ...(responseFormat && typeof responseFormat === 'object' ? { response_format: responseFormat } : {}),
+        /* 通义千问系默认开思考链（一次读图能多花 1～2 分钟），应用明确要短答案时关掉。 */
+        ...(enableThinking === false && /qwen/i.test(String(model)) ? { enable_thinking: false } : {}),
       }),
       signal: AbortSignal.timeout(timeoutMs),
     })

@@ -29,6 +29,8 @@ const state = {
   activeProjectId: '',
   activeProjectName: '',
   activeProjectCwd: '',
+  activeWorktreePath: '',
+  activeWorktreeBranch: '',
   executionPolicy: 'auto',
   taskMode: 'auto',
   runtimeSettings: { defaultPolicy: 'auto', defaultEffort: 'medium', workspaceChanges: true },
@@ -54,6 +56,8 @@ const state = {
   railLocked: false,
   morePinned: [],
   moreSet: (() => { try { return JSON.parse(localStorage.getItem('jg.moreSet') || '[]') } catch (e) { return [] } })(),
+  topOrder: (() => { try { return JSON.parse(localStorage.getItem('jg.topOrder') || '[]') } catch (e) { return [] } })(),
+  moreOrder: (() => { try { return JSON.parse(localStorage.getItem('jg.moreOrder') || '[]') } catch (e) { return [] } })(),
   sidebarWidth: 292,
   sbUserW: 0,
   setNavWidth: 208,
@@ -89,6 +93,7 @@ const state = {
   interactionPoll: null,
   qSel: {},
   qCustom: {},
+  qStep: 0,
   chatSteps: [],
   chatError: '',
   pendingConfirm: null,
@@ -101,6 +106,7 @@ const state = {
   monitor: null,
   automations: [],
   taskPins: [],
+  taskRead: [],
   agentEntries: [],
   webSearch: false,
   knowledge: [],
@@ -110,6 +116,7 @@ const state = {
   nbOpen: false,
   nbStart: false,
   nbSortMode: 'recent',
+  nbSource: null,
   noteId: null,
   cloud: null,
   cloudOpen: false,
@@ -121,6 +128,7 @@ const state = {
   cbW: 440,
   cbUserW: 0,
   imagegen: { prompt: '', ratio: '1:1', count: 1, style: '写实', shots: [], busy: false, modelId: '', references: [], assetsLoaded: false, assetsLoading: false, tab: 'templates', templates: [], templatesLoaded: false, templatesLoading: false, templateApps: [], templateAppsLoaded: false, templateAppsLoading: false },
+  pipeline: { datasets: [], loaded: false, loading: false, activeId: '', selected: null, layers: { water: true, sewer: true, gas: true, heat: true, power: true, telecom: true, industrial: true, gallery: true, other: true } },
 }
 
 const layout = new AppLayout(document.getElementById('app'))
@@ -152,6 +160,7 @@ const paths = {
   video: '<rect x="3" y="6" width="12" height="12" rx="2"/><path d="M15 10l6-3v10l-6-3"/>',
   cube: '<path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M12 12l8-4.5M12 12v9M12 12L4 7.5"/>',
   cad: '<rect x="4" y="4" width="16" height="16" rx="2"/><path d="M8 16V8l4 4 4-4v8"/>',
+  pipe: '<path d="M4 18h16"/><path d="M6 18V8a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v10"/><path d="M8 12h8"/><circle cx="12" cy="12" r="1.6"/>',
   table: '<rect x="4" y="5" width="16" height="14" rx="2"/><path d="M4 10h16M9 10v9"/>',
   shield: '<path d="M12 3l7 3v6c0 4-3 7-7 9-4-2-7-5-7-9V6z"/>',
   bell: '<path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h12s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/>',
@@ -164,6 +173,7 @@ const paths = {
   back: '<path d="M19 12H6M13 6l-6 6 6 6"/>',
   chart: '<path d="M5 19V9M10 19V5M15 19v-7M20 19v-3"/>',
   inbox: '<path d="M4 13l3-8h10l3 8v5H4z"/><path d="M4 13h5l1 2h4l1-2h5"/>',
+  clipboard: '<rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4a3 3 0 0 1 6 0"/><path d="M9 10h6M9 14h6"/>',
   spark: '<path d="M12 4l2 5 5 2-5 2-2 5-2-5-5-2 5-2z"/>',
   pulse: '<path d="M3 12h4l2-6 4 12 2-6h6"/>',
   globe: '<circle cx="12" cy="12" r="8"/><path d="M4 12h16M12 4c3 3 3 13 0 16M12 4c-3 3-3 13 0 16"/>',
@@ -247,46 +257,78 @@ async function api(path, options = {}) {
 
 /** 对话请求：服务端回 SSE 时按 delta 增量回调；否则退回一次性 JSON。 */
 async function postChat(payload, { onDelta } = {}) {
-  const res = await fetch('/api/chat', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    credentials: 'same-origin',
-    body: JSON.stringify(payload),
-  })
-  const type = res.headers.get('content-type') || ''
-  if (!res.ok || !type.includes('text/event-stream')) {
-    const body = await res.json().catch(() => ({}))
-    return { ok: res.ok, status: res.status, body }
-  }
-  const reader = res.body.getReader()
-  const decoder = new TextDecoder()
-  let buffer = ''
-  let result = null
-  let failure = null
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-    buffer += decoder.decode(value, { stream: true })
-    const parts = buffer.split('\n\n')
-    buffer = parts.pop() || ''
-    for (const part of parts) {
-      const lines = part.split('\n')
-      const event = (lines.find((line) => line.startsWith('event:')) || '').slice(6).trim()
-      const data = lines.filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trim()).join('')
-      if (!data) continue
-      let parsed = null
-      try { parsed = JSON.parse(data) } catch { continue }
-      if (event === 'delta') {
-        if (parsed.text && typeof onDelta === 'function') onDelta(parsed.text)
-      } else if (event === 'done') {
-        result = parsed
-      } else if (event === 'error') {
-        failure = parsed
+  // 断流判定不能只看“多久没数据”：工作模式的长任务几十秒没有 token 是正常的，
+  // 但服务进程被杀时连接会半开挂住。所以安静超过 30 秒就去探活本机服务，
+  // 连续探不通才断开；服务还活着就继续等（最长 5 分钟兜底）。
+  const controller = new AbortController()
+  let lastByteAt = Date.now()
+  let healthFails = 0
+  let probing = false
+  const idleLimitMs = 30000
+  const hardLimitMs = 5 * 60 * 1000
+  const startedAt = Date.now()
+  const watchdog = setInterval(async () => {
+    if (Date.now() - startedAt > hardLimitMs) { controller.abort(); return }
+    if (probing) return
+    if (Date.now() - lastByteAt <= idleLimitMs) { healthFails = 0; return }
+    probing = true
+    try {
+      const probe = await fetch('/api/health', { cache: 'no-store', signal: AbortSignal.timeout(3000) })
+      if (probe.ok) healthFails = 0
+      else healthFails += 1
+    } catch {
+      healthFails += 1
+    } finally {
+      probing = false
+    }
+    if (healthFails >= 3) controller.abort()
+  }, 5000)
+  try {
+    const res = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    })
+    const type = res.headers.get('content-type') || ''
+    if (!res.ok || !type.includes('text/event-stream')) {
+      const body = await res.json().catch(() => ({}))
+      return { ok: res.ok, status: res.status, body }
+    }
+    const reader = res.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    let result = null
+    let failure = null
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      lastByteAt = Date.now()
+      buffer += decoder.decode(value, { stream: true })
+      const parts = buffer.split('\n\n')
+      buffer = parts.pop() || ''
+      for (const part of parts) {
+        const lines = part.split('\n')
+        const event = (lines.find((line) => line.startsWith('event:')) || '').slice(6).trim()
+        const data = lines.filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trim()).join('')
+        if (!data) continue
+        let parsed = null
+        try { parsed = JSON.parse(data) } catch { continue }
+        if (event === 'delta') {
+          if (parsed.text && typeof onDelta === 'function') onDelta(parsed.text)
+        } else if (event === 'done') {
+          result = parsed
+        } else if (event === 'error') {
+          failure = parsed
+        }
       }
     }
+    if (result) return { ok: true, status: 200, body: result, streamed: true }
+    return { ok: false, status: 502, body: { error: failure?.error || '流式输出中断，请重试' }, streamed: true }
+  } finally {
+    clearInterval(watchdog)
   }
-  if (result) return { ok: true, status: 200, body: result, streamed: true }
-  return { ok: false, status: 502, body: { error: failure?.error || '流式输出中断，请重试' }, streamed: true }
 }
 
 /** 直传二进制文件到本地服务端；返回 file 元数据（id/size/sha256）。 */
@@ -617,8 +659,8 @@ async function refreshAuditIfOpen() {
 /* ------------------------------ sidebar ----------------------------- */
 
 const groups = [
-  { label: 'AI 工作台', items: ['home', 'imagegen', 'tasks', 'skills', 'projects'] },
-  { label: '企业工作台', items: ['notice', 'contacts', 'im', 'oa', 'drive', 'datacenter', 'oneMap'] },
+  { label: 'AI 工作台', items: ['home', 'imagegen', 'automation', 'skills', 'projects'] },
+  { label: '企业工作台', items: ['notice', 'contacts', 'im', 'oa', 'drive', 'datacenter', 'oneMap', 'pipeline'] },
   { label: '管理与运维', items: ['admin'] },
 ]
 
@@ -680,7 +722,7 @@ function renderRail() {
 function openRailMore(anchor) {
   if (!beginPopover(anchor)) return
   const { user, modules } = state.boot
-  const ids = ['datacenter', 'knowledge', 'oneMap', 'review', 'oa', 'finance', 'admin', 'settings']
+  const ids = ['datacenter', 'drive', 'knowledge', 'oneMap', 'pipeline', 'review', 'oa', 'finance', 'admin', 'settings']
   const pop = document.createElement('div')
   pop.className = 'rail-pop'
   pop.innerHTML = ids.filter((id) => id === 'settings' || user.visibleModules.includes(id)).map((id) => `
@@ -747,13 +789,15 @@ function openProjectMenu(anchor, id) {
   }), 0)
 }
 
-function startProjectChat(p) {
+function startProjectChat(p, options = {}) {
   state.conversation = null
   state.chatSteps = []
   state.chatError = ''
   state.activeProjectId = p.id
   state.activeProjectName = p.name
   state.activeProjectCwd = p.cwd || ''
+  state.activeWorktreePath = options.worktreePath || ''
+  state.activeWorktreeBranch = options.worktreeBranch || ''
   state.view = 'home'
   state.draft = ''
   render()
@@ -770,7 +814,7 @@ function openProjectRowMenu(anchor, id) {
   menu.innerHTML = [
     item('new', 'compose', '新建线程'),
     item('check', 'shield', '成果检查'),
-    item('pin', 'pin', p.pinned ? '取消置顶项目' : '置顶项目'),
+    item('pin', 'pin', p.pinned ? '取消置顶工作区' : '置顶工作区'),
     item('edit', 'gear', '编辑工作区'),
     item('archive', 'inbox', '归档线程'),
     item('remove', 'close', '移除工作区'),
@@ -1001,6 +1045,8 @@ function confirmRemoveProject(p) {
       state.activeProjectId = ''
       state.activeProjectName = ''
       state.activeProjectCwd = ''
+      state.activeWorktreePath = ''
+      state.activeWorktreeBranch = ''
     }
     state.projects = (state.projects || []).filter((x) => x.id !== p.id)
     state.sidebarProjects = (state.sidebarProjects || []).filter((x) => x.id !== p.id)
@@ -1044,7 +1090,7 @@ function openProjectCard(anchor) {
     <div class="pc-meta"><span class="ico">${icon('chat')}</span>${p.convs || 0} 次聊天 · ${waiting} 个等待中</div>
     <div class="pc-sep"></div>
     <div class="pc-path"><span class="ico">${icon('folder')}</span><span class="mono">${esc(projPath(p))}</span></div>
-    <button class="pc-item" data-pcedit="${p.id}"><span class="ico">${icon('gear')}</span>编辑项目</button>`
+    <button class="pc-item" data-pcedit="${p.id}"><span class="ico">${icon('gear')}</span>编辑工作区</button>`
   document.body.appendChild(card)
   const r = anchor.getBoundingClientRect()
   const w = 304
@@ -1110,6 +1156,9 @@ function openProjectEditCard(anchor, id) {
           <span class="ico" style="width:22px;height:22px;color:var(--muted)">${icon('folder')}</span>添加文件夹
         </button>
       </div>
+
+      <div style="margin:20px 0 8px;font-size:var(--fs-sub);font-weight:var(--fw-semi);color:var(--text)">工作区指令（可选）</div>
+      <textarea id="pceInstructions" rows="3" placeholder="例如：本项目统一使用中文命名；修改代码前先运行现有测试。更细的目录规则可写在 AGENTS.md。" style="width:100%;box-sizing:border-box;border:1px solid #e1e4e9;border-radius:12px;background:#fff;padding:11px 12px;font:inherit;font-size:var(--fs-meta);color:var(--text);resize:vertical;outline:none">${esc(p.instructions || '')}</textarea>
 
       <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:26px;padding-bottom:2px">
         <button id="pceRemove" type="button" style="border:0;border-radius:10px;background:#fdeaea;color:#c0392b;padding:12px 18px;font:inherit;font-size:var(--fs-sub);cursor:pointer">移除工作区</button>
@@ -1189,7 +1238,12 @@ function openProjectEditCard(anchor, id) {
   mask.querySelector('#pceSave')?.addEventListener('click', async () => {
     const name = mask.querySelector('#pceName').value.trim()
     if (!name) return toast('工作区名称不能为空', true)
-    const payload = { id: p.id, name, desc: p.desc || '', instructions: p.instructions || '' }
+    const payload = {
+      id: p.id,
+      name,
+      desc: p.desc || '',
+      instructions: mask.querySelector('#pceInstructions')?.value.trim() || '',
+    }
     if (draftCwd !== (p.cwd || '')) payload.cwd = draftCwd
     const saveBtn = mask.querySelector('#pceSave')
     saveBtn.disabled = true
@@ -1233,6 +1287,8 @@ function openProjectEditCard(anchor, id) {
       state.activeProjectId = ''
       state.activeProjectName = ''
       state.activeProjectCwd = ''
+      state.activeWorktreePath = ''
+      state.activeWorktreeBranch = ''
     }
     state.projects = (state.projects || []).filter((x) => x.id !== p.id)
     state.sidebarProjects = (state.sidebarProjects || []).filter((x) => x.id !== p.id)
@@ -1287,7 +1343,7 @@ function openRecentHeadMenu(anchor) {
     <button class="cm-item" data-rh="order"><span class="ico">${icon('sort')}</span><span class="cm-label">聊天排序方式</span><span class="cm-arrow">›</span></button>
     <div class="cm-sep"></div>
     <div class="cm-label-dim">显示</div>
-    <button class="cm-item" data-rh="projects"><span class="ico">${icon('folder')}</span><span class="cm-label">项目</span>${state.showProjects ? '<span class="cm-key">✓</span>' : ''}</button>
+    <button class="cm-item" data-rh="projects"><span class="ico">${icon('folder')}</span><span class="cm-label">工作区</span>${state.showProjects ? '<span class="cm-key">✓</span>' : ''}</button>
     <div class="cm-sep"></div>
     <button class="cm-item" data-rh="section"><span class="ico">${icon('plus')}</span><span class="cm-label">新建分区</span></button>
     <div class="cm-sep"></div>
@@ -1561,13 +1617,14 @@ function renderSidebar() {
 
   const pinnedProjects = projects.filter((p) => p.pinned || (state.pinnedProjects || []).includes(p.id))
   const workspaceProjects = projects.filter((p) => !pinnedProjects.includes(p))
+  const notifyUnread = state.notifications.filter((n) => n.unread).length
 
   sidebar.innerHTML = `
     <div class="brand">
       <button class="brand-name" id="brandMenu" title="九规智能中枢">九规智能中枢</button>
       <div class="brand-icons">
         <button class="brand-icon" id="sbSearch" title="搜索（Ctrl+K）"><span class="ico">${icon('search')}</span></button>
-        <button class="brand-icon" id="notifyTrigger" title="通知中心"><span class="ico">${icon('bell')}</span></button>
+        <button class="brand-icon" id="notifyTrigger" title="${notifyUnread ? `通知中心 · ${notifyUnread} 条未读` : '通知中心'}"><span class="ico">${icon('bell')}</span><span class="notify-dot"${notifyUnread ? '' : ' hidden'}></span></button>
       </div>
     </div>
     <div class="sb-top-actions">
@@ -1584,7 +1641,7 @@ function renderSidebar() {
         <button class="sb-collapse" id="projMore" title="工作区显示设置"><span class="ico">${icon('dots')}</span></button>
       </div>
       <div class="sb-projects${state.projMerge ? ' merged' : ''}">
-        ${workspaceProjects.map((p) => projBlock(p)).join('') || (pinnedProjects.length ? '' : '<div class="sb-empty">暂无项目</div>')}
+        ${workspaceProjects.map((p) => projBlock(p)).join('') || (pinnedProjects.length ? '' : '<div class="sb-empty">暂无工作区</div>')}
       </div>` : ''}
       ${(state.sidebarSections || []).map((sec) => {
         const kids = convs.filter((c) => sectionOf[c.id] === sec.id && !pins.includes(c))
@@ -1797,7 +1854,7 @@ function mountPageSidebar() {
   const sb = document.getElementById('sidebar')
   const view = document.getElementById('view')
   if (!sb || !view) return
-  if (state.view === 'tasks') {
+  if (['tasks', 'automation'].includes(state.view)) {
     // 定时任务侧栏由 renderTaskCenter 直接写入全局容器；这里只补齐统一拖拽边。
     if (sb.querySelector('.tk-left')) ensureSidebarGrip()
     applyLayout()
@@ -1864,7 +1921,7 @@ function openConversationMenu(anchor, id) {
     ['archive', 'inbox', '归档', 'Ctrl+Shift+A'],
     ['delete', 'close', '删除', ''],
     ['—', '', '', ''],
-    ['move', 'folder', '移至项目', ''],
+    ['move', 'folder', '移至工作区', ''],
   ]
   const pop = document.createElement('div')
   pop.className = 'conv-menu'
@@ -1900,7 +1957,7 @@ function openMoveToProject(anchor, id) {
   const projects = state.sidebarProjects || state.projects || []
   const pop = document.createElement('div')
   pop.className = 'conv-menu'
-  pop.innerHTML = `<div class="cm-head">移至项目</div>` + projects.map((p) => `
+  pop.innerHTML = `<div class="cm-head">移至工作区</div>` + projects.map((p) => `
     <button class="cm-item" data-mp="${p.id}"><span class="ico">${icon('folder')}</span><span class="cm-label">${esc(p.name)}</span></button>`).join('')
   document.body.appendChild(pop)
   finishPopover(pop, anchor)
@@ -2077,11 +2134,6 @@ function renderMenubar() {
       ${hasSidebarView() ? `<button class="mb-icon mb-sidebar-toggle${state.sbPinned ? ' on' : ''}" id="mbLayoutToggle" title="${state.sbPinned ? '隐藏侧边栏' : '显示侧边栏'}（Ctrl+Shift+S）" aria-pressed="${state.sbPinned}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="4" width="18" height="16" rx="3"/>${state.sbPinned ? '<rect x="3.8" y="4.8" width="4.4" height="14.4" rx="2" fill="currentColor" stroke="none" opacity="0.55"/>' : '<path d="M9 4v16" opacity="0.45"/>'}</svg></button>` : ''}
       ${Object.entries(menus).map(([k, [label, items]]) => `<button class="mb-menu" data-menu="${k}">${label}</button>`).join('')}
       ${cloudAllowed() ? `<button class="mb-icon mb-cloud-toggle${state.cloudOpen ? ' on' : ''}" id="mbCloudToggle" title="${state.cloudOpen ? '折叠云浏览器' : '展开云浏览器'}" aria-label="云浏览器">${icon('globe')}</button>` : ''}
-    </div>
-    <div class="mb-win" role="group" aria-label="窗口控制">
-      <button type="button" class="mb-winbtn" data-win="minimize" title="最小化" aria-label="最小化"><svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 6h8"/></svg></button>
-      <button type="button" class="mb-winbtn" id="winMax" data-win="maximize" title="最大化" aria-label="最大化" aria-pressed="false"><svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2.5" y="2.5" width="7" height="7"/></svg></button>
-      <button type="button" class="mb-winbtn close" data-win="close" title="关闭" aria-label="关闭"><svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3 3l6 6M9 3L3 9"/></svg></button>
     </div>`
   mb.querySelector('#mbLayoutToggle')?.addEventListener('click', () => toggleGlobalSidebar())
   mb.querySelector('#mbCloudToggle')?.addEventListener('click', () => toggleCloudPanel())
@@ -2149,6 +2201,8 @@ function runMenuAction(act) {
     state.activeProjectId = ''
     state.activeProjectName = ''
     state.activeProjectCwd = ''
+    state.activeWorktreePath = ''
+    state.activeWorktreeBranch = ''
     render()
     setTimeout(() => document.getElementById('draft')?.focus(), 60)
   }
@@ -2254,8 +2308,7 @@ const PAGE_LAYOUTS = {
   home: { sidebar: true, sidebarTitle: '工作区' },
   chat: { sidebar: true, sidebarTitle: '工作区' },
   tasks: { sidebar: true, sidebarTitle: '定时任务' },
-  automation: { sidebar: true, sidebarTitle: '定时任务' },
-  skills: { sidebar: true, sidebarTitle: '插件与技能' },
+  automation: { sidebar: true, sidebarTitle: '定时任务' },  skills: { sidebar: true, sidebarTitle: '插件与技能' },
   settings: { sidebar: true, sidebarTitle: '设置' },
   admin: { sidebar: true, sidebarTitle: '管理中心' },
   im: { sidebar: true, sidebarTitle: '即时通讯' },
@@ -2316,13 +2369,13 @@ window.addEventListener('resize', () => applyLayout())
 
 function navIcon(id) {
   return {
-    home: 'home', history: 'history', projects: 'folder', tasks: 'clock', skills: 'plugin', automation: 'clock',
+    home: 'home', history: 'history', projects: 'folder', tasks: 'list', skills: 'plugin', automation: 'clock',
     imagegen: 'image',
-    datacenter: 'database', knowledge: 'book', oneMap: 'map', review: 'layers', finance: 'wallet',
+    datacenter: 'database', knowledge: 'book', oneMap: 'map', pipeline: 'pipe', review: 'layers', finance: 'wallet',
     adminops: 'briefcase',
     apps: 'grid', cloudbrowser: 'globe', settings: 'settings', admin: 'shield',
     drive: 'cloud', contacts: 'users', im: 'message', notice: 'megaphone', academy: 'cap', more: 'more',
-    bid: 'doc', monitor: 'pulse',
+    oa: 'clipboard', bid: 'doc', monitor: 'pulse',
   }[id] || 'doc'
 }
 
@@ -2575,15 +2628,15 @@ function openNotifications(anchor) {
       <button class="btn sm" id="readAll">全部已读</button>
     </div>
     <div class="notify-list">
-      ${items.map((n) => `
-        <button class="notify-item${n.unread ? ' unread' : ''}" data-nid="${n.id}" data-nav-to="${n.nav}">
+      ${items.length ? items.map((n) => `
+        <button class="notify-item${n.unread ? ' unread' : ''}" data-nid="${esc(n.id)}" data-nav-to="${esc(n.nav || '')}" data-conv="${esc(n.conversationId || '')}">
           <span class="notify-mark ${n.kind}"></span>
           <span class="notify-copy">
             <span class="notify-name">${esc(n.title)}</span>
             <span class="notify-body">${esc(n.body)}</span>
-            <span class="notify-time">${esc(n.time)}</span>
+            <span class="notify-time">${esc(n.time || '')}</span>
           </span>
-        </button>`).join('')}
+        </button>`).join('') : '<div class="notify-empty">暂无通知</div>'}
     </div>
     <div class="notify-foot">通知与审计同源：安全事件不可关闭，其余可在设置中调整</div>`
 
@@ -2596,7 +2649,7 @@ function openNotifications(anchor) {
 
   pop.querySelector('#readAll').addEventListener('click', async () => {
     await api('/api/notifications/read', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: 'all' }) })
-    loadNotifications()
+    await loadNotifications()
     pop.remove()
   })
   pop.querySelectorAll('[data-nid]').forEach((b) => {
@@ -2604,8 +2657,8 @@ function openNotifications(anchor) {
       await api('/api/notifications/read', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: b.dataset.nid }) })
       await loadNotifications()
       pop.remove()
-      state.view = b.dataset.navTo
-      render()
+      if (b.dataset.conv) { const opened = await openConversation(b.dataset.conv); if (opened) return }
+      if (b.dataset.navTo) { state.view = b.dataset.navTo; render() }
     })
   })
 
@@ -2614,9 +2667,22 @@ function openNotifications(anchor) {
   }), 0)
 }
 
+function refreshNotifyChrome() {
+  const unread = state.notifications.filter((n) => n.unread).length
+  document.querySelectorAll('#notifyTrigger').forEach((btn) => {
+    const dot = btn.querySelector('.notify-dot')
+    if (!dot) return
+    dot.hidden = unread === 0
+    btn.title = unread ? `通知中心 · ${unread} 条未读` : '通知中心'
+  })
+  if (state.boot && document.getElementById('railbar')) renderRail()
+}
+
 async function loadNotifications() {
   const { body } = await api('/api/notifications')
   state.notifications = body.items || []
+  refreshNotifyChrome()
+  return state.notifications
 }
 
 /* --------------------------- 全局搜索面板 --------------------------- */
@@ -2636,9 +2702,13 @@ async function openSearchPalette(initial = '') {
       </div>
       <div class="search-results" id="spBody"></div>
       <div class="search-tabs" role="tablist" aria-label="搜索范围">
-        <button class="search-tab on" data-filter="all" role="tab" aria-selected="true">全部</button>
+        <button class="search-tab on" data-filter="all" role="tab" aria-selected="true">全部<span class="search-tab-count" data-count="all"></span></button>
+        <button class="search-tab" data-filter="chats" role="tab" aria-selected="false">聊天<span class="search-tab-count" data-count="conversations"></span></button>
+        <button class="search-tab" data-filter="projects" role="tab" aria-selected="false">工作区<span class="search-tab-count" data-count="projects"></span></button>
+        <button class="search-tab" data-filter="files" role="tab" aria-selected="false">文件<span class="search-tab-count" data-count="files"></span></button>
+        <button class="search-tab" data-filter="notebooks" role="tab" aria-selected="false">知识库<span class="search-tab-count" data-count="notebooks"></span></button>
+        <button class="search-tab" data-filter="more" role="tab" aria-selected="false">更多<span class="search-tab-count" data-count="more"></span></button>
         <button class="search-tab" data-filter="actions" role="tab" aria-selected="false">操作</button>
-        <button class="search-tab" data-filter="chats" role="tab" aria-selected="false">聊天</button>
       </div>
     </div>`
   document.body.appendChild(wrap)
@@ -2664,6 +2734,8 @@ async function openSearchPalette(initial = '') {
     state.activeProjectId = ''
     state.activeProjectName = ''
     state.activeProjectCwd = ''
+    state.activeWorktreePath = ''
+    state.activeWorktreeBranch = ''
     state.view = 'home'
     render()
     setTimeout(() => document.getElementById('draft')?.focus(), 60)
@@ -2676,7 +2748,7 @@ async function openSearchPalette(initial = '') {
 
   const settingIcons = {
     general: 'gear', appearance: 'spark', notifications: 'bell', profile: 'users',
-    network: 'globe', models: 'spark', usage: 'chart', data: 'download',
+    network: 'globe', models: 'spark', usage: 'chart', data: 'download', memory: 'layers',
     integrations: 'grid', runtime: 'play', mcp: 'layers', about: 'book',
   }
   const settingContent = {
@@ -2687,6 +2759,7 @@ async function openSearchPalette(initial = '') {
     network: '网络 政务网 互联网 令牌 凭证 诊断 代理 证书 网络与凭证',
     models: '模型 密钥 外发 个人 Key 默认模型 推理 网关 模型与密钥',
     usage: 'token 用量 配额 账单 超额 模型 统计 用量与配额',
+    memory: '长期记忆 偏好 事实 决策 语义召回 记住 忘掉',
     data: '保留 导出 缓存 归档 导入 数据管理 清理 存储',
     integrations: '插件 技能 MCP 工具 地址 安装 启用 插件与工具',
     runtime: 'Agent 运行时 设置中心 运行时 Agent loop 模型路由 shell subagent 会话日志 配置 执行策略 推理强度',
@@ -2822,18 +2895,24 @@ async function openSearchPalette(initial = '') {
     <span class="search-row-meta">${esc(a.tabLabel)} · ${esc(a.group)}</span>
   </button>`
 
-  const placeholders = { all: '搜索 九规智能中枢', actions: '搜索操作', chats: '搜索聊天' }
+  const placeholders = {
+    all: '搜索会话、工作区、云空间、知识库、数据资源与应用',
+    chats: '搜索聊天记录',
+    projects: '搜索工作区',
+    files: '搜索云空间文件与正文',
+    notebooks: '搜索智能笔记本',
+    more: '搜索数据资源、应用与任务',
+    actions: '搜索操作与设置',
+  }
 
-  const [res, appsRes, prjRes, convRes] = await Promise.all([
-    api('/api/resources'), api('/api/apps'), api('/api/projects'), api('/api/conversations?withText=1'),
-  ])
-  if (!wrap.isConnected) return
-  const resources = res.ok ? res.body.items || [] : []
-  const apps = appsRes.ok ? appsRes.body.items || [] : []
-  const projects = prjRes.ok ? prjRes.body.items || [] : []
-  const tasks = state.tasks || []
-  const conversations = convRes.ok ? convRes.body.items || [] : (state.conversations || [])
   const navRows = Object.keys(modules).filter(visible)
+  let conversations = state.conversations || []
+  let remote = null
+  let remoteQuery = ''
+  let loading = false
+  let searchError = ''
+  let searchSeq = 0
+  let searchTimer = null
 
   const q = () => input.value.trim().toLowerCase()
   const matchPos = (text, value) => {
@@ -2848,7 +2927,9 @@ async function openSearchPalette(initial = '') {
     return s.toLowerCase().indexOf(value)
   }
   const hit = (s) => matchPos(s, q()) >= 0
-  const section = (title, inner) => inner ? `<div class="search-section"><div class="search-section-title">${title}</div>${inner}</div>` : ''
+  const section = (title, inner, total) => inner
+    ? `<div class="search-section"><div class="search-section-title">${esc(title)}${Number(total) > 0 ? `<span class="search-section-count">${Number(total) > 99 ? '99+' : Number(total)}</span>` : ''}</div>${inner}</div>`
+    : ''
 
   const actionRow = (a) => `<button class="search-row" data-qaction="${a.id}">
     <span class="search-row-ico">${icon(a.ic)}</span>
@@ -2861,90 +2942,189 @@ async function openSearchPalette(initial = '') {
     <span class="search-row-main">${esc(a.label)}</span>
   </button>`
 
-  const findSnippet = (text, query) => {
-    if (!text || !query) return ''
-    const idx = matchPos(text, query)
-    if (idx < 0) return ''
-    const start = Math.max(0, idx - 10)
-    const end = Math.min(text.length, idx + query.length + 26)
-    return `${start > 0 ? '…' : ''}${text.slice(start, end).replace(/\s+/g, ' ')}${end < text.length ? '…' : ''}`
+  const markText = (text, query) => {
+    let out = esc(String(text || ''))
+    if (!query) return out
+    const needles = [...new Set([query, ...String(query).split(/[\s,，、;；]+/).filter((x) => x.length > 1)])]
+      .filter(Boolean)
+      .sort((a, b) => b.length - a.length)
+    for (const raw of needles) {
+      const pattern = raw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      try { out = out.replace(new RegExp(pattern, 'gi'), (m) => `<mark>${m}</mark>`) } catch { /* 非法表达式不处理 */ }
+    }
+    return out
   }
+
+  const searchRow = ({ attr = '', iconHtml, title, snippet = '', meta = '', query = '' }) => `<button class="search-row" ${attr}>
+    ${iconHtml}
+    <span class="search-row-body">
+      <span class="search-row-title">${markText(title, query)}</span>
+      ${snippet ? `<span class="search-row-snippet">${markText(snippet, query)}</span>` : ''}
+    </span>
+    ${meta ? `<span class="search-row-meta">${esc(meta)}</span>` : ''}
+  </button>`
 
   const bubbleIco = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 4h12a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H9l-5 4v-13a2 2 0 0 1 2-2z"/></svg>`
 
-  const convRow = (c, query = '') => {
-    const proj = projects.find((p) => p.id === c.projectId)
-    const bodyMeta = findSnippet(c.searchText || '', query)
-    const meta = bodyMeta || proj?.name || ''
-    return `<button class="search-row" data-conv="${esc(c.id)}">
-    <span class="search-row-ico bubble" aria-hidden="true">${bubbleIco}</span>
-    <span class="search-row-main">${esc(c.title || '未命名会话')}</span>
-    ${meta ? `<span class="search-row-meta">${esc(meta)}</span>` : ''}
-  </button>`
-  }
+  const convRow = (c, query = '') => searchRow({
+    attr: `data-conv="${esc(c.id)}"`,
+    iconHtml: `<span class="search-row-ico bubble" aria-hidden="true">${bubbleIco}</span>`,
+    title: c.title || '未命名会话',
+    snippet: c.snippet || '',
+    meta: [c.projectName, c.time || '会话'].filter(Boolean).join(' · '),
+    query,
+  })
 
-  const navRow = (id) => `<button class="search-row" data-view="${id}">
-    <span class="search-row-ico">${icon(navIcon(id))}</span>
-    <span class="search-row-main">${esc(modules[id].label)}</span>
-    <span class="search-row-meta">导航</span>
-  </button>`
+  const navRow = (id) => searchRow({
+    attr: `data-view="${esc(id)}"`,
+    iconHtml: `<span class="search-row-ico">${icon(navIcon(id))}</span>`,
+    title: modules[id]?.label || id,
+    meta: '导航',
+  })
 
-  const resourceRow = (r) => `<button class="search-row" data-res="${esc(r.id)}">
-    <span class="search-row-ico">${icon('database')}</span>
-    <span class="search-row-main">${esc(r.name)}</span>
-    <span class="search-row-meta">${esc(r.type || '资源')} · ${esc(r.source || '数据中心')}</span>
-  </button>`
+  const resourceRow = (r, query = '') => searchRow({
+    attr: `data-res="${esc(r.id)}"`,
+    iconHtml: `<span class="search-row-ico">${icon('database')}</span>`,
+    title: r.name,
+    snippet: r.snippet || '',
+    meta: `数据资源 · ${r.type || r.source || '资源'}`,
+    query,
+  })
 
-  const appRow = (a) => `<button class="search-row" data-view="skills">
-    <span class="search-row-ico">${icon('grid')}</span>
-    <span class="search-row-main">${esc(a.name)}</span>
-    <span class="search-row-meta">应用 · ${esc(a.category || '内置')}</span>
-  </button>`
+  const appRow = (a, query = '') => searchRow({
+    attr: `data-app="${esc(a.id)}"`,
+    iconHtml: `<span class="search-row-ico">${icon('grid')}</span>`,
+    title: a.name,
+    snippet: a.snippet || '',
+    meta: `应用 · ${a.category || '内置'}`,
+    query,
+  })
 
-  const taskRow = (t) => `<button class="search-row" data-view="tasks">
-    <span class="search-row-ico">${icon('task')}</span>
-    <span class="search-row-main">${esc(t.title || t.name)}</span>
-    <span class="search-row-meta">任务 · ${esc(t.status || '')}</span>
-  </button>`
+  const taskRow = (t, query = '') => searchRow({
+    attr: `data-conv="${esc(t.conversationId)}" data-task-id="${esc(t.id)}"`,
+    iconHtml: `<span class="search-row-ico">${icon('task')}</span>`,
+    title: t.title || t.name,
+    snippet: t.snippet || '',
+    meta: `任务 · ${t.state || t.status || '执行中'}${Number(t.runCount) > 1 ? ` · ${t.runCount} 次` : ''}`,
+    query,
+  })
 
-  const projectRow = (p) => `<button class="search-row" data-project="${esc(p.id)}">
-    <span class="search-row-ico">${icon('folder')}</span>
-    <span class="search-row-main">${esc(p.name)}</span>
-    <span class="search-row-meta">项目</span>
-  </button>`
+  const projectRow = (p, query = '') => searchRow({
+    attr: `data-project="${esc(p.id)}"`,
+    iconHtml: `<span class="search-row-ico">${icon('folder')}</span>`,
+    title: p.name,
+    snippet: p.snippet || p.desc || p.cwd || '',
+    meta: p.status === 'online' ? '工作区 · 在线' : '工作区',
+    query,
+  })
+
+  const driveRow = (f, query = '') => searchRow({
+    attr: `data-drive="${esc(f.id)}" data-drive-space="${esc(f.space || 'CL-DEPT')}" data-drive-name="${esc(f.name || '')}"`,
+    iconHtml: `<span class="search-row-ico">${icon('cloud')}</span>`,
+    title: f.name,
+    snippet: f.snippet || '',
+    meta: [f.spaceName || '云空间', f.typeLabel || f.type || ''].filter(Boolean).join(' · '),
+    query,
+  })
+
+  const notebookRow = (n, query = '') => searchRow({
+    attr: `data-nb="${esc(n.id)}"`,
+    iconHtml: `<span class="search-row-ico">${icon('book')}</span>`,
+    title: n.title,
+    snippet: n.snippet || n.desc || n.topic || '',
+    meta: `知识库 · ${n.sourceCount || 0} 来源`,
+    query,
+  })
+
+  const groupOf = (name) => (remote && remoteQuery === q() ? remote.groups?.[name] : null) || null
+  const hasRemote = () => Boolean(remote && remoteQuery === q())
 
   const paint = () => {
     const query = q()
     const parts = []
-    if (filter === 'all' || filter === 'actions') {
-      const acts = quickActions.filter((a) => hit(`${a.label} ${a.keywords}`))
-      const tabsMatched = settingActions.filter((a) => hit(`${a.label} ${a.keywords}`))
-      const itemsMatched = settingItems.filter((a) => hit(`${a.keywords} ${a.tabLabel}`))
-      const setHtml = query
-        ? itemsMatched.slice(0, filter === 'actions' ? itemsMatched.length : 6).map(settingItemRow).join('')
-        : tabsMatched.map(settingRow).join('')
-      parts.push(section('快捷操作', acts.map(actionRow).join('')))
-      parts.push(section('设置', setHtml))
+    const dataReady = hasRemote()
+    const add = (title, list, render, total) => {
+      if (!list?.length) return
+      parts.push(section(title, list.map((item) => render(item, query)).join(''), total))
     }
+
+    const actionSections = (query, limit) => {
+      const result = []
+      const acts = query ? quickActions.filter((a) => hit(`${a.label} ${a.keywords}`)) : quickActions
+      const tabsMatched = query ? settingActions.filter((a) => hit(`${a.label} ${a.keywords}`)) : settingActions
+      const itemsMatched = query ? settingItems.filter((a) => hit(`${a.keywords} ${a.tabLabel}`)) : []
+      if (acts.length) result.push(section('快捷操作', acts.map(actionRow).join('')))
+      const setHtml = query ? itemsMatched.slice(0, limit).map(settingItemRow).join('') : tabsMatched.map(settingRow).join('')
+      if (setHtml) result.push(section('设置', setHtml))
+      return result
+    }
+
+    if (filter === 'actions' || (filter === 'all' && !query)) {
+      parts.push(...actionSections(query, filter === 'actions' ? 20 : 6))
+    }
+
     if (filter === 'all' || filter === 'chats') {
-      const matched = conversations.filter((c) => hit(`${c.title || ''}\n${c.searchText || ''}`))
-      if (query) {
-        matched.sort((a, b) => (matchPos(a.title, query) >= 0 ? 0 : 1) - (matchPos(b.title, query) >= 0 ? 0 : 1))
+      const group = groupOf('conversations')
+      if (dataReady) add('聊天', group?.items || [], convRow, group?.total)
+      else if (!query) add('最近会话', conversations.slice(0, 8), convRow)
+    }
+
+    if (filter === 'all' || filter === 'projects') {
+      const group = groupOf('projects')
+      if (dataReady) add('工作区', group?.items || [], projectRow, group?.total)
+    }
+
+    if (filter === 'all' || filter === 'files') {
+      const group = groupOf('files')
+      if (dataReady) add('云空间', group?.items || [], driveRow, group?.total)
+    }
+
+    if (filter === 'all' || filter === 'notebooks') {
+      const group = groupOf('notebooks')
+      if (dataReady) add('知识库', group?.items || [], notebookRow, group?.total)
+    }
+
+    if (filter === 'all' || filter === 'more') {
+      const resources = groupOf('resources')
+      const apps = groupOf('apps')
+      const tasks = groupOf('tasks')
+      if (dataReady) {
+        add('数据资源', resources?.items || [], resourceRow, resources?.total)
+        add('应用', apps?.items || [], appRow, apps?.total)
+        add('任务', tasks?.items || [], taskRow, tasks?.total)
       }
-      const shown = query ? matched : matched.slice(0, 8)
-      parts.push(section('聊天', shown.map((c) => convRow(c, query)).join('')))
     }
-    if (filter === 'all' && query) {
-      parts.push(section('导航', navRows.filter((id) => hit(modules[id].label)).slice(0, 5).map(navRow).join('')))
-      parts.push(section('资源', resources.filter((r) => hit(`${r.name} ${r.source || ''} ${r.dataOwner || ''}`)).slice(0, 5).map(resourceRow).join('')))
-      parts.push(section('项目', projects.filter((p) => hit(`${p.name || ''} ${p.desc || ''}`)).slice(0, 4).map(projectRow).join('')))
-      parts.push(section('应用', apps.filter((a) => hit(`${a.name || ''} ${a.category || ''}`)).slice(0, 4).map(appRow).join('')))
-      parts.push(section('任务', tasks.filter((t) => hit(`${t.title || t.name || ''} ${t.status || ''}`)).slice(0, 4).map(taskRow).join('')))
+
+    if (filter === 'all' && query && dataReady) {
+      parts.push(...actionSections(query, 6))
+      parts.push(section('导航', navRows.filter((id) => hit(modules[id]?.label || id)).slice(0, 5).map(navRow).join('')))
     }
+
+    if (query && loading) parts.push('<div class="search-empty search-loading">正在检索会话、工作区、云空间与知识库…</div>')
+    if (searchError) parts.push(`<div class="search-warn">${esc(searchError)}</div>`)
+
     body.innerHTML = parts.filter(Boolean).join('')
-    if (!parts.filter(Boolean).length) {
-      body.innerHTML = `<div class="search-empty">没有找到「${esc(input.value.trim())}」相关结果</div>`
+    if (!body.innerHTML) {
+      const hint = !query
+        ? (filter === 'actions' ? '输入关键词搜索操作与设置' : '输入关键词搜索会话、工作区、云空间文件、知识库、数据资源与应用')
+        : `没有找到「${esc(input.value.trim())}」相关结果`
+      body.innerHTML = `<div class="search-empty">${esc(hint)}</div>`
     }
+
+    const counts = {
+      all: dataReady ? Object.values(remote.groups || {}).reduce((sum, group) => sum + (Number(group?.total) || 0), 0) : 0,
+      conversations: groupOf('conversations')?.total || 0,
+      projects: groupOf('projects')?.total || 0,
+      files: groupOf('files')?.total || 0,
+      notebooks: groupOf('notebooks')?.total || 0,
+      more: ['resources', 'apps', 'tasks'].reduce((sum, name) => sum + (Number(groupOf(name)?.total) || 0), 0),
+    }
+    wrap.querySelectorAll('[data-count]').forEach((el) => {
+      const n = counts[el.dataset.count] || 0
+      el.textContent = n > 99 ? '99+' : (n ? String(n) : '')
+      el.classList.toggle('on', n > 0)
+    })
+
     rows = Array.from(body.querySelectorAll('.search-row'))
     active = rows.length ? 0 : -1
     paintActive()
@@ -2974,6 +3154,67 @@ async function openSearchPalette(initial = '') {
     body.querySelectorAll('[data-res]').forEach((b) => b.addEventListener('click', () => { close(); openResource(b.dataset.res) }))
     body.querySelectorAll('[data-project]').forEach((b) => b.addEventListener('click', () => { close(); openProject(b.dataset.project) }))
     body.querySelectorAll('[data-conv]').forEach((b) => b.addEventListener('click', () => { close(); openConversation(b.dataset.conv) }))
+    body.querySelectorAll('[data-drive]').forEach((b) => b.addEventListener('click', () => {
+      close()
+      state.view = 'drive'
+      state.driveSpace = b.dataset.driveSpace || 'CL-DEPT'
+      state.driveQuery = b.dataset.driveName || ''
+      state.driveFilter = 'all'
+      state.drivePage = 1
+      render()
+    }))
+    body.querySelectorAll('[data-nb]').forEach((b) => b.addEventListener('click', () => {
+      close()
+      state.view = 'knowledge'
+      state.notebookId = b.dataset.nb
+      state.nbOpen = true
+      state.nbStart = false
+      state.noteOpen = false
+      state.noteId = ''
+      render()
+    }))
+    body.querySelectorAll('[data-app]').forEach((b) => b.addEventListener('click', () => {
+      close()
+      openAppDetail(b.dataset.app)
+    }))
+  }
+
+  const loadRemote = async (query, seq) => {
+    let result
+    try {
+      result = await api(`/api/search?q=${encodeURIComponent(query)}`)
+    } catch {
+      if (seq !== searchSeq || !wrap.isConnected) return
+      loading = false
+      searchError = '搜索服务暂时无法连接，请稍后重试'
+      paint()
+      return
+    }
+    if (seq !== searchSeq || !wrap.isConnected) return
+    if (!result.ok) {
+      remote = null
+      remoteQuery = ''
+      searchError = result.body?.error || '搜索失败，请稍后重试'
+    } else {
+      remote = result.body
+      remoteQuery = query
+      searchError = result.body?.searchError ? `云空间检索部分不可用：${result.body.searchError}` : ''
+    }
+    loading = false
+    paint()
+  }
+
+  const queueSearch = (query) => {
+    clearTimeout(searchTimer)
+    searchSeq += 1
+    remote = null
+    remoteQuery = ''
+    searchError = ''
+    loading = Boolean(query)
+    paint()
+    if (!query) return
+    const seq = searchSeq
+    searchTimer = setTimeout(() => loadRemote(query, seq), 220)
   }
 
   wrap.querySelectorAll('.search-tab').forEach((b) => b.addEventListener('click', () => {
@@ -2983,7 +3224,6 @@ async function openSearchPalette(initial = '') {
       x.classList.toggle('on', on)
       x.setAttribute('aria-selected', on ? 'true' : 'false')
     })
-    input.value = ''
     input.placeholder = placeholders[filter] || placeholders.all
     paint()
     input.focus()
@@ -3006,10 +3246,18 @@ async function openSearchPalette(initial = '') {
     }
   }
 
-  input.addEventListener('input', paint)
+  api('/api/conversations').then(({ ok, body }) => {
+    if (!ok || !wrap.isConnected) return
+    conversations = body.items || conversations
+    if (!q()) paint()
+  }).catch(() => {})
+
+  input.addEventListener('input', () => queueSearch(q()))
   wrap.addEventListener('click', (e) => { if (e.target === wrap) close() })
   document.addEventListener('keydown', onKey)
+  input.placeholder = placeholders[filter] || placeholders.all
   paint()
+  if (q()) queueSearch(q())
 }
 
 /* -------------------------------- views ----------------------------- */
@@ -3049,6 +3297,7 @@ async function renderViewInner() {
     }
   }
   if (state.view === 'imagegen') return renderImage(view)
+  if (state.view === 'pipeline') return renderPipeline(view)
   if (state.view === 'drive') return renderDrive(view)
   if (state.view === 'contacts') return renderContacts(view)
   if (state.view === 'im') return renderIM(view)
@@ -3737,9 +3986,9 @@ function currentProject() {
 function projectContextControl() {
   const p = currentProject()
   const online = p?.status === 'online'
-  return `<button class="quick" id="projectContext" style="display:inline-flex;align-items:center;gap:6px;line-height:1.2" title="${p ? esc(p.cwd || '') : '为本次对话绑定项目或本地文件夹'}">
+  return `<button class="quick" id="projectContext" style="display:inline-flex;align-items:center;gap:6px;line-height:1.2" title="${p ? esc(state.activeWorktreePath || p.cwd || '') : '为本次对话绑定项目或本地文件夹'}">
     <span class="ico" style="display:inline-flex;align-items:center;justify-content:center">${icon('folder')}</span>${p ? esc(p.folderName || p.name) : '项目或文件夹'}
-    ${p ? `<span class="tag" style="margin-left:4px">${online ? '已连接' : '不可用'}</span>` : ''}
+    ${p ? `<span class="tag" style="margin-left:4px">${state.activeWorktreePath ? esc(state.activeWorktreeBranch || '游离 HEAD') : (online ? '已连接' : '不可用')}</span>` : ''}
   </button>`
 }
 
@@ -4009,6 +4258,8 @@ async function openWorkspacePicker(trigger) {
     state.activeProjectId = p?.id || ''
     state.activeProjectName = p?.name || ''
     state.activeProjectCwd = p?.cwd || ''
+    state.activeWorktreePath = ''
+    state.activeWorktreeBranch = ''
     wrap.remove()
     state.view = state.conversation ? 'chat' : 'home'
     render()
@@ -4037,6 +4288,8 @@ async function openWorkspacePicker(trigger) {
       state.activeProjectId = p.id
       state.activeProjectName = p.name
       state.activeProjectCwd = p.cwd
+      state.activeWorktreePath = ''
+      state.activeWorktreeBranch = ''
       state.view = 'home'
       render()
     })
@@ -4155,7 +4408,7 @@ async function startVoiceInput(btn, targetInput = null) {
 
 function openSpeechSettings() {
   const mask = openModal('本地离线语音', `
-    <div class="mc-block"><div class="mc-id">识别模型</div><div class="field-value">SenseVoiceSmall ONNX · CPU 本地推理 · 音频不上传云端</div><div class="mc-id" id="speechState" style="margin-top:8px">读取中…</div><div class="mc-id" id="speechProgress" style="margin-top:4px"></div></div>
+    <div class="mc-block"><div class="mc-dim">识别模型</div><div class="field-value">SenseVoiceSmall ONNX · CPU 本地推理 · 音频不上传云端</div><div class="mc-dim" id="speechState" style="margin-top:8px">读取中…</div><div class="mc-dim" id="speechProgress" style="margin-top:4px"></div></div>
     <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px"><button class="btn primary" id="speechPrepare">下载/校验本地模型</button></div>`)
   const stateEl = mask.querySelector('#speechState')
   const progressEl = mask.querySelector('#speechProgress')
@@ -4196,6 +4449,8 @@ async function renderHome(el) {
     state.activeProjectId = ''
     state.activeProjectName = ''
     state.activeProjectCwd = ''
+    state.activeWorktreePath = ''
+    state.activeWorktreeBranch = ''
   }
   if (project) {
     state.activeProjectName = project.name
@@ -4299,7 +4554,7 @@ async function openConversation(id) {
   state.shareMode = false
   state.shareSelection = []
   const { body: one } = await api(`/api/conversation?id=${id}`)
-  if (!one?.item) return toast('该会话不存在或已被删除', true)
+  if (!one?.item) { toast('该会话不存在或已被删除', true); return false }
   state.conversation = one.item
   upsertConversationMeta(one.item)
   const sp = (state.projects || []).find((p) => p.id === one.item.projectId)
@@ -4308,6 +4563,8 @@ async function openConversation(id) {
   state.activeProjectId = one.item.projectId || ''
   state.activeProjectName = sp?.name || ''
   state.activeProjectCwd = sp?.cwd || ''
+  state.activeWorktreePath = one.item.worktreePath || ''
+  state.activeWorktreeBranch = one.item.worktreeBranch || ''
   state.executionPolicy = one.item.executionPolicy === 'manual' ? 'manual' : 'auto'
   state.taskMode = ['auto', 'chat', 'work'].includes(one.item.taskMode) ? one.item.taskMode : 'auto'
   state.agentPresetId = one.item.agentPresetId || ''
@@ -4323,6 +4580,7 @@ async function openConversation(id) {
   } catch { state.pendingInteraction = null }
   state.view = 'chat'
   render()
+  return true
 }
 
 /* ------------------------------- 项目 ------------------------------- */
@@ -4343,17 +4601,19 @@ function startFreshChat() {
   state.pendingConfirm = null
   state.qSel = {}
   state.qCustom = {}
+  state.qStep = 0
   clearComposerRefs()
   state.agentPresetId = ''
   state.activeProjectId = ''
   state.activeProjectName = ''
   state.activeProjectCwd = ''
+  state.activeWorktreePath = ''
+  state.activeWorktreeBranch = ''
   state.executionPolicy = state.runtimeSettings?.defaultPolicy === 'manual' ? 'manual' : 'auto'
   state.taskMode = 'auto'
   state.reasoningEffort = state.runtimeSettings?.defaultEffort || 'medium'
   state.deepThink = false
   render()
-  toast('已开始全新对话：项目、上下文和策略均已重置')
   setTimeout(() => document.getElementById('draft')?.focus(), 50)
 }
 
@@ -4475,11 +4735,11 @@ function openProjectFiles({ projectId = '', conversationId = '' } = {}) {
   const mask = openModal('文件浏览', `
     <div style="display:flex;gap:12px;min-height:52vh;align-items:stretch">
       <div style="width:38%;min-width:220px;border-right:1px solid var(--line);padding-right:10px;display:flex;flex-direction:column">
-        <div class="mc-id" id="fileRoot" style="margin-bottom:8px">正在读取目录…</div>
+        <div class="mc-dim" id="fileRoot" style="margin-bottom:8px">正在读取目录…</div>
         <div id="fileTree" style="overflow:auto;flex:1;font-size:12px"></div>
       </div>
       <div style="flex:1;min-width:0;display:flex;flex-direction:column">
-        <div class="mc-id" id="fileHead">选择左侧文件预览</div>
+        <div class="mc-dim" id="fileHead">选择左侧文件预览</div>
         <pre id="fileBody" class="mono" style="flex:1;overflow:auto;white-space:pre-wrap;word-break:break-word;margin:8px 0 0;padding:10px;background:var(--panel);border:1px solid var(--line);border-radius:8px;min-height:260px"></pre>
       </div>
     </div>`)
@@ -4542,6 +4802,25 @@ function openProjectFiles({ projectId = '', conversationId = '' } = {}) {
   })
 }
 
+const MEMORY_KIND_LABEL = { preference: '偏好', fact: '事实', decision: '决策', entity: '实体', task: '任务' }
+
+/** 工作区详情：读取归属于当前项目的自动记忆（全局记忆在个人记忆库中查看）。 */
+async function loadProjectMemoryList(slide, projectId) {
+  const box = slide.querySelector('#prjMemoryList')
+  if (!box) return
+  const { ok, body } = await api(`/api/memories?projectId=${encodeURIComponent(projectId)}&limit=100`)
+  if (!ok) { box.textContent = body?.error || '记忆读取失败'; return }
+  const items = (Array.isArray(body.items) ? body.items : []).filter((x) => x.scope === 'project' && x.scopeRef === projectId)
+  if (!items.length) {
+    box.textContent = '暂无沉淀到本工作区的长期记忆；随着对话与协作，稳定的事实、偏好和决策会自动归类到这里。'
+    return
+  }
+  box.innerHTML = items.map((item) => `<div style="padding:8px 0;border-top:1px solid var(--line)">
+      <div style="font-size:var(--fs-meta);color:var(--muted)">${esc(MEMORY_KIND_LABEL[item.kind] || '事实')}${item.pinned ? ' · 已置顶' : ''} · 使用 ${Number(item.useCount || 0)} 次</div>
+      <div style="margin-top:2px;white-space:normal">${esc(item.text)}</div>
+    </div>`).join('')
+}
+
 function openProject(id) {
   const p = (state.projects || []).find((x) => x.id === id)
     || (state.sidebarProjects || []).find((x) => x.id === id)
@@ -4551,11 +4830,15 @@ function openProject(id) {
   const online = p.status === 'online'
   const autoReview = (state.agentEntries || []).find((x) => x.id === 'auto-review')
   const threads = (state.conversations || []).filter((c) => c.projectId === p.id)
+  const agentsFiles = p.agents?.files || []
+  const agentsSummary = agentsFiles.length
+    ? `${agentsFiles.slice(0, 3).map((f) => f.path || f.name).join('、')}${agentsFiles.length > 3 ? ` 等 ${agentsFiles.length} 个文件` : ''}${p.agents?.truncated ? '（已按 32KB 截断）' : ''}`
+    : '未发现 AGENTS.md 或 AGENTS.override.md；可在工作区根目录新建。'
   const threadRows = threads.length
     ? threads.slice(0, 20).map((c) => `<button class="lib-row" data-prjthread="${esc(c.id)}" style="width:100%;border:0;border-bottom:1px solid var(--line);border-radius:0;text-align:left">
         <span class="ico">${icon('chat')}</span>
         <span class="lib-name" style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.title || '未命名线程')}</span>
-        <span class="lib-meta">${esc(c.status === 'running' ? '运行中' : (c.time || '—'))}</span>
+        <span class="lib-meta">${esc(c.status === 'running' ? '运行中' : (c.time || '—'))}${c.worktreePath ? ` · ${esc(c.worktreeBranch || '游离 HEAD')}` : ''}</span>
       </button>`).join('')
     : `<div style="padding:14px;color:var(--muted);font-size:var(--fs-meta)">还没有线程；点下方「新建线程」开始。</div>`
   slide.innerHTML = `
@@ -4580,7 +4863,9 @@ function openProject(id) {
         <div style="max-height:210px;overflow:auto;border:1px solid var(--line);border-radius:10px;background:#fff">${threadRows}</div>
       </div>
       <div class="field"><div class="field-label">工作区说明</div><div class="field-value">${esc(p.desc || '未填写工作区说明')}</div></div>
-      <div class="field"><div class="field-label">工作区指令</div><div class="field-value">${esc(p.instructions || '未设置；可在新建或编辑工作区时补充统一约定。')}</div></div>
+      <div class="field"><div class="field-label" style="display:flex;align-items:center;justify-content:space-between;gap:8px"><span>工作区指令</span><button class="btn sm" data-editprj>编辑</button></div><div class="field-value">${esc(p.instructions || '未设置；可在新建或编辑工作区时补充统一约定。')}</div></div>
+      <div class="field"><div class="field-label">工作区记忆 <span style="color:var(--muted);font-weight:400">（统一自动沉淀，按工作区归类）</span></div><div class="field-value" id="prjMemoryList" style="white-space:pre-wrap">正在读取记忆…</div></div></div>
+      <div class="field"><div class="field-label">仓库指令（AGENTS.md）</div><div class="field-value">${esc(agentsSummary)}</div></div>
       <div class="field"><div class="field-label">工作区上下文</div><div class="field-value">Agent 直接读取该本地目录中的文件；同一工作区下的多个线程共享目录与指令，但聊天记录彼此独立。</div></div>
       <div class="field"><div class="field-label">安全与权限</div>
         <div class="field-value">
@@ -4595,13 +4880,17 @@ function openProject(id) {
     </div>
     <div class="slide-foot" style="flex-wrap:wrap">
       <button class="btn primary" data-ask ${p.cwd ? '' : 'disabled'}>新建线程</button>
+      ${p.cwd ? '<button class="btn" data-worktrees>工作树</button>' : ''}
       ${p.cwd ? '<button class="btn" data-files>浏览文件</button>' : ''}
       ${p.cwd ? `<button class="btn" data-check ${online ? '' : 'disabled'} title="${online ? '只读检查成果中的指标、日期与版本冲突' : '工作区文件夹当前不可用'}">成果检查</button>` : ''}
       <button class="btn" data-rename>重命名</button>
       <button class="btn" data-remove>移除</button>
     </div>`
   wireSlide(slide)
+  loadProjectMemoryList(slide, p.id)
   slide.querySelector('[data-files]')?.addEventListener('click', () => openProjectFiles({ projectId: p.id }))
+  slide.querySelector('[data-worktrees]')?.addEventListener('click', () => openProjectWorktrees(p))
+  slide.querySelector('[data-editprj]')?.addEventListener('click', () => { slide.classList.remove('open'); openProjectEditCard(null, p.id) })
   slide.querySelector('[data-check]')?.addEventListener('click', () => openDeliverableCheck(p))
   slide.querySelector('[data-security]')?.addEventListener('click', () => openProjectSecurity(p, autoReview))
   slide.querySelector('[data-reveal]')?.addEventListener('click', () => revealProjectFolder(p))
@@ -4676,6 +4965,191 @@ function openProject(id) {
   })
 }
 
+function openProjectWorktrees(p) {
+  const mask = openModal(`工作树 · ${esc(p.name)}`, `
+    <div class="form-note">隔离工作树用于让不同线程并行修改同一个 Git 仓库：每条线程在自己的工作树里读写，完成后可合并回主工作树。非 Git 工作区仍直接使用主目录。</div>
+    <div id="wtBody" style="margin-top:12px;color:var(--muted);font-size:var(--fs-meta)">正在读取工作树…</div>`)
+  const modal = mask.querySelector('.jg-modal')
+  if (modal) modal.style.width = 'min(760px, calc(100vw - 44px))'
+  const bodyEl = mask.querySelector('#wtBody')
+  let projectInfo = null
+
+  const render = (info) => {
+    projectInfo = info
+    if (!info.repo) {
+      bodyEl.innerHTML = `<div class="notice">${esc(info.note || '当前工作区不是 Git 仓库，无法创建隔离工作树。')}</div>`
+      return
+    }
+    const items = info.items || []
+    const branches = info.branches || []
+    const snapshots = info.snapshots || []
+    bodyEl.innerHTML = `
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+        <span class="tag">${items.length} 个工作树</span>
+        <span style="color:var(--muted);font-size:var(--fs-meta)">主工作树：${esc(info.cwd || '')}</span>
+      </div>
+      <div style="border:1px solid var(--line);border-radius:10px;overflow:hidden;background:#fff">
+        ${items.map((item, index) => `
+          <div style="display:flex;align-items:flex-start;gap:10px;padding:10px 12px;border-bottom:${index === items.length - 1 ? '0' : '1px solid var(--line)'}">
+            <div style="min-width:0;flex:1">
+              <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+                <span style="font-weight:var(--fw-semi)">${item.main ? '主工作树' : (item.branch || `游离 HEAD${item.head ? ` · ${esc(item.head.slice(0, 8))}` : ''}`)}</span>
+                ${item.main ? '<span class="tag">主目录</span>' : ''}
+                ${item.dirty ? `<span class="tag warn">${item.dirty} 个未提交改动</span>` : '<span class="tag">干净</span>'}
+              </div>
+              <div class="mono" style="margin-top:4px;color:var(--muted);font-size:var(--fs-micro);word-break:break-all">${esc(item.path || '')}</div>
+            </div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end">
+              <button class="btn sm" data-wt-start="${esc(item.main ? '' : item.path)}">新建线程</button>
+              ${!item.main && !item.branch ? `<button class="btn sm" data-wt-branch="${esc(item.path)}">建分支</button>` : ''}
+              ${!item.main && item.branch ? `<button class="btn sm" data-wt-merge="${esc(item.path)}">合并</button>` : ''}
+              ${!item.main ? `<button class="btn sm" data-wt-cleanup="${esc(item.path)}">清理</button>` : ''}
+              ${!item.main ? `<button class="btn sm" data-wt-discard="${esc(item.path)}">移除</button>` : ''}
+            </div>
+          </div>`).join('') || '<div style="padding:14px;color:var(--muted)">还没有工作树记录。</div>'}
+      </div>
+      ${snapshots.length ? `<div style="margin-top:14px;border:1px solid var(--line);border-radius:10px;background:#fff;overflow:hidden">
+        <div class="field-label" style="padding:10px 12px;border-bottom:1px solid var(--line)">工作树快照</div>
+        ${snapshots.slice(0, 8).map((snap, index) => `
+          <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;border-bottom:${index === Math.min(snapshots.length, 8) - 1 ? '0' : '1px solid var(--line)'}">
+            <div style="min-width:0;flex:1">
+              <div style="font-size:var(--fs-meta);font-weight:var(--fw-semi)">${esc(snap.branch || `游离 HEAD${snap.head ? ` · ${String(snap.head).slice(0, 8)}` : ''}`)} <span class="tag">${snap.dirty || 0} 个改动</span>${snap.partial ? ' <span class="tag warn">部分文件未保存</span>' : ''}</div>
+              <div class="mono" style="margin-top:3px;color:var(--muted);font-size:var(--fs-micro);word-break:break-all">${esc(snap.id)} · ${esc(relTime(snap.createdAt))} · ${esc(snap.path || '')}</div>
+            </div>
+            <button class="btn sm" data-wt-restore="${esc(snap.id)}">恢复</button>
+          </div>`).join('')}
+      </div>` : ''}
+      <div style="margin-top:14px;padding:12px;border:1px solid var(--line);border-radius:10px;background:var(--panel)">
+        <div class="field-label" style="margin-bottom:8px">新建隔离工作树</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <input class="text-input" id="wtBranch" placeholder="分支名（留空则游离 HEAD）" style="flex:1;min-width:220px" />
+          <select class="text-input" id="wtBase" style="width:210px">
+            ${branches.map((b) => `<option value="${esc(b.name)}" ${b.current ? 'selected' : ''}>${esc(b.name)}${b.current ? '（当前）' : ''}</option>`).join('') || '<option value="HEAD">HEAD</option>'}
+          </select>
+          <button class="btn primary" id="wtCreate">创建工作树</button>
+        </div>
+        <div style="margin-top:6px;color:var(--muted);font-size:var(--fs-micro)">留空时从所选起点创建 detached HEAD 工作树；需要保留成果时，再点「建分支」。工作树位于平台数据目录的 worktrees 下。</div>
+      </div>`
+    bodyEl.querySelectorAll('[data-wt-start]').forEach((btn) => btn.addEventListener('click', () => {
+      const path = btn.dataset.wtStart || ''
+      mask.remove()
+      startProjectChat(p, { worktreePath: path, worktreeBranch: items.find((x) => x.path === path)?.branch || '' })
+    }))
+    bodyEl.querySelectorAll('[data-wt-branch]').forEach((btn) => btn.addEventListener('click', () => {
+      const path = btn.dataset.wtBranch
+      const branchMask = openModal('在游离 HEAD 上创建分支', `
+        <div class="form-note">该工作树当前是 detached HEAD。创建分支后，已有线程的分支信息会同步更新，之后才能合并回主工作树。</div>
+        <div class="field"><div class="field-label">分支名</div><input class="text-input" id="wtBranchName" placeholder="例如：jg/2026-11-18-login" autocomplete="off" /></div>
+        <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px"><button class="btn" data-wtb-cancel>取消</button><button class="btn primary" data-wtb-save>创建分支</button></div>`)
+      const input = branchMask.querySelector('#wtBranchName')
+      setTimeout(() => input?.focus(), 40)
+      branchMask.querySelector('[data-wtb-cancel]')?.addEventListener('click', () => openProjectWorktrees(p))
+      branchMask.querySelector('[data-wtb-save]')?.addEventListener('click', async () => {
+        const branch = input?.value.trim() || ''
+        if (!branch) return toast('请填写分支名', true)
+        const save = branchMask.querySelector('[data-wtb-save]')
+        save.disabled = true
+        const { ok, body } = await api('/api/worktrees/branch', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ projectId: p.id, path, branch }),
+        })
+        save.disabled = false
+        if (!ok) return toast(body.error || '创建分支失败', true)
+        toast(`已创建分支 ${body.item?.branch || branch}`)
+        openProjectWorktrees(p)
+      })
+    }))
+    bodyEl.querySelectorAll('[data-wt-merge]').forEach((btn) => btn.addEventListener('click', async () => {
+      const path = btn.dataset.wtMerge
+      if (!window.confirm(`把 ${path} 的工作树分支合并回主工作树？`)) return
+      btn.disabled = true
+      const { ok, body } = await api('/api/worktrees/merge', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ projectId: p.id, path }),
+      })
+      if (!ok) { btn.disabled = false; return toast(body.error || '合并失败', true) }
+      toast('已合并到主工作树')
+      load()
+    }))
+    bodyEl.querySelectorAll('[data-wt-discard]').forEach((btn) => btn.addEventListener('click', async () => {
+      const path = btn.dataset.wtDiscard
+      if (!window.confirm(`移除 ${path} 工作树？未提交的改动会一并移除，分支会保留。`)) return
+      btn.disabled = true
+      const { ok, body } = await api('/api/worktrees/discard', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ projectId: p.id, path }),
+      })
+      if (!ok) { btn.disabled = false; return toast(body.error || '移除失败', true) }
+      toast('工作树已移除，分支已保留')
+      load()
+    }))
+    bodyEl.querySelectorAll('[data-wt-cleanup]').forEach((btn) => btn.addEventListener('click', async () => {
+      const path = btn.dataset.wtCleanup
+      if (!window.confirm(`清理并保存快照？${path} 的未提交改动和未跟踪文件会先写入快照，再从 Git 中移除；之后可从快照恢复。`)) return
+      btn.disabled = true
+      btn.textContent = '清理中…'
+      const { ok, body } = await api('/api/worktrees/cleanup', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ projectId: p.id, path }),
+      })
+      if (!ok) {
+        btn.disabled = false
+        btn.textContent = '清理'
+        return toast(body.error || '清理失败', true)
+      }
+      toast(`已清理并保存快照 ${body.snapshotId || ''}`)
+      load()
+    }))
+    bodyEl.querySelectorAll('[data-wt-restore]').forEach((btn) => btn.addEventListener('click', async () => {
+      const snapshotId = btn.dataset.wtRestore
+      btn.disabled = true
+      btn.textContent = '恢复中…'
+      const { ok, body } = await api('/api/worktrees/restore', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ projectId: p.id, snapshotId }),
+      })
+      if (!ok) {
+        btn.disabled = false
+        btn.textContent = '恢复'
+        return toast(body.error || '恢复失败', true)
+      }
+      toast(`已恢复为新工作树${body.item?.path ? `：${body.item.path}` : ''}`)
+      load()
+    }))
+    bodyEl.querySelector('#wtCreate')?.addEventListener('click', async (ev) => {
+      const btn = ev.currentTarget
+      const branch = bodyEl.querySelector('#wtBranch')?.value.trim() || ''
+      const base = bodyEl.querySelector('#wtBase')?.value || 'HEAD'
+      btn.disabled = true
+      btn.textContent = '创建中…'
+      const { ok, body } = await api('/api/worktrees/create', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ projectId: p.id, branch, base }),
+      })
+      if (!ok) {
+        btn.disabled = false
+        btn.textContent = '创建工作树'
+        return toast(body.error || '创建工作树失败', true)
+      }
+      toast(`工作树已创建：${body.item?.branch || (body.item?.detached ? `游离 HEAD ${body.item?.head || ''}` : '')}`)
+      load()
+    })
+  }
+
+  const load = async () => {
+    const [worktrees, snapshots] = await Promise.all([
+      api(`/api/worktrees?projectId=${encodeURIComponent(p.id)}`),
+      api(`/api/worktrees/snapshots?projectId=${encodeURIComponent(p.id)}`),
+    ])
+    if (!worktrees.ok) {
+      bodyEl.innerHTML = `<div class="notice">${esc(worktrees.body.error || '读取工作树失败')}</div>`
+      return
+    }
+    render({ ...worktrees.body, snapshots: snapshots.ok ? (snapshots.body.items || []) : [] })
+  }
+  load()
+}
+
 function openProjectSecurity(p, autoReview) {
   const mask = openModal(`项目权限与安全 · ${esc(p.name)}`, `
     <div class="form-note">权限层与代码审查是两个不同的能力：前者拦截工具调用，后者审查源码。自动审查权限层已从输入框工具菜单移除，统一放到项目安全设置。</div>
@@ -4720,7 +5194,7 @@ function deliverableResultHtml(result) {
   const checks = result.checks || []
   const summary = result.summary || {}
   const evidence = (items) => (items || []).map((item) => `
-    <div class="mc-id" style="margin-top:6px;white-space:normal;line-height:1.6">${esc(item.file || '')}${item.text ? ` · ${esc(item.text)}` : ''}</div>`).join('')
+    <div class="mc-dim" style="margin-top:6px;white-space:normal;line-height:1.6">${esc(item.file || '')}${item.text ? ` · ${esc(item.text)}` : ''}</div>`).join('')
   const cards = checks.length ? checks.map((item) => {
     const color = item.level === 'conflict' ? '#c0392b' : item.level === 'warning' ? '#b7791f' : '#2f855a'
     return `<div style="border:1px solid var(--line);border-left:3px solid ${color};border-radius:8px;padding:10px 12px;background:#fff;margin-bottom:8px">
@@ -4807,7 +5281,7 @@ function openProjectForm(onDone) {
       <textarea id="prjInstructions" rows="3" placeholder="例如：本项目统一使用中文命名；修改代码前先运行现有测试。" style="width:100%;box-sizing:border-box;border:1px solid #e1e4e9;border-radius:12px;background:#fff;padding:11px 12px;font:inherit;font-size:var(--fs-meta);color:var(--text);resize:vertical;outline:none"></textarea>
 
       <div style="display:flex;align-items:center;justify-content:space-between;margin-top:18px">
-        <button id="prjMemory" type="button" style="border:0;background:transparent;padding:6px 0;font:inherit;font-size:var(--fs-sub);color:var(--text);cursor:pointer">工作区记忆 <span style="color:var(--muted)">⌄</span></button>
+        <div style="font-size:var(--fs-meta);color:var(--muted)">长期事实、偏好与决策由统一自动记忆沉淀，按工作区自动归类，无需手工填写。</div>
         <button class="btn primary" data-ok disabled style="min-width:126px;height:44px;border-radius:22px;font-size:var(--fs-sub);background:#b9bdc4 !important;color:#fff !important;border-color:#b9bdc4 !important">创建工作区</button>
       </div>
     </div>`)
@@ -4852,7 +5326,6 @@ function openProjectForm(onDone) {
   mask.querySelector('#prjDrop')?.addEventListener('click', (e) => {
     if (hasBridge && e.target.closest('#prjDrop') && !e.target.closest('#prjBrowse') && !e.target.closest('#prjCwd')) chooseFolder()
   })
-  mask.querySelector('#prjMemory')?.addEventListener('click', () => toast('工作区记忆将在后续版本开放'))
   mask.querySelector('[data-ok]').addEventListener('click', async () => {
     const cwd = cwdInput.value.trim()
     const name = nameInput.value.trim() || folderNameOf(cwd) || '本地工作区'
@@ -4978,6 +5451,7 @@ function startInteractionPoll() {
   }
   state.qSel = {}
   state.qCustom = {}
+  state.qStep = 0
   let seen = ''
   state.interactionPoll = setInterval(async () => {
     if (!state.chatBusy) return
@@ -4996,6 +5470,7 @@ function startInteractionPoll() {
     state.pendingInteraction = item
     state.qSel = {}
     state.qCustom = {}
+    state.qStep = 0
     renderView()
   }, 800)
 }
@@ -5035,6 +5510,8 @@ async function submitAnswer(cancel = false) {
     body: JSON.stringify({ id: p.id, answers }),
   })
   if (!ok) toast(body.error || '回答回填失败', true)
+  // 取消问题卡 = 放弃这一轮，不能让模型拿默认值继续建任务。
+  else if (cancel) await cancelChat()
 }
 
 function upsertConversationMeta(conv) {
@@ -5113,6 +5590,7 @@ async function sendMessage(text, options = {}) {
     refs,
     mode: state.taskMode || 'auto',
     projectId: state.activeProjectId || state.conversation?.projectId || '',
+    worktreePath: state.activeWorktreePath || state.conversation?.worktreePath || '',
     executionPolicy: state.executionPolicy,
     presetId: state.agentPresetId || '',
     webSearch: Boolean(state.webSearch),
@@ -5126,7 +5604,18 @@ async function sendMessage(text, options = {}) {
       streamDraft.text += delta
       scheduleStreamRender()
     },
-  }).catch((error) => ({ ok: false, status: 0, body: { error: error?.message || '网络请求失败，请稍后重试' } }))
+  }).catch((error) => {
+    const aborted = Boolean(error && (error.name === 'AbortError' || /abort/i.test(String(error.message || ''))))
+    return {
+      ok: false,
+      status: 0,
+      body: {
+        error: aborted
+          ? '连接中断：本机服务连续无响应（可能异常退出或卡死），请重试'
+          : (error?.message || '网络请求失败，请稍后重试'),
+      },
+    }
+  })
 
   if (streamDraft) {
     const draftIndex = conv.messages.indexOf(streamDraft)
@@ -5140,6 +5629,7 @@ async function sendMessage(text, options = {}) {
   if (!res.ok) {
     stopThinkingClock()
     state.chatBusy = false
+    state.chatSteps = []
     state.chatError = res.body.error || '模型或工具调用失败'
     renderView()
     return
@@ -5348,13 +5838,13 @@ async function renderFormats(el) {
     <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-top:18px">
       ${cards.map((item) => `<div class="mc-block" style="padding:14px;grid-column:auto !important">
         <div style="display:flex;align-items:center;gap:8px"><b>${esc(item.label)}</b><span class="tag">${esc(item.family || '数据')}</span></div>
-        <div class="mc-id" style="margin-top:8px">读取：${esc((item.read || []).join('、'))}</div>
-        <div class="mc-id" style="margin-top:2px">输出：${esc((item.write || []).join('、'))}</div>
+        <div class="mc-dim" style="margin-top:8px">读取：${esc((item.read || []).join('、'))}</div>
+        <div class="mc-dim" style="margin-top:2px">输出：${esc((item.write || []).join('、'))}</div>
         <div class="form-note" style="margin-top:8px">${esc(item.note || '')}</div>
       </div>`).join('')}
     </div>
     <div class="mc-block" style="padding:14px;margin-top:14px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-      <div style="flex:1;min-width:260px"><b>格式运行器</b><div class="mc-id" style="margin-top:4px">SHP / GDB 可直接选择文件夹，不需要压缩；SHP 与 GDB 可互转，GeoJSON 可转换为 SHP 或 GDB。PDF、GIS、CAD 共用同一套 inspect / export 服务。</div></div>
+      <div style="flex:1;min-width:260px"><b>格式运行器</b><div class="mc-dim" style="margin-top:4px">SHP / GDB 可直接选择文件夹，不需要压缩；SHP 与 GDB 可互转，GeoJSON 可转换为 SHP 或 GDB。PDF、GIS、CAD 共用同一套 inspect / export 服务。</div></div>
       <button class="btn primary" id="fmtPdf">打开 PDF 运行器</button>
       <button class="btn" id="fmtSpatial">打开 GIS / CAD 运行器</button>
     </div>
@@ -5366,7 +5856,7 @@ async function renderFormats(el) {
 
 async function openSpatialTool() {
   const mask = openModal('GIS / CAD 格式运行器', `<div style="min-width:760px;max-width:86vw">
-    <div class="mc-id" style="margin-bottom:10px">平台格式基座 · 直接读取 SHP / GDB 文件夹，不需要压缩；SHP 与 GDB 可互转，GeoJSON 可转换为这两种主格式。DWG 需先转换为 DXF。</div>
+    <div class="mc-dim" style="margin-bottom:10px">平台格式基座 · 直接读取 SHP / GDB 文件夹，不需要压缩；SHP 与 GDB 可互转，GeoJSON 可转换为这两种主格式。DWG 需先转换为 DXF。</div>
     <div class="mc-block" style="padding:12px;margin-bottom:10px">
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
         <input type="file" id="geoFolder" webkitdirectory directory multiple style="display:none">
@@ -5375,7 +5865,7 @@ async function openSpatialTool() {
         <button class="btn sm" id="geoPickFile">选择单个文件</button>
         <span class="mc-dim" id="geoPickInfo">尚未选择数据</span>
       </div>
-      <div class="mc-id" style="margin-top:8px">SHP 文件夹需包含 .shp/.dbf/.shx（建议带 .prj）；一个文件夹里有多个 SHP 时可合并输出为一个 GDB。GDB 直接选择整个 .gdb 文件夹。GeoJSON 与 ZIP 包也可直接选择。</div>
+      <div class="mc-dim" style="margin-top:8px">SHP 文件夹需包含 .shp/.dbf/.shx（建议带 .prj）；一个文件夹里有多个 SHP 时可合并输出为一个 GDB。GDB 直接选择整个 .gdb 文件夹。GeoJSON 与 ZIP 包也可直接选择。</div>
     </div>
     <div id="geoOut"><div class="mc-block" style="padding:12px"><div class="mc-dim">选择数据后解析真实几何、图层、范围与要素数量。</div></div></div>
   </div>`, { wide: true })
@@ -5447,16 +5937,16 @@ async function openSpatialTool() {
       const targetLabel = { shp: '输出 SHP', gdb: '输出 GDB' }
       out.innerHTML = `<div class="mc-block" style="padding:12px">
         <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><b>${esc(d.name || inspectName)}</b><span class="tag ok">${esc(d.formatLabel || (isDxf ? 'DXF' : '空间数据'))}</span><span class="mc-dim">${d.features} 个${isDxf ? '实体' : '要素'} · ${d.pointCount || 0} 个坐标点${d.previewFeatures && d.previewFeatures < d.features ? `（预览 ${d.previewFeatures} 个）` : ''}</span></div>
-        <div class="mc-id" style="margin-top:6px">范围：${(d.bbox || []).join(' , ') || '未声明'} · 坐标系：${esc(d.crs)}${d.crsMixed ? '（多坐标系，按图层保留）' : ''} · 图层：${esc((d.layers || []).join('、') || '未声明')}</div>
-        <div class="mc-id" style="margin-top:2px">类型：${esc((d.geometryTypes || d.entityTypes || []).join('、'))}</div>
-        ${d.sourceFiles?.length > 1 ? `<div class="mc-id" style="margin-top:2px">数据源：${esc(d.sourceFiles.slice(0, 8).join('、'))}${d.sourceFiles.length > 8 ? ' …' : ''}</div>` : ''}
-        ${d.fields?.length ? `<div class="mc-id" style="margin-top:2px">属性字段：${esc(d.fields.slice(0, 12).join('、'))}${d.fields.length > 12 ? ' …' : ''}</div>` : ''}
-        ${d.layerDetails?.length ? `<div class="mc-id" style="margin-top:2px">图层：${esc(d.layerDetails.map((x) => `${x.name}（${x.features}）`).join('、'))}</div>` : ''}
+        <div class="mc-dim" style="margin-top:6px">范围：${(d.bbox || []).join(' , ') || '未声明'} · 坐标系：${esc(d.crs)}${d.crsMixed ? '（多坐标系，按图层保留）' : ''} · 图层：${esc((d.layers || []).join('、') || '未声明')}</div>
+        <div class="mc-dim" style="margin-top:2px">类型：${esc((d.geometryTypes || d.entityTypes || []).join('、'))}</div>
+        ${d.sourceFiles?.length > 1 ? `<div class="mc-dim" style="margin-top:2px">数据源：${esc(d.sourceFiles.slice(0, 8).join('、'))}${d.sourceFiles.length > 8 ? ' …' : ''}</div>` : ''}
+        ${d.fields?.length ? `<div class="mc-dim" style="margin-top:2px">属性字段：${esc(d.fields.slice(0, 12).join('、'))}${d.fields.length > 12 ? ' …' : ''}</div>` : ''}
+        ${d.layerDetails?.length ? `<div class="mc-dim" style="margin-top:2px">图层：${esc(d.layerDetails.map((x) => `${x.name}（${x.features}）`).join('、'))}</div>` : ''}
         ${d.note ? `<div class="form-note" style="margin-top:6px">${esc(d.note)}</div>` : ''}
         <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">${targets.map((target) => `<button class="btn sm" data-fmt-export="${target}">${targetLabel[target]}</button>`).join('')}${isDxf ? `<button class="btn sm" data-fmt-export="dxf">输出 DXF</button>` : ''}<span class="mc-dim" id="fmtExportStatus"></span></div>
         <div id="fmtExportOut"></div>
         <div style="border:1px solid var(--line);border-radius:10px;overflow:hidden;margin-top:10px;height:430px;background:#fff">${d.svg || ''}</div>
-        <div class="mc-id" style="margin-top:6px">预览由本机解析出的坐标生成；不是静态图片，也不做投影转换。</div>
+        <div class="mc-dim" style="margin-top:6px">预览由本机解析出的坐标生成；不是静态图片，也不做投影转换。</div>
       </div>`
       out.querySelectorAll('[data-fmt-export]').forEach((button) => button.addEventListener('click', () => exportTarget(button)))
       async function exportTarget(button) {
@@ -5488,7 +5978,7 @@ async function openSpatialTool() {
           }
         } catch (error) {
           if (status) status.textContent = error?.message || '输出失败'
-          if (exportOut) exportOut.innerHTML = `<div class="mc-id" style="margin-top:6px;color:var(--warn)">${esc(error?.message || '输出失败')}</div>`
+          if (exportOut) exportOut.innerHTML = `<div class="mc-dim" style="margin-top:6px;color:var(--warn)">${esc(error?.message || '输出失败')}</div>`
         } finally { button.disabled = false }
       }
     } catch (error) {
@@ -5499,14 +5989,14 @@ async function openSpatialTool() {
 
 async function openPdfTool() {
   const mask = openModal('PDF 格式运行器', `<div style="min-width:720px;max-width:86vw">
-    <div class="mc-id" style="margin-bottom:10px">平台格式基座 · 真实解析、合并、拆分与文本提取；文件在本机处理，不调用外部服务。</div>
+    <div class="mc-dim" style="margin-bottom:10px">平台格式基座 · 真实解析、合并、拆分与文本提取；文件在本机处理，不调用外部服务。</div>
     <div class="mc-block" style="padding:12px;margin-bottom:10px">
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
         <input type="file" id="pdfFiles" accept="application/pdf,.pdf" multiple style="display:none">
         <button class="btn sm primary" id="pdfPick">选择 PDF 文件</button>
         <span class="mc-dim" id="pdfPickInfo">尚未选择文件</span>
       </div>
-      <div class="mc-id" style="margin-top:8px">支持选择多个文件用于合并；解析、拆分、提取文本使用第一个文件。</div>
+      <div class="mc-dim" style="margin-top:8px">支持选择多个文件用于合并；解析、拆分、提取文本使用第一个文件。</div>
     </div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
       <button class="btn sm" data-pdf-op="inspect">解析 / 预览</button>
@@ -5558,10 +6048,10 @@ async function openPdfTool() {
         const d = info.body
         out.innerHTML = `<div class="mc-block" style="padding:12px">
           <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap"><b>${esc(uploaded[0].localName)}</b><span class="tag ok">${d.pageCount} 页</span><span class="mc-dim">${(d.bytes / 1024).toFixed(0)} KB</span></div>
-          <div class="mc-id" style="margin-top:8px">标题：${esc(d.title || '未设置')} · 作者：${esc(d.author || '未设置')} · 生成器：${esc(d.producer || '未设置')}</div>
-          <div class="mc-id" style="margin-top:4px">页面：${d.pages.map((p) => `${p.index}（${p.width}×${p.height}${p.rotation ? `，旋转 ${p.rotation}°` : ''}）`).join('、')}</div>
+          <div class="mc-dim" style="margin-top:8px">标题：${esc(d.title || '未设置')} · 作者：${esc(d.author || '未设置')} · 生成器：${esc(d.producer || '未设置')}</div>
+          <div class="mc-dim" style="margin-top:4px">页面：${d.pages.map((p) => `${p.index}（${p.width}×${p.height}${p.rotation ? `，旋转 ${p.rotation}°` : ''}）`).join('、')}</div>
           <iframe src="/api/pdf/view?fileId=${encodeURIComponent(uploaded[0].id)}" style="width:100%;height:420px;border:1px solid var(--line);border-radius:10px;margin-top:10px;background:#fff" title="PDF 预览"></iframe>
-          <div class="mc-id" style="margin-top:6px">预览来自真实 PDF 文件；若浏览器无法内嵌，可用下方“下载/打开”链接。</div>
+          <div class="mc-dim" style="margin-top:6px">预览来自真实 PDF 文件；若浏览器无法内嵌，可用下方“下载/打开”链接。</div>
           <div style="margin-top:8px"><a class="btn sm" href="/api/files/download?id=${encodeURIComponent(uploaded[0].id)}" download>下载原文件</a></div>
         </div>`
       } else if (op === 'merge') {
@@ -5579,7 +6069,7 @@ async function openPdfTool() {
         if (!result.ok) throw new Error(result.body?.error || '提取失败')
         const text = result.body.text || ''
         out.innerHTML = `<div class="mc-block" style="padding:12px"><b>文本提取</b><span class="tag ok" style="margin-left:8px">${text.length} 字符</span>
-          <div class="mc-id" style="margin-top:4px">${esc(result.body.note || '')}</div>
+          <div class="mc-dim" style="margin-top:4px">${esc(result.body.note || '')}</div>
           <div class="mono" style="white-space:pre-wrap;word-break:break-word;max-height:340px;overflow:auto;margin-top:8px;font-size:12px;line-height:1.6">${esc(text || '（没有提取到可显示文本）')}</div></div>`
       }
     } catch (error) {
@@ -5990,6 +6480,16 @@ async function openResource(id) {
   }))
 }
 
+function slideTopOffset() {
+  /* 抽屉不该盖住最上层那条工具栏：按顶部栏的实际高度把抽屉往下让，
+     顶部栏不存在或是贴顶隐藏时退回 0，面板仍然占满高度。 */
+  const bar = document.querySelector('.topbar')
+  if (!bar) return 0
+  const rect = bar.getBoundingClientRect()
+  if (rect.height <= 0 || rect.top > 1) return 0
+  return Math.round(rect.height)
+}
+
 function ensureSlide() {
   let slide = document.getElementById('slide')
   if (!slide) {
@@ -5998,6 +6498,7 @@ function ensureSlide() {
     slide.className = 'slide'
     document.body.appendChild(slide)
   }
+  slide.style.top = slideTopOffset() + 'px'
   slide.classList.add('open')
   initSlideNativeObserver(slide)
   syncNativeWithSlide()
@@ -6101,7 +6602,7 @@ async function renderSkills(el) {
       <span class="pl-ico ${tone(i)}">${icon(typeIcon(t))}</span>
       <div class="pl-item-main"><div class="pl-item-name">${esc(m.name)}</div><div class="pl-item-desc">${esc(m.desc)}</div></div>
       ${t === 'app' && m.runtime?.running ? '<span class="tag ok" style="font-size:10px">运行中</span>' : ''}
-      ${t === 'app' && m.installed && m.versionDrift ? `<span class="tag bad" style="font-size:10px" title="市场已发布新版本">可更新 v${esc(m.marketVersion)}</span>` : ''}
+      ${t === 'app' && m.installed && m.versionDrift ? `<button class="tag bad as-quickupdate" style="font-size:10px" title="点击更新到 v${esc(m.marketVersion)}" data-as-quickupdate="${esc(m.id)}" data-as-target="${esc(m.marketVersion)}">可更新 v${esc(m.marketVersion)}</button>` : ''}
       ${t === 'app' && m.installed && m.runningVersion && m.installedVersion && m.runningVersion !== m.installedVersion ? '<span class="tag warn" style="font-size:10px" title="版本已切换，重启应用后生效">重启后生效</span>' : ''}
       ${t === 'app' && (m.appCapabilities?.tools || []).filter((tool) => !tool.sideEffect).length ? `<span class="tag" style="font-size:10px">AI · ${(m.appCapabilities.tools || []).filter((tool) => !tool.sideEffect).length}</span>` : ''}
       ${m.installed
@@ -6213,7 +6714,7 @@ async function renderSkills(el) {
             const mid = x.marketId || (state.market.find((m) => m.name === x.name)?.id) || (tab === 'plugin' ? x.id : '')
             return `<div class="pl-inst" ${instAttr(x)} role="button" tabindex="0">
               <span class="pl-inst-ico ${tone(i)}">${icon(tab === 'plugin' ? 'plugin' : tab === 'app' ? 'grid' : 'spark')}</span><span class="pl-inst-name">${esc(x.name)}</span>
-              ${tab === 'app' && x.versionDrift ? '<span class="tag bad" style="font-size:10px" title="市场有新版本">可更新</span>' : ''}
+              ${tab === 'app' && x.versionDrift ? `<button class="tag bad as-quickupdate" style="font-size:10px" title="点击更新到 v${esc(x.marketVersion || '')}" data-as-quickupdate="${esc(x.marketId || x.id)}" data-as-target="${esc(x.marketVersion || '')}">可更新</button>` : ''}
               ${mid ? `<button class="pl-inst-more" data-mi-menu="${esc(mid)}" data-mi-name="${esc(x.name)}" title="更多操作" type="button">${icon('dots')}</button>` : ''}
             </div>`
           }).join('') || `<div class="pl2-inst-empty">${tab === 'plugin' ? '暂无已安装插件' : tab === 'app' ? '暂无已安装应用' : '暂无已安装技能'}</div>`}
@@ -6229,7 +6730,7 @@ async function renderSkills(el) {
               <input id="skSearch" placeholder="搜索${tab === 'plugin' ? '插件' : tab === 'app' ? '应用' : '技能'}" value="${esc(state.skillQuery || '')}" />
             </label>
             <button class="pl-ico-btn pl2-tool" id="skRefresh" title="刷新">${icon('refresh')}</button>
-            ${tab === 'app' && appUpdateCount ? `<button class="pl-add pl2-add" id="skUpdates" title="有 ${appUpdateCount} 个应用可更新">更新 · ${appUpdateCount}</button>` : ''}
+            ${tab === 'app' ? `<button class="pl-add pl2-add" id="skUpdates" title="${appUpdateCount ? `${appUpdateCount} 个应用有新版本` : '检查应用更新'}">更新${appUpdateCount ? ` · ${appUpdateCount}` : ''}</button>` : ''}
             <button class="pl-add pl2-add" id="skAddLeft">添加</button>
           </div>
           <div class="pl-sub">${sub}</div>
@@ -6300,6 +6801,13 @@ async function renderSkills(el) {
     openPluginSlide(b.dataset.mdetail)
   }))
   el.querySelectorAll('[data-mopen]').forEach((b) => b.addEventListener('click', () => openPluginSlide(b.dataset.mopen)))
+  /* 「可更新」标签即更新按钮：照 App Store 的语义，点一下就把当前账号切到市场最新版本，
+     不再强制先开详情抽屉再点第二个按钮。 */
+  el.querySelectorAll('[data-as-quickupdate]').forEach((b) => b.addEventListener('click', (e) => {
+    e.stopPropagation()
+    e.preventDefault()
+    quickUpdateApp(b.dataset.asQuickupdate, b.dataset.asTarget)
+  }))
   el.querySelectorAll('[data-market-download]').forEach((b) => b.addEventListener('click', () => {
     const a = document.createElement('a')
     a.href = b.dataset.marketDownload
@@ -6476,6 +6984,41 @@ async function openUpdatesSlide() {
   })
 }
 
+/* 「可更新」标签的直连入口：不用先开抽屉，点一下就按当前账号切到目标版本。
+   与抽屉里的“更新到 vX”共用同一条 /api/as/version 链路，所以回收旧进程、重拉市场的行为一致。 */
+function compareAppVersion(a, b) {
+  const left = String(a || '').split('.').map((x) => Number(x) || 0)
+  const right = String(b || '').split('.').map((x) => Number(x) || 0)
+  const size = Math.max(left.length, right.length)
+  for (let i = 0; i < size; i += 1) {
+    const diff = (left[i] || 0) - (right[i] || 0)
+    if (diff) return diff > 0 ? 1 : -1
+  }
+  return 0
+}
+
+async function quickUpdateApp(marketId, version) {
+  const m = (state.market || []).find((x) => x.id === marketId)
+  if (!m) return
+  const target = version || m.marketVersion
+  if (!target) return toast('市场没有可用版本', true)
+  /* 标签只在"市场比本机新"时出现；万一目标并不比本机新，宁可提示也不做降级切换。 */
+  if (m.installedVersion && compareAppVersion(target, m.installedVersion) <= 0) {
+    toast(`当前已是 v${m.installedVersion}，市场没有更新的版本`)
+    return renderView()
+  }
+  const { ok, body } = await api('/api/as/version', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: marketId, version: target }) })
+  if (!ok) return toast(body.error || '版本切换失败', true)
+  releaseAsLease(marketId)
+  removeAsTab(marketId, true)
+  const list = await api('/api/plugin-market')
+  if (list.ok) state.market = list.body.items || []
+  toast(body.stopped ? `已更新到 v${target}，旧版本进程已停止；点「启动并打开」即用新版本` : `已更新到 v${target}`)
+  const slide = document.getElementById('slide')
+  if (slide && slide.classList.contains('open')) openPluginSlide(marketId)
+  else renderView()
+}
+
 function openPluginSlide(id) {
   /* 抽屉不再压制右侧浏览器里的应用视图：应用现在是浏览器分栏中的标签，
      打开应用详情不会影响主工作区，也不会回收应用租约。 */
@@ -6490,7 +7033,7 @@ function openPluginSlide(id) {
   const appPkgStale = isApp && m.available === false && Boolean(m.installed)
   const slide = ensureSlide()
   slide.innerHTML = `
-    <div class="slide-head"><div><div class="slide-title">${esc(m.name)}</div><div class="slide-sub">${esc(m.publisher)} · ${esc(m.section)} · ID ${esc(m.id)}</div></div><span class="spacer"></span><button class="btn subtle" data-close>${icon('close')}</button></div>
+    <div class="slide-head"><div><div class="slide-title">${esc(m.name)}</div><div class="slide-sub">${esc(m.publisher)} · ${esc(m.section)} · ID ${esc(m.id)}</div></div></div>
     <div class="slide-body">
       <div style="display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap"><span class="tag ${m.installed ? 'ok' : ''}">${m.installed ? '已安装' : '未安装'}</span><span class="tag ${m.available === false ? 'warn' : ''}">${m.available === false ? (appPkgStale ? '包缺失 · 待重新入库' : '待上架') : m.locked ? '系统内置' : '可安装'}</span><span class="tag">${isApp ? '应用' : m.origin === 'community' ? '社区提交' : '官方/内置'}</span>${isApp ? `<span class="tag ${appRuntime.running ? 'ok' : ''}" data-as-state>${appRuntime.running ? `运行中 · ${appRuntime.port || ''}` : '未运行'}</span>` : ''}<span class="tag">${esc(m.scope)}</span></div>
       <div class="field"><div class="field-label">功能说明</div><div class="field-value">${esc(m.desc)}</div></div>
@@ -6536,6 +7079,7 @@ function openPluginSlide(id) {
         : m.locked ? `<button class="btn primary" disabled>${m.product ? '产品内置' : '全客户端基线'}</button>` : m.available === false ? '<button class="btn primary" disabled>尚未提供安装包</button>' : `<button class="btn primary" data-toggle>${m.installed ? '卸载' : '安装'}</button>`}
       ${m.downloadUrl ? '<button class="btn" data-download>下载原始包</button>' : ''}
       <button class="btn" data-log>调用记录</button>
+      <span class="spacer"></span><button class="btn" data-close>关闭</button>
     </div>`
   wireSlide(slide)
   const scopeSelect = slide.querySelector('#mktInstallScope')
@@ -6655,14 +7199,36 @@ function openPluginSlide(id) {
       }
       state.asLeases = state.asLeases || {}
       if (state.asLeases[m.id]?.timer) clearInterval(state.asLeases[m.id].timer)
-      const leaseId = body.leaseId
+      let leaseId = body.leaseId
       const timer = setInterval(async () => {
         const hb = await api('/api/as/heartbeat', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: m.id, leaseId }) })
+        if (hb.ok && hb.body?.leaseId && hb.body.leaseId !== leaseId) {
+          leaseId = hb.body.leaseId
+          if (state.asLeases[m.id]) state.asLeases[m.id].leaseId = leaseId
+        }
         if (!hb.ok) {
+          /* 中枢托管常驻：心跳断连不等于进程被回收。先向后端核实进程状态，
+             仍在运行就重新认领租约并继续心跳；确已停止才标记异常。 */
+          const st = await api(`/api/as/status?id=${encodeURIComponent(m.id)}`).catch(() => null)
+          const rt = st?.body?.runtime
+          if (rt?.running) {
+            try {
+              const again = await api('/api/as/start', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: m.id }) })
+              if (again.ok) {
+                leaseId = again.body.leaseId
+                if (state.asLeases[m.id]) {
+                  state.asLeases[m.id].leaseId = leaseId
+                  state.asLeases[m.id].url = again.body.url
+                }
+                setAsTabStatus(m.id, 'running')
+                return
+              }
+            } catch (_) {}
+          }
           clearInterval(timer)
           if (state.asLeases[m.id]?.leaseId === leaseId) delete state.asLeases[m.id]
-          setAsTabStatus(m.id, 'expired')
-          toast('应用租约已失效，进程会在宽限期后回收', true)
+          setAsTabStatus(m.id, rt?.status === 'error' ? 'failed' : 'expired')
+          toast(rt?.running ? '应用进程仍在后台运行，已重新连接' : '应用进程已停止', true)
         }
       }, 15000)
       state.asLeases[m.id] = { leaseId, timer, url: body.url }
@@ -6936,6 +7502,220 @@ const NB_STUDIO_PANEL_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="curre
 const nbStudioLabel = (n) => n.kind === 'docx' ? 'DOCX 文档' : n.kind === 'xlsx' ? 'XLSX 表格' : n.kind === 'pptx' ? 'PPTX 演示' : 'Studio 记忆'
 const nbStudioIcon = (n) => n.kind === 'xlsx' ? 'table' : n.kind === 'pptx' ? 'layers' : 'doc'
 
+function notebookSourceKindLabel(kind) {
+  return kind === 'web' ? '网页来源'
+    : kind === 'file' ? '本地文件'
+      : kind === 'cloud' ? '云空间来源' : '资源来源'
+}
+
+function notebookShortDate(value) {
+  const match = String(value || '').match(/\d{4}-\d{2}-\d{2}/)
+  return match ? match[0] : ''
+}
+
+function notebookSourceHost(source) {
+  if (source?.domain) return String(source.domain).replace(/^www\./i, '')
+  try { return new URL(source?.url || '').hostname.replace(/^www\./i, '') } catch { return '' }
+}
+
+/* 左栏来源列表；与来源阅读器共用同一栏，阅读时由阅读器替换。 */
+function notebookSourceListMarkup(sources) {
+  return `<div class="nbx-head"><span>来源</span><span class="mono">${sources.length}/20</span><span class="spacer"></span><button class="nbx-link" id="nbAddSource">${icon('plus')}添加</button></div>
+    <div class="nbx-scroll">
+      ${sources.length ? sources.map((sc) => `
+        <div class="nbx-row ${sc.canSee === false ? 'locked' : ''}">
+          <button class="nbx-row-main" ${sc.kind ? `data-ext="${esc(sc.resourceId)}"` : `data-src="${esc(sc.resourceId)}"`}>
+            <span class="nbx-ico">${icon(nbSourceIcon(sc))}</span>
+            <span class="nbx-row-body">
+              <span class="nbx-row-name">${esc(sc.name)}</span>
+              <span class="nbx-row-meta">${sc.kind === 'web' ? `网页 · 官方权威站点 · ${esc(sc.domain || '')}${notebookShortDate(sc.publishedAt) ? ' · ' + esc(notebookShortDate(sc.publishedAt)) : ''}` : sc.kind ? `${esc(sc.format || '外部来源')}${sc.kind === 'file' ? ' · ' + nbSize(sc.sizeBytes) : sc.kind === 'cloud' ? ' · 不占容量' : ''} · ${esc(sc.syncStatus || '')}` : `${esc(sc.latestVersion || sc.format || '')} · ${sc.versionMode === 'follow' ? '跟随最新' : '钉住 ' + esc(sc.resolvedVersionId || '')}${sc.canSee === false ? ' · 无权查看，问答不引用' : ''}`}</span>
+            </span>
+          </button>
+          <button class="nbx-x" data-rm="${esc(sc.resourceId)}" title="移出引用">${icon('close')}</button>
+        </div>`).join('') : `<div class="nbx-empty">还没有引用资料。<br>从数据中心选择 Resource 加入，只建立引用、不复制文件。</div>`}
+    </div>
+    <div class="nbx-principle">只引用不复制 · 跟随已发布最新版本 · 笔记独立保存 · 复用数据中心与 Harness 能力</div>`
+}
+
+function notebookSourceHighlightHTML(text, quote) {
+  const raw = String(text || '')
+  if (!raw) return '<div class="nbx-src-reader-empty">这条来源暂无可显示的正文。</div>'
+  const cleanQuote = String(quote || '').replace(/\s+/g, '').slice(0, 240)
+  if (!cleanQuote) return esc(raw)
+  const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  let pattern
+  try {
+    pattern = new RegExp(Array.from(cleanQuote).map((ch) => escapeRe(ch)).join('\\s*'), 'gi')
+  } catch {
+    return esc(raw)
+  }
+  let html = ''
+  let last = 0
+  for (const match of raw.matchAll(pattern)) {
+    const index = Number(match.index) || 0
+    html += esc(raw.slice(last, index))
+    html += `<mark class="nbx-src-hit">${esc(match[0])}</mark>`
+    last = index + match[0].length
+  }
+  return html + esc(raw.slice(last))
+}
+
+/* 左侧来源阅读器：不打开外部浏览器，正文、定位片段和来源信息都在中枢内显示。 */
+function notebookSourceReaderMarkup(source) {
+  const bodyText = source.text || source.excerpt || ''
+  const meta = [
+    source.kind === 'web' ? (notebookSourceHost(source) || '网页来源') : notebookSourceKindLabel(source.kind),
+    notebookShortDate(source.publishedAt),
+    source.locator,
+  ].filter(Boolean).join(' · ')
+  return `<div class="nbx-head nbx-src-reader-head">
+      <button class="nbx-link nbx-src-back" id="nbSourceBack">${icon('arrow')}来源</button>
+      <span class="spacer"></span>
+      <span class="mono">${esc(notebookSourceKindLabel(source.kind))}</span>
+    </div>
+    <div class="nbx-src-reader-info">
+      <div class="nbx-src-reader-title">${esc(source.name || '来源')}</div>
+      <div class="nbx-src-reader-meta">${esc(meta)}</div>
+    </div>
+    <div class="nbx-scroll nbx-src-reader">
+      ${source.loading ? '<div class="nbx-src-reader-loading">正在读取来源正文…</div>' : ''}
+      ${source.error ? `<div class="nbx-src-reader-error">${esc(source.error)}</div>` : ''}
+      <div class="nbx-src-reader-body">${bodyText ? notebookSourceHighlightHTML(bodyText, source.quote) : '<div class="nbx-src-reader-empty">这条来源暂无可显示的正文。</div>'}</div>
+    </div>`
+}
+
+function openNotebookSource(input) {
+  if (!state.notebookId || !input) return
+  const resourceId = String(input.resourceId || input.id || '')
+  if (!resourceId) return
+  const previous = state.nbSource
+  const reuse = previous && previous.resourceId === resourceId && previous.notebookId === state.notebookId
+  state.nbSource = {
+    notebookId: state.notebookId,
+    resourceId,
+    kind: input.kind || '',
+    name: input.name || '来源',
+    url: input.url || '',
+    domain: input.domain || '',
+    publishedAt: input.publishedAt || '',
+    locator: input.locator || '',
+    quote: input.quote || '',
+    excerpt: input.excerpt || '',
+    text: reuse ? (previous.text || '') : (input.quote || input.excerpt || ''),
+    loaded: reuse ? !!previous.loaded : false,
+    loading: !(reuse && previous.loaded),
+    error: '',
+  }
+  renderView()
+  void loadNotebookSourceReader(state.nbSource)
+}
+
+async function loadNotebookSourceReader(source) {
+  if (!source || source.loaded) return
+  try {
+    const { body } = await api(`/api/notebook/reader?id=${encodeURIComponent(source.notebookId)}&rid=${encodeURIComponent(source.resourceId)}`)
+    if (state.nbSource !== source) return
+    if (!body?.ok || !body.source) throw new Error(body?.error || '来源正文读取失败')
+    source.name = body.source.name || source.name
+    source.kind = body.source.kind || source.kind
+    source.url = body.source.url || source.url
+    source.domain = body.source.domain || source.domain
+    source.publishedAt = body.source.publishedAt || source.publishedAt
+    source.text = body.source.text || source.excerpt || ''
+    source.loaded = true
+  } catch (error) {
+    if (state.nbSource !== source) return
+    source.error = String(error?.message || error || '来源正文读取失败')
+    source.text = source.text || source.excerpt || ''
+  } finally {
+    if (state.nbSource !== source) return
+    source.loading = false
+    renderView()
+  }
+}
+
+function notebookRefCardMarkup() {
+  return `<div class="nb-ref-card" id="nbRefCard" hidden>
+    <div class="nb-ref-card-kicker" id="nbRefCardKicker"></div>
+    <div class="nb-ref-card-title" id="nbRefCardTitle"></div>
+    <div class="nb-ref-card-meta" id="nbRefCardMeta"></div>
+    <div class="nb-ref-card-text" id="nbRefCardText"></div>
+    <button type="button" class="nb-ref-card-open" id="nbRefCardOpen">查看来源</button>
+  </div>`
+}
+
+function bindNotebookRefCard(el, chat) {
+  const card = el.querySelector('#nbRefCard')
+  if (!card) return
+  let current = null
+  let hideTimer = 0
+  const clearHide = () => { if (hideTimer) { clearTimeout(hideTimer); hideTimer = 0 } }
+  const hide = () => { clearHide(); card.hidden = true; current = null }
+  const scheduleHide = () => { clearHide(); hideTimer = setTimeout(hide, 140) }
+  const citationAt = (button) => {
+    const message = chat[Number(button.dataset.nbMsg)]
+    const citation = message?.citations?.[Number(button.dataset.nbRef) - 1]
+    if (!citation) return null
+    return {
+      ...citation,
+      quote: button.dataset.quote || citation.quote || '',
+      excerpt: button.dataset.excerpt || citation.excerpt || '',
+    }
+  }
+  const show = (citation, anchor) => {
+    if (!citation) return
+    clearHide()
+    current = citation
+    const kicker = card.querySelector('#nbRefCardKicker')
+    const title = card.querySelector('#nbRefCardTitle')
+    const meta = card.querySelector('#nbRefCardMeta')
+    const text = card.querySelector('#nbRefCardText')
+    if (kicker) kicker.textContent = notebookSourceKindLabel(citation.kind)
+    if (title) title.textContent = citation.name || '未命名来源'
+    if (meta) meta.textContent = [notebookSourceHost(citation), notebookShortDate(citation.publishedAt), citation.locator].filter(Boolean).join(' · ')
+    if (text) text.innerHTML = notebookSourceHighlightHTML(citation.quote || citation.excerpt || '', citation.quote)
+    card.hidden = false
+    card.style.visibility = 'hidden'
+    const width = Math.min(340, window.innerWidth - 24)
+    card.style.width = `${width}px`
+    const height = card.offsetHeight
+    const rect = anchor.getBoundingClientRect()
+    let top = rect.bottom + 8
+    if (top + height > window.innerHeight - 12) top = Math.max(12, rect.top - height - 8)
+    const left = Math.min(Math.max(12, rect.left - 12), window.innerWidth - width - 12)
+    card.style.top = `${Math.round(top)}px`
+    card.style.left = `${Math.round(left)}px`
+    card.style.visibility = 'visible'
+  }
+  el.querySelectorAll('[data-nb-ref]').forEach((button) => {
+    button.addEventListener('mouseenter', () => show(citationAt(button), button))
+    button.addEventListener('focus', () => show(citationAt(button), button))
+    button.addEventListener('mouseleave', scheduleHide)
+    button.addEventListener('blur', scheduleHide)
+  })
+  card.addEventListener('mouseenter', clearHide)
+  card.addEventListener('mouseleave', scheduleHide)
+  card.querySelector('#nbRefCardOpen')?.addEventListener('click', () => {
+    if (current) openNotebookSource(current)
+    hide()
+  })
+  el.querySelector('#nbChat')?.addEventListener('scroll', hide, { passive: true })
+}
+
+function scrollNotebookSourceHit(el) {
+  const reader = el.querySelector('.nbx-src-reader')
+  const hit = reader?.querySelector('mark.nbx-src-hit')
+  if (!reader || !hit) return
+  const apply = () => {
+    if (!reader.isConnected || !hit.isConnected) return
+    const top = hit.getBoundingClientRect().top - reader.getBoundingClientRect().top + reader.scrollTop
+    reader.scrollTop = Math.max(0, top - 70)
+  }
+  apply()
+  /* 来源正文含大量站点导航时，字体与换行布局会在首帧后继续收敛，延迟再对齐一次。 */
+  setTimeout(apply, 180)
+}
+
 function notebookStudioMarkup(notes, opts = {}) {
   return `<aside class="nbx-studio ${opts.start ? 'nbs-studio' : ''}">
     <div class="nbx-head"><span>Studio</span><span class="mono">${notes.length}</span><span class="spacer"></span><button class="nbx-studio-panel" id="nbStudioPanel" title="Studio 固定在右侧">${NB_STUDIO_PANEL_ICON}</button></div>
@@ -6969,7 +7749,7 @@ function notebookNoteModal(note) {
         <input class="nbx-note-title" id="nbNoteTitle" value="${esc(note.title)}">
         <div class="nbx-note-meta mono">${esc(note.author)} · 更新于 ${esc(note.updatedAt)} · ${nbStudioLabel(note)}</div>
         <textarea class="nbx-note-body" id="nbNoteBody" rows="12">${esc(note.content)}</textarea>
-        ${(note.citations || []).length ? `<div class="nb-cites">${note.citations.map((c) => `<button class="nb-cite" data-cite="${c.resourceId}" data-ver="${esc(c.versionId || '')}"><span class="mono">${esc(c.versionId || 'V?')}</span>${esc(c.locator || '')}</button>`).join('')}</div>` : ''}
+        ${(note.citations || []).length ? `<div class="nb-cites">${note.citations.map((c) => `<button class="nb-cite" data-cite="${c.resourceId}" data-ver="${esc(c.versionId || '')}" data-url="${esc(c.url || '')}" data-quote="${esc(c.quote || '')}" data-name="${esc(c.name || '')}" title="${esc(c.name || '')} ${esc(c.locator || '')}"><span class="mono">${esc((c.name || c.versionId || 'V?').replace(/\.(pdf|docx|pptx|xlsx|txt|md|csv|json|html?)$/i, ''))}</span>${esc(c.locator || '')}</button>`).join('')}</div>` : ''}
       </div>
       <div class="jg-modal-foot">
         <button class="btn sm" id="nbDelNote">删除</button>
@@ -7024,26 +7804,70 @@ function notebookDialogFoot(okLabel = '保存', danger = false) {
   return `<div class="nb-dialog-foot"><button class="btn subtle" data-nb-cancel>取消</button><button class="btn ${danger ? 'danger' : 'primary'}" data-nb-ok>${okLabel}</button></div>`
 }
 
-function openNotebookRenameDialog(nb) {
-  const mask = openModal('重命名笔记本', `<div class="nb-dialog">
-    <label class="nb-dialog-label" for="nbRenameInput">笔记本名称</label>
-    <input class="nb-dialog-input" id="nbRenameInput" maxlength="80" value="${esc(nb.title)}" autocomplete="off">
-    <div class="nb-dialog-note">名称会同步到所有共享列表，最多 80 个字符。</div>
-    ${notebookDialogFoot('保存')}
-  </div>`)
-  const input = mask.querySelector('#nbRenameInput')
-  input.focus()
-  input.select()
+function focusNotebookTitle() {
+  const title = document.getElementById('nbTitleEdit')
+  if (!title) return false
+  title.focus()
+  try {
+    const range = document.createRange()
+    range.selectNodeContents(title)
+    const sel = window.getSelection()
+    sel.removeAllRanges()
+    sel.addRange(range)
+  } catch { /* ignore */ }
+  return true
+}
+
+function bindNotebookTitleEdit(el, nb) {
+  const title = el.querySelector('#nbTitleEdit')
+  if (!title) return
+  const original = String(nb.title || '')
+  let saving = false
+  const restore = () => { title.textContent = original }
   const save = async () => {
-    const title = input.value.trim()
-    if (!title) return toast('名称不能为空', true)
-    const { body: r } = await api('/api/notebook/manage', { method: 'POST', body: JSON.stringify({ op: 'rename', id: nb.id, title }) })
-    if (!r?.ok) return toast(r?.error || '重命名失败', true)
-    mask.remove(); toast('已重命名'); renderView()
+    if (saving) return
+    const next = String(title.textContent || '').replace(/\s+/g, ' ').trim()
+    if (!next) {
+      restore()
+      toast('名称不能为空', true)
+      return
+    }
+    if (next.length > 80) {
+      restore()
+      toast('名称最多 80 个字符', true)
+      return
+    }
+    if (next === original) return
+    saving = true
+    title.setAttribute('aria-busy', 'true')
+    try {
+      const { body: r } = await api('/api/notebook/manage', { method: 'POST', body: JSON.stringify({ op: 'rename', id: nb.id, title: next }) })
+      if (!r?.ok) {
+        restore()
+        toast(r?.error || '重命名失败', true)
+        return
+      }
+      toast('已重命名')
+      renderView()
+    } finally {
+      saving = false
+      title.removeAttribute('aria-busy')
+    }
   }
-  mask.querySelector('[data-nb-ok]')?.addEventListener('click', save)
-  mask.querySelector('[data-nb-cancel]')?.addEventListener('click', () => mask.remove())
-  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); save() } })
+  title.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      title.blur()
+    } else if (e.key === 'Escape') {
+      e.preventDefault()
+      restore()
+      title.blur()
+    }
+  })
+  title.addEventListener('blur', () => { void save() })
+  const pen = el.querySelector('#nbTitlePen')
+  pen?.addEventListener('mousedown', (e) => e.preventDefault())
+  pen?.addEventListener('click', () => focusNotebookTitle())
 }
 
 function openNotebookShareDialog(nb) {
@@ -7157,7 +7981,14 @@ function openNotebookMore(anchor, nb, scope = 'normal') {
   pop.querySelectorAll('[data-nbact]').forEach((b) => b.addEventListener('click', async () => {
     const act = b.dataset.nbact
     close()
-    if (act === 'rename') return openNotebookRenameDialog(nb)
+    if (act === 'rename') {
+      state.notebookId = nb.id
+      state.nbOpen = true
+      state.nbStart = false
+      renderView()
+      requestAnimationFrame(() => focusNotebookTitle())
+      return
+    }
     if (act === 'share') return openNotebookShareDialog(nb)
     if (act === 'delete') return openNotebookDeleteDialog(nb)
     if (act === 'collection') return openNotebookCollectionDialog(nb)
@@ -7216,16 +8047,23 @@ async function renderNotebook(el) {
   if (!state.notebookId || !list.some((n) => n.id === state.notebookId)) state.notebookId = list[0]?.id
   const detail = state.notebookId ? (await api(`/api/notebook?id=${state.notebookId}`)).body : null
   const nb = detail?.notebook
+  if (state.nbSource && (!nb || state.nbSource.notebookId !== nb.id)) state.nbSource = null
   const notes = detail?.notes || []
   const chat = detail?.chat || []
   if (!state.noteId || !notes.some((n) => n.id === state.noteId)) state.noteId = notes[0]?.id
   const note = notes.find((n) => n.id === state.noteId)
   const sources = nb?.sources || []
+  /* 左栏是笔记本的来源清单，按来源本身的加入顺序展示；
+     正文里的 [N] 只是该处引用的区分标记，不与左栏条目一一对应。 */
+  const referenceSources = sources
   const pending = sources.filter((x) => x.syncStatus === '有更新待同步').length
   const openNote = note && state.noteOpen
   const startMode = !chat.length && !notes.length
   const featured = list.filter((n) => n.featured).sort((a, b) => (a.featuredRank || 99) - (b.featuredRank || 99))
-  const recent = list.filter((n) => !n.featured).slice().sort((a, b) => {
+  const sharedFallback = featured.length ? [] : list.filter((n) => n.shared).slice().sort((a, b) => (Number(b.votes) || 0) - (Number(a.votes) || 0) || String(b.updated || '').localeCompare(String(a.updated || '')))
+  const displayedFeatured = featured.length ? featured : sharedFallback
+  const displayedFeaturedIds = new Set(displayedFeatured.map((n) => n.id))
+  const recent = list.filter((n) => !displayedFeaturedIds.has(n.id)).slice().sort((a, b) => {
     const pin = Number(!!b.pinned) - Number(!!a.pinned)
     if (pin) return pin
     if (state.nbSortMode === 'title') return String(a.title || '').localeCompare(String(b.title || ''), 'zh-Hans-CN')
@@ -7247,29 +8085,15 @@ async function renderNotebook(el) {
     <div class="view-head">
       <div>
         <div class="nbx-back"><button class="nbx-link" id="nbBack">${icon('arrow')}全部笔记本</button></div>
-        <div class="view-title">${nb ? esc(nb.title) : '智能笔记本'}</div>
+        <div class="view-title nbx-title-edit-wrap">${nb ? `<span class="nbx-title-edit" id="nbTitleEdit" contenteditable="plaintext-only" role="textbox" aria-label="重命名笔记本" spellcheck="false">${esc(nb.title)}</span><button type="button" class="nbx-title-pen" id="nbTitlePen" title="编辑名称" aria-label="编辑笔记本名称">${icon('pen')}</button>` : '智能笔记本'}</div>
         <div class="view-desc">${esc(nb?.topic || '')}${nb?.desc ? ' · ' + esc(nb.desc) : ''}</div>
       </div>
       <div class="spacer"></div>
       ${pending ? `<button class="btn sm" id="nbSync">${icon('refresh')}同步 ${pending} 项更新</button>` : ''}
     </div>
-    <div class="nbx">
-      <aside class="nbx-src">
-        <div class="nbx-head"><span>笔记来源</span><span class="mono">${sources.length}/20</span><span class="spacer"></span><button class="nbx-link" id="nbAddSource">${icon('plus')}添加</button></div>
-        <div class="nbx-scroll">
-          ${sources.length ? sources.map((sc) => `
-            <div class="nbx-row ${sc.canSee === false ? 'locked' : ''}">
-              <button class="nbx-row-main" ${sc.kind ? `data-ext="${esc(sc.resourceId)}"` : `data-src="${esc(sc.resourceId)}"`}>
-                <span class="nbx-ico">${icon(nbSourceIcon(sc))}</span>
-                <span class="nbx-row-body">
-                  <span class="nbx-row-name">${esc(sc.name)}</span>
-                  <span class="nbx-row-meta">${sc.kind ? `${esc(sc.format || '外部来源')}${sc.kind === 'file' ? ' · ' + nbSize(sc.sizeBytes) : sc.kind === 'cloud' ? ' · 不占容量' : ''} · ${esc(sc.syncStatus || '')}` : `${esc(sc.latestVersion || sc.format || '')} · ${sc.versionMode === 'follow' ? '跟随最新' : '钉住 ' + esc(sc.resolvedVersionId || '')}${sc.canSee === false ? ' · 无权查看，问答不引用' : ''}`}</span>
-                </span>
-              </button>
-              <button class="nbx-x" data-rm="${sc.resourceId}" title="移出引用">${icon('close')}</button>
-            </div>`).join('') : `<div class="nbx-empty">还没有引用资料。<br>从数据中心选择 Resource 加入，只建立引用、不复制文件。</div>`}
-        </div>
-        <div class="nbx-principle">只引用不复制 · 跟随已发布最新版本 · 笔记独立保存 · 复用数据中心与 Harness 能力</div>
+    <div class="nbx ${state.nbSource ? 'is-source-view' : ''}">
+      <aside class="nbx-src ${state.nbSource ? 'is-reading' : ''}">
+        ${state.nbSource ? notebookSourceReaderMarkup(state.nbSource) : notebookSourceListMarkup(referenceSources)}
       </aside>
       <div class="nbx-grip" data-grip="1" title="拖动调整来源栏宽度"></div>
 
@@ -7280,18 +8104,21 @@ async function renderNotebook(el) {
             const idx = Math.max(0, chat.length - 12) + mi
             return `
             <div class="nbx-msg ${m.role}">
-              <div class="nbx-msg-text">${esc(m.text)}</div>
-              ${(m.citations || []).length ? `<div class="nb-cites">${m.citations.map((c) => `<button class="nb-cite" data-cite="${c.resourceId}" data-ver="${esc(c.versionId || '')}"><span class="mono">${esc(c.versionId || 'V?')}</span>${esc(c.locator || '')}</button>`).join('')}</div>` : ''}
-              <div class="nbx-msg-foot"><span class="nbx-msg-time mono">${esc(m.at || '')}</span><button class="nbx-msg-save" data-save-msg="${idx}" title="保存这段对话到 Studio">${icon('plus')}Studio</button></div>
+              <div class="nbx-msg-text">${notebookTextHTML(m.text, m.citations, idx, m.citationAnchors)}</div>
+              <div class="nbx-msg-foot"><span class="nbx-msg-time mono">${esc(m.at || '')}</span>${m.role === 'ai' ? `<div class="nbx-msg-actions">
+                <button class="nbx-msg-save" data-save-msg="${idx}" title="保存到 Studio">${icon('plus')}保存到 Studio</button>
+                <button class="msg-act icon" data-copy-nb="${idx}" title="复制" aria-label="复制">${icon('copy')}</button>
+                <button class="msg-act icon ${m.feedback === 'up' ? 'on' : ''}" data-nb-fb="${idx}" data-fbv="up" title="有帮助" aria-label="有帮助">${icon('thumbUp')}</button>
+                <button class="msg-act icon ${m.feedback === 'down' ? 'on' : ''}" data-nb-fb="${idx}" data-fbv="down" title="需改进" aria-label="需改进">${icon('thumbDown')}</button>
+              </div>` : ''}</div>
             </div>`
           }).join('') : '<div class="nbx-empty">直接提问。回答只使用本笔记本引用的来源，并标出资源与版本。</div>'}
-          ${chat.length ? `<button class="nbx-take" id="nbTake">把最后一条回答存到 Studio ${icon('pen')}</button>` : ''}
         </div>
         <div class="nbx-ask">
           <div class="nbx-chips">${['概括这组资料的核心结论', '找出相互矛盾的表述', '列出还需要核实的问题'].map((t) => `<button class="chip" data-qs="${t}">${t}</button>`).join('')}</div>
           <div class="nbx-input">
-            <textarea id="nbQ" rows="1" placeholder="向本笔记本的 ${sources.length} 项资料提问"></textarea>
-            <button class="nbx-send" id="nbAsk" title="提问（Ctrl/⌘ + Enter）">${icon('up')}</button>
+            <textarea id="nbQ" rows="1" enterkeyhint="send" title="Enter 发送，Shift + Enter 换行" placeholder="向本笔记本的 ${sources.length} 项资料提问"></textarea>
+            <button class="nbx-send" id="nbAsk" title="提问（Enter 发送，Shift + Enter 换行）">${icon('up')}</button>
           </div>
         </div>
       </section>
@@ -7299,14 +8126,15 @@ async function renderNotebook(el) {
 
       ${notebookStudioMarkup(notes)}
     </div>
-    ${notebookNoteModal(openNote ? note : null)}` : `
+    ${notebookNoteModal(openNote ? note : null)}
+    ${notebookRefCardMarkup()}` : `
     <div class="kn-gal">
       <div class="kn-gal-head">
         <h2 class="kn-gal-title">精选笔记本</h2>
-        ${featured.length > 5 ? `<button class="kn-link" id="nbSeeAll">查看更多 ${icon('arrow')}</button>` : ''}
+        ${displayedFeatured.length > 5 ? `<button class="kn-link" id="nbSeeAll">查看更多 ${icon('arrow')}</button>` : ''}
       </div>
-      ${featured.length ? `<div class="kn-feat-grid">
-        ${featured.slice(0, 5).map((n) => `
+      ${displayedFeatured.length ? `<div class="kn-feat-grid">
+        ${displayedFeatured.slice(0, 5).map((n) => `
         <div class="kn-feat kn-tone-${Number(n.coverTone) || 0} ${n.coverTone === 2 ? 'is-dark' : ''}" data-nb="${n.id}" role="button" tabindex="0">
           <div class="kn-feat-cover">${icon(n.coverIcon || 'doc')}</div>
           <div class="kn-feat-top">
@@ -7316,11 +8144,11 @@ async function renderNotebook(el) {
           </div>
           <div class="kn-feat-main">
             <div class="kn-feat-title">${esc(n.title)}</div>
-            <div class="kn-feat-meta">精选第 ${n.featuredRank || 1} · ${cnDate(n.updated)} · ${n.displaySources ?? n.sourceCount} 个来源</div>
+            <div class="kn-feat-meta">${featured.length ? `精选第 ${n.featuredRank || 1}` : '用户共享'} · ${cnDate(n.updated)} · ${n.displaySources ?? n.sourceCount} 个来源</div>
           </div>
           <button class="kn-vote" data-nbv="${n.id}" title="推荐这个笔记本">${voteIcon}<span>${n.votes || 0}</span></button>
         </div>`).join('')}
-      </div>` : '<div class="kn-empty">待揭晓</div>'}
+      </div>` : '<div class="kn-empty">暂无精选笔记本，也暂无共享笔记本</div>'}
 
       <div class="kn-gal-head kn-recent-head">
         <h2 class="kn-gal-title">最近打开过的笔记本</h2>
@@ -7351,17 +8179,21 @@ async function renderNotebook(el) {
     state.notebookId = b.dataset.nb
     state.noteId = null
     state.noteOpen = false
+    state.nbSource = null
     state.nbOpen = true
     state.nbStart = false
     renderView()
   }))
-  el.querySelector('#nbBack')?.addEventListener('click', () => { state.nbOpen = false; state.noteOpen = false; state.nbStart = false; renderView() })
+  bindNotebookTitleEdit(el, nb)
+  el.querySelector('#nbBack')?.addEventListener('click', () => { state.nbOpen = false; state.noteOpen = false; state.nbStart = false; state.nbSource = null; renderView() })
+  el.querySelector('#nbSourceBack')?.addEventListener('click', () => { state.nbSource = null; renderView() })
 
-  // 点击资料行暂时只做定位提示（资源详情另有入口）
+  // 左侧来源行也进入中枢内阅读器，不再打开外部浏览器
   el.querySelectorAll('[data-src]').forEach((b) => b.addEventListener('click', () => openResource(b.dataset.src)))
   el.querySelectorAll('[data-ext]').forEach((b) => b.addEventListener('click', () => {
     const sc = sources.find((x) => x.resourceId === b.dataset.ext)
-    toast(sc?.url ? `外部来源：${sc.url}` : `外部来源：${sc?.name || ''}`)
+    if (sc) return openNotebookSource(sc)
+    toast('来源不存在或已移出引用')
   }))
 
 
@@ -7372,6 +8204,7 @@ async function renderNotebook(el) {
     state.notebookId = r.notebook.id
     state.noteId = null
     state.noteOpen = false
+    state.nbSource = null
     state.nbOpen = true
     state.nbStart = true
     renderView()
@@ -7390,7 +8223,7 @@ async function renderNotebook(el) {
   el.querySelectorAll('[data-nbmore]').forEach((b) => b.addEventListener('click', (e) => {
     e.stopPropagation()
     const nb = list.find((x) => x.id === b.dataset.nbmore)
-    if (nb) openNotebookMore(b, nb, nb.featured ? 'shared' : 'normal')
+    if (nb) openNotebookMore(b, nb, nb.shared ? 'shared' : 'normal')
   }))
   el.querySelector('#nbSeeAll')?.addEventListener('click', () => openNotebookSharedDialog(list, state.notebookCollections || []))
   const sortBtn = el.querySelector('#nbSort')
@@ -7440,20 +8273,128 @@ async function renderNotebook(el) {
 
   // 提问
   const ask = async (q) => {
-    if (!q.trim()) return
-    const { body: r } = await api('/api/notebook/ask', { method: 'POST', body: JSON.stringify({ id: state.notebookId, q }) })
-    if (r?.ok) renderView()
-    else toast(r?.error || '提问失败')
+    const text = String(q || '').trim()
+    if (!text || state.nbAsking) return
+    state.nbAsking = true
+    const input = el.querySelector('#nbQ')
+    const button = el.querySelector('#nbAsk')
+    const chatBox = el.querySelector('#nbChat')
+    const typedText = input?.value || ''
+    if (input && typedText.trim() === text) input.value = ''
+    if (input) input.disabled = true
+    if (button) { button.disabled = true; button.classList.add('is-loading') }
+    el.querySelectorAll('[data-qs]').forEach((b) => { b.disabled = true })
+
+    /* 先把问题和一个等待回答的气泡放进对话区，避免后端生成期间界面看起来没反应。 */
+    let pendingNodes = []
+    if (chatBox) {
+      const questionMsg = document.createElement('div')
+      questionMsg.className = 'nbx-msg user nbx-msg-optimistic'
+      const questionText = document.createElement('div')
+      questionText.className = 'nbx-msg-text'
+      questionText.textContent = text
+      questionMsg.append(questionText)
+
+      const answerMsg = document.createElement('div')
+      answerMsg.className = 'nbx-msg ai nbx-msg-pending'
+      answerMsg.setAttribute('role', 'status')
+      answerMsg.setAttribute('aria-live', 'polite')
+      const answerText = document.createElement('div')
+      answerText.className = 'nbx-msg-text nbx-thinking'
+      answerText.textContent = `正在基于 ${sources.length} 项来源生成回答`
+      const dots = document.createElement('span')
+      dots.className = 'nbx-thinking-dots'
+      dots.setAttribute('aria-hidden', 'true')
+      dots.innerHTML = '<i></i><i></i><i></i>'
+      answerText.append(dots)
+      answerMsg.append(answerText)
+
+      chatBox.append(questionMsg, answerMsg)
+      chatBox.setAttribute('aria-busy', 'true')
+      pendingNodes = [questionMsg, answerMsg]
+      requestAnimationFrame(() => { chatBox.scrollTop = chatBox.scrollHeight })
+    }
+
+    let committed = false
+    try {
+      const { body: r } = await api('/api/notebook/ask', { method: 'POST', body: JSON.stringify({ id: state.notebookId, q: text }) })
+      if (r?.ok) {
+        committed = true
+        renderView()
+      } else {
+        toast(r?.error || '提问失败', true)
+      }
+    } catch (error) {
+      toast(error?.message || '提问失败', true)
+    } finally {
+      state.nbAsking = false
+      if (!committed) {
+        pendingNodes.forEach((node) => node.remove())
+        chatBox?.removeAttribute('aria-busy')
+        if (input) {
+          input.disabled = false
+          if (!input.value && typedText) input.value = typedText
+        }
+        el.querySelectorAll('[data-qs]').forEach((b) => { b.disabled = false })
+      }
+      if (button) { button.disabled = false; button.classList.remove('is-loading') }
+    }
   }
   el.querySelector('#nbAsk')?.addEventListener('click', () => ask(el.querySelector('#nbQ').value))
-  el.querySelector('#nbQ')?.addEventListener('keydown', (e) => { if (e.key === 'Enter' && e.metaKey) ask(e.target.value) })
+  el.querySelector('#nbQ')?.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' || e.shiftKey) return
+    /* 输入法确认候选词时也会触发 Enter，此时不能发送。 */
+    if (e.isComposing || e.keyCode === 229) return
+    e.preventDefault()
+    ask(e.target.value)
+  })
   el.querySelectorAll('[data-qs]').forEach((b) => b.addEventListener('click', () => ask(b.dataset.qs)))
 
-  // 引用跳转到数据中心资源
-  el.querySelectorAll('[data-cite]').forEach((b) => b.addEventListener('click', () => openResource(b.dataset.cite)))
+  // 来源 chip 同样在左栏展开，不离开智能中枢
+  el.querySelectorAll('[data-cite]').forEach((b) => b.addEventListener('click', () => {
+    if (!b.dataset.cite) return
+    const known = [...chat].flatMap((m) => m.citations || [])
+      .find((c) => c.resourceId === b.dataset.cite && String(c.url || '') === String(b.dataset.url || ''))
+    if (known) return openNotebookSource(known)
+    openNotebookSource({
+      resourceId: b.dataset.cite,
+      kind: /^https?:\/\//i.test(b.dataset.url || '') ? 'web' : 'file',
+      url: b.dataset.url || '',
+      quote: b.dataset.quote || '',
+      name: b.dataset.name || '来源',
+    })
+  }))
+
+  el.querySelectorAll('[data-nb-ref]').forEach((b) => b.addEventListener('click', () => {
+    const message = chat[Number(b.dataset.nbMsg)]
+    const citation = message?.citations?.[Number(b.dataset.nbRef) - 1]
+    if (citation) openNotebookSource({
+      ...citation,
+      quote: b.dataset.quote || citation.quote || '',
+      excerpt: b.dataset.excerpt || citation.excerpt || '',
+    })
+  }))
+  bindNotebookRefCard(el, chat)
+  requestAnimationFrame(() => scrollNotebookSourceHit(el))
 
   // Studio：输出、笔记打开/保存/删除
   bindNotebookStudio(el, { nb, notes, chat, sources })
+  el.querySelectorAll('[data-copy-nb]').forEach((b) => b.addEventListener('click', async () => {
+    const m = chat[Number(b.dataset.copyNb)]
+    if (!m) return
+    const plain = String(m.text || '').replace(/\s*\[\d{1,3}\]/g, '')
+    if (await copyToClipboard(plain)) toast('已复制这条回答')
+  }))
+  el.querySelectorAll('[data-nb-fb]').forEach((b) => b.addEventListener('click', () => {
+    const m = chat[Number(b.dataset.nbFb)]
+    if (!m) return
+    const value = b.dataset.fbv
+    m.feedback = m.feedback === value ? null : value
+    el.querySelectorAll(`[data-nb-fb="${b.dataset.nbFb}"]`).forEach((other) => {
+      other.classList.toggle('on', other.dataset.fbv === m.feedback)
+    })
+    toast(m.feedback ? (m.feedback === 'up' ? '已标记为有帮助' : '已记录改进意见') : '已撤销反馈')
+  }))
   el.querySelectorAll('[data-save-msg]').forEach((b) => b.addEventListener('click', async () => {
     const m = chat[Number(b.dataset.saveMsg)]
     if (!m) return
@@ -7461,12 +8402,6 @@ async function renderNotebook(el) {
     const { body: r } = await api('/api/notebook/note', { method: 'POST', body: JSON.stringify({ id: state.notebookId, note: { title, content: m.text, kind: 'chat', citations: m.citations || [] } }) })
     if (r?.ok) { state.noteId = r.notes[0].id; toast('这段对话已保存到 Studio'); renderView() } else toast(r?.error || '保存失败')
   }))
-  el.querySelector('#nbTake')?.addEventListener('click', async () => {
-    const last = [...chat].reverse().find((m) => m.role === 'ai')
-    if (!last) return
-    const { body: r } = await api('/api/notebook/note', { method: 'POST', body: JSON.stringify({ id: state.notebookId, note: { title: '从对话保存的结论', content: last.text, kind: 'chat', citations: last.citations || [] } }) })
-    if (r?.ok) { state.noteId = r.notes[0].id; toast('已保存到 Studio，可继续编辑'); renderView() } else toast(r?.error || '保存失败')
-  })
 
   const grid = el.querySelector('.nbx')
   if (grid) {
@@ -7511,12 +8446,40 @@ async function renderNotebook(el) {
 
 /* ------------------------------ 智能笔记本 · 新空页 ------------------------------ */
 
-const NB_CLOUD_SOURCES = [
-  { name: '九江市城市更新专题成果包', path: '云空间 / 规划成果 / 2026', format: '文件夹' },
-  { name: '浔阳区三维模型轻量化说明.pdf', path: '云空间 / 项目资料 / 浔阳区', format: 'PDF' },
-  { name: '城市体检指标口径汇总.docx', path: '云空间 / 政策汇编 / 城市体检', format: 'DOCX' },
-  { name: '1958 工业厂区更新汇报.pptx', path: '云空间 / 会议材料 / 1958', format: 'PPTX' },
-]
+function notebookTextHTML(text, citations, messageIndex, citationAnchors) {
+  const safe = esc(String(text || ''))
+  if (!Array.isArray(citations) || !citations.length) return safe
+  let occurrence = 0
+  return safe.replace(/\[(\d{1,3})\]/g, (all, num) => {
+    const index = Number(num)
+    const citation = citations[index - 1]
+    const anchor = Array.isArray(citationAnchors)
+      ? (citationAnchors.find((item) => Number(item.index) === index) || citationAnchors[occurrence])
+      : null
+    occurrence += 1
+    if (!citation) return all
+    const quote = anchor?.quote || citation.quote || ''
+    const excerpt = anchor?.excerpt || citation.excerpt || ''
+    return `<button class="nb-ref" data-nb-ref="${index}" data-nb-msg="${Number(messageIndex) || 0}" data-quote="${esc(quote)}" data-excerpt="${esc(excerpt)}" title="${esc([citation.name, citation.locator].filter(Boolean).join(' · '))}">[${index}]</button>`
+  })
+}
+
+function notebookTextFragmentUrl(url, quote) {
+  const value = String(url || '').trim()
+  if (!/^https?:\/\//i.test(value)) return value
+  const clean = String(quote || '').replace(/\s+/g, ' ').trim().slice(0, 140)
+  if (!clean) return value
+  const base = value.split('#')[0]
+  return `${base}#:~:text=${encodeURIComponent(clean)}`
+}
+
+function openNotebookWebUrl(url, quote = '') {
+  const value = String(url || '').trim()
+  if (!/^https?:\/\//i.test(value)) return toast('这个网页来源没有可打开的地址', true)
+  const target = notebookTextFragmentUrl(value, quote)
+  if (window.jgClient?.browser) window.jgClient.browser.openExternal(target)
+  else window.open(target, '_blank', 'noopener,noreferrer')
+}
 
 function nbSourceIcon(sc) {
   if (sc.kind === 'web') return 'globe'
@@ -7543,7 +8506,7 @@ function renderNotebookStart(el, nb, sources, detail) {
         <span class="nbs-ico">${icon(nbSourceIcon(sc))}</span>
         <span class="nbs-row-body">
           <span class="nbs-row-name">${esc(sc.name)}</span>
-          <span class="nbs-row-meta">${esc(sc.format || (sc.kind === 'web' ? '网页' : sc.kind === 'cloud' ? '云空间' : '本地文件'))}${sc.kind === 'file' ? ' · ' + nbSize(sc.sizeBytes) : sc.kind === 'cloud' ? ' · 不占容量' : ''}${sc.url ? ' · ' + esc(sc.url.replace(/^https?:\/\//, '')) : ''}</span>
+          <span class="nbs-row-meta">${sc.kind === 'web' ? `网页 · 官方权威站点 · ${esc(sc.domain || '')}${notebookShortDate(sc.publishedAt) ? ' · ' + esc(notebookShortDate(sc.publishedAt)) : ''}` : `${esc(sc.format || (sc.kind === 'cloud' ? '云空间' : '本地文件'))}${sc.kind === 'file' ? ' · ' + nbSize(sc.sizeBytes) : sc.kind === 'cloud' ? ' · 不占容量' : ''}${sc.url ? ' · ' + esc(sc.url.replace(/^https?:\/\//, '')) : ''}`}</span>
         </span>
       </button>
       <button class="nbs-x" data-rm="${esc(sc.resourceId)}" title="移出来源">${icon('close')}</button>
@@ -7563,10 +8526,11 @@ function renderNotebookStart(el, nb, sources, detail) {
         <button class="nbs-pill" id="nbsNote">${icon('plus')}创建笔记</button>
       </div>
       <div class="nbs-search">
-        <input id="nbsQ" placeholder="搜索数据中心、云空间来源" autocomplete="off">
+        <input id="nbsQ" placeholder="搜索数据中心、云空间或官方网页" autocomplete="off">
         <div class="nbs-search-foot">
           <button class="nbs-scope" data-scope="data">${icon('database')}数据中心</button>
           <button class="nbs-scope" data-scope="cloud">${icon('cloud')}云空间</button>
+          <button class="nbs-scope" data-scope="web">${icon('globe')}网络搜索</button>
           <button class="nbs-go" id="nbsGo" title="搜索来源">${icon('arrow')}</button>
         </div>
       </div>
@@ -7574,11 +8538,11 @@ function renderNotebookStart(el, nb, sources, detail) {
         ${rows || `<div class="nbs-empty">
           <span class="nbs-empty-ico">${icon('doc')}</span>
           <b>已保存的来源将显示在此处</b>
-          <p>上传本地文件，或引用数据中心、云空间的资源，再基于这些来源提问或创作内容。</p>
+          <p>上传本地文件，引用数据中心、云空间的资源，或从 gov、edu、org 等官方权威站点检索网页。</p>
           <span class="nbs-empty-hint">将文件拖到此处或 <button class="nbs-link" id="nbsEmptyAdd">添加来源</button></span>
         </div>`}
       </div>
-      <div class="nbs-principle">来源 ${sources.length}/${maxSources} · 个人容量 ${nbSize(usedQuota)} / ${nbSize(maxQuota)}<br>只建立引用，不复制原文件 · 数据中心与云空间不占容量</div>
+      <div class="nbs-principle">来源 ${sources.length}/${maxSources} · 个人容量 ${nbSize(usedQuota)} / ${nbSize(maxQuota)}<br>只建立引用，不复制原文件 · 网页来源只收录官方权威站点</div>
     </aside>
 
     <section class="nbs-canvas">
@@ -7634,10 +8598,25 @@ function renderNotebookStart(el, nb, sources, detail) {
   const ask = async () => {
     const q = el.querySelector('#nbsAskQ')?.value.trim() || ''
     if (!q) return toast('请输入问题')
-    const { body: r } = await api('/api/notebook/ask', { method: 'POST', body: JSON.stringify({ id: state.notebookId, q }) })
-    if (!r?.ok) return toast(r?.error || '提问失败')
-    state.nbStart = false
-    renderView()
+    if (state.nbAsking) return
+    state.nbAsking = true
+    const input = el.querySelector('#nbsAskQ')
+    const button = el.querySelector('#nbsAsk')
+    if (input) input.disabled = true
+    if (button) { button.disabled = true; button.classList.add('is-loading') }
+    try {
+      const { body: r } = await api('/api/notebook/ask', { method: 'POST', body: JSON.stringify({ id: state.notebookId, q }) })
+      if (!r?.ok) {
+        toast(r?.error || '提问失败', true)
+        return
+      }
+      state.nbStart = false
+      renderView()
+    } finally {
+      state.nbAsking = false
+      if (input) input.disabled = false
+      if (button) { button.disabled = false; button.classList.remove('is-loading') }
+    }
   }
   el.querySelector('#nbsAsk')?.addEventListener('click', ask)
   el.querySelector('#nbsAskQ')?.addEventListener('keydown', (e) => {
@@ -7652,6 +8631,7 @@ function renderNotebookStart(el, nb, sources, detail) {
   el.querySelectorAll('[data-src]').forEach((b) => b.addEventListener('click', () => openResource(b.dataset.src)))
   el.querySelectorAll('[data-ext]').forEach((b) => b.addEventListener('click', () => {
     const sc = sources.find((x) => x.resourceId === b.dataset.ext)
+    if (sc?.kind === 'web' && sc.url) return openNotebookWebUrl(sc.url)
     toast(sc?.url ? `外部来源：${sc.url}` : `外部来源：${sc?.name || ''}`)
   }))
   el.querySelectorAll('[data-rm]').forEach((b) => b.addEventListener('click', async () => {
@@ -7669,15 +8649,29 @@ async function addNotebookGenericSource(source) {
 
 function openNotebookSourcePicker(detail, opts = {}) {
   const existing = new Set((detail?.notebook?.sources || []).map((x) => x.resourceId))
-  const baseCount = (detail?.notebook?.sources || []).length
+  let baseCount = (detail?.notebook?.sources || []).length
   const limits = detail?.limits || {}
   const maxSources = limits.maxSources || NB_MAX_SOURCES
   const quotaMax = limits.quotaBytes || 15 * 1024 ** 3
   const quotaUsed = limits.usedBytes || 0
-  const full = baseCount >= maxSources
+  let full = baseCount >= maxSources
   const cands = (detail?.candidates || []).filter((r) => !existing.has(r.id))
-  let mode = ['file', 'data', 'cloud'].includes(opts.mode) ? opts.mode : 'file'
+  let mode = ['file', 'data', 'cloud', 'web'].includes(opts.mode) ? opts.mode : 'file'
   const startQuery = opts.query || ''
+  let webQuery = ''
+  let webResults = []
+  let webDiagnostics = null
+  const webSelected = new Set()
+  let webAdding = false
+  let webSearchSeq = 0
+  let webLimit = 30
+  let webLoading = false
+  let webError = ''
+  let webSearched = false
+  let cloudFiles = []
+  let cloudLoading = false
+  let cloudError = ''
+  let cloudLoaded = false
 
   const mask = openModal('添加来源', `
     <div class="nbsm" data-mode="${mode}">
@@ -7685,6 +8679,7 @@ function openNotebookSourcePicker(detail, opts = {}) {
         <button class="nbsm-tab" data-nbmode="file">${icon('upload')}本地上传</button>
         <button class="nbsm-tab" data-nbmode="data">${icon('database')}数据中心</button>
         <button class="nbsm-tab" data-nbmode="cloud">${icon('cloud')}云空间</button>
+        <button class="nbsm-tab" data-nbmode="web">${icon('globe')}网络搜索</button>
       </div>
       <div class="nbsm-drop nbsm-drop-top ${full ? 'disabled' : ''}" id="nbsmDrop">
         <span class="nbsm-drop-ico">${icon('upload')}</span>
@@ -7699,8 +8694,8 @@ function openNotebookSourcePicker(detail, opts = {}) {
       </div>
       <div class="nbsm-body" id="nbsmBody"></div>
       <div class="nbsm-foot">
-        <div class="nbsm-cap"><span>来源 ${baseCount} / ${maxSources}</span><span>个人容量 ${nbSize(quotaUsed)} / ${nbSize(quotaMax)}</span></div>
-        <div>本地上传占用个人容量；数据中心与云空间来源只建立引用、不占容量。</div>
+        <div class="nbsm-cap"><span id="nbsmCapCount">来源 ${baseCount} / ${maxSources}</span><span>个人容量 ${nbSize(quotaUsed)} / ${nbSize(quotaMax)}</span></div>
+        <div>本地上传占用个人容量；数据中心、云空间与官方网页来源只建立引用、不占容量。</div>
       </div>
     </div>`, { wide: true })
 
@@ -7708,17 +8703,289 @@ function openNotebookSourcePicker(detail, opts = {}) {
   const qEl = mask.querySelector('#nbsmQ')
   const finish = () => { mask.remove(); renderView() }
 
+  const paintWebSelection = () => {
+    const limit = Math.max(0, maxSources - baseCount)
+    const picked = webSelected.size
+    const boxes = [...body.querySelectorAll('[data-web-pick]')]
+    boxes.forEach((box) => {
+      const index = Number(box.dataset.webPick)
+      const checked = webSelected.has(index)
+      box.checked = checked
+      box.disabled = full || webAdding || (!checked && picked >= limit)
+      box.closest('.nbsm-web-row')?.classList.toggle('sel', checked)
+    })
+    body.querySelectorAll('[data-web]').forEach((btn) => { btn.disabled = full || webAdding })
+    const allBtn = body.querySelector('#nbsmWebAll')
+    if (allBtn) {
+      const allCount = Math.min(limit, webResults.length)
+      allBtn.disabled = full || webAdding || allCount <= 0
+      allBtn.textContent = picked >= allCount ? '取消全选' : '全选'
+    }
+    const countEl = body.querySelector('#nbsmWebCount')
+    if (countEl) countEl.textContent = picked ? `已选 ${picked} 条` : '已选 0 条'
+    const addBtn = body.querySelector('#nbsmWebAdd')
+    if (addBtn) {
+      addBtn.disabled = full || webAdding || picked === 0
+      addBtn.textContent = webAdding ? '抓取并加入…' : (picked ? `加入选中（${picked}）` : '加入选中')
+    }
+  }
+
+  const renderWebBody = () => {
+    if (webLoading) {
+      body.innerHTML = `<div class="nbsm-empty nbsm-web-loading">${icon('globe')}<b>正在检索官方网页…</b><span>服务端按政府、官方媒体、高校与机构分级过滤，不需要手动选择范围。</span></div>`
+      return
+    }
+    if (webError) {
+      body.innerHTML = `<div class="nbsm-empty"><b>网络检索没有完成</b><span>${esc(webError)}</span><button class="btn sm" id="nbsmWebRetry">重新检索</button></div>`
+      body.querySelector('#nbsmWebRetry')?.addEventListener('click', () => runWebSearch(webQuery || qEl.value))
+      return
+    }
+    if (!webSearched) {
+      body.innerHTML = `<div class="nbsm-web-intro">
+        <span class="nbsm-web-badge">${icon('globe')}官方站点垂直检索</span>
+        <b>先检索，再选择要加入来源的网页</b>
+        <p>按你输入的关键词，同时检索中国政府网、生态环境部、央视网等官方站内搜索；再用 Bing RSS 兜底补齐。多个关键词用空格分隔，作为一次查询同时匹配，词越多范围越窄。网页正文在加入时抓取，问答会引用真实网页内容。</p>
+        <div class="nbsm-web-chips"><span>.gov.cn</span><span>news.cn</span><span>qstheory.cn</span><span>people.com.cn</span><span>.edu.cn</span><span>.org.cn</span></div>
+        <div class="nbsm-web-examples">试试：<button data-web-example="城市更新 老旧小区">城市更新 老旧小区</button><button data-web-example="城市体检 试点">城市体检 试点</button></div>
+      </div>`
+      body.querySelectorAll('[data-web-example]').forEach((b) => b.addEventListener('click', () => {
+        qEl.value = b.dataset.webExample
+        runWebSearch(b.dataset.webExample)
+      }))
+      return
+    }
+    if (!webResults.length) {
+      body.innerHTML = `<div class="nbsm-empty"><b>没有找到官方网页</b><span>检索词“${esc(webQuery)}”没有返回可用的官方站点结果。换一个更具体的主题词后重试。</span><button class="btn sm" id="nbsmWebSearchAgain">修改关键词</button></div>`
+      body.querySelector('#nbsmWebSearchAgain')?.addEventListener('click', () => qEl.focus())
+      return
+    }
+    const diag = webDiagnostics || {}
+    const filtered = (Number(diag.filteredCount) || 0) + (Number(diag.duplicateCount) || 0)
+    const mediaCount = webResults.filter((x) => x.authorityLabel === '官方媒体' || x.authorityLabel === '中央广播电视总台' || x.authorityLabel === '新华社' || x.authorityLabel === '人民日报' || x.authorityLabel === '求是网').length
+    const providerParts = (Array.isArray(diag.providers) ? diag.providers : [])
+      .map((p) => `${p.label || p.key} ${p.status === 'failed' ? '失败' : (Number(p.count) || 0)}`)
+    const coverage = diag.siteCoverage || {}
+    const govCount = (Number(coverage.central) || 0) + (Number(coverage.jiangxi) || 0) + (Number(coverage.jiujiang) || 0)
+    const coverageText = coverage.total
+      ? `官方站点库 ${coverage.total} 个（政府 ${govCount} / 协会 ${Number(coverage.association) || 0} / 高校 ${Number(coverage.university) || 0}）`
+      : ''
+    const diagParts = [
+      coverageText,
+      ...providerParts,
+      diag.failedQueries ? `${diag.failedQueries} 个检索源失败` : '',
+      filtered ? `过滤 ${filtered} 条` : '',
+      mediaCount ? `官方媒体 ${mediaCount} 条` : '',
+      diag.cached ? '命中缓存' : '',
+    ].filter(Boolean)
+    const diagText = diagParts.join(' · ') || '官方站点垂直检索 + Bing RSS 兜底'
+    body.innerHTML = `<div class="nbsm-sect"><span>官方网页</span><em>${webResults.length} 条 · 按相关度排序${diag.truncated ? ` · 仅展示前 ${webLimit} 条` : ''}</em></div>
+      ${full ? `<div class="nbsm-web-limit">本笔记本已有 ${baseCount}/${maxSources} 个来源，已达上限；先移除不用的来源再加入。</div>` : ''}
+      <div class="nbsm-web-diag ${diag.failedQueries ? 'warn' : ''}">${diag.failedQueries ? '检索不完整：' : ''}${esc(diagText)}</div>
+      ${webResults.map((x, i) => `<div class="nbsm-web-row ${webSelected.has(i) ? 'sel' : ''}">
+        <input class="nbsm-web-check" type="checkbox" data-web-pick="${i}" ${webSelected.has(i) ? 'checked' : ''} ${full ? 'disabled' : ''} aria-label="选择这条网页来源">
+        <span class="nbsm-row-ico">${icon('globe')}</span>
+        <div class="nbsm-web-main">
+          <b>${esc(x.title || x.url)}</b>
+          <span class="nbsm-web-host">${x.authorityLabel ? `<i class="nbsm-web-rank">${esc(x.authorityLabel)}</i>` : ''}${esc(x.host || x.domain || '')}${x.publishedAt ? ' · ' + esc(String(x.publishedAt).slice(0, 10)) : ''}${Number(x.mergedCount) > 1 ? ` · 已合并 ${Number(x.mergedCount)} 条重复` : ''}</span>
+          ${x.snippet ? `<p>${esc(x.snippet)}</p>` : ''}
+        </div>
+        <button class="nbsm-web-open" data-web-open="${i}" title="打开原网页">${icon('arrow')}</button>
+        <button class="btn sm" data-web="${i}" ${full ? 'disabled' : ''}>加入</button>
+      </div>`).join('')}
+      <div class="nbsm-web-note">结果来自中国政府网、生态环境部、江西省政府站群、九江市政务站群、央视网等官方站内搜索，以及 Bing RSS 兜底的真实链接；国务院部门、行业协会、高校站点已纳入权威源库，协会与高校以域名过滤和 Bing 兜底为主，命中数量取决于搜索引擎收录，加入时会抓取网页正文。</div>
+      <div class="nbsm-web-batch">
+        <button class="nbsm-web-all" id="nbsmWebAll" ${full ? 'disabled' : ''}>全选</button>
+        <span class="nbsm-web-count" id="nbsmWebCount">已选 0 条</span>
+        <button class="btn sm" id="nbsmWebAdd" disabled>加入选中</button>
+      </div>`
+    body.querySelectorAll('[data-web-pick]').forEach((box) => box.addEventListener('change', () => {
+      const index = Number(box.dataset.webPick)
+      const limit = Math.max(0, maxSources - baseCount)
+      if (box.checked) {
+        if (webSelected.size >= limit) {
+          box.checked = false
+          toast(`本次最多还能选择 ${limit} 条`, true)
+          return
+        }
+        webSelected.add(index)
+      } else {
+        webSelected.delete(index)
+      }
+      paintWebSelection()
+    }))
+    body.querySelector('#nbsmWebAll')?.addEventListener('click', () => {
+      const limit = Math.max(0, maxSources - baseCount)
+      const allCount = Math.min(limit, webResults.length)
+      if (webSelected.size >= allCount) {
+        webSelected.clear()
+      } else {
+        webSelected.clear()
+        for (let i = 0; i < allCount; i += 1) webSelected.add(i)
+      }
+      paintWebSelection()
+    })
+    body.querySelector('#nbsmWebAdd')?.addEventListener('click', addSelectedWebSources)
+    body.querySelectorAll('[data-web-open]').forEach((b) => b.addEventListener('click', () => openNotebookWebUrl(webResults[Number(b.dataset.webOpen)]?.url)))
+    body.querySelectorAll('[data-web]').forEach((b) => b.addEventListener('click', async () => {
+      if (webAdding || full) return
+      const x = webResults[Number(b.dataset.web)]
+      if (!x?.url) return toast('这条结果没有可用网址', true)
+      const original = b.textContent
+      webAdding = true
+      b.textContent = '抓取中…'
+      paintWebSelection()
+      try {
+        const { body: r } = await api('/api/notebook/source', {
+          method: 'POST',
+          body: JSON.stringify({ id: state.notebookId, source: {
+            kind: 'web', name: x.title || x.url, url: x.url, snippet: x.snippet || '', publishedAt: x.publishedAt || '',
+          } }),
+        })
+        if (r?.ok) {
+          toast('已加入官方网页来源')
+          finish()
+        } else {
+          toast(r?.error || '添加失败', true)
+        }
+      } catch (err) {
+        toast(String(err?.message || err || '添加失败'), true)
+      } finally {
+        webAdding = false
+        if (mask.isConnected) {
+          b.textContent = original
+          paintWebSelection()
+        }
+      }
+    }))
+    paintWebSelection()
+  }
+
+  async function addSelectedWebSources() {
+    if (webAdding) return
+    const picks = [...webSelected].map((i) => webResults[i]).filter(Boolean)
+    if (!picks.length) return toast('请先选择要加入的网页', true)
+    const remaining = Math.max(0, maxSources - baseCount)
+    if (picks.length > remaining) return toast(`本次最多还能加入 ${remaining} 条`, true)
+    webAdding = true
+    paintWebSelection()
+    try {
+      const { body: r } = await api('/api/notebook/source', {
+        method: 'POST',
+        body: JSON.stringify({ id: state.notebookId, sources: picks.map((x) => ({
+          kind: 'web', name: x.title || x.url, url: x.url, snippet: x.snippet || '', publishedAt: x.publishedAt || '',
+        })) }),
+      })
+      const added = Array.isArray(r?.added) ? r.added : []
+      const failed = Array.isArray(r?.failed) ? r.failed : []
+      if (!added.length) {
+        toast(failed[0]?.error || r?.error || '没有加入任何网页来源', true)
+        return
+      }
+      baseCount += added.length
+      full = baseCount >= maxSources
+      const addedUrls = new Set(added.flatMap((x) => [x.requestedUrl, x.url]).filter(Boolean))
+      webResults = webResults.filter((x) => !addedUrls.has(x.url))
+      webSelected.clear()
+      const capEl = mask.querySelector('#nbsmCapCount')
+      if (capEl) capEl.textContent = `来源 ${baseCount} / ${maxSources}`
+      if (failed.length) {
+        toast(`已加入 ${added.length} 条，${failed.length} 条失败：${failed[0]?.error || '请重试'}`, true)
+        renderWebBody()
+        return
+      }
+      toast(`已加入 ${added.length} 条来源`)
+      finish()
+    } catch (err) {
+      toast(String(err?.message || err || '加入失败'), true)
+    } finally {
+      webAdding = false
+      if (mask.isConnected) paintWebSelection()
+    }
+  }
+
+
+  const runWebSearch = async (value) => {
+    const q = String(value || '').trim()
+    if (!q) return toast('请输入要检索的关键词', true)
+    const seq = ++webSearchSeq
+    webQuery = q
+    webSearched = true
+    webResults = []
+    webDiagnostics = null
+    webSelected.clear()
+    webError = ''
+    webLoading = true
+    qEl.value = q
+    paint()
+    let lastError = null
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const { body: r } = await api('/api/notebook/web-search', { method: 'POST', body: JSON.stringify({ q }) })
+        if (seq !== webSearchSeq) return
+        if (!r?.ok) throw new Error(r?.error || '检索失败')
+        webResults = Array.isArray(r.results) ? r.results : []
+        webDiagnostics = r.diagnostics || null
+        webLimit = Number(r.limit) || 50
+        lastError = null
+        break
+      } catch (err) {
+        if (seq !== webSearchSeq) return
+        lastError = err
+        const networkError = /Failed to fetch|NetworkError|fetch failed|Load failed/i.test(String(err?.message || err))
+        if (attempt === 0 && networkError) {
+          await new Promise((resolve) => setTimeout(resolve, 900))
+          if (seq !== webSearchSeq) return
+          continue
+        }
+        break
+      }
+    }
+    if (lastError) {
+      const networkError = /Failed to fetch|NetworkError|fetch failed|Load failed/i.test(String(lastError?.message || lastError))
+      webError = networkError
+        ? '本机检索服务连接中断（Failed to fetch）。请点“重新检索”；若仍失败，重启客户端。'
+        : String(lastError?.message || lastError || '检索失败')
+    }
+    if (seq === webSearchSeq) {
+      webLoading = false
+      paint()
+    }
+  }
+
+  const loadCloudFiles = async () => {
+    if (cloudLoading) return
+    cloudLoading = true
+    cloudError = ''
+    paint()
+    try {
+      const { body: r } = await api('/api/notebook/cloud-files')
+      if (!r?.ok) throw new Error(r?.error || '云空间文件读取失败')
+      cloudFiles = Array.isArray(r.items) ? r.items : []
+      cloudLoaded = true
+    } catch (err) {
+      cloudError = String(err?.message || err || '云空间文件读取失败')
+    } finally {
+      cloudLoading = false
+      paint()
+    }
+  }
+
   const paint = () => {
     mask.querySelectorAll('.nbsm-tab').forEach((b) => b.classList.toggle('on', b.dataset.nbmode === mode))
     mask.querySelector('.nbsm').dataset.mode = mode
-    qEl.placeholder = mode === 'cloud' ? '搜索云空间文件' : '搜索数据中心资源'
-    const q = (qEl.value || '').trim().toLowerCase()
+    qEl.placeholder = mode === 'cloud' ? '搜索云空间文件'
+      : mode === 'web' ? '搜索官方网页（多个关键词用空格分隔，词越多范围越窄）'
+        : '搜索数据中心资源'
 
     if (mode === 'file') {
       body.innerHTML = full
         ? `<div class="nbsm-empty">本笔记本已有 ${baseCount}/${maxSources} 个来源，已达上限。请先在来源列表移除不用的来源后再添加。</div>`
         : ''
-    } else if (mode === 'data') {
+      return
+    }
+    if (mode === 'web') return renderWebBody()
+    const q = (qEl.value || '').trim().toLowerCase()
+    if (mode === 'data') {
       const items = cands.filter((x) => !q || (x.name + ' ' + (x.owner || '') + ' ' + (x.format || '')).toLowerCase().includes(q))
       body.innerHTML = items.length ? `<div class="nbsm-sect"><span>数据中心资源</span><em>${items.length} 项可引用 · 不占个人容量</em></div>
         ${items.map((x, i) => `<div class="nbsm-row">
@@ -7734,17 +9001,48 @@ function openNotebookSourcePicker(detail, opts = {}) {
         if (r?.ok) { toast('已加入数据中心引用（不占个人容量）'); finish() } else toast(r?.error || '添加失败')
       }))
     } else if (mode === 'cloud') {
-      const items = NB_CLOUD_SOURCES.filter((x) => !q || (x.name + ' ' + x.path).toLowerCase().includes(q))
+      if (cloudLoading) {
+        body.innerHTML = `<div class="nbsm-empty">${icon('cloud')}<b>正在读取云空间文件…</b><span>只列出服务端已保存正文、且你有权限读取的云文件。</span></div>`
+        return
+      }
+      if (cloudError) {
+        body.innerHTML = `<div class="nbsm-empty"><b>云空间文件读取失败</b><span>${esc(cloudError)}</span><button class="btn sm" id="nbsmCloudRetry">重新读取</button></div>`
+        body.querySelector('#nbsmCloudRetry')?.addEventListener('click', loadCloudFiles)
+        return
+      }
+      if (!cloudLoaded) {
+        body.innerHTML = `<div class="nbsm-empty"><b>云空间文件尚未读取</b><span>点击后从服务端读取真实云文件。</span><button class="btn sm" id="nbsmCloudLoad">读取云空间文件</button></div>`
+        body.querySelector('#nbsmCloudLoad')?.addEventListener('click', loadCloudFiles)
+        return
+      }
+      const items = cloudFiles.filter((x) => !q || (x.name + ' ' + (x.path || '')).toLowerCase().includes(q))
       body.innerHTML = items.length ? `<div class="nbsm-sect"><span>云空间文件</span><em>${items.length} 个 · 不占个人容量</em></div>
         ${items.map((x, i) => `<div class="nbsm-row">
           <span class="nbsm-row-ico">${icon('cloud')}</span>
-          <div class="nbsm-row-main"><b>${esc(x.name)}</b><span>${esc(x.path)} · ${esc(x.format)}</span></div>
+          <div class="nbsm-row-main"><b>${esc(x.name)}</b><span>${esc(x.path || '云空间')} · ${esc(x.format || '')}${x.size ? ' · ' + esc(x.size) : ''}</span></div>
           <button class="btn sm" data-cloud="${i}" ${full ? 'disabled' : ''}>引用</button>
-        </div>`).join('')}` : `<div class="nbsm-empty">云空间中没有匹配的文件。</div>`
+        </div>`).join('')}` : `<div class="nbsm-empty">云空间中没有可读取的文件。请先在「云空间」上传文件，刷新后再引用。</div>`
       body.querySelectorAll('[data-cloud]').forEach((b) => b.addEventListener('click', async () => {
         if (full) return toast(`每本笔记本最多 ${maxSources} 个来源`)
         const x = items[Number(b.dataset.cloud)]
-        if (await addNotebookGenericSource({ kind: 'cloud', name: x.name, url: x.path, format: x.format })) { toast('已引用云空间文件（不占个人容量）'); finish() }
+        const original = b.textContent
+        b.disabled = true
+        b.textContent = '读取中…'
+        if (await addNotebookGenericSource({
+          kind: 'cloud',
+          name: x.name,
+          driveItemId: x.driveItemId,
+          fileId: x.fileId,
+          format: x.format,
+          sizeBytes: x.sizeBytes,
+          url: x.path,
+        })) {
+          toast('已引用云空间文件（不占个人容量）')
+          finish()
+        } else {
+          b.disabled = false
+          b.textContent = original
+        }
       }))
     }
   }
@@ -7758,10 +9056,21 @@ function openNotebookSourcePicker(detail, opts = {}) {
     let okCount = 0
     for (const f of picked) {
       const ext = (f.name.split('.').pop() || '').toUpperCase()
-      const ok = await addNotebookGenericSource({ kind: 'file', name: f.name, format: ext, sizeBytes: f.size })
+      const uploaded = await uploadBinaryFile(f, 'notebook')
+      if (!uploaded.ok || !uploaded.file?.id) {
+        toast(uploaded.body?.error || `《${f.name}》上传失败`, true)
+        continue
+      }
+      const ok = await addNotebookGenericSource({
+        kind: 'file',
+        name: f.name,
+        format: ext,
+        sizeBytes: uploaded.file.size,
+        fileId: uploaded.file.id,
+      })
       if (ok) okCount += 1
     }
-    if (okCount) toast(`已添加 ${okCount} 个本地文件作为来源`)
+    if (okCount) toast(`已上传并添加 ${okCount} 个本地文件来源`)
     finish()
   }
   const fileInput = mask.querySelector('#nbsmFile')
@@ -7772,11 +9081,31 @@ function openNotebookSourcePicker(detail, opts = {}) {
   drop?.addEventListener('drop', (e) => { e.preventDefault(); drop.classList.remove('over'); if (!full) addFiles(Array.from(e.dataTransfer?.files || [])) })
   drop?.addEventListener('click', () => { if (full) return toast(`每本笔记本最多 ${maxSources} 个来源`); fileInput?.click() })
 
-  qEl.addEventListener('input', paint)
-  qEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); paint() } })
-  mask.querySelector('#nbsmGo')?.addEventListener('click', paint)
-  mask.querySelectorAll('[data-nbmode]').forEach((b) => b.addEventListener('click', () => { mode = b.dataset.nbmode; paint() }))
+  qEl.addEventListener('input', () => {
+    if (mode === 'web' && !webLoading) {
+      webResults = []
+      webError = ''
+      webSearched = false
+      webQuery = qEl.value.trim()
+    }
+    paint()
+  })
+  qEl.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return
+    e.preventDefault()
+    if (mode === 'web') runWebSearch(qEl.value)
+    else paint()
+  })
+  mask.querySelector('#nbsmGo')?.addEventListener('click', () => { if (mode === 'web') runWebSearch(qEl.value); else paint() })
+  mask.querySelectorAll('[data-nbmode]').forEach((b) => b.addEventListener('click', () => {
+    mode = b.dataset.nbmode
+    if (mode === 'web' && qEl.value.trim() && !webLoading) runWebSearch(qEl.value)
+    else if (mode === 'cloud' && !cloudLoaded && !cloudLoading) loadCloudFiles()
+    else paint()
+  }))
   paint()
+  if (mode === 'web' && qEl.value.trim()) runWebSearch(qEl.value)
+  else if (mode === 'cloud' && !cloudLoaded) loadCloudFiles()
 }
 
 
@@ -7807,10 +9136,24 @@ function imageEditModel() {
   return editable.find((model) => model.id === state.imagegen.modelId) || editable[0] || null
 }
 
+function imageLayerModel() {
+  const models = Array.isArray(state.boot?.imageGeneration?.models) ? state.boot.imageGeneration.models : []
+  const layered = models.filter((model) => model.configured && model.capabilities?.layers)
+  return layered.find((model) => model.id === state.imagegen.modelId) || layered[0] || null
+}
+
 function imagegenReady() {
   const cap = state.boot?.imageGeneration
   if (cap) return Boolean(cap.enabled)
   return false
+}
+
+function visualReady() {
+  return Boolean(state.boot?.imageGeneration?.visual?.configured)
+}
+
+function visualReason() {
+  return String(state.boot?.imageGeneration?.visual?.disabledReason || '视觉服务未配置')
 }
 
 function showImageGate() {
@@ -8152,7 +9495,7 @@ function deleteImageAsset(shot) {
 function editImageAsset(shot) {
   const model = imageEditModel()
   if (!model) return toast('当前没有可用的图像编辑模型', true)
-  const mask = openModal('编辑图像', `
+  const mask = openModal('AI 重绘', `
     <div class="img-edit-preview"><img src="${shot.url}" alt=""></div>
     <div class="field" style="margin-top:10px">
       <label class="field-label" for="igEditPrompt">编辑要求</label>
@@ -8205,9 +9548,8 @@ function openImageMenu(anchor, shot) {
   const menu = document.createElement('div')
   menu.className = 'img-menu'
   menu.innerHTML = `
-    ${editModel ? '<button type="button" data-imenu="edit">编辑</button>' : ''}
-    <button type="button" data-imenu="mask">局部选区</button>
-    <button type="button" data-imenu="polygon">多边形选区</button>
+    <button type="button" data-imenu="edit">编辑图片</button>
+    ${editModel ? '<button type="button" data-imenu="redraw">AI 重绘</button><button type="button" data-imenu="mask">局部选区</button><button type="button" data-imenu="polygon">多边形选区</button>' : ''}
     <button type="button" data-imenu="download">下载原图</button>
     <button type="button" data-imenu="copy">复制提示词</button>
     <button type="button" data-imenu="template">申请成为模板</button>
@@ -8234,7 +9576,8 @@ function openImageMenu(anchor, shot) {
     e.stopPropagation()
     menu.remove()
     const action = btn.dataset.imenu
-    if (action === 'edit') editImageAsset(shot)
+    if (action === 'edit') openImageWorkbench(shot)
+    else if (action === 'redraw') editImageAsset(shot)
     else if (action === 'mask') openImageMaskEditor(shot)
     else if (action === 'polygon') openImageMaskEditor(shot, { tool: 'polygon' })
     else if (action === 'download') downloadImageAsset(shot)
@@ -8249,6 +9592,7 @@ function openImageMaskEditor(shot, opts = {}) {
   const erase = Boolean(opts.erase)
   const startPolygon = Boolean(opts.polygon) || (!erase && opts.tool === 'polygon')
   const editModel = imageEditModel()
+  if (!editModel) return toast('当前没有可用的图像编辑模型，无法执行选区擦除或局部修改', true)
   const modelName = editModel?.label || ''
   const intro = erase
     ? '涂抹要移除的物体或文字，白笔为擦除区、未涂抹为保留区。提交后由当前选中的图像模型重绘选区，并创建新版本。'
@@ -8523,7 +9867,7 @@ function openImageMaskEditor(shot, opts = {}) {
     err.textContent = ''
     render()
   })
-  mask.querySelector('#igMaskCancel').addEventListener('click', () => mask.remove())
+  mask.querySelector('#igMaskCancel').addEventListener('click', () => { if (opts.back) { mask.remove(); openImageWorkbench(shot) } else mask.remove() })
   go.addEventListener('click', async () => {
     err.textContent = ''
     if (!ctx || !canvas.width) return (err.textContent = '图片还没有加载完成')
@@ -8554,12 +9898,14 @@ function openImageMaskEditor(shot, opts = {}) {
       toast(erase ? `已擦除选区并生成版本 v${res.body.image.revision}` : `已生成局部编辑版本 v${res.body.image.revision}`)
       renderView()
       if (typeof opts.after === 'function') opts.after(next)
+      else if (opts.back) setTimeout(() => openImageWorkbench(next), 60)
     } catch (error) {
       go.disabled = false
       go.textContent = erase ? '擦除并生成新版本' : '应用选区'
       err.textContent = error?.message || '局部选区编辑失败'
     }
   })
+  bindWorkbenchBack(mask, shot, opts)
 }
 
 function readTemplateReference(file) {
@@ -8842,108 +10188,349 @@ function wbIcon(name) {
     bg: '<path d="M4 3.5h8v9H4z"/><path d="M4 8.5l3-2 3 2 2-1.5"/><circle cx="9.5" cy="6" r="1"/>',
     erase: '<path d="M7 14.5l-3-3 7-7 5 5-5 5z"/><path d="M8 16.5h6"/>',
     resize: '<path d="M3.5 6V3.5h6"/><path d="M12.5 10v2.5h-6"/><path d="M10 3.5h2.5V6"/>',
+    expand: '<rect x="5" y="5" width="6" height="6" rx="1"/><path d="M3.5 3.5v2M12.5 3.5v2M3.5 10.5v2M12.5 10.5v2"/>',
+    upscale: '<circle cx="7" cy="7" r="3"/><path d="M9.4 9.4 12 12"/><path d="M7 5.6v2.8M5.6 7h2.8"/>',
+    download: '<path d="M8 3v8"/><path d="M5 8.5 8 11l3-2.5"/><path d="M3.5 13.5h9"/>',
+    layers: '<path d="M8 3l5 2.5-5 2.5L3 5.5z"/><path d="M3 9l5 2.5L13 9"/><path d="M3 12l5 2.5L13 12"/>',
   }
   return `<svg viewBox="0 0 16 16" aria-hidden="true">${icons[name] || ''}</svg>`
 }
 
+const ANNOT_ICONS = {
+  select: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 3.2 11.2 9.6 8.6 10 7 12.8z"/></svg>',
+  brush: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 13.5V10l8.5-7 3.5 3.5-7 8.5H4.5"/><path d="M10 4.5l3.5 3.5"/></svg>',
+  text: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 3.5h6M8 3.5v9M6 12.5h4"/></svg>',
+  shape: '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="4" y="5" width="8" height="6" rx="1"/></svg>',
+  erase: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M7 14.5l-3-3 7-7 5 5-5 5z"/><path d="M8 16.5h6"/></svg>',
+  undo: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8 6 5.5M3.5 8l2.5 2.5M3.5 8h6a3 3 0 0 1 0 6H8"/></svg>',
+  redo: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M12.5 8 10 5.5M12.5 8l-2.5 2.5M12.5 8h-6a3 3 0 0 0 0 6H8"/></svg>',
+  cancel: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg>',
+}
+
+const SHAPES = [
+  { key: 'line', label: '直线', svg: '<svg viewBox="0 0 16 16"><path d="M3 13 13 3"/></svg>' },
+  { key: 'arrow', label: '箭头', svg: '<svg viewBox="0 0 16 16"><path d="M3 13 13 3"/><path d="M8 3h5v5"/></svg>' },
+  { key: 'rect', label: '方框', svg: '<svg viewBox="0 0 16 16"><rect x="3.5" y="4.5" width="9" height="7" rx="1"/></svg>' },
+  { key: 'ellipse', label: '圆形', svg: '<svg viewBox="0 0 16 16"><ellipse cx="8" cy="8" rx="5" ry="3.5"/></svg>' },
+  { key: 'triangle', label: '三角', svg: '<svg viewBox="0 0 16 16"><path d="M8 3.5 13 12H3z"/></svg>' },
+  { key: 'diamond', label: '菱形', svg: '<svg viewBox="0 0 16 16"><path d="M8 3 12.5 8 8 13 3.5 8z"/></svg>' },
+  { key: 'star', label: '五角星', svg: '<svg viewBox="0 0 16 16"><path d="M8 3.5 9.3 6.8 12.8 7 10.1 9.3 11 12.7 8 10.8 5 12.7 5.9 9.3 3.2 7 6.7 6.8z"/></svg>' },
+  { key: 'heart', label: '心形', svg: '<svg viewBox="0 0 16 16"><path d="M8 12.5S3.5 9.5 3.5 6.3C3.5 4.6 4.8 3.5 6.2 3.5c.8 0 1.5.4 1.8 1 .3-.6 1-1 1.8-1 1.4 0 2.7 1.1 2.7 2.8 0 3.2-4.5 6.2-4.5 6.2z"/></svg>' },
+]
+
+const PRESET_COLORS = ['#111827', '#6b7280', '#8a5a2b', '#d92d20', '#f76808', '#fdb022', '#12b76a', '#0e9394', '#2e90fa', '#6172f3', '#9e5cf7', '#ee46bc']
+
+// 子编辑器由主工作台进入时（opts.back），取消 / X / 点遮罩关闭后回到主工作台；
+// 右键菜单等直进入口不传 back，关闭后维持原行为（回列表）。
+function bindWorkbenchBack(mask, shot, opts) {
+  if (!opts?.back) return
+  const back = () => { mask.remove(); openImageWorkbench(shot) }
+  mask.querySelector('[data-mclose]')?.addEventListener('click', back)
+  mask.addEventListener('click', (e) => { if (e.target === mask) back() })
+  mask.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return
+    const t = e.target
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return
+    e.stopPropagation()
+    back()
+  })
+}
+
+const IMG_ICON_FULL = '<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="2.5" width="7" height="7" rx="1"/></svg>'
+const IMG_ICON_RESTORE = '<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="8" height="6" rx="1"/><path d="M4 3V2h4v1"/></svg>'
+
+function setupImageStageViewer({ mask, stage, inner, zoomLabel, inBtn, outBtn, fitBtn, fullBtn }) {
+  const MIN = 0.5
+  const MAX = 3
+  const view = { scale: 1, tx: 0, ty: 0 }
+  let pan = null
+  let interactive = true
+  const setInteractive = (v) => { interactive = Boolean(v); if (!interactive) pan = null }
+  const stageRect = () => {
+    const r = stage.getBoundingClientRect()
+    return { width: Math.max(1, r.width), height: Math.max(1, r.height), cx: r.left + r.width / 2, cy: r.top + r.height / 2 }
+  }
+  const applyView = () => {
+    if (inner) inner.style.transform = `translate(${view.tx}px, ${view.ty}px) scale(${view.scale})`
+    if (zoomLabel) zoomLabel.textContent = `${Math.round(view.scale * 100)}%`
+  }
+  const clampView = () => {
+    const r = stageRect()
+    const maxTx = Math.max(0, (r.width * (view.scale - 1)) / 2)
+    const maxTy = Math.max(0, (r.height * (view.scale - 1)) / 2)
+    view.tx = Math.max(-maxTx, Math.min(maxTx, view.tx))
+    view.ty = Math.max(-maxTy, Math.min(maxTy, view.ty))
+  }
+  const zoomAt = (next, px, py) => {
+    next = Math.max(MIN, Math.min(MAX, next))
+    const r = stageRect()
+    const cx = px ?? r.cx
+    const cy = py ?? r.cy
+    const k = next / view.scale
+    view.tx = (cx - r.cx) - (cx - r.cx - view.tx) * k
+    view.ty = (cy - r.cy) - (cy - r.cy - view.ty) * k
+    view.scale = next
+    clampView()
+    applyView()
+  }
+  const resetView = () => { view.scale = 1; view.tx = 0; view.ty = 0; applyView() }
+  const setFull = (on) => {
+    mask.classList.toggle('preview-full', on)
+    if (fullBtn) {
+      fullBtn.title = on ? '退出全屏' : '全屏查看'
+      fullBtn.setAttribute('aria-label', on ? '退出全屏' : '全屏查看')
+      fullBtn.innerHTML = on ? IMG_ICON_RESTORE : IMG_ICON_FULL
+    }
+    if (on) resetView()
+  }
+  inBtn?.addEventListener('click', () => zoomAt(view.scale * 1.15))
+  outBtn?.addEventListener('click', () => zoomAt(view.scale / 1.15))
+  fitBtn?.addEventListener('click', resetView)
+  fullBtn?.addEventListener('click', () => setFull(!mask.classList.contains('preview-full')))
+  stage?.addEventListener('wheel', (event) => {
+    if (!interactive) return
+    event.preventDefault()
+    const factor = event.deltaY < 0 ? 1.12 : 0.89
+    zoomAt(view.scale * factor, event.clientX, event.clientY)
+  }, { passive: false })
+  stage?.addEventListener('pointerdown', (event) => {
+    if (!interactive) return
+    if (event.target.closest('button, input, textarea, a, .wb-main-bar, .img-wb-more, .wb-annot-bar, .wb-comment-bar, .wb-erase-bar, .wb-resize-pop, .img-wb-side, .wb-shape-pop, .wb-color-pop, .wb-pin, .wb-text-item, .wb-text-input')) return
+    pan = { startX: event.clientX, startY: event.clientY, tx: view.tx, ty: view.ty }
+    stage.setPointerCapture?.(event.pointerId)
+    event.preventDefault()
+  })
+  window.addEventListener('pointermove', (event) => {
+    if (!pan) return
+    view.tx = pan.tx + (event.clientX - pan.startX)
+    view.ty = pan.ty + (event.clientY - pan.startY)
+    clampView()
+    applyView()
+  })
+  window.addEventListener('pointerup', () => { pan = null })
+  applyView()
+  return { view, applyView, resetView, setFull, setInteractive }
+}
+
+function openImagePreview(shot) {
+  if (!shot?.url) return
+  const editModel = imageEditModel()
+  const mask = openModal('查看图片', `
+    <div class="img-wb img-preview">
+      <div class="img-preview-stage" id="pvStage">
+        <div class="img-preview-inner" id="pvInner"><img src="${shot.url}" alt=""></div>
+      </div>
+      <div class="img-preview-foot">
+        <div class="img-preview-meta" title="${esc(shot.prompt || '')}">${esc(shot.prompt || '')}</div>
+        <div class="img-preview-acts">
+          <span class="img-preview-zoom">
+            <button type="button" class="btn sm" data-pv="out" title="缩小">−</button>
+            <span id="pvZoomLabel" class="img-preview-zoom-label">100%</span>
+            <button type="button" class="btn sm" data-pv="in" title="放大">＋</button>
+            <button type="button" class="btn sm" data-pv="fit" title="重置缩放与平移，适应窗口">适应窗口</button>
+            <button type="button" class="btn sm" data-pv="full" title="全屏查看" aria-label="全屏查看"><svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="2.5" width="7" height="7" rx="1"/></svg></button>
+          </span>
+          <button type="button" class="btn" data-pv="download">下载原图</button>
+          <button type="button" class="btn" data-pv="copy">复制提示词</button>
+          <button type="button" class="btn" data-pv="versions">版本历史</button>
+          ${editModel ? '<button type="button" class="btn primary" data-pv="edit">编辑图片</button>' : ''}
+        </div>
+      </div>
+    </div>`, { wide: true })
+  mask.querySelector('.jg-modal-body').classList.add('img-wb-body')
+
+  const stage = mask.querySelector('#pvStage')
+  const inner = mask.querySelector('#pvInner')
+  setupImageStageViewer({
+    mask, stage, inner,
+    zoomLabel: mask.querySelector('#pvZoomLabel'),
+    inBtn: mask.querySelector('[data-pv="in"]'),
+    outBtn: mask.querySelector('[data-pv="out"]'),
+    fitBtn: mask.querySelector('[data-pv="fit"]'),
+    fullBtn: mask.querySelector('[data-pv="full"]'),
+  })
+  mask.querySelector('[data-pv="download"]')?.addEventListener('click', () => downloadImageAsset(shot))
+  mask.querySelector('[data-pv="copy"]')?.addEventListener('click', () => copyImagePrompt(shot))
+  mask.querySelector('[data-pv="versions"]')?.addEventListener('click', () => openImageVersions(shot))
+  mask.querySelector('[data-pv="edit"]')?.addEventListener('click', () => { mask.remove(); openImageWorkbench(shot) })
+}
+
 function openImageWorkbench(shot) {
   if (!shot?.url) return
-  const mask = openModal('图像编辑', `
+  const WB_RATIOS = [
+    { ratio: '1:1', label: '方图' },
+    { ratio: '3:4', label: '竖图' },
+    { ratio: '9:16', label: '故事' },
+    { ratio: '4:3', label: '横图' },
+    { ratio: '16:9', label: '宽屏' },
+  ]
+  const mask = openModal('编辑图片', `
     <div class="img-wb" id="imgWb">
-      <div class="img-wb-stage">
-        <img id="imgWbImg" src="${shot.url}" alt="">
+      <div class="img-wb-stage" id="imgWbStage">
+        <span class="img-preview-zoom img-wb-zoom" id="imgWbZoomBar">
+          <button type="button" class="btn sm" data-wbv="out" title="缩小">−</button>
+          <span id="wbZoomLabel" class="img-preview-zoom-label">100%</span>
+          <button type="button" class="btn sm" data-wbv="in" title="放大">＋</button>
+          <button type="button" class="btn sm" data-wbv="fit" title="重置缩放与平移，适应窗口">适应窗口</button>
+          <button type="button" class="btn sm" data-wbv="full" title="全屏查看" aria-label="全屏查看">${IMG_ICON_FULL}</button>
+        </span>
+        <div class="wb-main-bar" id="wbMainBar">
+          <span class="wb-cb-grip" aria-hidden="true">⋮⋮</span>
+          <button type="button" data-wb="annotate" title="在图片上绘制标记与注释">${wbIcon('annotate')}<span>标注</span></button>
+          <button type="button" data-wb="comment" title="为这张图片添加修改意见或备注">${wbIcon('comment')}<span>添加评论</span></button>
+          <button type="button" data-wb="removebg" title="AI 自动抠除整图背景，保留主体（透明底）">${wbIcon('bg')}<span>移除背景</span></button>
+          <button type="button" data-wb="erase" title="手动涂抹局部区域，AI 擦除所选内容并重绘填补">${wbIcon('erase')}<span>擦除</span></button>
+          <button type="button" data-wb="resize" title="AI 按目标比例延展画幅，主体不缩小、不裁切">${wbIcon('resize')}<span>调整大小</span></button>
+          <span class="wb-main-sep" aria-hidden="true"></span>
+          <button type="button" class="img-wb-dot" data-wb="more" aria-label="更多操作">${wbIcon('dots')}</button>
+        </div>
+        <div class="img-wb-inner" id="imgWbInner">
+          <div class="img-wb-paper" id="imgWbPaper">
+            <img id="imgWbImg" src="${shot.url}" alt="">
+            <canvas id="imgWbAnnotCanvas"></canvas>
+            <canvas id="imgWbEraseCanvas"></canvas>
+            <div class="wb-layer" id="imgWbTextLayer"></div>
+            <div class="wb-layer" id="imgWbPinLayer"></div>
+          </div>
+        </div>
         <div class="img-wb-status" id="imgWbStatus" hidden></div>
-      </div>
-      <div class="img-wb-toolbar" role="toolbar" aria-label="图像编辑工具">
-        <button type="button" class="img-wb-dot" data-wb="more" aria-label="更多操作">${wbIcon('dots')}</button>
-        <button type="button" data-wb="annotate">${wbIcon('annotate')}<span>标注</span></button>
-        <button type="button" data-wb="comment">${wbIcon('comment')}<span>添加评论</span></button>
-        <button type="button" data-wb="removebg">${wbIcon('bg')}<span>移除背景</span></button>
-        <button type="button" data-wb="erase">${wbIcon('erase')}<span>擦除</span></button>
-        <button type="button" data-wb="resize">${wbIcon('resize')}<span>调整大小</span></button>
+        <div class="wb-annot-bar" id="wbAnnotBar" hidden>
+          <div class="wb-ab-group">
+            <button type="button" class="wb-ab-btn" data-atool="select" title="选择 / 删除">${ANNOT_ICONS.select}</button>
+            <button type="button" class="wb-ab-btn" data-atool="brush" title="画笔">${ANNOT_ICONS.brush}</button>
+            <button type="button" class="wb-ab-btn" data-atool="text" title="文本">${ANNOT_ICONS.text}</button>
+            <button type="button" class="wb-ab-btn" data-atool="shape" title="形状">${ANNOT_ICONS.shape}</button>
+            <button type="button" class="wb-ab-btn" data-atool="color" title="墨迹颜色"><span class="wb-color-dot" id="wbColorDot"></span></button>
+            <button type="button" class="wb-ab-btn" data-atool="erase" title="橡皮擦">${ANNOT_ICONS.erase}</button>
+          </div>
+          <div class="wb-ab-size" id="wbAnnotSizeWrap" title="画笔 / 橡皮粗细">
+            <input id="wbAnnotSize" type="range" min="2" max="120" value="24" aria-label="画笔或橡皮粗细">
+          </div>
+          <div class="wb-ab-group">
+            <button type="button" class="wb-ab-btn" data-atool="undo" title="撤销">${ANNOT_ICONS.undo}</button>
+            <button type="button" class="wb-ab-btn" data-atool="redo" title="重做">${ANNOT_ICONS.redo}</button>
+          </div>
+          <button type="button" class="wb-ab-btn wb-ab-close" data-atool="cancel" title="取消标注">${ANNOT_ICONS.cancel}</button>
+          <div class="wb-shape-pop" id="wbShapePop" hidden>
+            ${SHAPES.map((s) => `<button type="button" class="wb-shape-btn" data-shape="${s.key}" title="${s.label}">${s.svg}</button>`).join('')}
+          </div>
+          <div class="wb-color-pop" id="wbColorPop" hidden>
+            <label class="wb-color-custom" title="自定义取色"><input type="color" id="wbColorPicker" value="#d92d20"><span>取色</span></label>
+            <div class="wb-color-grid">
+              ${PRESET_COLORS.map((c) => `<button type="button" class="wb-color-chip" data-color="${c}" style="background:${c}" title="${c}"></button>`).join('')}
+            </div>
+          </div>
+        </div>
+        <div class="wb-comment-bar" id="wbCommentBar" hidden>
+          <span class="wb-cb-grip" aria-hidden="true">⋮⋮</span>
+          <input id="wbCommentInput2" maxlength="500" placeholder="输入评论" autocomplete="off">
+          <button type="button" class="btn primary sm" id="wbCommentSend">发送</button>
+          <button type="button" class="wb-ab-btn" id="wbCommentClose" title="关闭评论">${ANNOT_ICONS.cancel}</button>
+        </div>
+        <div class="wb-erase-bar at-button" id="wbEraseBar" hidden>
+          <span class="wb-cb-grip" aria-hidden="true">⋮⋮</span>
+          <label class="wb-erase-size" title="擦除画笔粗细">粗细
+            <input id="wbEraseSize" type="range" min="2" max="240" value="24" aria-label="擦除画笔粗细">
+          </label>
+          <button type="button" class="wb-ab-btn" id="wbEraseUndo" title="撤销">${ANNOT_ICONS.undo}</button>
+          <button type="button" class="wb-ab-btn" id="wbEraseRedo" title="重做">${ANNOT_ICONS.redo}</button>
+          <button type="button" class="btn primary sm" id="wbEraseSend">发送</button>
+          <button type="button" class="wb-ab-btn" id="wbEraseClose" title="取消擦除">${ANNOT_ICONS.cancel}</button>
+        </div>
+        <div class="wb-resize-pop" id="wbResizePop" hidden>
+          <span class="wb-resize-title">画幅</span>
+          ${WB_RATIOS.map((item) => `<button type="button" class="wb-resize-chip${shot.ratio === item.ratio ? ' on' : ''}" data-wb-ratio="${item.ratio}" title="${item.label} ${item.ratio}">${item.ratio}</button>`).join('')}
+          <button type="button" class="wb-ab-btn" id="wbResizeClose" title="关闭">${ANNOT_ICONS.cancel}</button>
+        </div>
       </div>
       <div class="img-wb-more" id="imgWbMore" hidden>
-        <button type="button" data-wbmore="edit">提示词编辑</button>
-        <button type="button" data-wbmore="template">申请成为模板</button>
-        <button type="button" data-wbmore="versions">版本历史对比</button>
-        <button type="button" data-wbmore="download">下载原图</button>
-        <button type="button" data-wbmore="usechat">用于会话</button>
-        <button type="button" data-wbmore="delete" class="danger">删除</button>
+        <button type="button" data-wbmore="layers">图层</button>
+        <button type="button" data-wbmore="expand">扩图</button>
+        <button type="button" data-wbmore="upscale">变清晰</button>
       </div>
-      <aside class="img-wb-side" id="imgWbSide" hidden>
-        <div class="img-wb-side-head"><div><b>评论</b><span id="imgWbCommentCount"></span></div><button type="button" class="img-wb-side-x" id="imgWbSideX" aria-label="关闭评论">×</button></div>
-        <div class="img-wb-comments" id="imgWbComments"><div class="img-wb-empty">还没有评论</div></div>
-        <textarea id="imgWbCommentInput" maxlength="500" placeholder="写下对这张图的修改意见或备注…"></textarea>
-        <div class="img-wb-side-foot"><span class="img-edit-err" id="imgWbCommentErr"></span><button type="button" class="btn primary" id="imgWbCommentGo">发表评论</button></div>
-      </aside>
     </div>`, { wide: true })
   const body = mask.querySelector('.jg-modal-body')
   body.classList.add('img-wb-body')
+  // 缩放组移入标题栏，置于关闭按钮左侧同行
+  const modalHead = mask.querySelector('.jg-modal-head')
+  const modalCloseBtn = modalHead && modalHead.querySelector('[data-mclose]')
+  const zoomBar = mask.querySelector('#imgWbZoomBar')
+  if (modalHead && modalCloseBtn && zoomBar) modalHead.insertBefore(zoomBar, modalCloseBtn)
   const status = mask.querySelector('#imgWbStatus')
-  const side = mask.querySelector('#imgWbSide')
   const morePanel = mask.querySelector('#imgWbMore')
-  const setStatus = (text, busy = true) => {
+  const viewer = setupImageStageViewer({
+    mask,
+    stage: mask.querySelector('.img-wb-stage'),
+    inner: mask.querySelector('#imgWbInner'),
+    zoomLabel: mask.querySelector('#wbZoomLabel'),
+    inBtn: mask.querySelector('[data-wbv="in"]'),
+    outBtn: mask.querySelector('[data-wbv="out"]'),
+    fitBtn: mask.querySelector('[data-wbv="fit"]'),
+    fullBtn: mask.querySelector('[data-wbv="full"]'),
+  })
+  function setStatus(text, busy = true) {
     status.hidden = false
     status.textContent = text
     status.classList.toggle('busy', busy)
   }
-  const clearStatus = () => { status.hidden = true; status.textContent = '' }
+  function clearStatus() { status.hidden = true; status.textContent = '' }
 
-  const renderComments = async () => {
-    const list = mask.querySelector('#imgWbComments')
-    const count = mask.querySelector('#imgWbCommentCount')
-    const res = await api(`/api/images/comments?assetId=${encodeURIComponent(shot.id)}`)
-    if (!res.ok) {
-      list.innerHTML = `<div class="img-wb-empty">评论读取失败：${esc(res.body?.error || res.status)}</div>`
-      return
-    }
-    const comments = Array.isArray(res.body?.comments) ? res.body.comments : []
-    count.textContent = comments.length ? ` · ${comments.length}` : ''
-    list.innerHTML = comments.length ? comments.map((item) => `
-      <div class="img-wb-comment">
-        <div class="img-wb-comment-head"><span class="img-wb-avatar">${esc(String(item.owner || '我').slice(0, 1))}</span><span>${esc(item.owner || '我')}</span><span>${esc(new Date(item.createdAt).toLocaleString('zh-CN', { hour12: false }).slice(0, 16))}</span></div>
-        <div class="img-wb-comment-body">${esc(item.body)}</div>
-      </div>`).join('') : '<div class="img-wb-empty">还没有评论，写下第一条修改意见</div>'
-  }
-  const openComments = async () => {
-    side.hidden = false
-    await renderComments()
-    mask.querySelector('#imgWbCommentInput').focus()
-  }
-  mask.querySelector('#imgWbSideX').addEventListener('click', () => { side.hidden = true })
-  mask.querySelector('#imgWbCommentGo').addEventListener('click', async (event) => {
-    const btn = event.currentTarget
-    const input = mask.querySelector('#imgWbCommentInput')
-    const err = mask.querySelector('#imgWbCommentErr')
-    const text = input.value.trim()
-    if (!text) { err.textContent = '请先写评论'; input.focus(); return }
-    btn.disabled = true
-    const res = await api('/api/images/comments', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ assetId: shot.id, body: text }),
-    })
-    btn.disabled = false
-    if (!res.ok) { err.textContent = res.body?.error || '评论失败'; return }
-    input.value = ''
-    err.textContent = ''
-    await renderComments()
-  })
+  // ---------- 画布覆盖层元素 ----------
+  const stageEl = mask.querySelector('#imgWbStage')
+  const paper = mask.querySelector('#imgWbPaper')
+  const imgEl = mask.querySelector('#imgWbImg')
+  const canvas = mask.querySelector('#imgWbAnnotCanvas')
+  const textLayer = mask.querySelector('#imgWbTextLayer')
+  const pinLayer = mask.querySelector('#imgWbPinLayer')
+  const annotBar = mask.querySelector('#wbAnnotBar')
+  const commentBar = mask.querySelector('#wbCommentBar')
+  const eraseCanvas = mask.querySelector('#imgWbEraseCanvas')
+  const eraseBar = mask.querySelector('#wbEraseBar')
+  const resizePop = mask.querySelector('#wbResizePop')
+  const mainBar = mask.querySelector('#wbMainBar')
+  const commentInput2 = mask.querySelector('#wbCommentInput2')
+  const shapePop = mask.querySelector('#wbShapePop')
+  const colorPop = mask.querySelector('#wbColorPop')
+  function clampNum(v, a, b) { return Math.min(b, Math.max(a, v)) }
 
-  mask.querySelectorAll('[data-wb]').forEach((btn) => btn.addEventListener('click', async (event) => {
+  // ---------- 子模块状态（前置声明，避免事件闭包暂时性死区 TDZ） ----------
+  let annotMode = false
+  let activeTool = 'brush'
+  let currentColor = '#d92d20'
+  let currentShape = 'rect'
+  let annotBrushSize = 24
+  let annotEraserSize = 44
+  let annotItems = []
+  let redoStack = []
+  let drawing = null
+  let textEditing = null
+  let commentMode = false
+  let pendingPin = null
+  let localComments = []
+  let remoteComments = []
+  let eraseMode = false
+  let eraseStrokes = []
+  let eraseRedo = []
+  let eraseDrawing = null
+  let eraseBrushSize = 24
+  let paperRect = null
+
+  /* 主条与更多菜单委托前置注册：即使后段子模块绑定出现异常，主功能按钮也先可用。
+     回调在点击时才执行，闭包内引用的 enter* 函数届时已完成初始化。 */
+  mask.addEventListener('click', async (event) => {
+    const btn = event.target.closest('[data-wb]')
+    if (!btn) return
     const action = btn.dataset.wb
-    if (action === 'more') {
-      morePanel.hidden = !morePanel.hidden
-      return
-    }
-    if (action === 'comment') { await openComments(); return }
-    if (action === 'annotate') { mask.remove(); openImageAnnotator(shot); return }
-    if (action === 'resize') { mask.remove(); openImageResize(shot); return }
-    if (action === 'erase') { mask.remove(); openImageMaskEditor(shot, { erase: true }); return }
-    if (action === 'removebg') {
-      btn.disabled = true
-      setStatus('正在移除背景，结果会创建新版本…')
-      try {
+    try {
+      if (action === 'more') { morePanel.hidden = !morePanel.hidden; return }
+      if (action === 'comment') { await enterComments(); return }
+      if (action === 'annotate') { enterAnnotate(); return }
+      if (action === 'resize') { enterResizePopover(); return }
+      if (action === 'erase') { enterErase(); return }
+      if (action === 'removebg') {
+        exitAnnotate(); exitComments(false); exitErase(); exitResizePopover()
+        btn.disabled = true
+        setStatus('正在移除背景，结果会创建新版本…')
         const res = await api('/api/images/remove-bg', {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
@@ -8952,29 +10539,1465 @@ function openImageWorkbench(shot) {
         if (!res.ok || !res.body?.image) throw new Error(res.body?.error || `移除背景失败（HTTP ${res.status}）`)
         const next = imageShotFromAsset(res.body.image)
         mergeRecentImage(next)
-        mask.remove()
-        renderView()
+        mask.remove(); renderView()
         toast('已移除背景并创建新版本')
         setTimeout(() => openImageWorkbench(next), 60)
-      } catch (error) {
-        btn.disabled = false
-        setStatus(error?.message || '移除背景失败', false)
+      }
+    } catch (error) {
+      btn.disabled = false
+      console.error('[workbench] 主条动作失败:', error)
+      setStatus(error?.message || '操作失败', false)
+    }
+  })
+  mask.addEventListener('click', (event) => {
+    const btn = event.target.closest('[data-wbmore]')
+    if (!btn) return
+    const action = btn.dataset.wbmore
+    if (action === 'layers') {
+      if (!imageLayerModel()) return toast('当前图像模型不支持图层拆分', true)
+      mask.remove(); openLayerWorkbench(shot); return
+    }
+    if (action === 'expand') {
+      if (!visualReady()) return toast(visualReason(), true)
+      mask.remove(); openImageExpand(shot, { back: true }); return
+    }
+    if (action === 'upscale') {
+      if (!visualReady()) return toast(visualReason(), true)
+      mask.remove(); openImageUpscale(shot, { back: true }); return
+    }
+  })
+
+  // ---------- 标注状态 ----------
+  function annotCtx() { return canvas.getContext('2d') }
+  function px(p) { return ({ x: (p.x / 100) * canvas.width, y: (p.y / 100) * canvas.height }) }
+  function paperPoint(event) {
+    const r = paperRect || paper.getBoundingClientRect()
+    return {
+      x: clampNum(((event.clientX - r.left) / r.width) * 100, 0, 100),
+      y: clampNum(((event.clientY - r.top) / r.height) * 100, 0, 100),
+    }
+  }
+  function setupCanvas() {
+    if (!imgEl.naturalWidth) return
+    canvas.width = imgEl.naturalWidth
+    canvas.height = imgEl.naturalHeight
+    redrawCanvas()
+    viewer.resetView()
+  }
+  if (imgEl.complete && imgEl.naturalWidth) setupCanvas()
+  else imgEl.addEventListener('load', setupCanvas, { once: true })
+
+  function starPath(c, cx, cy, r) {
+    c.beginPath()
+    for (let i = 0; i < 10; i++) {
+      const ang = -Math.PI / 2 + (i * Math.PI) / 5
+      const rr = i % 2 === 0 ? r : r * 0.45
+      const x = cx + rr * Math.cos(ang), y = cy + rr * Math.sin(ang)
+      i === 0 ? c.moveTo(x, y) : c.lineTo(x, y)
+    }
+    c.closePath()
+  }
+  function heartPath(c, p1, p2, w, h) {
+    const cx = (p1.x + p2.x) / 2, top = Math.min(p1.y, p2.y), bottom = Math.max(p1.y, p2.y)
+    c.beginPath()
+    c.moveTo(cx, bottom)
+    c.bezierCurveTo(p1.x, top + h * 0.15, p1.x, top, cx, top + h * 0.28)
+    c.bezierCurveTo(p2.x, top, p2.x, top + h * 0.15, cx, bottom)
+    c.closePath()
+  }
+  function strokeShape(c, shape, a, b, color, width) {
+    const p1 = px(a), p2 = px(b)
+    const x = Math.min(p1.x, p2.x), y = Math.min(p1.y, p2.y)
+    const w = Math.max(1, Math.abs(p2.x - p1.x)), h = Math.max(1, Math.abs(p2.y - p1.y))
+    c.strokeStyle = color; c.fillStyle = color; c.lineWidth = width
+    c.lineCap = 'round'; c.lineJoin = 'round'
+    c.beginPath()
+    if (shape === 'line') { c.moveTo(p1.x, p1.y); c.lineTo(p2.x, p2.y) }
+    else if (shape === 'arrow') {
+      c.moveTo(p1.x, p1.y); c.lineTo(p2.x, p2.y)
+      const ang = Math.atan2(p2.y - p1.y, p2.x - p1.x), s = Math.max(8, width * 3)
+      c.moveTo(p2.x, p2.y); c.lineTo(p2.x - s * Math.cos(ang - 0.4), p2.y - s * Math.sin(ang - 0.4))
+      c.moveTo(p2.x, p2.y); c.lineTo(p2.x - s * Math.cos(ang + 0.4), p2.y - s * Math.sin(ang + 0.4))
+    }
+    else if (shape === 'rect') c.rect(x, y, w, h)
+    else if (shape === 'ellipse') c.ellipse((p1.x + p2.x) / 2, (p1.y + p2.y) / 2, w / 2, h / 2, 0, 0, Math.PI * 2)
+    else if (shape === 'triangle') { c.moveTo((p1.x + p2.x) / 2, y); c.lineTo(p2.x, p1.y + h); c.lineTo(p1.x, p1.y + h); c.closePath() }
+    else if (shape === 'diamond') { c.moveTo((p1.x + p2.x) / 2, y); c.lineTo(p2.x, (p1.y + p2.y) / 2); c.lineTo((p1.x + p2.x) / 2, p1.y + h); c.lineTo(p1.x, (p1.y + p2.y) / 2); c.closePath() }
+    else if (shape === 'star') starPath(c, (p1.x + p2.x) / 2, (p1.y + p2.y) / 2, Math.min(w, h) / 2)
+    else if (shape === 'heart') heartPath(c, p1, p2, w, h)
+    c.stroke()
+  }
+
+  function redrawCanvas() {
+    const c = annotCtx(); if (!canvas.width) return
+    c.clearRect(0, 0, canvas.width, canvas.height)
+    const width = Math.max(2, canvas.width / 120)
+    for (const it of annotItems) {
+      if (it.kind === 'brush' || it.kind === 'erase') {
+        c.save()
+        if (it.kind === 'erase') c.globalCompositeOperation = 'destination-out'
+        c.strokeStyle = it.color; c.fillStyle = it.color
+        c.lineWidth = it.size || width; c.lineCap = 'round'; c.lineJoin = 'round'
+        const pts = it.pts.map(px)
+        if (pts.length === 1) { c.beginPath(); c.arc(pts[0].x, pts[0].y, (it.size || width) / 2, 0, Math.PI * 2); c.fill() }
+        else { c.beginPath(); c.moveTo(pts[0].x, pts[0].y); for (let i = 1; i < pts.length; i++) c.lineTo(pts[i].x, pts[i].y); c.stroke() }
+        c.restore()
+      } else if (it.kind === 'shape') {
+        strokeShape(c, it.shape, it.a, it.b, it.color, it.size || width)
       }
     }
+  }
+  function renderTextLayer() {
+    textLayer.innerHTML = ''
+    annotItems.forEach((it, i) => {
+      if (it.kind !== 'text') return
+      const el = document.createElement('div')
+      el.className = 'wb-text-item' + (activeTool === 'select' ? ' selectable' : '')
+      el.style.left = it.x + '%'; el.style.top = it.y + '%'; el.style.color = it.color
+      el.dataset.index = i
+      el.textContent = it.text
+      textLayer.appendChild(el)
+    })
+  }
+  function syncUndoRedo() {
+    const u = annotBar.querySelector('[data-atool="undo"]')
+    const r = annotBar.querySelector('[data-atool="redo"]')
+    if (u) u.disabled = !annotItems.length
+    if (r) r.disabled = !redoStack.length
+  }
+  const annotSizeEl = mask.querySelector('#wbAnnotSize')
+  const annotSizeWrap = mask.querySelector('#wbAnnotSizeWrap')
+  function annotActiveSize() { return activeTool === 'erase' ? annotEraserSize : annotBrushSize }
+  function syncAnnotSize() {
+    const size = annotActiveSize()
+    annotSizeEl.value = String(size)
+    annotSizeWrap.hidden = !(activeTool === 'brush' || activeTool === 'erase' || activeTool === 'shape')
+    annotSizeWrap.title = activeTool === 'erase' ? '橡皮粗细' : '画笔粗细'
+    annotSizeEl.setAttribute('aria-label', activeTool === 'erase' ? '橡皮粗细' : '画笔粗细')
+  }
+  function pushAnnot(item) { annotItems.push(item); redoStack = []; redrawCanvas(); renderTextLayer(); syncUndoRedo() }
+  function undo() { if (!annotItems.length) return; redoStack.push(annotItems.pop()); redrawCanvas(); renderTextLayer(); syncUndoRedo() }
+  function redo() { if (!redoStack.length) return; annotItems.push(redoStack.pop()); redrawCanvas(); renderTextLayer(); syncUndoRedo() }
+
+  function placeText(p) {
+    if (textEditing) textEditing.remove()
+    const box = document.createElement('input')
+    box.className = 'wb-text-input'
+    box.style.left = p.x + '%'; box.style.top = p.y + '%'; box.style.color = currentColor
+    box.maxLength = 80; box.placeholder = '输入文字'
+    textLayer.appendChild(box); box.focus(); textEditing = box
+    const commit = () => {
+      const t = box.value.trim()
+      if (t) pushAnnot({ kind: 'text', color: currentColor, x: p.x, y: p.y, text: t })
+      box.remove(); textEditing = null
+    }
+    box.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); commit() } if (e.key === 'Escape') { box.remove(); textEditing = null } })
+    box.addEventListener('blur', commit)
+  }
+
+  function paintAnnotSegment(item, index) {
+    if (index < 1 || index >= item.pts.length) return
+    const c = annotCtx()
+    const a = px(item.pts[index - 1])
+    const b = px(item.pts[index])
+    c.save()
+    if (item.kind === 'erase') c.globalCompositeOperation = 'destination-out'
+    c.strokeStyle = item.color
+    c.fillStyle = item.color
+    c.lineWidth = item.size
+    c.lineCap = 'round'
+    c.lineJoin = 'round'
+    c.beginPath()
+    c.moveTo(a.x, a.y)
+    c.lineTo(b.x, b.y)
+    c.stroke()
+    c.restore()
+  }
+  function paintAnnotDot(item) {
+    if (!item.pts.length) return
+    const c = annotCtx()
+    const p = px(item.pts[0])
+    c.save()
+    if (item.kind === 'erase') c.globalCompositeOperation = 'destination-out'
+    c.fillStyle = item.color
+    c.beginPath()
+    c.arc(p.x, p.y, item.size / 2, 0, Math.PI * 2)
+    c.fill()
+    c.restore()
+  }
+
+  paper.addEventListener('pointerdown', (event) => {
+    paperRect = paper.getBoundingClientRect()
+    if (annotMode) {
+      event.preventDefault(); event.stopPropagation()
+      const p = paperPoint(event)
+      if (activeTool === 'brush' || activeTool === 'erase') {
+        drawing = { kind: activeTool, color: currentColor, size: Math.max(2, annotActiveSize()), pts: [p] }
+        paper.setPointerCapture?.(event.pointerId)
+        paintAnnotDot(drawing)
+      } else if (activeTool === 'shape') {
+        drawing = { kind: 'shape', shape: currentShape, color: currentColor, size: Math.max(2, annotActiveSize()), a: p, b: p }
+        paper.setPointerCapture?.(event.pointerId)
+      } else if (activeTool === 'text') { placeText(p) }
+      else if (activeTool === 'select') {
+        const hit = event.target.closest('.wb-text-item')
+        if (hit) { const i = Number(hit.dataset.index); if (Number.isInteger(i)) { annotItems.splice(i, 1); redoStack = []; redrawCanvas(); renderTextLayer(); syncUndoRedo() } }
+      }
+      return
+    }
+    if (commentMode) {
+      event.preventDefault(); event.stopPropagation()
+      pendingPin = paperPoint(event)
+      pinLayer.querySelectorAll('.wb-pin-pending').forEach((n) => n.remove())
+      const tmp = document.createElement('div')
+      tmp.className = 'wb-pin wb-pin-pending'
+      tmp.style.left = pendingPin.x + '%'; tmp.style.top = pendingPin.y + '%'
+      pinLayer.appendChild(tmp)
+      positionCommentBar(pendingPin)
+      commentInput2.focus()
+      return
+    }
+    if (eraseMode) {
+      event.preventDefault(); event.stopPropagation()
+      eraseDrawing = { pts: [paperPoint(event)], size: Math.max(2, eraseBrushSize) }
+      paper.setPointerCapture?.(event.pointerId)
+      paintEraseDot(eraseDrawing)
+    }
+  })
+  paper.addEventListener('pointermove', (event) => {
+    if (!annotMode || !drawing) return
+    event.preventDefault()
+    const p = paperPoint(event)
+    if (drawing.kind === 'brush' || drawing.kind === 'erase') {
+      const last = drawing.pts[drawing.pts.length - 1]
+      if (Math.hypot(p.x - last.x, p.y - last.y) < 0.05) return
+      drawing.pts.push(p)
+      paintAnnotSegment(drawing, drawing.pts.length - 1)
+      return
+    }
+    drawing.b = p
+    redrawCanvas()
+    strokeShape(annotCtx(), drawing.shape, drawing.a, drawing.b, drawing.color, drawing.size)
+  })
+  function endDraw() {
+    if (!drawing) return
+    if (drawing.kind === 'brush' || drawing.kind === 'erase') { if (drawing.pts.length) pushAnnot(drawing) }
+    else if (drawing.kind === 'shape') { if (Math.abs(drawing.a.x - drawing.b.x) > 1 || Math.abs(drawing.a.y - drawing.b.y) > 1) pushAnnot(drawing) }
+    drawing = null
+    paperRect = null
+  }
+  paper.addEventListener('pointerup', endDraw)
+  paper.addEventListener('pointercancel', endDraw)
+
+  function setTool(t) {
+    activeTool = t
+    annotBar.querySelectorAll('[data-atool]').forEach((b) => b.classList.toggle('active', b.dataset.atool === t))
+    syncAnnotSize()
+    renderTextLayer()
+  }
+  function togglePop(pop) { const open = pop.hidden; shapePop.hidden = true; colorPop.hidden = true; pop.hidden = !open }
+  annotBar.querySelectorAll('[data-atool]').forEach((btn) => btn.addEventListener('click', () => {
+    const t = btn.dataset.atool
+    if (t === 'undo') return undo()
+    if (t === 'redo') return redo()
+    if (t === 'cancel') return exitAnnotate()
+    if (t === 'shape') return togglePop(shapePop)
+    if (t === 'color') return togglePop(colorPop)
+    setTool(t)
   }))
-  mask.querySelectorAll('[data-wbmore]').forEach((btn) => btn.addEventListener('click', () => {
-    const action = btn.dataset.wbmore
-    mask.remove()
-    if (action === 'edit') editImageAsset(shot)
-    else if (action === 'template') openImageTemplateApplication(shot)
-    else if (action === 'versions') openImageVersions(shot)
-    else if (action === 'download') downloadImageAsset(shot)
-    else if (action === 'usechat') useImageInChat(shot)
-    else if (action === 'delete') deleteImageAsset(shot)
-  }))
+  shapePop.querySelectorAll('[data-shape]').forEach((b) => b.addEventListener('click', () => { currentShape = b.dataset.shape; setTool('shape'); shapePop.hidden = true }))
+  const colorDot = mask.querySelector('#wbColorDot')
+  const colorPicker = mask.querySelector('#wbColorPicker')
+  function setColor(c) { currentColor = c; colorDot.style.background = c; colorPicker.value = c }
+  colorPop.querySelectorAll('[data-color]').forEach((ch) => ch.addEventListener('click', () => { setColor(ch.dataset.color); colorPop.hidden = true }))
+  colorPicker.addEventListener('input', () => setColor(colorPicker.value))
+  annotSizeEl.addEventListener('input', () => {
+    const value = Math.max(2, Number(annotSizeEl.value) || 24)
+    if (activeTool === 'erase') annotEraserSize = value
+    else annotBrushSize = value
+  })
+  setColor(currentColor)
+
+  function enterAnnotate() {
+    exitComments(false); exitErase(); exitResizePopover()
+    annotMode = true
+    annotBar.hidden = false
+    mainBar.hidden = true
+    stageEl.classList.add('annotating')
+    viewer.setInteractive(false)
+    setTool('brush')
+    syncUndoRedo()
+  }
+  function exitAnnotate() {
+    annotMode = false
+    annotBar.hidden = true
+    mainBar.hidden = false
+    shapePop.hidden = true; colorPop.hidden = true
+    stageEl.classList.remove('annotating')
+    viewer.setInteractive(true)
+    annotItems = []; redoStack = []; drawing = null
+    redrawCanvas(); renderTextLayer(); syncUndoRedo()
+  }
+
+  // ---------- 评论定位（坐标仅本次会话保留） ----------
+  function fmtPct(n) { return Number(n).toFixed(1) }
+
+  function renderPins() {
+    pinLayer.innerHTML = ''
+    localComments.forEach((item, i) => {
+      const pin = document.createElement('button')
+      pin.type = 'button'
+      pin.className = 'wb-pin'
+      pin.style.left = item.x + '%'; pin.style.top = item.y + '%'
+      pin.textContent = String(i + 1)
+      pin.title = item.body
+      pinLayer.appendChild(pin)
+    })
+  }
+  function positionCommentBar(point) {
+    commentBar.hidden = false
+    commentBar.classList.add('at-pin')
+    const stageRect = stageEl.getBoundingClientRect()
+    const paperRect = paper.getBoundingClientRect()
+    const x = paperRect.left - stageRect.left + (point.x / 100) * paperRect.width
+    const y = paperRect.top - stageRect.top + (point.y / 100) * paperRect.height
+    const bw = commentBar.offsetWidth || 330
+    const bh = commentBar.offsetHeight || 42
+    const left = clampNum(x + 18, 8, Math.max(8, stageRect.width - bw - 8))
+    const below = y + 16
+    const top = below + bh <= stageRect.height - 8 ? below : Math.max(8, y - bh - 16)
+    commentBar.style.left = `${left}px`
+    commentBar.style.top = `${top}px`
+    clearStatus()
+  }
+  async function enterComments() {
+    exitAnnotate(); exitErase(); exitResizePopover()
+    commentMode = true
+    pendingPin = null
+    pinLayer.querySelectorAll('.wb-pin-pending').forEach((n) => n.remove())
+    commentBar.hidden = true
+    commentBar.classList.remove('at-pin')
+    mainBar.hidden = true
+    stageEl.classList.add('commenting')
+    viewer.setInteractive(false)
+    mask.querySelector('[data-wb="comment"]').classList.add('active')
+    setStatus('点击图片中的位置，在标记点旁写评论', false)
+    renderPins()
+  }
+  function exitComments(restore = true) {
+    commentMode = false
+    pendingPin = null
+    commentBar.hidden = true
+    stageEl.classList.remove('commenting')
+    mask.querySelector('[data-wb="comment"]').classList.remove('active')
+    pinLayer.querySelectorAll('.wb-pin-pending').forEach((n) => n.remove())
+    clearStatus()
+    if (restore) { mainBar.hidden = false; viewer.setInteractive(true) }
+  }
+  async function sendComment() {
+    const text = commentInput2.value.trim()
+    if (!text) { toast('请先写评论', true); commentInput2.focus(); return }
+    if (!pendingPin) { toast('请先在图片上点选评论位置', true); return }
+    const pin = { ...pendingPin }
+    const res = await api('/api/images/comments', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ assetId: shot.id, body: text }),
+    })
+    if (!res.ok) { toast(res.body?.error || '评论失败', true); return }
+    localComments.push({ owner: '我', body: text, createdAt: Date.now(), x: pin.x, y: pin.y, local: true })
+    commentInput2.value = ''
+    pendingPin = null
+    commentBar.hidden = true
+    pinLayer.querySelectorAll('.wb-pin-pending').forEach((n) => n.remove())
+    renderPins()
+    toast('评论已添加')
+  }
+  mask.querySelector('#wbCommentSend').addEventListener('click', sendComment)
+  commentInput2.addEventListener('keydown', (e) => { if (e.key === 'Enter') sendComment() })
+  mask.querySelector('#wbCommentClose').addEventListener('click', () => exitComments())
+
+  // ---------- 内嵌擦除选区 ----------
+  function eraseCtx() { return eraseCanvas.getContext('2d') }
+  const eraseSizeEl = mask.querySelector('#wbEraseSize')
+  function setupEraseCanvas() {
+    if (!imgEl.naturalWidth) return
+    eraseCanvas.width = imgEl.naturalWidth
+    eraseCanvas.height = imgEl.naturalHeight
+    eraseBrushSize = Math.max(4, Math.round(imgEl.naturalWidth / 90))
+    eraseSizeEl.value = String(Math.min(240, eraseBrushSize))
+    redrawErase()
+  }
+  if (imgEl.complete && imgEl.naturalWidth) setupEraseCanvas()
+  else imgEl.addEventListener('load', setupEraseCanvas, { once: true })
+  function eraseStrokeWidth(stroke) { return Math.max(2, Number(stroke?.size) || eraseBrushSize) }
+  function paintEraseDot(stroke) {
+    const c = eraseCtx(); if (!eraseCanvas.width || !stroke.pts.length) return
+    const size = eraseStrokeWidth(stroke), p = px(stroke.pts[0])
+    c.strokeStyle = 'rgba(46, 144, 250, .55)'; c.fillStyle = 'rgba(46, 144, 250, .55)'
+    c.lineWidth = size; c.lineCap = 'round'; c.lineJoin = 'round'
+    c.beginPath(); c.arc(p.x, p.y, size / 2, 0, Math.PI * 2); c.fill()
+  }
+  function paintEraseSegment(stroke, index) {
+    const c = eraseCtx(); if (!eraseCanvas.width) return
+    const size = eraseStrokeWidth(stroke)
+    const a = px(stroke.pts[index - 1]), b = px(stroke.pts[index])
+    c.strokeStyle = 'rgba(46, 144, 250, .55)'; c.fillStyle = 'rgba(46, 144, 250, .55)'
+    c.lineWidth = size; c.lineCap = 'round'; c.lineJoin = 'round'
+    c.beginPath(); c.moveTo(a.x, a.y); c.lineTo(b.x, b.y); c.stroke()
+  }
+  function redrawErase() {
+    const c = eraseCtx(); if (!eraseCanvas.width) return
+    c.clearRect(0, 0, eraseCanvas.width, eraseCanvas.height)
+    for (const stroke of eraseStrokes) {
+      const size = eraseStrokeWidth(stroke)
+      const pts = stroke.pts.map(px)
+      c.strokeStyle = 'rgba(46, 144, 250, .55)'; c.fillStyle = 'rgba(46, 144, 250, .55)'
+      c.lineWidth = size; c.lineCap = 'round'; c.lineJoin = 'round'
+      if (pts.length === 1) { c.beginPath(); c.arc(pts[0].x, pts[0].y, size / 2, 0, Math.PI * 2); c.fill() }
+      else { c.beginPath(); c.moveTo(pts[0].x, pts[0].y); for (let i = 1; i < pts.length; i++) c.lineTo(pts[i].x, pts[i].y); c.stroke() }
+    }
+  }
+  function syncEraseButtons() {
+    mask.querySelector('#wbEraseUndo').disabled = !eraseStrokes.length
+    mask.querySelector('#wbEraseRedo').disabled = !eraseRedo.length
+  }
+  function positionErasePopup() {
+    if (!eraseMode || eraseBar.hidden) return
+    const btn = mask.querySelector('[data-wb="erase"]')
+    if (!btn) return
+    const sr = stageEl.getBoundingClientRect(), br = btn.getBoundingClientRect()
+    const bw = eraseBar.offsetWidth || 360, bh = eraseBar.offsetHeight || 40
+    const left = clampNum(br.left - sr.left + br.width / 2 - bw / 2, 8, Math.max(8, sr.width - bw - 8))
+    const top = clampNum(br.top - sr.top - bh - 10, 8, Math.max(8, sr.height - bh - 8))
+    eraseBar.style.left = `${left}px`
+    eraseBar.style.top = `${top}px`
+  }
+  function enterErase() {
+    if (!imageEditModel()) return toast('当前没有可用的图像编辑模型，无法执行擦除', true)
+    exitAnnotate(); exitComments(false); exitResizePopover()
+    eraseMode = true
+    mainBar.hidden = false
+    eraseBar.hidden = false
+    eraseSizeEl.value = String(Math.min(240, eraseBrushSize))
+    stageEl.classList.add('commenting')
+    viewer.setInteractive(false)
+    mask.querySelector('[data-wb="erase"]').classList.add('active')
+    syncEraseButtons()
+    positionErasePopup()
+  }
+  function exitErase() {
+    eraseMode = false
+    eraseBar.hidden = true
+    mainBar.hidden = false
+    stageEl.classList.remove('commenting')
+    mask.querySelector('[data-wb="erase"]').classList.remove('active')
+    viewer.setInteractive(true)
+    eraseStrokes = []; eraseRedo = []; eraseDrawing = null
+    redrawErase(); syncEraseButtons()
+  }
+  function positionResizePopup() {
+    if (resizePop.hidden) return
+    const btn = mask.querySelector('[data-wb="resize"]')
+    if (!btn) return
+    const sr = stageEl.getBoundingClientRect(), br = btn.getBoundingClientRect()
+    const bw = resizePop.offsetWidth || 300, bh = resizePop.offsetHeight || 42
+    const left = clampNum(br.left - sr.left + br.width / 2 - bw / 2, 8, Math.max(8, sr.width - bw - 8))
+    const top = clampNum(br.top - sr.top - bh - 10, 8, Math.max(8, sr.height - bh - 8))
+    resizePop.style.left = `${left}px`
+    resizePop.style.top = `${top}px`
+  }
+  function enterResizePopover() {
+    if (!visualReady() && !imageEditModel()) return toast('当前没有可用的 AI 画幅模型，请先配置后再调整大小', true)
+    exitAnnotate(); exitComments(false); exitErase()
+    resizePop.hidden = false
+    mainBar.hidden = false
+    mask.querySelector('[data-wb="resize"]').classList.add('active')
+    positionResizePopup()
+  }
+  function exitResizePopover() {
+    resizePop.hidden = true
+    mask.querySelector('[data-wb="resize"]').classList.remove('active')
+  }
+  function undoErase() { if (!eraseStrokes.length) return; eraseRedo.push(eraseStrokes.pop()); redrawErase(); syncEraseButtons() }
+  function redoErase() { if (!eraseRedo.length) return; eraseStrokes.push(eraseRedo.pop()); redrawErase(); syncEraseButtons() }
+  paper.addEventListener('pointermove', (event) => {
+    if (!eraseMode || !eraseDrawing) return
+    event.preventDefault()
+    const p = paperPoint(event)
+    const last = eraseDrawing.pts[eraseDrawing.pts.length - 1]
+    if (Math.hypot(p.x - last.x, p.y - last.y) < 0.05) return
+    eraseDrawing.pts.push(p)
+    paintEraseSegment(eraseDrawing, eraseDrawing.pts.length - 1)
+  })
+  function endErase() {
+    if (!eraseDrawing) return
+    if (eraseDrawing.pts.length) { eraseStrokes.push(eraseDrawing); eraseRedo = []; syncEraseButtons() }
+    eraseDrawing = null
+  }
+  paper.addEventListener('pointerup', endErase)
+  paper.addEventListener('pointercancel', endErase)
+  eraseSizeEl.addEventListener('input', () => { eraseBrushSize = Math.max(2, Number(eraseSizeEl.value) || 24) })
+  resizePop.addEventListener('click', async (event) => {
+    if (event.target.closest('#wbResizeClose')) { exitResizePopover(); return }
+    const btn = event.target.closest('[data-wb-ratio]')
+    if (!btn) return
+    const ratio = btn.dataset.wbRatio
+    if (shot.ratio === ratio) { exitResizePopover(); return }
+    btn.disabled = true
+    setStatus(`正在调整为 ${ratio} 画幅…`)
+    try {
+      const res = await api('/api/images/resize', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ assetId: shot.id, ratio }),
+      })
+      if (!res.ok || !res.body?.image) throw new Error(res.body?.error || `调整大小失败（HTTP ${res.status}）`)
+      const next = imageShotFromAsset(res.body.image)
+      mergeRecentImage(next)
+      mask.remove(); renderView()
+      toast(`已调整为 ${ratio} 并创建新版本`)
+      setTimeout(() => openImageWorkbench(next), 60)
+    } catch (error) {
+      btn.disabled = false
+      setStatus(error?.message || '调整大小失败', false)
+    }
+  })
+  if (typeof ResizeObserver === 'function') new ResizeObserver(() => { positionErasePopup(); positionResizePopup() }).observe(stageEl)
+  async function sendErase() {
+    const btn = mask.querySelector('#wbEraseSend')
+    if (!eraseStrokes.length) return toast('请先在图片上涂抹要擦除的区域', true)
+    if (!eraseCanvas.width) return toast('图片还没有加载完成', true)
+    const exportCanvas = document.createElement('canvas')
+    exportCanvas.width = eraseCanvas.width; exportCanvas.height = eraseCanvas.height
+    const ec = exportCanvas.getContext('2d')
+    ec.fillStyle = '#000'; ec.fillRect(0, 0, exportCanvas.width, exportCanvas.height)
+    ec.fillStyle = '#fff'; ec.strokeStyle = '#fff'
+    ec.lineCap = 'round'; ec.lineJoin = 'round'
+    for (const stroke of eraseStrokes) {
+      const pts = stroke.pts.map(px)
+      const size = eraseStrokeWidth(stroke)
+      ec.lineWidth = size
+      if (pts.length === 1) { ec.beginPath(); ec.arc(pts[0].x, pts[0].y, size / 2, 0, Math.PI * 2); ec.fill() }
+      else { ec.beginPath(); ec.moveTo(pts[0].x, pts[0].y); for (let i = 1; i < pts.length; i++) ec.lineTo(pts[i].x, pts[i].y); ec.stroke() }
+    }
+    const maskDataUrl = exportCanvas.toDataURL('image/png')
+    const prompt = '移除选区内的物体，并用周围背景自然补全，保持光影和材质连续'
+    btn.disabled = true; btn.textContent = '提交中…'
+    setStatus('正在擦除选区，结果会创建新版本…')
+    try {
+      const res = await api('/api/images/mask-edit', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ assetId: shot.id, prompt, maskDataUrl, modelId: imageEditModel()?.id || '' }),
+      })
+      if (!res.ok || !res.body?.image) throw new Error(res.body?.error || `擦除失败（HTTP ${res.status}）`)
+      const next = imageShotFromAsset(res.body.image)
+      mergeRecentImage(next)
+      mask.remove(); renderView()
+      toast(`已擦除选区并生成版本 v${res.body.image.revision}`)
+      setTimeout(() => openImageWorkbench(next), 60)
+    } catch (error) {
+      btn.disabled = false; btn.textContent = '发送'
+      setStatus(error?.message || '擦除失败', false)
+    }
+  }
+  mask.querySelector('#wbEraseUndo').addEventListener('click', undoErase)
+  mask.querySelector('#wbEraseRedo').addEventListener('click', redoErase)
+  mask.querySelector('#wbEraseSend').addEventListener('click', sendErase)
+  mask.querySelector('#wbEraseClose').addEventListener('click', exitErase)
+
   mask.addEventListener('click', (event) => {
     if (!morePanel.hidden && !morePanel.contains(event.target) && !event.target.closest('[data-wb="more"]')) morePanel.hidden = true
   })
+}
+
+function openLayerWorkbench(shot) {
+  if (!shot?.url) return
+  const mask = openModal('图层管理', `
+    <div class="ly-wb" id="lyWb">
+      <div class="ly-wb-toolbar">
+        <div class="ly-wb-title">图层 <span id="lyCount"></span></div>
+        <div class="ly-wb-actions">
+          <button type="button" class="btn" data-ly="back">返回编辑</button>
+          <button type="button" class="btn" data-ly="undo">撤销</button>
+          <button type="button" class="btn" data-ly="redo">重做</button>
+          <button type="button" class="btn" data-ly="reset-view" title="重置缩放与平移，适应窗口">适应窗口</button>
+          <button type="button" class="btn primary" data-ly="split">拆分图层</button>
+          <button type="button" class="btn" data-ly="distribute-h">水平等距</button>
+          <button type="button" class="btn" data-ly="distribute-v">垂直等距</button>
+          <button type="button" class="btn" data-ly="export" title="将所有可见图层合成为一张 PNG 下载">导出合成图</button>
+          <button type="button" class="btn" data-ly="download" title="下载未做图层处理的原始图片">下载原图</button>
+        </div>
+      </div>
+      <div class="ly-wb-body">
+        <div class="ly-wb-canvas" id="lyCanvas"><div class="ly-stage" id="lyStage"></div></div>
+        <aside class="ly-wb-panel">
+          <div class="ly-panel-list" id="lyList"></div>
+          <div class="ly-panel-empty" id="lyEmpty" hidden>尚未拆分图层，点击上方「拆分图层」由模型自动分离主体、背景与装饰元素。</div>
+          <div class="ly-props" id="lyProps" hidden></div>
+        </aside>
+      </div>
+      <div class="ly-wb-status" id="lyStatus" hidden></div>
+    </div>`, { wide: true })
+
+  const canvas = mask.querySelector('#lyCanvas')
+  const stageEl = mask.querySelector('#lyStage')
+  const listEl = mask.querySelector('#lyList')
+  const emptyEl = mask.querySelector('#lyEmpty')
+  const propsEl = mask.querySelector('#lyProps')
+  const statusEl = mask.querySelector('#lyStatus')
+  const VIEW_MIN = 0.5
+  const VIEW_MAX = 3
+  const view = { scale: 1, tx: 0, ty: 0 }
+  let pan = null
+  function applyView() {
+    stageEl.style.transform = `translate(${view.tx}px, ${view.ty}px) scale(${view.scale})`
+  }
+  const BLEND_OPTIONS = [
+    ['normal', '正常'], ['multiply', '正片叠底'], ['screen', '滤色'],
+    ['overlay', '叠加'], ['darken', '变暗'], ['lighten', '变亮'],
+  ]
+  const COMPOSITE_MODE = { normal: 'source-over', multiply: 'multiply', screen: 'screen', overlay: 'overlay', darken: 'darken', lighten: 'lighten' }
+  let layers = []
+  let busy = false
+  let selectedId = null
+  let dragId = null
+  let drag = null
+  let guideEls = []
+  const HISTORY_LIMIT = 50
+  let history = []
+  let historyIndex = -1
+
+  const setStatus = (text, busyFlag = true) => { statusEl.hidden = false; statusEl.textContent = text; statusEl.classList.toggle('busy', busyFlag) }
+  const clearStatus = () => { statusEl.hidden = true; statusEl.textContent = '' }
+
+  function snapshotLayers() {
+    return layers.map((layer) => ({
+      id: layer.id,
+      name: layer.name,
+      visible: layer.visible,
+      opacity: layer.opacity,
+      blendMode: blendOf(layer),
+      locked: Boolean(layer.locked),
+      zOrder: Number(layer.zOrder) || 0,
+      rotation: Number(layer.rotation || 0),
+      box: layer.box?.normalized ? { normalized: [...layer.box.normalized] } : null,
+    }))
+  }
+  function syncUndoRedoButtons() {
+    const undoBtn = mask.querySelector('[data-ly="undo"]')
+    const redoBtn = mask.querySelector('[data-ly="redo"]')
+    if (undoBtn) undoBtn.disabled = historyIndex <= 0
+    if (redoBtn) redoBtn.disabled = historyIndex >= history.length - 1
+  }
+  function pushHistory() {
+    if (historyIndex < history.length - 1) history = history.slice(0, historyIndex + 1)
+    history.push(snapshotLayers())
+    if (history.length > HISTORY_LIMIT) history.shift()
+    historyIndex = history.length - 1
+    syncUndoRedoButtons()
+  }
+  async function applySnapshot(snap) {
+    const byId = new Map(snap.map((entry) => [entry.id, entry]))
+    for (const layer of layers) {
+      const s = byId.get(layer.id)
+      if (!s) continue
+      layer.name = s.name
+      layer.visible = s.visible
+      layer.opacity = s.opacity
+      layer.blendMode = s.blendMode
+      layer.locked = s.locked
+      layer.zOrder = s.zOrder
+      layer.rotation = s.rotation
+      if (s.box) layer.box = { normalized: [...s.box.normalized] }
+    }
+    renderAll()
+    for (const s of snap) {
+      const layer = layers.find((entry) => entry.id === s.id)
+      if (layer && layer.kind === 'background') continue
+      const patch = { visible: s.visible, opacity: s.opacity, blendMode: s.blendMode, locked: s.locked, rotation: s.rotation }
+      if (s.name != null) patch.name = s.name
+      if (s.box) patch.box = { normalized: [...s.box.normalized] }
+      await patchLayer(s.id, patch)
+    }
+    const reorder = snap.map((s) => ({ id: s.id, zOrder: s.zOrder }))
+    if (reorder.length) {
+      await api('/api/images/layers/reorder', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ assetId: shot.id, layers: reorder }),
+      })
+    }
+  }
+  async function undoHistory() {
+    if (historyIndex <= 0) return
+    historyIndex -= 1
+    try { await applySnapshot(history[historyIndex]) } catch (error) { toast(error?.message || '撤销失败', true); renderAll() }
+    syncUndoRedoButtons()
+  }
+  async function redoHistory() {
+    if (historyIndex >= history.length - 1) return
+    historyIndex += 1
+    try { await applySnapshot(history[historyIndex]) } catch (error) { toast(error?.message || '重做失败', true); renderAll() }
+    syncUndoRedoButtons()
+  }
+  const defaultName = (layer) => layer.name || (layer.kind === 'background' ? '背景' : `图层 ${layer.zOrder}`)
+  const blendOf = (layer) => BLEND_OPTIONS.some(([v]) => v === layer.blendMode) ? layer.blendMode : 'normal'
+
+  function loadLayerImage(url) {
+    return new Promise((resolve, reject) => {
+      const im = new Image()
+      im.onload = () => resolve(im)
+      im.onerror = () => reject(new Error('图层图片加载失败'))
+      im.src = url
+    })
+  }
+
+  function layerNorm(layer) {
+    const n = layer.box?.normalized
+    if (Array.isArray(n) && n.length === 4 && n[2] > n[0] && n[3] > n[1]) {
+      const scale = Math.max(...n) <= 1.5 ? 1 : 1000
+      return [n[0] / scale, n[1] / scale, n[2] / scale, n[3] / scale]
+    }
+    return [0, 0, 1, 1]
+  }
+
+  function layerRect(layer, W, H) {
+    const [l, t, r, b] = layerNorm(layer)
+    return { x: l * W, y: t * H, w: (r - l) * W, h: (b - t) * H }
+  }
+
+  // 旋转后的轴对齐外接矩形（归一化），仅用于边界钳制与对齐参考；box 仍保存未旋转的自身矩形。
+  function layerAabb(layer) {
+    const [l, t, r, b] = layerNorm(layer)
+    const cx = (l + r) / 2
+    const cy = (t + b) / 2
+    const w = r - l
+    const h = b - t
+    const rot = Number(layer.rotation || 0) * Math.PI / 180
+    const cos = Math.abs(Math.cos(rot))
+    const sin = Math.abs(Math.sin(rot))
+    const aw = w * cos + h * sin
+    const ah = w * sin + h * cos
+    return [cx - aw / 2, cy - ah / 2, cx + aw / 2, cy + ah / 2]
+  }
+
+  function clearGuides() {
+    guideEls.forEach((el) => el.remove())
+    guideEls = []
+  }
+
+  function drawGuides(vLines, hLines) {
+    clearGuides()
+    vLines.forEach((x) => {
+      const el = document.createElement('div')
+      el.className = 'ly-guide ly-guide-v'
+      el.style.left = `${Math.max(0, Math.min(1, x)) * 100}%`
+      stageEl.appendChild(el)
+      guideEls.push(el)
+    })
+    hLines.forEach((y) => {
+      const el = document.createElement('div')
+      el.className = 'ly-guide ly-guide-h'
+      el.style.top = `${Math.max(0, Math.min(1, y)) * 100}%`
+      stageEl.appendChild(el)
+      guideEls.push(el)
+    })
+  }
+
+  function alignmentRefs(excludeId) {
+    const x = [0.5]
+    const y = [0.5]
+    layers.forEach((o) => {
+      if (o.id === excludeId || !o.visible) return
+      const [ol, ot, orr, ob] = layerNorm(o)
+      x.push(ol, (ol + orr) / 2, orr)
+      y.push(ot, (ot + ob) / 2, ob)
+    })
+    return { x, y }
+  }
+
+  // 画布坐标点 → 图层局部坐标（绕中心反向旋转），用于旋转态下的缩放换算。
+  function toLocal(point, cx, cy, rotDeg) {
+    const dx = point.x - cx
+    const dy = point.y - cy
+    const a = -rotDeg * Math.PI / 180
+    const cos = Math.cos(a)
+    const sin = Math.sin(a)
+    return { x: dx * cos - dy * sin, y: dx * sin + dy * cos }
+  }
+
+  async function distributeLayers(axis) {
+    const targets = layers.filter((o) => o.kind !== 'background' && o.visible && !o.locked)
+    if (targets.length < 3) { toast('至少需要 3 个可见的非背景图层才能等距分布', true); return }
+    pushHistory()
+    const sorted = [...targets].sort((a, b) => {
+      const na = layerNorm(a)
+      const nb = layerNorm(b)
+      return axis === 'h' ? na[0] - nb[0] : na[1] - nb[1]
+    })
+    if (axis === 'h') {
+      const first = layerNorm(sorted[0])
+      const last = layerNorm(sorted[sorted.length - 1])
+      const minCx = (first[0] + first[2]) / 2
+      const maxCx = (last[0] + last[2]) / 2
+      const gap = (maxCx - minCx) / (sorted.length - 1)
+      sorted.forEach((o, i) => {
+        const [l, t, r, b] = layerNorm(o)
+        const w = r - l
+        const cx = minCx + gap * i
+        applyLocalBox(o, [cx - w / 2, t, cx + w / 2, b])
+      })
+    } else {
+      const first = layerNorm(sorted[0])
+      const last = layerNorm(sorted[sorted.length - 1])
+      const minCy = (first[1] + first[3]) / 2
+      const maxCy = (last[1] + last[3]) / 2
+      const gap = (maxCy - minCy) / (sorted.length - 1)
+      sorted.forEach((o, i) => {
+        const [l, t, r, b] = layerNorm(o)
+        const h = b - t
+        const cy = minCy + gap * i
+        applyLocalBox(o, [l, cy - h / 2, r, cy + h / 2])
+      })
+    }
+    try {
+      await Promise.all(sorted.map((o) => patchLayer(o.id, { box: { normalized: o.box.normalized } })))
+      renderAll()
+      toast(axis === 'h' ? '已水平等距分布' : '已垂直等距分布')
+    } catch (error) {
+      toast(error?.message || '图层分布保存失败', true)
+      renderAll()
+    }
+  }
+
+  function renderCanvas() {
+    stageEl.innerHTML = ''
+    const ordered = [...layers].sort((a, b) => a.zOrder - b.zOrder)
+    ordered.forEach((layer) => {
+      const isBg = layer.kind === 'background'
+      const locked = isBg || Boolean(layer.locked)
+      const img = document.createElement('img')
+      img.src = layer.url
+      img.alt = defaultName(layer)
+      img.className = `ly-canvas-img${isBg ? ' is-bg' : ''}${selectedId === layer.id ? ' selected' : ''}`
+      img.dataset.id = layer.id
+      if (!layer.visible) img.style.display = 'none'
+      img.style.opacity = String(layer.opacity / 100)
+      img.style.mixBlendMode = blendOf(layer)
+      const [l, t, r, b] = layerNorm(layer)
+      img.style.left = `${l * 100}%`
+      img.style.top = `${t * 100}%`
+      img.style.width = `${(r - l) * 100}%`
+      img.style.height = `${(b - t) * 100}%`
+      const rot = Number(layer.rotation || 0)
+      img.style.transform = rot ? `rotate(${rot}deg)` : ''
+      stageEl.appendChild(img)
+      if (selectedId === layer.id && !locked) {
+        const handle = document.createElement('div')
+        handle.className = 'ly-handle'
+        handle.dataset.id = layer.id
+        handle.title = '拖动自由缩放；按住 Alt 以中心对称缩放'
+        img.appendChild(handle)
+        const rotHandle = document.createElement('div')
+        rotHandle.className = 'ly-rotate'
+        rotHandle.dataset.id = layer.id
+        img.appendChild(rotHandle)
+      }
+    })
+    const rulerV = document.createElement('div')
+    rulerV.className = 'ly-ruler ly-ruler-v'
+    const rulerH = document.createElement('div')
+    rulerH.className = 'ly-ruler ly-ruler-h'
+    stageEl.appendChild(rulerV)
+    stageEl.appendChild(rulerH)
+  }
+
+  function renderPanel() {
+    const ordered = [...layers].sort((a, b) => b.zOrder - a.zOrder)
+    emptyEl.hidden = layers.length > 0
+    mask.querySelector('#lyCount').textContent = layers.length ? ` · ${layers.length}` : ''
+    listEl.innerHTML = ''
+    ordered.forEach((layer) => {
+      const isBg = layer.kind === 'background'
+      const locked = isBg || Boolean(layer.locked)
+      const item = document.createElement('div')
+      item.className = `ly-item${isBg ? ' is-bg' : ''}${locked ? ' is-locked' : ''}${selectedId === layer.id ? ' is-selected' : ''}`
+      item.dataset.id = layer.id
+      item.draggable = !locked
+      const blendSelect = BLEND_OPTIONS.map(([v, label]) => `<option value="${v}" ${blendOf(layer) === v ? 'selected' : ''}>${label}</option>`).join('')
+      const rotDeg = Number(layer.rotation || 0)
+      item.innerHTML = `
+        <button type="button" class="ly-eye" aria-label="显示或隐藏图层" ${locked ? 'disabled' : ''}>${layer.visible ? '👁' : '·'}</button>
+        <img class="ly-thumb" src="${esc(layer.url)}" alt="">
+        <div class="ly-meta">
+          <div class="ly-name-row">
+            <span class="ly-name" title="${esc(layer.description || defaultName(layer))}">${esc(defaultName(layer))}</span>
+            <button type="button" class="ly-rename-btn" title="重命名图层" aria-label="重命名图层" ${locked ? 'disabled' : ''}>✏️</button>
+          </div>
+          <div class="ly-row">
+            <span class="ly-opacity-label">透明度</span>
+            <input type="range" class="ly-opacity" min="0" max="100" value="${layer.opacity}" ${locked ? 'disabled' : ''}>
+            <span class="ly-opacity-val">${layer.opacity}</span>
+          </div>
+          <div class="ly-row">
+            <select class="ly-blend" ${locked ? 'disabled' : ''}>${blendSelect}</select>
+            <span class="ly-blend-hint" title="混合模式决定当前图层与下层的叠加方式：正常=原样叠加；正片叠底=相乘变暗；滤色=提亮；叠加=明暗对比叠加；变暗=取较暗像素；变亮=取较亮像素。">?</span>
+          </div>
+          <div class="ly-row">
+            <span class="ly-opacity-label">角度</span>
+            <input type="number" class="ly-angle" min="0" max="359" step="1" value="${rotDeg}" ${locked ? 'disabled' : ''}>
+            <span class="ly-opacity-val">°</span>
+          </div>
+        </div>
+        <div class="ly-ops">
+          <button type="button" class="ly-up" aria-label="上移图层" ${locked ? 'disabled' : ''}>↑</button>
+          <button type="button" class="ly-down" aria-label="下移图层" ${locked ? 'disabled' : ''}>↓</button>
+          <button type="button" class="ly-lock" aria-label="锁定或解锁图层" ${isBg ? 'disabled' : ''}>${layer.locked ? '🔒' : '🔓'}</button>
+          <button type="button" class="ly-del" aria-label="删除图层" ${locked ? 'disabled' : ''}>×</button>
+        </div>`
+      listEl.appendChild(item)
+    })
+  }
+
+  function renderProps() {
+    const layer = layers.find((entry) => entry.id === selectedId)
+    const locked = !layer || layer.kind === 'background' || Boolean(layer.locked)
+    if (locked) { propsEl.hidden = true; propsEl.innerHTML = ''; return }
+    const [l, t, r, b] = layerNorm(layer)
+    const pct = (v) => Math.round(v * 1000) / 10
+    const x = pct(l), y = pct(t), w = pct(r - l), h = pct(b - t)
+    propsEl.hidden = false
+    propsEl.innerHTML = `
+      <div class="ly-props-head">位置与尺寸（%）</div>
+      <div class="ly-prop-grid">
+        <label class="ly-prop"><span>左 X</span><input type="number" class="ly-prop-input" data-field="x" min="0" max="100" step="1" value="${x}"></label>
+        <label class="ly-prop"><span>上 Y</span><input type="number" class="ly-prop-input" data-field="y" min="0" max="100" step="1" value="${y}"></label>
+        <label class="ly-prop"><span>宽</span><input type="number" class="ly-prop-input" data-field="w" min="5" max="100" step="1" value="${w}"></label>
+        <label class="ly-prop"><span>高</span><input type="number" class="ly-prop-input" data-field="h" min="5" max="100" step="1" value="${h}"></label>
+      </div>`
+  }
+
+  function renderAll() { renderCanvas(); renderPanel(); renderProps() }
+
+  async function patchLayer(id, patch) {
+    const res = await api('/api/images/layers', {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id, ...patch }),
+    })
+    if (!res.ok) throw new Error(res.body?.error || '图层更新失败')
+    const updated = res.body.layer
+    const i = layers.findIndex((item) => item.id === id)
+    if (i >= 0 && updated) layers[i] = { ...layers[i], ...updated }
+    return updated
+  }
+
+  async function swapLayers(aId, bId) {
+    const a = layers.find((entry) => entry.id === aId)
+    const b = layers.find((entry) => entry.id === bId)
+    if (!a || !b || a.id === b.id) return
+    const za = a.zOrder
+    const zb = b.zOrder
+    await api('/api/images/layers/reorder', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ assetId: shot.id, layers: [{ id: a.id, zOrder: zb }, { id: b.id, zOrder: za }] }),
+    })
+    a.zOrder = zb
+    b.zOrder = za
+    renderAll()
+  }
+
+  async function moveLayer(id, dir) {
+    const ordered = [...layers].sort((a, b) => a.zOrder - b.zOrder)
+    const i = ordered.findIndex((item) => item.id === id)
+    const j = i + dir
+    if (j < 0 || j >= ordered.length) return
+    await swapLayers(id, ordered[j].id)
+  }
+
+  async function removeLayer(id) {
+    const res = await api('/api/images/layers', {
+      method: 'DELETE',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id }),
+    })
+    if (!res.ok) throw new Error(res.body?.error || '删除图层失败')
+    layers = layers.filter((item) => item.id !== id)
+    renderAll()
+  }
+
+  listEl.addEventListener('click', async (event) => {
+    const item = event.target.closest('.ly-item')
+    if (!item) return
+    const id = item.dataset.id
+    const layer = layers.find((entry) => entry.id === id)
+    const locked = !layer || layer.kind === 'background' || Boolean(layer.locked)
+    // 点击条目空白处：选中该图层，同步画布与面板高亮
+    if (!event.target.closest('.ly-lock,.ly-eye,.ly-up,.ly-down,.ly-del,.ly-opacity,.ly-blend,.ly-rename,.ly-rename-btn,.ly-angle,.ly-blend-hint')) {
+      selectedId = id
+      renderAll()
+    }
+    try {
+      if (event.target.closest('.ly-lock')) {
+        if (!layer || layer.kind === 'background') return
+        pushHistory()
+        await patchLayer(id, { locked: !layer.locked })
+        renderAll()
+      } else if (locked) return
+      else if (event.target.closest('.ly-eye')) {
+        pushHistory()
+        await patchLayer(id, { visible: !layer.visible })
+        renderAll()
+      } else if (event.target.closest('.ly-up')) { pushHistory(); await moveLayer(id, -1) }
+      else if (event.target.closest('.ly-down')) { pushHistory(); await moveLayer(id, 1) }
+      else if (event.target.closest('.ly-rename-btn')) { startRename(layer, item) }
+      else if (event.target.closest('.ly-del')) {
+        if (!window.confirm('确定删除该图层？删除后不可撤销。')) return
+        await removeLayer(id)
+      }
+    } catch (error) {
+      toast(error?.message || '图层操作失败', true)
+    }
+  })
+
+  listEl.addEventListener('input', (event) => {
+    if (!event.target.classList.contains('ly-opacity')) return
+    const item = event.target.closest('.ly-item')
+    const layer = layers.find((entry) => entry.id === item.dataset.id)
+    if (!layer) return
+    layer.opacity = Number(event.target.value)
+    item.querySelector('.ly-opacity-val').textContent = layer.opacity
+    renderCanvas()
+  })
+
+  listEl.addEventListener('change', async (event) => {
+    const item = event.target.closest('.ly-item')
+    if (!item) return
+    const layer = layers.find((entry) => entry.id === item.dataset.id)
+    if (!layer) return
+    try {
+      pushHistory()
+      if (event.target.classList.contains('ly-opacity')) {
+        await patchLayer(item.dataset.id, { opacity: Number(event.target.value) })
+      } else if (event.target.classList.contains('ly-blend')) {
+        await patchLayer(item.dataset.id, { blendMode: event.target.value })
+        renderCanvas()
+      } else if (event.target.classList.contains('ly-angle')) {
+        const deg = Math.max(0, Math.min(359, Math.round(Number(event.target.value) || 0)))
+        event.target.value = String(deg)
+        await patchLayer(item.dataset.id, { rotation: deg })
+        renderCanvas()
+      }
+    } catch (error) {
+      toast(error?.message || '图层属性保存失败', true)
+    }
+  })
+
+  propsEl.addEventListener('change', async (event) => {
+    const input = event.target.closest('.ly-prop-input')
+    if (!input) return
+    const layer = layers.find((entry) => entry.id === selectedId)
+    if (!layer || layer.kind === 'background' || Boolean(layer.locked)) return
+    const field = input.dataset.field
+    const [l, t, r, b] = layerNorm(layer)
+    let x = l * 100, y = t * 100, w = (r - l) * 100, h = (b - t) * 100
+    const v = Number(input.value)
+    if (!Number.isFinite(v)) { renderProps(); return }
+    if (field === 'x') x = Math.max(0, Math.min(100 - w, v))
+    else if (field === 'y') y = Math.max(0, Math.min(100 - h, v))
+    else if (field === 'w') w = Math.max(5, Math.min(100 - x, v))
+    else if (field === 'h') h = Math.max(5, Math.min(100 - y, v))
+    const box = [x / 100, y / 100, (x + w) / 100, (y + h) / 100]
+    pushHistory()
+    try {
+      await patchLayer(layer.id, { box: { normalized: box } })
+      renderAll()
+    } catch (error) {
+      toast(error?.message || '位置尺寸保存失败', true)
+      renderAll()
+    }
+  })
+
+  function startRename(layer, item) {
+    if (!layer || layer.kind === 'background' || Boolean(layer.locked)) return
+    const nameEl = item.querySelector('.ly-name')
+    if (!nameEl) return
+    const input = document.createElement('input')
+    input.className = 'ly-rename'
+    input.value = layer.name || defaultName(layer)
+    nameEl.replaceWith(input)
+    input.focus()
+    input.select()
+    const commit = async () => {
+      const value = input.value.trim().slice(0, 40)
+      if (value) {
+        pushHistory()
+        try { await patchLayer(layer.id, { name: value }) } catch (error) { toast(error?.message || '重命名失败', true) }
+      }
+      renderPanel()
+    }
+    input.addEventListener('blur', commit)
+    input.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') input.blur()
+      if (ev.key === 'Escape') renderPanel()
+    })
+  }
+
+  listEl.addEventListener('dblclick', (event) => {
+    const nameEl = event.target.closest('.ly-name')
+    if (!nameEl) return
+    const item = nameEl.closest('.ly-item')
+    const layer = layers.find((entry) => entry.id === item.dataset.id)
+    startRename(layer, item)
+  })
+
+  listEl.addEventListener('dragstart', (event) => {
+    const item = event.target.closest('.ly-item')
+    if (!item) return
+    const layer = layers.find((entry) => entry.id === item.dataset.id)
+    if (!layer || layer.kind === 'background' || Boolean(layer.locked)) { event.preventDefault(); return }
+    dragId = item.dataset.id
+    item.classList.add('dragging')
+    event.dataTransfer.effectAllowed = 'move'
+  })
+  function clearDropPlaceholder() {
+    listEl.querySelector('.ly-drop-placeholder')?.remove()
+  }
+  listEl.addEventListener('dragover', (event) => {
+    const item = event.target.closest('.ly-item')
+    if (!item || item.dataset.id === dragId) return
+    const target = layers.find((entry) => entry.id === item.dataset.id)
+    if (!target || target.kind === 'background' || Boolean(target.locked)) return
+    event.preventDefault()
+    event.dataTransfer.dropEffect = 'move'
+    clearDropPlaceholder()
+    const rect = item.getBoundingClientRect()
+    const before = event.clientY < rect.top + rect.height / 2
+    const ph = document.createElement('div')
+    ph.className = 'ly-drop-placeholder'
+    listEl.insertBefore(ph, before ? item : item.nextSibling)
+  })
+  listEl.addEventListener('drop', async (event) => {
+    event.preventDefault()
+    clearDropPlaceholder()
+    const item = event.target.closest('.ly-item')
+    if (!item || !dragId || item.dataset.id === dragId) return
+    const target = layers.find((entry) => entry.id === item.dataset.id)
+    if (!target || target.kind === 'background' || Boolean(target.locked)) return
+    pushHistory()
+    try { await swapLayers(dragId, target.id) } catch (error) { toast(error?.message || '排序失败', true) }
+    dragId = null
+  })
+  listEl.addEventListener('dragend', () => {
+    clearDropPlaceholder()
+    listEl.querySelector('.ly-item.dragging')?.classList.remove('dragging')
+    dragId = null
+  })
+
+  const CANVAS_PAD = 22
+  function contentRect() {
+    const r = canvas.getBoundingClientRect()
+    const width = Math.max(1, r.width - CANVAS_PAD * 2)
+    const height = Math.max(1, r.height - CANVAS_PAD * 2)
+    return { left: r.left + CANVAS_PAD, top: r.top + CANVAS_PAD, width, height, cx: r.left + CANVAS_PAD + width / 2, cy: r.top + CANVAS_PAD + height / 2 }
+  }
+  function clampView() {
+    const r = contentRect()
+    const maxTx = Math.max(0, (r.width * (view.scale - 1)) / 2)
+    const maxTy = Math.max(0, (r.height * (view.scale - 1)) / 2)
+    view.tx = Math.max(-maxTx, Math.min(maxTx, view.tx))
+    view.ty = Math.max(-maxTy, Math.min(maxTy, view.ty))
+  }
+  function canvasPoint(event) {
+    const r = contentRect()
+    const nx = 0.5 + (event.clientX - r.cx - view.tx) / (r.width * view.scale)
+    const ny = 0.5 + (event.clientY - r.cy - view.ty) / (r.height * view.scale)
+    return { x: Math.max(0, Math.min(1, nx)), y: Math.max(0, Math.min(1, ny)) }
+  }
+  function applyLocalBox(layer, box) {
+    layer.box = { normalized: box }
+    const img = stageEl.querySelector(`.ly-canvas-img[data-id="${layer.id}"]`)
+    if (img) {
+      img.style.left = `${box[0] * 100}%`
+      img.style.top = `${box[1] * 100}%`
+      img.style.width = `${(box[2] - box[0]) * 100}%`
+      img.style.height = `${(box[3] - box[1]) * 100}%`
+    }
+  }
+  canvas.addEventListener('wheel', (event) => {
+    event.preventDefault()
+    const r = contentRect()
+    const factor = event.deltaY < 0 ? 1.1 : 0.9
+    const ns = Math.max(VIEW_MIN, Math.min(VIEW_MAX, view.scale * factor))
+    const k = ns / view.scale
+    view.tx = (event.clientX - r.cx) - (event.clientX - r.cx - view.tx) * k
+    view.ty = (event.clientY - r.cy) - (event.clientY - r.cy - view.ty) * k
+    view.scale = ns
+    clampView()
+    applyView()
+  }, { passive: false })
+  canvas.addEventListener('pointerdown', (event) => {
+    const handleEl = event.target.closest('.ly-handle')
+    const rotEl = event.target.closest('.ly-rotate')
+    const imgEl = event.target.closest('.ly-canvas-img')
+    if (!imgEl) {
+      pan = { startX: event.clientX, startY: event.clientY, tx: view.tx, ty: view.ty, moved: false }
+      event.preventDefault()
+      return
+    }
+    const layer = layers.find((entry) => entry.id === imgEl.dataset.id)
+    if (!layer) return
+    const isBg = layer.kind === 'background'
+    const locked = isBg || Boolean(layer.locked)
+    if (locked) { selectedId = null; renderCanvas(); return }
+    selectedId = layer.id
+    pushHistory()
+    const box = layerNorm(layer)
+    const p = canvasPoint(event)
+    const [l, t, r, b] = box
+    drag = {
+      id: layer.id,
+      mode: rotEl ? 'rotate' : handleEl ? 'resize' : 'move',
+      startX: p.x,
+      startY: p.y,
+      box,
+      centerX: (l + r) / 2,
+      centerY: (t + b) / 2,
+      startRotation: Number(layer.rotation || 0),
+      startAngle: Math.atan2(p.y - (t + b) / 2, p.x - (l + r) / 2),
+    }
+    renderCanvas()
+    event.preventDefault()
+  })
+  window.addEventListener('pointermove', (event) => {
+    if (pan) {
+      const dx = event.clientX - pan.startX
+      const dy = event.clientY - pan.startY
+      if (Math.abs(dx) + Math.abs(dy) > 3) pan.moved = true
+      view.tx = pan.tx + dx
+      view.ty = pan.ty + dy
+      clampView()
+      applyView()
+      return
+    }
+    if (!drag) return
+    const layer = layers.find((entry) => entry.id === drag.id)
+    if (!layer) return
+    const p = canvasPoint(event)
+    const [l, t, r, b] = drag.box
+    if (drag.mode === 'move') {
+      const [al, at, ar, ab] = layerAabb(layer)
+      const aw = ar - al
+      const ah = ab - at
+      const refs = alignmentRefs(layer.id)
+      const SNAP = 0.02
+      let nAl = al + p.x - drag.startX
+      let nAt = at + p.y - drag.startY
+      const nAr = nAl + aw
+      const nAb = nAt + ah
+      let snapX = null
+      refs.x.forEach((rx) => {
+        [nAl, (nAl + nAr) / 2, nAr].forEach((edge) => {
+          const d = rx - edge
+          if (Math.abs(d) <= SNAP && (!snapX || Math.abs(d) < Math.abs(snapX.d))) snapX = { d, rx }
+        })
+      })
+      if (snapX) nAl += snapX.d
+      let snapY = null
+      refs.y.forEach((ry) => {
+        [nAt, (nAt + nAb) / 2, nAb].forEach((edge) => {
+          const d = ry - edge
+          if (Math.abs(d) <= SNAP && (!snapY || Math.abs(d) < Math.abs(snapY.d))) snapY = { d, ry }
+        })
+      })
+      if (snapY) nAt += snapY.d
+      nAl = Math.max(0, Math.min(1 - aw, nAl))
+      nAt = Math.max(0, Math.min(1 - ah, nAt))
+      const shiftX = nAl - al
+      const shiftY = nAt - at
+      applyLocalBox(layer, [l + shiftX, t + shiftY, r + shiftX, b + shiftY])
+      drawGuides(snapX ? [snapX.rx] : [], snapY ? [snapY.ry] : [])
+    } else if (drag.mode === 'resize') {
+      const rot = Number(layer.rotation || 0)
+      const cx = drag.centerX
+      const cy = drag.centerY
+      const w = r - l
+      const h = b - t
+      if (Math.abs(rot) > 0.5) {
+        // 旋转态：转到图层局部坐标，中心锚定缩放，避免手柄方向随旋转错位
+        const lp = toLocal(p, cx, cy, rot)
+        const hw = Math.max(0.025, Math.min(0.5, lp.x + w / 2))
+        const hh = Math.max(0.025, Math.min(0.5, lp.y + h / 2))
+        applyLocalBox(layer, [cx - hw, cy - hh, cx + hw, cy + hh])
+      } else if (event.altKey) {
+        const maxW = Math.min(cx, 1 - cx) * 2
+        const maxH = Math.min(cy, 1 - cy) * 2
+        const nw = Math.max(0.05, Math.min(maxW, 2 * (p.x - cx)))
+        const nh = Math.max(0.05, Math.min(maxH, 2 * (p.y - cy)))
+        applyLocalBox(layer, [cx - nw / 2, cy - nh / 2, cx + nw / 2, cy + nh / 2])
+      } else {
+        const refs = alignmentRefs(layer.id)
+        const SNAP = 0.02
+        let nw = Math.max(0.05, p.x - l)
+        let nh = Math.max(0.05, p.y - t)
+        let snapX = null
+        refs.x.forEach((rx) => {
+          const d = rx - (l + nw)
+          if (Math.abs(d) <= SNAP && (!snapX || Math.abs(d) < Math.abs(snapX.d))) snapX = { d }
+        })
+        if (snapX) nw += snapX.d
+        let snapY = null
+        refs.y.forEach((ry) => {
+          const d = ry - (t + nh)
+          if (Math.abs(d) <= SNAP && (!snapY || Math.abs(d) < Math.abs(snapY.d))) snapY = { d }
+        })
+        if (snapY) nh += snapY.d
+        nw = Math.max(0.05, Math.min(1 - l, nw))
+        nh = Math.max(0.05, Math.min(1 - t, nh))
+        applyLocalBox(layer, [l, t, l + nw, t + nh])
+        drawGuides(snapX ? [l + nw] : [], snapY ? [t + nh] : [])
+      }
+    } else {
+      const angle = Math.atan2(p.y - drag.centerY, p.x - drag.centerX)
+      let rot = drag.startRotation + (angle - drag.startAngle) * 180 / Math.PI
+      rot = ((rot % 360) + 360) % 360
+      layer.rotation = rot
+      const img = stageEl.querySelector(`.ly-canvas-img[data-id="${layer.id}"]`)
+      if (img) img.style.transform = `rotate(${rot}deg)`
+    }
+  })
+  window.addEventListener('pointerup', async () => {
+    if (pan) {
+      if (!pan.moved) { selectedId = null; renderAll() }
+      pan = null
+      return
+    }
+    if (!drag) return
+    const layer = layers.find((entry) => entry.id === drag.id)
+    const mode = drag.mode
+    drag = null
+    clearGuides()
+    if (!layer) return
+    try {
+      const patch = { box: { normalized: layer.box.normalized } }
+      if (mode === 'rotate') patch.rotation = Number(layer.rotation || 0)
+      await patchLayer(layer.id, patch)
+    } catch (error) {
+      toast(error?.message || '图层位置保存失败', true)
+      renderAll()
+    }
+  })
+
+  async function loadLayers() {
+    const res = await api(`/api/images/layers?assetId=${encodeURIComponent(shot.id)}`)
+    if (!res.ok) throw new Error(res.body?.error || '图层读取失败')
+    layers = Array.isArray(res.body?.layers) ? res.body.layers : []
+    history = [snapshotLayers()]
+    historyIndex = 0
+    syncUndoRedoButtons()
+    renderAll()
+  }
+
+  async function splitLayers() {
+    if (busy) return
+    busy = true
+    setStatus('正在拆分图层，通常需要 10–30 秒…')
+    try {
+      const res = await api('/api/images/layers/decompose', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ assetId: shot.id }),
+      })
+      if (!res.ok || !Array.isArray(res.body?.layers)) throw new Error(res.body?.error || '图层拆分失败')
+      layers = res.body.layers
+      clearStatus()
+      renderAll()
+      toast('图层拆分完成')
+    } catch (error) {
+      setStatus(error?.message || '图层拆分失败', false)
+    } finally {
+      busy = false
+    }
+  }
+
+  async function exportComposite() {
+    if (!layers.length) { toast('还没有图层可导出', true); return }
+    setStatus('正在合成导出…')
+    try {
+      const ordered = [...layers].sort((a, b) => a.zOrder - b.zOrder)
+      const base = ordered.find((item) => item.kind === 'background') || ordered[0]
+      const baseImg = await loadLayerImage(base.url)
+      const W = baseImg.naturalWidth || 1024
+      const H = baseImg.naturalHeight || 1024
+      const cv = document.createElement('canvas')
+      cv.width = W
+      cv.height = H
+      const ctx = cv.getContext('2d')
+      for (const layer of ordered) {
+        if (!layer.visible) continue
+        const im = await loadLayerImage(layer.url)
+        const r = layerRect(layer, W, H)
+        ctx.globalAlpha = layer.opacity / 100
+        ctx.globalCompositeOperation = COMPOSITE_MODE[blendOf(layer)] || 'source-over'
+        const rot = Number(layer.rotation || 0)
+        if (rot) {
+          ctx.save()
+          ctx.translate(r.x + r.w / 2, r.y + r.h / 2)
+          ctx.rotate(rot * Math.PI / 180)
+          ctx.drawImage(im, -r.w / 2, -r.h / 2, r.w, r.h)
+          ctx.restore()
+        } else {
+          ctx.drawImage(im, r.x, r.y, r.w, r.h)
+        }
+      }
+      ctx.globalAlpha = 1
+      ctx.globalCompositeOperation = 'source-over'
+      const blob = await new Promise((resolve) => cv.toBlob(resolve, 'image/png'))
+      if (!blob) throw new Error('合成图片生成失败')
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `${(shot.name || 'layer-composite').replace(/\.[^.]+$/, '')}-合成.png`
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(url)
+      clearStatus()
+      toast('合成图已导出')
+    } catch (error) {
+      setStatus(error?.message || '导出失败', false)
+    }
+  }
+
+  mask.querySelector('[data-ly="split"]').addEventListener('click', splitLayers)
+  mask.querySelector('[data-ly="distribute-h"]').addEventListener('click', () => distributeLayers('h'))
+  mask.querySelector('[data-ly="distribute-v"]').addEventListener('click', () => distributeLayers('v'))
+  mask.querySelector('[data-ly="export"]').addEventListener('click', exportComposite)
+  mask.querySelector('[data-ly="download"]').addEventListener('click', () => downloadImageAsset(shot))
+  mask.querySelector('[data-ly="back"]').addEventListener('click', () => { mask.remove(); openImageWorkbench(shot) })
+  mask.querySelector('[data-ly="undo"]').addEventListener('click', () => { undoHistory() })
+  mask.querySelector('[data-ly="redo"]').addEventListener('click', () => { redoHistory() })
+  mask.querySelector('[data-ly="reset-view"]').addEventListener('click', () => {
+    view.scale = 1; view.tx = 0; view.ty = 0
+    applyView()
+  })
+  mask.addEventListener('keydown', (event) => {
+    const target = event.target
+    if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT' || target.isContentEditable)) return
+    if (event.key === 'Escape') { event.stopPropagation(); mask.remove(); openImageWorkbench(shot); return }
+    if (!(event.ctrlKey || event.metaKey)) return
+    if (event.key === 'z' || event.key === 'Z') {
+      event.preventDefault()
+      if (event.shiftKey) redoHistory(); else undoHistory()
+    } else if (event.key === 'y' || event.key === 'Y') {
+      event.preventDefault(); redoHistory()
+    }
+  })
+
+  loadLayers().catch((error) => setStatus(error?.message || '图层读取失败', false))
 }
 
 async function useImageInChat(shot) {
@@ -8994,7 +12017,7 @@ async function useImageInChat(shot) {
   }
 }
 
-function openImageAnnotator(shot) {
+function openImageAnnotator(shot, opts = {}) {
   const mask = openModal('标注', `
     <div class="form-note">在图片上画红色标记，保存后会与当前版本合成并创建新版本；原版本保留在版本历史对比中。</div>
     <div class="img-annot-stage">
@@ -9112,9 +12135,11 @@ function openImageAnnotator(shot) {
       err.textContent = error?.message || '标注保存失败'
     }
   })
+  bindWorkbenchBack(mask, shot, opts)
 }
 
-function openImageResize(shot) {
+function openImageResize(shot, opts = {}) {
+  if (!visualReady() && !imageEditModel()) return toast('当前没有可用的 AI 画幅模型，请先配置后再调整大小', true)
   const options = [
     { ratio: '1:1', label: '正方形' },
     { ratio: '3:4', label: '竖向' },
@@ -9123,7 +12148,7 @@ function openImageResize(shot) {
     { ratio: '16:9', label: '宽屏' },
   ]
   const mask = openModal('调整大小', `
-    <div class="form-note">按所选比例扩展画布，主体完整保留，不裁掉画面内容；会创建新版本。</div>
+    <div class="form-note">AI 按所选比例延展画面，主体完整保留、不缩小、不裁切；会创建新版本。</div>
     <div class="img-resize-list">
       ${options.map((item) => `
         <button type="button" class="img-resize-choice${shot.ratio === item.ratio ? ' on' : ''}" data-resize-ratio="${item.ratio}">
@@ -9136,7 +12161,7 @@ function openImageResize(shot) {
   const err = mask.querySelector('#imgResizeErr')
   mask.querySelectorAll('[data-resize-ratio]').forEach((btn) => btn.addEventListener('click', async () => {
     const ratio = btn.dataset.resizeRatio
-    if (shot.ratio === ratio) { mask.remove(); return }
+    if (shot.ratio === ratio) { if (opts.back) { mask.remove(); openImageWorkbench(shot) } else mask.remove(); return }
     btn.disabled = true
     btn.classList.add('loading')
     try {
@@ -9158,6 +12183,114 @@ function openImageResize(shot) {
       err.textContent = error?.message || '调整大小失败'
     }
   }))
+  bindWorkbenchBack(mask, shot, opts)
+}
+
+function openImageExpand(shot, opts = {}) {
+  const options = [
+    { value: '0.1', label: '轻度外扩', sub: '四边各 10%' },
+    { value: '0.2', label: '标准外扩', sub: '四边各 20%' },
+    { value: '0.3', label: '大幅外扩', sub: '四边各 30%' },
+  ]
+  const mask = openModal('智能扩图', `
+    <div class="form-note">保留原图主体，四边向外生成延展画面；结果会创建新版本。</div>
+    <div class="img-resize-list" id="expScaleGroup">
+      ${options.map((item) => `<button type="button" class="img-resize-choice${item.value === '0.2' ? ' on' : ''}" data-exp="${item.value}"><span class="img-resize-name">${item.label}</span><span class="img-resize-ratio">${item.sub}</span></button>`).join('')}
+    </div>
+    <div class="form-label">延展方向提示（可选）</div>
+    <input class="text-input" id="expPrompt" maxlength="100" placeholder="如：延续海边与天空，保持光线一致">
+    <div class="img-edit-err" id="expErr"></div>
+    <div class="form-foot"><span class="spacer"></span><button type="button" class="btn" data-mclose>取消</button><button type="button" class="btn primary" id="expOk">开始扩图</button></div>`)
+  let selected = '0.2'
+  mask.querySelectorAll('[data-exp]').forEach((btn) => btn.addEventListener('click', () => {
+    selected = btn.dataset.exp
+    mask.querySelectorAll('[data-exp]').forEach((b) => b.classList.toggle('on', b === btn))
+  }))
+  mask.querySelector('[data-mclose]').addEventListener('click', () => { if (opts.back) { mask.remove(); openImageWorkbench(shot) } else mask.remove() })
+  const err = mask.querySelector('#expErr')
+  const okBtn = mask.querySelector('#expOk')
+  okBtn.addEventListener('click', async () => {
+    const prompt = mask.querySelector('#expPrompt').value.trim()
+    okBtn.disabled = true
+    err.textContent = ''
+    try {
+      const res = await api('/api/images/expand', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ assetId: shot.id, expand: Number(selected), prompt }),
+      })
+      if (!res.ok || !res.body?.image) throw new Error(res.body?.error || `扩图失败（HTTP ${res.status}）`)
+      const next = imageShotFromAsset(res.body.image)
+      mergeRecentImage(next)
+      mask.remove()
+      renderView()
+      toast('已扩图并创建新版本')
+      setTimeout(() => openImageWorkbench(next), 60)
+    } catch (error) {
+      okBtn.disabled = false
+      err.textContent = error?.message || '扩图失败'
+    }
+  })
+  bindWorkbenchBack(mask, shot, opts)
+}
+
+function openImageUpscale(shot, opts = {}) {
+  const resOptions = [
+    { value: '4k', label: '4K', sub: '高清放大' },
+    { value: '8k', label: '8K', sub: '超高清放大' },
+  ]
+  const scaleOptions = [
+    { value: '30', label: '细腻', sub: '轻度增强' },
+    { value: '50', label: '均衡', sub: '标准增强' },
+    { value: '80', label: '锐利', sub: '细节强化' },
+  ]
+  const choiceRow = (prefix, group, list, def) => `
+    <div class="img-resize-list" id="${group}">
+      ${list.map((item) => `<button type="button" class="img-resize-choice${item.value === def ? ' on' : ''}" data-${prefix}="${item.value}"><span class="img-resize-name">${item.label}</span><span class="img-resize-ratio">${item.sub}</span></button>`).join('')}
+    </div>`
+  const mask = openModal('智能超清', `
+    <div class="form-note">在保留原图构图的前提下提升分辨率与细节；结果会创建新版本。</div>
+    <div class="form-label">输出分辨率</div>
+    ${choiceRow('upres', 'upResGroup', resOptions, '4k')}
+    <div class="form-label">增强强度</div>
+    ${choiceRow('upscale', 'upScaleGroup', scaleOptions, '50')}
+    <div class="img-edit-err" id="upErr"></div>
+    <div class="form-foot"><span class="spacer"></span><button type="button" class="btn" data-mclose>取消</button><button type="button" class="btn primary" id="upOk">生成高清版本</button></div>`)
+  let selectedRes = '4k'
+  let selectedScale = '50'
+  mask.querySelectorAll('[data-upres]').forEach((btn) => btn.addEventListener('click', () => {
+    selectedRes = btn.dataset.upres
+    mask.querySelectorAll('[data-upres]').forEach((b) => b.classList.toggle('on', b === btn))
+  }))
+  mask.querySelectorAll('[data-upscale]').forEach((btn) => btn.addEventListener('click', () => {
+    selectedScale = btn.dataset.upscale
+    mask.querySelectorAll('[data-upscale]').forEach((b) => b.classList.toggle('on', b === btn))
+  }))
+  mask.querySelector('[data-mclose]').addEventListener('click', () => { if (opts.back) { mask.remove(); openImageWorkbench(shot) } else mask.remove() })
+  const err = mask.querySelector('#upErr')
+  const okBtn = mask.querySelector('#upOk')
+  okBtn.addEventListener('click', async () => {
+    okBtn.disabled = true
+    err.textContent = ''
+    try {
+      const res = await api('/api/images/upscale', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ assetId: shot.id, resolution: selectedRes, scale: Number(selectedScale) }),
+      })
+      if (!res.ok || !res.body?.image) throw new Error(res.body?.error || `超清失败（HTTP ${res.status}）`)
+      const next = imageShotFromAsset(res.body.image)
+      mergeRecentImage(next)
+      mask.remove()
+      renderView()
+      toast('已生成高清版本')
+      setTimeout(() => openImageWorkbench(next), 60)
+    } catch (error) {
+      okBtn.disabled = false
+      err.textContent = error?.message || '超清失败'
+    }
+  })
+  bindWorkbenchBack(mask, shot, opts)
 }
 
 function openImageSkills() {
@@ -9373,7 +12506,7 @@ async function renderImage(el) {
   el.querySelectorAll('.img-card').forEach((b) => {
     const openPreview = () => {
       const s = g.shots.find((x) => x.id === b.dataset.igid)
-      if (s) openImageWorkbench(s)
+      if (s) openImagePreview(s)
     }
     b.addEventListener('click', (e) => {
       if (e.target.closest('.img-more')) return
@@ -9456,8 +12589,8 @@ function openDrawingBoard(opts = {}) {
         <button class="jg-draw-topbtn" data-dundo title="撤销" aria-label="撤销" disabled>${drawSvg('undo')}</button>
         <button class="jg-draw-topbtn" data-dredo title="重做" aria-label="重做" disabled>${drawSvg('redo')}</button>
       </div>
-      <div class="jg-draw-size" title="画笔粗细">
-        <input id="drawSize" type="range" min="1" max="28" value="4" aria-label="画笔粗细">
+      <div class="jg-draw-size" title="画笔 / 橡皮粗细">
+        <input id="drawSize" type="range" min="1" max="36" value="4" aria-label="画笔或橡皮粗细">
       </div>
       <div class="jg-draw-colors">
         ${colors.map(([c, label]) => `<button class="jg-draw-color${c === 'rainbow' ? ' rainbow' : ''}${c === '#1f2328' ? ' on' : ''}" data-color="${c}" title="${label}" aria-label="${label}"${c === 'rainbow' ? '' : ` style="background:${c}"`}></button>`).join('')}
@@ -9475,11 +12608,18 @@ function openDrawingBoard(opts = {}) {
   let tool = 'pen'
   let color = '#1f2328'
   let brush = 4
+  let eraserWidth = 18
+  let drawRect = null
   const sizeWrap = mask.querySelector('.jg-draw-size')
   const sizeInput = mask.querySelector('#drawSize')
+  const activeWidth = () => tool === 'eraser' ? eraserWidth : brush
   const syncSize = () => {
-    const pct = 100 - ((brush - 1) / 27) * 100
+    const width = activeWidth()
+    const pct = 100 - ((width - 1) / 35) * 100
     sizeWrap.style.setProperty('--jg-fill', `${Math.max(0, Math.min(100, pct))}%`)
+    sizeWrap.title = tool === 'eraser' ? '橡皮粗细' : '画笔粗细'
+    sizeInput.setAttribute('aria-label', tool === 'eraser' ? '橡皮粗细' : '画笔粗细')
+    if (Number(sizeInput.value) !== width) sizeInput.value = String(width)
   }
   syncSize()
   let shapeKind = 'rect'
@@ -9510,10 +12650,19 @@ function openDrawingBoard(opts = {}) {
     const width = Math.max(...lines.map((line) => ctx.measureText(line).width), 0)
     return { x: o.x, y: o.y, w: width, h: lines.length * o.size * 1.25 }
   }
-  const paintStroke = (o) => {
-    if (!o.points.length) return
+  const paintStrokeSegment = (o, i) => {
+    if (!o.points.length || i < 1 || i >= o.points.length) return
     ctx.lineCap = 'round'
     ctx.lineJoin = 'round'
+    ctx.strokeStyle = o.color === 'rainbow' ? `hsl(${(i * 18) % 360} 82% 55%)` : o.color
+    ctx.lineWidth = o.width
+    ctx.beginPath()
+    ctx.moveTo(o.points[i - 1].x, o.points[i - 1].y)
+    ctx.lineTo(o.points[i].x, o.points[i].y)
+    ctx.stroke()
+  }
+  const paintStroke = (o) => {
+    if (!o.points.length) return
     if (o.points.length === 1) {
       ctx.fillStyle = o.color === 'rainbow' ? '#2563eb' : o.color
       ctx.beginPath()
@@ -9521,14 +12670,7 @@ function openDrawingBoard(opts = {}) {
       ctx.fill()
       return
     }
-    for (let i = 1; i < o.points.length; i += 1) {
-      ctx.strokeStyle = o.color === 'rainbow' ? `hsl(${(i * 18) % 360} 82% 55%)` : o.color
-      ctx.lineWidth = o.width
-      ctx.beginPath()
-      ctx.moveTo(o.points[i - 1].x, o.points[i - 1].y)
-      ctx.lineTo(o.points[i].x, o.points[i].y)
-      ctx.stroke()
-    }
+    for (let i = 1; i < o.points.length; i += 1) paintStrokeSegment(o, i)
   }
   const paintShape = (o) => {
     const x1 = o.x1
@@ -9641,11 +12783,12 @@ function openDrawingBoard(opts = {}) {
     dpr = Math.max(1, window.devicePixelRatio || 1)
     canvas.width = Math.round(r.width * dpr)
     canvas.height = Math.round(r.height * dpr)
+    drawRect = null
     redraw()
   }
   const pointOf = (e) => {
-    const r = canvas.getBoundingClientRect()
-    return { x: e.clientX - r.left, y: e.clientY - r.top }
+    if (!drawRect) drawRect = canvas.getBoundingClientRect()
+    return { x: e.clientX - drawRect.left, y: e.clientY - drawRect.top }
   }
   const clone = (o) => JSON.parse(JSON.stringify(o))
   const commit = () => {
@@ -9710,14 +12853,44 @@ function openDrawingBoard(opts = {}) {
     else if (o.type === 'shape') { o.x1 += dx; o.x2 += dx; o.y1 += dy; o.y2 += dy }
     else if (o.type === 'text') { o.x += dx; o.y += dy }
   }
+  const splitStrokeByEraser = (o, p, radius) => {
+    const runs = []
+    let current = []
+    let removed = false
+    for (const point of o.points) {
+      if (Math.hypot(point.x - p.x, point.y - p.y) <= radius) {
+        removed = true
+        if (current.length) runs.push(current)
+        current = []
+      } else {
+        current.push(point)
+      }
+    }
+    if (current.length) runs.push(current)
+    if (!removed) return null
+    return runs.map((points) => ({ ...o, points }))
+  }
   const eraseAt = (p) => {
-    const idx = hitTest(p)
-    if (idx < 0) return
-    objects.splice(idx, 1)
+    const radius = eraserWidth / 2 + 1.5
+    let changed = false
+    for (let i = objects.length - 1; i >= 0; i -= 1) {
+      const o = objects[i]
+      const b = bounds(o)
+      if (p.x < b.x - radius || p.x > b.x + b.w + radius || p.y < b.y - radius || p.y > b.y + b.h + radius) continue
+      if (o.type === 'stroke') {
+        const parts = splitStrokeByEraser(o, p, radius)
+        if (!parts) continue
+        objects.splice(i, 1, ...parts)
+        changed = true
+        continue
+      }
+      objects.splice(i, 1)
+      changed = true
+    }
+    if (!changed) return
     erased = true
-    if (dragging?.index === idx) dragging = null
-    if (selected === idx) selected = -1
-    else if (selected > idx) selected -= 1
+    dragging = null
+    selected = -1
     redraw()
   }
   const syncTools = () => {
@@ -9763,11 +12936,13 @@ function openDrawingBoard(opts = {}) {
     tool = next
     if (next !== 'shape') shapeMenu.hidden = true
     syncTools()
+    syncSize()
   }
   const closeBoard = () => {
     closeTextEditor(false)
     if (observer) observer.disconnect()
     window.removeEventListener('resize', resize)
+    window.removeEventListener('pointerup', endPointer)
     document.removeEventListener('keydown', onKey)
     mask.remove()
   }
@@ -9791,6 +12966,7 @@ function openDrawingBoard(opts = {}) {
   }, true)
   canvas.addEventListener('pointerdown', (e) => {
     if (e.button != null && e.button !== 0) return
+    drawRect = canvas.getBoundingClientRect()
     const p = pointOf(e)
     if (tool === 'text') {
       e.preventDefault()
@@ -9830,12 +13006,15 @@ function openDrawingBoard(opts = {}) {
     if (drawing) {
       if (drawing.type === 'stroke') {
         const last = drawing.points[drawing.points.length - 1]
-        if (Math.hypot(p.x - last.x, p.y - last.y) >= 1.5) drawing.points.push(p)
+        if (Math.hypot(p.x - last.x, p.y - last.y) >= 1.5) {
+          drawing.points.push(p)
+          paintStrokeSegment(drawing, drawing.points.length - 1)
+        }
       } else if (drawing.type === 'shape') {
         drawing.x2 = p.x
         drawing.y2 = p.y
+        redraw()
       }
-      redraw()
       return
     }
     if (dragging) {
@@ -9871,6 +13050,7 @@ function openDrawingBoard(opts = {}) {
   }
   canvas.addEventListener('pointerup', endPointer)
   canvas.addEventListener('pointercancel', endPointer)
+  window.addEventListener('pointerup', endPointer)
   mask.querySelectorAll('[data-tool]').forEach((b) => {
     if (b.dataset.tool === 'shape') return
     b.addEventListener('click', () => setTool(b.dataset.tool))
@@ -9888,7 +13068,9 @@ function openDrawingBoard(opts = {}) {
   }))
   mask.querySelectorAll('[data-color]').forEach((b) => b.addEventListener('click', () => { color = b.dataset.color; syncTools() }))
   mask.querySelector('#drawSize').addEventListener('input', (e) => {
-    brush = Number(e.target.value) || 4
+    const value = Number(e.target.value) || 4
+    if (tool === 'eraser') eraserWidth = value
+    else brush = value
     syncSize()
   })
   undoBtn.addEventListener('click', undo)
@@ -9938,11 +13120,11 @@ function openDrawingBoard(opts = {}) {
     if (!shapeMenu.hidden && !shapeMenu.contains(e.target) && !e.target.closest('[data-tool="shape"]')) shapeMenu.hidden = true
   })
   document.addEventListener('keydown', onKey)
+  history = [JSON.stringify(objects)]
+  histIndex = 0
+  syncHistory()
   requestAnimationFrame(() => {
     resize()
-    history = [JSON.stringify(objects)]
-    histIndex = 0
-    syncHistory()
     redraw()
   })
   if (window.ResizeObserver) {
@@ -10006,6 +13188,18 @@ async function collectHistory(entry) {
   } catch { /* 历史上报失败忽略，不影响浏览 */ }
 }
 
+/* 页面无 <title> 时浏览器会用网址兜底；这类标题不算真实站名，标签保留干净域名。 */
+function webHostOf(url) {
+  try { return new URL(String(url || '')).hostname.replace(/^www\./, '') } catch (_) { return '' }
+}
+function isUrlFallbackTitle(title, url) {
+  const t = String(title || '').trim()
+  if (!t) return true
+  const strip = (s) => String(s || '').replace(/^https?:\/\//i, '').replace(/[#/]+$/, '').toLowerCase()
+  if (strip(t) === strip(url)) return true
+  return /^[a-z0-9.-]+(:\d+)?(\/[^\s]*)?$/i.test(t) && /\./.test(t)
+}
+
 async function openCloudWebTab(url, title = '') {
   const target = String(url || '').trim()
   if (!/^https?:\/\//i.test(target)) return toast('只能打开 http/https 网页', true)
@@ -10022,8 +13216,7 @@ async function openCloudWebTab(url, title = '') {
     return
   }
   try { await ensureCloud() } catch { return toast('自带浏览器初始化失败', true) }
-  let host = '网页'
-  try { host = new URL(target).hostname.replace(/^www\./, '') } catch (_) {}
+  const host = webHostOf(target) || '网页'
   const id = `web-${Date.now()}`
   const name = String(title || host).trim().slice(0, 48) || host
   state.cloudTabs = (state.cloudTabs || []).filter((t) => t.kind !== 'new')
@@ -10077,6 +13270,12 @@ async function endAllCloudSessions() {
   if (!asTabById(state.cloudTab)) state.cloudTab = 'new'
 }
 
+/* 云浏览器主页推荐站点：点击在网页标签中打开；后续可在此追加常用网址。 */
+const CB_HOME_SITES = [
+  { title: '集团门户', host: 'jjghsjjt.com', url: 'https://www.jjghsjjt.com/' },
+  { title: '九江市自然资源局', host: 'bnr.jiujiang.gov.cn', url: 'https://bnr.jiujiang.gov.cn/' },
+]
+
 function cloudHomeHTML() {
   return `
     <div class="cb-addr">
@@ -10098,6 +13297,7 @@ function cloudHomeHTML() {
       <button class="cb-tool" id="cbToolFile">${icon('folder')}<span>文件</span><em>Ctrl+P</em></button>
       <button class="cb-tool" id="cbToolMore">${icon('grid')}<span>更多工具…</span><em>⌄</em></button>
     </div>
+    ${CB_HOME_SITES.length ? `<div class="cb-h">常用网站</div><div class="cb-site-row">${CB_HOME_SITES.map((s) => `<button class="cb-site" data-web-site="${esc(s.url)}" data-site-title="${esc(s.title || s.host)}"><span class="cb-site-ico">${esc((s.title || s.host).slice(0, 1).toUpperCase())}</span><span class="cb-site-name">${esc(s.title || s.host)}</span></button>`).join('')}</div>` : ''}
     <div class="cb-sec-row">
       ${(state.cloud?.policy || []).slice(0, 4).map((p) => `<span class="cb-sec">${esc(p.title)}</span>`).join('')}
     </div>`
@@ -10224,7 +13424,7 @@ function renderCloudPanel() {
     <div class="cb-grip" id="cbGrip" title="拖动调整宽度"></div>
     <div class="cb-head">
       <div class="cb-tabs">
-        ${tabs.map((t) => `<button class="cb-tab${t.id === active.id ? ' on' : ''}" data-tab="${esc(t.id)}" title="${esc(t.title)}">
+        ${tabs.map((t) => `<button class="cb-tab${t.id === active.id ? ' on' : ''}" data-tab="${esc(t.id)}" title="${esc(t.url ? `${t.title}\n${t.url}` : t.title)}">
           <span class="cb-tab-ico">${icon(t.kind === 'app' ? 'grid' : 'globe')}</span>
           <span class="cb-tab-name">${esc(t.title)}</span>
           <em class="cb-tab-x" data-x="${esc(t.id)}">×</em>
@@ -10236,7 +13436,7 @@ function renderCloudPanel() {
         : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>'}</button>
       <button class="cb-icon-btn" id="cbFold" title="折叠云浏览器"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M15 4v16"/></svg></button>
     </div>
-    <div class="cb-body${active.kind === 'app' ? ' cb-body-app' : ''}">${active.kind === 'app' ? cloudAppHTML(active) : active.kind === 'session' ? cloudSessionHTML(active) : active.kind === 'web' ? cloudWebHTML(active) : cloudHomeHTML()}</div>
+    <div class="cb-body${active.kind === 'app' ? ' cb-body-app' : active.kind === 'web' ? ' cb-body-web' : ''}">${active.kind === 'app' ? cloudAppHTML(active) : active.kind === 'session' ? cloudSessionHTML(active) : active.kind === 'web' ? cloudWebHTML(active) : cloudHomeHTML()}</div>
     ${state.cbFull ? `<div class="cb-composer">
       <button class="cbc-plus" title="附件">${icon('plus')}</button>
       <input id="cbcInput" placeholder="询问 九规智能中枢" autocomplete="off">
@@ -10292,6 +13492,7 @@ function renderCloudPanel() {
   }
 
   panel.querySelectorAll('[data-open]').forEach((b) => b.addEventListener('click', () => openCloudTab(b.dataset.open)))
+  panel.querySelectorAll('[data-web-site]').forEach((b) => b.addEventListener('click', () => openCloudWebTab(b.dataset.webSite, b.dataset.siteTitle)))
   panel.querySelector('#cbAddr')?.addEventListener('keydown', (e) => { if (e.key === 'Enter') submitCloudAddr(panel) })
   panel.querySelector('#cbBack')?.addEventListener('click', () => window.jgClient?.browser?.goBack?.())
   panel.querySelector('#cbFwd')?.addEventListener('click', () => window.jgClient?.browser?.goForward?.())
@@ -10462,6 +13663,24 @@ function hideNativeApp() {
   window.jgClient?.asApp?.hide()
 }
 
+/* 弹窗（openModal）同样是渲染进程里的 HTML 覆盖层；原生视图层级高于 HTML，弹窗打开期间
+   隐藏原生视图，全部弹窗关闭后若云浏览器面板仍打开，按当前标签恢复（与详情抽屉一致）。 */
+var __modalWasOpen = false
+function syncNativeWithModal() {
+  const anyModal = Boolean(document.querySelector('.jg-modal-mask'))
+  if (anyModal) { __modalWasOpen = true; return }
+  if (!__modalWasOpen) return
+  __modalWasOpen = false
+  if (state.cloudOpen && cloudAllowed()) renderCloudPanel()
+}
+function initModalNativeObserver() {
+  if (window.__modalNativeObserverBound) return
+  window.__modalNativeObserverBound = true
+  if (!window.MutationObserver) { syncNativeWithModal(); return }
+  const observer = new MutationObserver(syncNativeWithModal)
+  observer.observe(document.body, { childList: true, subtree: true })
+}
+
 /* 详情抽屉是渲染进程里的 fixed 覆盖层；Electron 的应用视图（WebContentsView）
    层级始终高于 HTML。抽屉打开时若已嵌入的上一个应用视图仍可见，会盖住抽屉正文，
    只露出标题条，表现为“第二个应用标题错位飘在顶部、右侧仍是上一个应用页面”。
@@ -10534,7 +13753,11 @@ function syncNativeBrowser(active) {
     nativeWebUrl = active.url
     bridge.open(active.url)
   }
-  requestAnimationFrame(sendNativeBounds)
+  /* 与应用槽位对齐：面板重建/完整视图切换后，栅格与滚动条可能在同一帧内再次变化；
+     补一次延迟同步，避免原生网页视图停留在上一档窄栏尺寸。 */
+  const syncWebBounds = () => sendNativeBounds()
+  requestAnimationFrame(syncWebBounds)
+  setTimeout(syncWebBounds, 120)
   if (window.ResizeObserver) {
     if (!nativeWebObserver) nativeWebObserver = new ResizeObserver(() => sendNativeBounds())
     nativeWebObserver.disconnect()
@@ -10794,14 +14017,24 @@ function initCloudBrowserBridge() {
       const tab = (state.cloudTabs || []).find((t) => t.id === state.cloudTab && t.kind === 'web')
       if (tab) {
         if (nav.url) tab.url = nav.url
-        if (nav.title) tab.title = String(nav.title).slice(0, 48)
+        // 真实页面标题才覆盖；浏览器用网址兜底的标题不采纳，标签保留干净域名便于区分。
+        if (nav.title && !isUrlFallbackTitle(nav.title, nav.url || tab.url)) {
+          tab.title = String(nav.title).slice(0, 48)
+        } else if (webHostOf(tab.url)) {
+          tab.title = webHostOf(tab.url)
+        }
         // 导航完成后二次采集：刷新、站内跳转、后退/前进都覆盖更新快照；后端按账号+类型+URL 幂等去重。
         if (nav.url) collectHistory({ kind: 'web', url: nav.url, title: tab.title || '' })
       }
       syncCloudNavButtons()
       const slot = document.getElementById('cbWebSlot')
       slot?.querySelector('.cb-web-status')?.remove()
-      if (tab) renderCloudPanel()
+      if (tab) {
+        renderCloudPanel()
+        /* 导航完成后面板重建，页面布局稳定后兜底再推一次视图尺寸 */
+        requestAnimationFrame(sendNativeBounds)
+        setTimeout(sendNativeBounds, 120)
+      }
     })
   }
   if (typeof bridge.onNavError === 'function') {
@@ -10825,6 +14058,10 @@ function initCloudBrowserBridge() {
       if (count) count.textContent = res?.matchCount ? `${res.activeMatchOrdinal}/${res.matchCount}` : ''
     })
   }
+  /* 页面内新窗口（target=_blank / window.open）：在云浏览器新开网页标签，而非交给系统默认浏览器。 */
+  if (typeof bridge.onNewWindow === 'function') {
+    bridge.onNewWindow((url) => { if (url) openCloudWebTab(url) })
+  }
 }
 
 function cloudDownloadRows(items) {
@@ -10835,7 +14072,7 @@ function cloudDownloadRows(items) {
     return `<div class="mc-block" style="padding:10px;margin-bottom:8px">
       <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
         <div style="flex:1;min-width:220px"><div style="font-size:12px">${esc(item.name)}</div>
-        <div class="mc-id mono" style="margin-top:4px;word-break:break-all">${esc(item.path || '')}</div></div>
+        <div class="mc-dim mono" style="margin-top:4px;word-break:break-all">${esc(item.path || '')}</div></div>
         <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
           <span class="tag${item.state === 'completed' ? ' ok' : ''}">${stateLabel}${item.state === 'downloading' && item.total ? ` ${pct}%` : ''}</span>
           ${item.state === 'completed' ? `<button class="btn sm" data-dl-open="${esc(item.path)}">打开</button><button class="btn sm" data-dl-reveal="${esc(item.path)}">定位</button>` : ''}
@@ -10850,9 +14087,9 @@ async function openCloudDownloads() {
   const bridge = window.jgClient?.browser
   if (!bridge) return toast('当前环境没有 Electron 下载桥接', true)
   const mask = openModal('浏览器下载与文件', `<div style="min-width:620px;max-width:80vw">
-    <div class="mc-id" style="margin-bottom:10px">真实下载记录 · 保存位置：系统“下载/九规智能中枢”</div>
+    <div class="mc-dim" style="margin-bottom:10px">真实下载记录 · 保存位置：系统“下载/九规智能中枢”</div>
     <div id="cbDlList"><div class="mc-dim">正在读取下载记录…</div></div>
-    <div class="mc-id" style="margin-top:10px">下载完成后可打开文件或在资源管理器中定位；未完成的下载不会显示为成功。</div>
+    <div class="mc-dim" style="margin-top:10px">下载完成后可打开文件或在资源管理器中定位；未完成的下载不会显示为成功。</div>
   </div>`, { wide: true })
   const list = mask.querySelector('#cbDlList')
   try {
@@ -11290,12 +14527,24 @@ async function openCloudTab(systemId) {
   collectHistory({ kind: 'session', systemId, title: sys.name || systemId })
 }
 
+/* ------------------------------ 地下管网 ----------------------------- */
+
+// 三工作界面（数据管理 / 三维场景 / 分析成果）在 pipeline-ui.js 中实现，
+// 首次进入时动态加载，避免把 Three.js 与管网模块塞进首屏。
+let pipelineUiModule = null
+
+async function renderPipeline(el) {
+  if (!pipelineUiModule) pipelineUiModule = await import('./pipeline-ui.js?v=28')
+  await pipelineUiModule.renderPipeline(el, { api, toast, icon, esc })
+}
+
 /* ---------------------------- placeholder --------------------------- */
 
 function renderPlaceholder(el) {
   const label = state.boot.modules[state.view]?.label || ''
   const detail = {
     oneMap: ['一张图'],
+    pipeline: ['地下管网'],
     oa: ['OA 办公'],
     review: ['审图平台'],
     finance: ['财务管理'],
@@ -11314,6 +14563,11 @@ function renderPlaceholder(el) {
 
 function openModal(title, body, opts = {}) {
   document.querySelectorAll('.jg-modal-mask').forEach((m) => m.remove())
+  // 原生 WebContentsView 层级高于 HTML；弹窗打开期间一并隐藏网页/应用原生视图，
+  // 避免盖住弹窗正文（与详情抽屉同一处理）。弹窗全部关闭后由观察者恢复。
+  closeNativeWeb()
+  hideNativeApp()
+  initModalNativeObserver()
   const mask = document.createElement('div')
   mask.className = 'jg-modal-mask open'
   mask.innerHTML = `<div class="jg-modal ${opts.wide ? 'wide' : ''}">
@@ -11332,8 +14586,17 @@ function openModal(title, body, opts = {}) {
   markDuplicateDismiss()
   const dismissObserver = new MutationObserver(markDuplicateDismiss)
   dismissObserver.observe(mask, { childList: true, subtree: true })
-  mask.querySelector('[data-mclose]').addEventListener('click', () => { dismissObserver.disconnect(); mask.remove() })
-  mask.addEventListener('click', (e) => { if (e.target === mask) { dismissObserver.disconnect(); mask.remove() } })
+  const close = () => { dismissObserver.disconnect(); document.removeEventListener('keydown', onKeydown); mask.remove() }
+  const onKeydown = (e) => {
+    if (!document.body.contains(mask)) { document.removeEventListener('keydown', onKeydown); return }
+    if (e.key !== 'Escape') return
+    const t = e.target
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return
+    close()
+  }
+  mask.querySelector('[data-mclose]').addEventListener('click', close)
+  mask.addEventListener('click', (e) => { if (e.target === mask) close() })
+  document.addEventListener('keydown', onKeydown)
   if (typeof opts.onMount === 'function') opts.onMount(mask)
   return mask
 }
@@ -12286,13 +15549,13 @@ function openAppRegister() {
 
 function openAutomationForm(idea) {
   const pre = idea ? { ...idea, sch: idea.schedule || idea.sch, desc: idea.prompt || idea.desc } : {}
-  const scheduleOptions = ['每天 08:30', '每周一 09:00', '每周五 17:00', '每季度首月 5 日', '每天 09:00']
+  const scheduleOptions = ['每天 08:30', '每周一 09:00', '每周五 17:00', '每月 1 日 09:00', '每季度首月 5 日', '每天 09:00']
   if (pre.sch && !scheduleOptions.includes(pre.sch)) scheduleOptions.unshift(pre.sch)
   const scheduleHtml = scheduleOptions.map((s) => `<option${pre.sch === s || (!pre.sch && s === '每天 08:30') ? ' selected' : ''}>${esc(s)}</option>`).join('')
   const body = `
     <div class="form-note">定时任务由系统 AI 按时执行。无人值守运行前，必须在这里明确它能做什么；超出范围会停止并记录，不会自动扩权。</div>
     <div class="form-grid">
-      <label>名称<input id="auName" placeholder="例如：每日公示项目变更摘要" value="${esc(pre.name || '')}"></label>
+      <label>名称<input id="auName" placeholder="例如：规划公示项目摘要" value="${esc(pre.name || '')}"></label>
       <label>频率<select id="auSch">${scheduleHtml}</select></label>
       <label style="grid-column:1/-1">任务权限<select id="auPerm">
         <option value="" disabled${(pre.permission || '') === '' ? ' selected' : ''}>请选择任务权限</option>
@@ -12301,7 +15564,7 @@ function openAutomationForm(idea) {
       </select></label>
     </div>
     <div class="form-label">执行内容</div>
-    <textarea id="auPrompt" rows="3" class="form-area" placeholder="写给 AI 的指令，例如：读取公示项目台账，比昨日快照，列出新增、变更与到期节点">${esc(pre.desc || '')}</textarea>
+    <textarea id="auPrompt" rows="3" class="form-area" placeholder="写给 AI 的指令，例如：查询自然资源局官网公示栏目，比昨日快照，列出新增、变更与到期公示">${esc(pre.desc || '')}</textarea>
     <div class="form-foot"><span class="mono">权限在创建时固定；越权即停止</span><span class="spacer"></span><button class="btn" data-mclose>取消</button><button class="btn primary" id="auSubmit">创建</button></div>`
   const mask = openModal('新建定时任务', body)
   mask.querySelectorAll('[data-mclose]').forEach((b) => b.addEventListener('click', () => mask.remove()))
@@ -12315,7 +15578,7 @@ function openAutomationForm(idea) {
     if (!ok) return toast('创建失败', true)
     mask.remove()
     toast('定时任务已创建，已加入已开启列表')
-    state.view = 'tasks'
+    state.view = 'automation'
     renderView()
   })
 }
@@ -12659,18 +15922,22 @@ function openDocDialog(format) {
   setTimeout(() => mask.querySelector('#ddName').focus(), 60)
 }
 
+let driveSearchTimer = 0
+
 async function renderDrive(el) {
   const PERSONAL_SPACE = { id: 'CL-PERSONAL', name: '个人云盘', kind: 'personal', title: '个人云盘', status: 'active', members: 1, total: PERSONAL_STORAGE.totalGB, used: storageUsedGB(), note: '个人云盘与智能笔记本共用每人 50GB' }
   const personal = state.driveSpace === 'CL-PERSONAL'
-  const space = personal ? 'CL-DEPT' : (state.driveSpace || 'CL-DEPT')
+  const space = state.driveSpace || 'CL-DEPT'
+  const q = (state.driveQuery || '').trim()
   const { body } = await api('/api/drive?space=' + encodeURIComponent(space))
-  const local = personal
-    ? (state.personalFiles || [])
-    : [...(state.driveFolders || []), ...(state.driveUploads || [])].filter((it) => it.space === space)
+  const searchRes = q ? await api('/api/drive/search?space=' + encodeURIComponent(space) + '&q=' + encodeURIComponent(q) + '&mode=' + encodeURIComponent(state.driveMode || 'all')) : null
+  const searchBody = searchRes?.body || {}
+  const local = personal ? [] : [...(state.driveFolders || [])].filter((it) => it.space === space)
   const renamed = state.driveRenames || {}
-  const items = personal ? [...local] : [...local, ...(body.items || [])]
+  const items = q && searchRes?.ok ? [...(searchBody.items || [])] : [...local, ...(body.items || [])]
   const itemsMapped = items.map((it) => renamed[it.id] ? { ...it, name: renamed[it.id] } : it)
-  const quota = personal ? { used: storageUsedGB(), total: PERSONAL_STORAGE.totalGB } : (body.quota || { used: 0, total: 1024 })
+  const searchTerms = q ? (searchBody.terms || []) : []
+  const quota = body.quota || { used: 0, total: personal ? PERSONAL_STORAGE.totalGB : 1024 }
   if (!personal && quota.used) {
     const adj = (state.driveQuotaAdj || {})[space] || 0
     quota.used = Math.max(0, Math.round((quota.used - adj) * 10) / 10)
@@ -12678,10 +15945,9 @@ async function renderDrive(el) {
   quota.used = quota.used || 0
   quota.total = quota.total || 1024
   const filter = state.driveFilter || 'all'
-  const q = state.driveQuery || ''
   const list = itemsMapped
     .filter((it) => (filter === 'all' ? true : filter === 'db' ? ['gdb', 'shp', 'dwg'].includes(it.type) : it.type === filter))
-    .filter((it) => (q ? `${it.name}${it.owner}${it.dept}${(it.tags || []).join('')}`.includes(q) : true))
+    .filter((it) => (q ? (searchRes?.ok ? true : `${it.name}${it.owner}${it.dept}${(it.tags || []).join('')}`.includes(q)) : true))
   const pct = Math.min(100, Math.round(((quota.used || 0) / (quota.total || 1)) * 100))
   const listPageSize = 10
   const listPages = Math.max(1, Math.ceil(list.length / listPageSize))
@@ -12690,6 +15956,24 @@ async function renderDrive(el) {
   const pageItems = list.slice((listPage - 1) * listPageSize, listPage * listPageSize)
   const gbText = (n) => (n >= 1024 ? `${(n / 1024).toFixed(n % 1024 === 0 ? 0 : 1)} TB` : `${n} GB`)
   const isDoc = (t) => ['docx', 'xlsx', 'pptx', 'pdf'].includes(t)
+  const driveIndexLabel = (status) => ({
+    ready: '全文可搜',
+    processing: '索引中',
+    pending: '待索引',
+    failed: '索引失败',
+    unsupported: '未建索引',
+    empty: '无正文',
+  }[status] || '待索引')
+  const highlight = (text, terms) => {
+    let out = esc(String(text || ''))
+    for (const term of terms) {
+      const raw = String(term || '').replace(/["']/g, '').trim()
+      if (!raw) continue
+      const pattern = raw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      try { out = out.replace(new RegExp(pattern, 'gi'), (m) => `<mark>${m}</mark>`) } catch { /* 非法表达式不处理 */ }
+    }
+    return out
+  }
 
   const spaces = [...(body.spaces || []), PERSONAL_SPACE]
   const cur = personal ? PERSONAL_SPACE : (body.space || { id: space, name: '', kind: 'dept', members: 0, total: 1024, used: 0 })
@@ -12719,14 +16003,14 @@ async function renderDrive(el) {
     <div class="dq-main">
       <div class="dq-title">${cur.kind === 'team' ? '专班' : cur.kind === 'personal' ? '个人' : '部门'}已用 ${quota.used} GB / 共 ${gbText(quota.total || 1024)}</div>
       <div class="dq-bar"><i style="width:${pct}%"></i></div>
-      <div class="dq-note">${cur.kind === 'personal' ? `个人云盘 ${PERSONAL_STORAGE.cloudGB} GB · 智能笔记本 ${PERSONAL_STORAGE.notebookGB} GB · 合计 ${storageUsedGB()} GB` : `资料由${cur.kind === 'team' ? '专班' : '部门'}成员上传，上传者自动记录`}</div>
+      <div class="dq-note">${cur.kind === 'personal' ? `个人云盘 ${quota.used} GB / 共 ${gbText(quota.total || PERSONAL_STORAGE.totalGB)} · 文件由服务端持久保存` : `资料由${cur.kind === 'team' ? '专班' : '部门'}成员上传，上传者自动记录`}</div>
     </div>
   </div>
   <div class="drive-bar" ${pending ? 'hidden' : ''}>
     <div class="drive-tabs">
       ${[['all', '全部'], ['docx', '文档'], ['xlsx', '表格'], ['pptx', '演示'], ['pdf', 'PDF'], ['atlas', '图集'], ['db', '数据库']].map(([k, l]) => `<button class="drive-tab ${filter === k ? 'on' : ''}" data-dfilter="${k}">${l}</button>`).join('')}
     </div>
-    <div class="drive-search"><span class="ico">${icon('search')}</span><input id="driveQ" placeholder="搜索文件、拥有者或部门" value="${esc(q)}"></div>
+    <div class="drive-search"><span class="ico">${icon('search')}</span><input id="driveQ" placeholder="搜索正文，空格分隔多个关键词" value="${esc(q)}" autocomplete="off"></div>
     <button class="drive-new" id="driveNew"><span class="ico">${icon('plus')}</span>新建</button>
     <input type="file" id="driveFilePick" hidden>
   </div>
@@ -12735,16 +16019,16 @@ async function renderDrive(el) {
       <span>名称</span><span>类型</span><span>上传者 / 共享</span><span>大小 / 更新</span><span></span>
     </div>
     ${pageItems.map((it) => `
-      <div class="drive-row" data-dopen="${it.id}">
-        <span class="dr-name"><span class="ico">${icon(DOC_META[it.type]?.icon || 'doc')}</span><span class="dr-title">${esc(it.name)}</span></span>
-        <span class="dr-type-cell"><em class="dr-type ${DOC_META[it.type]?.tone || ''}">${esc(DOC_META[it.type]?.label || it.type)}</em></span>
+      <div class="drive-row${it.snippet ? ' has-snip' : ''}" data-dopen="${it.id}">
+        <span class="dr-name"><span class="ico">${icon(DOC_META[it.type]?.icon || 'doc')}</span><span class="dr-name-main"><span class="dr-title" title="${esc(it.name)}">${highlight(it.name, searchTerms)}</span>${it.snippet ? `<span class="dr-snip">${highlight(it.snippet, searchTerms)}</span>` : (q && it.matchedBy === 'name' ? '<span class="dr-snip">文件名命中</span>' : '')}${it.duplicateCount ? `<span class="dr-dup">另有 ${it.duplicateCount} 份相同文件</span>` : ''}</span></span>
+        <span class="dr-type-cell"><em class="dr-type ${DOC_META[it.type]?.tone || ''}">${esc(DOC_META[it.type]?.label || it.type)}</em>${it.fileId ? `<small class="dr-index ${esc(it.indexStatus || 'pending')}">${driveIndexLabel(it.indexStatus)}</small>` : ''}</span>
         <span class="dr-who"><span class="dr-owner"><span class="nm">${esc(it.owner)}</span><small>${esc(it.dept)}</small></span><span class="dr-shareline">${esc(it.scope || '仅本人')} · ${esc((it.shared || []).slice(0, 2).join('、') || '本人')}</span></span>
         <span class="dr-meta">${esc(it.size)}<small>${esc(it.updated)}</small></span>
         <span class="dr-act">
           <button class="dr-more" data-dmore="${it.id}" title="更多操作" aria-label="更多操作">${icon('more')}</button>
         </span>
       </div>`).join('')}
-    ${list.length ? '' : '<div class="empty">没有匹配的文件</div>'}
+    ${list.length ? '' : `<div class="empty">${q ? '没有匹配的文件或正文' : itemsMapped.length ? '没有匹配的文件' : '云空间暂无文件，点击「新建」上传真实文件'}</div>`}
     <div class="ac-pager drive-pager" ${pending ? 'hidden' : ''}>
       ${listPages > 1 ? `<button class="ac-pg" data-dpage="${listPage - 1}" ${listPage <= 1 ? 'disabled' : ''}>上一页</button>
       ${pageSeq(listPage, listPages).map((p) => p === '…' ? '<span class="ac-pager-dots">…</span>' : `<button class="ac-pg num ${p === listPage ? 'on' : ''}" data-dpage="${p}">${p}</button>`).join('')}
@@ -12778,8 +16062,38 @@ async function renderDrive(el) {
   const filePick = el.querySelector('#driveFilePick')
   filePick.addEventListener('change', () => handleDriveUpload(filePick, el))
   const qInput = el.querySelector('#driveQ')
-  qInput.addEventListener('input', () => { state.driveQuery = qInput.value })
-  qInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { state.drivePage = 1; renderView() } })
+  const reportSearchClick = (it, action = 'open') => {
+    const searchId = searchBody.searchId
+    if (!q || !searchId || !it) return
+    const position = list.findIndex((item) => item.id === it.id) + 1
+    api('/api/drive/search/click', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ searchId, itemId: it.id, position, action }),
+    }).catch(() => {})
+  }
+  qInput.addEventListener('input', () => {
+    state.driveQuery = qInput.value
+    const focused = document.activeElement === qInput
+    clearTimeout(driveSearchTimer)
+    driveSearchTimer = setTimeout(() => {
+      if (state.view !== 'drive') return
+      state.drivePage = 1
+      renderView()
+      if (focused) {
+        const next = document.querySelector('#driveQ')
+        if (next) { next.focus(); const end = next.value.length; next.setSelectionRange(end, end) }
+      }
+    }, 450)
+  })
+  qInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      clearTimeout(driveSearchTimer)
+      state.drivePage = 1
+      renderView()
+    }
+  })
   el.querySelectorAll('[data-dpage]').forEach((b) => b.addEventListener('click', () => {
     const p = Number(b.dataset.dpage)
     if (!Number.isFinite(p)) return
@@ -12795,6 +16109,7 @@ async function renderDrive(el) {
     if (ev.target.closest('button')) return
     const it = list.find((x) => x.id === r.dataset.dopen)
     if (!it) return
+    reportSearchClick(it, 'open')
     if (it.type === 'folder') return toast('文件夹已打开（演示暂无内容）')
     if (it.local) return toast(`已选择「${it.name}」（演示上传文件，暂未接入预览）`)
     if (['atlas', 'db', 'gdb', 'shp', 'dwg'].includes(it.type)) openAssetCard(it.id)
@@ -12861,31 +16176,31 @@ function createDriveFolder() {
   setTimeout(() => mask.querySelector('#drFolderName').focus(), 60)
 }
 
-function handleDriveUpload(input, el) {
+async function handleDriveUpload(input, el) {
   const file = input.files && input.files[0]
   if (!file) return
-  const ext = (file.name.split('.').pop() || '').toLowerCase()
-  const type = ['docx', 'xlsx', 'pptx', 'pdf'].includes(ext) ? ext : 'file'
-  const user = state.boot.user
-  const size = file.size >= 1048576 ? `${(file.size / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(file.size / 1024))} KB`
-  const personal = state.driveSpace === 'CL-PERSONAL'
-  const addGB = file.size / (1024 ** 3)
-  if (personal && storageUsedGB() + addGB > PERSONAL_STORAGE.totalGB) return toast('个人总云存储空间不足', true)
-  if (personal) {
-    PERSONAL_STORAGE.cloudGB = Math.round((PERSONAL_STORAGE.cloudGB + addGB) * 100) / 100
-    state.personalFiles.unshift({
-      id: `PF-${Date.now()}`, name: file.name, type, size, owner: user.name, dept: user.dept || '集团总部',
-      updated: driveNow(), shared: ['本人'], scope: '仅本人', tags: ['个人云盘'], local: true,
+  const space = state.driveSpace || 'CL-DEPT'
+  input.disabled = true
+  try {
+    const uploaded = await uploadBinaryFile(file, 'drive')
+    if (!uploaded.ok || !uploaded.file?.id) {
+      toast(uploaded.body?.error || `《${file.name}》上传失败`, true)
+      return
+    }
+    const { body } = await api('/api/drive/upload', {
+      method: 'POST',
+      body: JSON.stringify({ fileId: uploaded.file.id, name: file.name, space }),
     })
-  } else {
-    state.driveUploads = [...(state.driveUploads || []), {
-      id: `UP-${Date.now()}`, name: file.name.replace(/\.[^.]+$/, ''), type, size, owner: user.name, dept: user.unit,
-      updated: driveNow(), shared: [], scope: '仅本人', space: state.driveSpace || 'CL-DEPT', local: true,
-    }]
+    if (!body?.ok) {
+      toast(body?.error || '云空间保存失败', true)
+      return
+    }
+    toast(`已上传「${file.name}」并保存到云空间`)
+    renderView()
+  } finally {
+    input.disabled = false
+    input.value = ''
   }
-  input.value = ''
-  toast(`已上传「${file.name}」`)
-  renderView()
 }
 
 function openDriveMoreMenu(it, anchor, el, spaces, personal) {
@@ -13777,7 +17092,7 @@ async function openImAttach(thread) {
 /* ======================= 模块角标通知 ======================= */
 function notifModule(n) {
   const nav = n.nav || ''
-  if (nav === 'automation') return 'tasks'
+  if (nav === 'automation') return 'automation'
   if (nav === 'drive') return 'drive'
   if (nav === 'notice') return 'notice'
   if (nav === 'im') return 'im'
@@ -14382,18 +17697,19 @@ const ENTERPRISE_ITEMS = [
   ['academy', '教学园地', 'cap'],
   ['bid', '智能投标', 'doc'],
   ['notice', '通知公告', 'megaphone'],
-  ['oa', 'OA 办公', 'doc'],
+  ['oa', 'OA 办公', 'clipboard'],
   ['datacenter', '数据中心', 'database'],
   ['oneMap', '一张图', 'map'],
+  ['pipeline', '地下管网', 'pipe'],
 ]
 
 const MORE_PLACEHOLDERS = [
   ['contacts', '通讯录', 'users'],
   ['im', '即时通讯', 'message'],
-  ['drive', '云空间', 'cloud'],
 ]
 
 const MORE_ITEMS = [
+  ['drive', '云空间', 'cloud'],
   ['monitor', '综合监测', 'pulse'],
   ['renewal', '城市体检和更新', 'target'],
   ['hr', '人事组织', 'users'],
@@ -14402,14 +17718,27 @@ const MORE_ITEMS = [
   ['adminops', '综合管理', 'briefcase'],
 ]
 
+// 用户在「整理企业工作台」里拖出来的顺序；未出现的模块按原定义顺序补齐
+function orderBySaved(items, saved) {
+  const list = Array.isArray(saved) ? saved : []
+  const rank = new Map(list.map((id, i) => [id, i]))
+  return items.slice().sort((a, b) => {
+    const ai = rank.has(a[0]) ? rank.get(a[0]) : 9999
+    const bi = rank.has(b[0]) ? rank.get(b[0]) : 9999
+    return ai - bi
+  })
+}
+function orderedEnterpriseItems() { return orderBySaved(ENTERPRISE_ITEMS, state.topOrder) }
+function orderedMoreItems() { return orderBySaved(MORE_ITEMS, state.moreOrder) }
+
 // 图标栏单列容量：超出后新模块/次要模块自动进入「更多」，不再占图标栏
 const RAIL_CAP = 12
 function railPlan() {
   const { user } = state.boot
   const vis = (id) => user.visibleModules.includes(id)
-  const core = ['imagegen', 'tasks', 'skills', 'projects'].filter(vis)
+  const core = ['imagegen', 'automation', 'skills', 'projects'].filter(vis)
   const pinned = state.morePinned.filter((id) => vis(id) && MORE_ITEMS.some(([itemId]) => itemId === id))
-  const entAll = ENTERPRISE_ITEMS.map(([id]) => id).filter(vis)
+  const entAll = orderedEnterpriseItems().map(([id]) => id).filter(vis)
   const slots = Math.max(0, RAIL_CAP - core.length)
   const entPool = entAll.filter((id) => !state.moreSet.includes(id))
   const entShown = entPool.slice(0, slots)
@@ -14440,9 +17769,15 @@ function openMoreMenu(anchor) {
   const moved = plan.entHidden.filter((id) => entMeta.has(id)).map((id) => entMeta.get(id))
   const pinnedItems = plan.pinnedShown.map((id) => MORE_ITEMS.find((x) => x[0] === id) || entMeta.get(id)).filter(Boolean)
   const seen = new Set()
-  const list = [...MORE_ITEMS, ...moved, ...pinnedItems]
+  const moreRank = new Map((state.moreOrder || []).map((id, i) => [id, i]))
+  const list = [...orderedMoreItems(), ...moved, ...pinnedItems]
     .filter(([id]) => user.visibleModules.includes(id))
     .filter(([id]) => (seen.has(id) ? false : seen.add(id)))
+    .sort((a, b) => {
+      const ai = moreRank.has(a[0]) ? moreRank.get(a[0]) : 9999
+      const bi = moreRank.has(b[0]) ? moreRank.get(b[0]) : 9999
+      return ai - bi
+    })
   const pop = document.createElement('div')
   pop.className = 'rail-pop more-pop'
   pop.innerHTML = `
@@ -14829,6 +18164,8 @@ function renderChat(el) {
     state.activeProjectId = ''
     state.activeProjectName = ''
     state.activeProjectCwd = ''
+    state.activeWorktreePath = ''
+    state.activeWorktreeBranch = ''
   }
 
   el.innerHTML = `
@@ -14951,6 +18288,27 @@ function renderChat(el) {
     const qid = input.id.slice('qCustom-'.length)
     state.qCustom = { ...(state.qCustom || {}), [qid]: input.value }
   }))
+  el.querySelector('#qNext')?.addEventListener('click', () => {
+    state.qStep = Math.min((Number(state.qStep) || 0) + 1, Math.max(0, (state.pendingInteraction?.questions || []).length - 1))
+    renderView()
+  })
+  el.querySelector('#qPrev')?.addEventListener('click', () => {
+    state.qStep = Math.max(0, (Number(state.qStep) || 0) - 1)
+    renderView()
+  })
+  el.querySelector('#qSkip')?.addEventListener('click', () => {
+    const p = state.pendingInteraction
+    const qs = p?.questions || []
+    const step = Number(state.qStep) || 0
+    const q = qs[step]
+    if (q) {
+      const next = { ...(state.qSel || {}) }
+      delete next[q.id]
+      state.qSel = next
+    }
+    state.qStep = Math.min(step + 1, Math.max(0, qs.length - 1))
+    renderView()
+  })
   el.querySelector('#qSubmit')?.addEventListener('click', () => submitAnswer(false))
   el.querySelector('#qCancel')?.addEventListener('click', () => submitAnswer(true))
   el.querySelector('#confirmCancel')?.addEventListener('click', () => {
@@ -14982,10 +18340,10 @@ function stepsBlock(steps, open = false) {
     ['子代理', steps.filter((s) => s.tool === '子代理').length],
   ].filter(([, n]) => n)
   const suffix = kinds.length ? ` · ${kinds.map(([label, n]) => `${label} ${n}`).join(' · ')}` : ''
-  return `<details class="steps-block"${open ? ' open' : ''}>
-    <summary class="steps-title">执行过程 · ${steps.length} 步${suffix}</summary>
+  return `<div class="steps-block flat">
+    <div class="steps-title">执行过程 · ${steps.length} 步${suffix}</div>
     ${steps.map(stepRow).join('')}
-  </details>`
+  </div>`
 }
 
 
@@ -15021,8 +18379,8 @@ function jobsPanel(msgs) {
 function todoBlock(todos) {
   if (!todos || !todos.length) return ''
   const done = todos.filter((t) => t.status === 'completed').length
-  return `<details class="steps-block" open>
-    <summary class="steps-title">任务清单 · ${done}/${todos.length} 完成</summary>
+  return `<div class="steps-block flat">
+    <div class="steps-title">任务清单 · ${done}/${todos.length} 完成</div>
     ${todos.map((t) => {
       const label = t.status === 'completed' ? '已完成' : t.status === 'in_progress' ? '进行中' : '待办'
       const dot = t.status === 'completed' ? 'ok' : 'warn'
@@ -15032,7 +18390,7 @@ function todoBlock(todos) {
         <span class="step-detail">${label}</span>
       </div>`
     }).join('')}
-  </details>`
+  </div>`
 }
 
 
@@ -15073,8 +18431,8 @@ function workflowBlock(workflows) {
       group.nodes.push(node)
     }
     const done = members.filter((n) => n.status === 'completed').length
-    return `<details class="steps-block">
-      <summary class="steps-title">工作流 · ${esc(w.name || '工作流')} · ${done}/${members.length} 节点</summary>
+    return `<div class="steps-block flat">
+      <div class="steps-title">工作流 · ${esc(w.name || '工作流')} · ${done}/${members.length} 节点</div>
       ${phases.map((g) => `<div class="step">
         <span class="step-dot ok"></span>
         <span class="step-tool">${esc(g.name)}</span>
@@ -15084,7 +18442,7 @@ function workflowBlock(workflows) {
         <span class="step-tool">${esc(n.label || `节点 ${n.seq}`)}</span>
         <span class="step-detail">${stateOf(n.status)}${n.childId ? ` · <span class="mono">${esc(n.childId)}</span>` : ''}</span>
       </div>`).join('')}`).join('')}
-    </details>`
+    </div>`
   }).join('')
 }
 
@@ -15095,8 +18453,8 @@ function subagentBlock(subs) {
   const toneOf = (s) => /error|fail/i.test(s.status || '') ? 'bad' : s.status === 'running' ? 'warn' : 'ok'
   const done = subs.filter((s) => s.status !== 'running').length
   const active = subs.filter((s) => s.status === 'running').length
-  return `<details class="steps-block" open>
-    <summary class="steps-title">Agent Team · 任务板 · ${done}/${subs.length} 已结束${active ? ` · ${active} 个进行中` : ''}</summary>
+  return `<div class="steps-block flat">
+    <div class="steps-title">Agent Team · 任务板 · ${done}/${subs.length} 已结束${active ? ` · ${active} 个进行中` : ''}</div>
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:8px;padding:2px 12px 12px">
       ${subs.map((s, i) => {
         const label = s.name || s.provider || `子代理 ${i + 1}`
@@ -15116,7 +18474,7 @@ function subagentBlock(subs) {
         </div>`
       }).join('')}
     </div>
-  </details>`
+  </div>`
 }
 
 
@@ -15265,6 +18623,18 @@ function formatDurationMs(ms) {
   return `${Math.floor(value / 60000)}m ${Math.round((value % 60000) / 1000)}s`
 }
 
+function statusBadgeHTML(m) {
+  const busy = Boolean(m.streaming && state.chatBusy)
+  const failed = Boolean(m.error || m.failed)
+  const stateText = busy ? '进行中' : failed ? '失败' : '已完成'
+  const tone = busy ? 'warn' : failed ? 'bad' : 'ok'
+  const duration = formatDurationMs(m.runStats?.durationMs || m.elapsedMs)
+  const process = [todoBlock(m.todos), workflowBlock(m.workflows), subagentBlock(m.subagents), stepsBlock(m.steps)].join('')
+  const summary = `<span class="msg-status-dot ${tone}"></span><span class="msg-status-text">${stateText}</span>${duration ? `<span class="msg-status-dur">用时 ${esc(duration)}</span>` : ''}`
+  if (!process) return `<div class="msg-status"><div class="msg-status-row">${summary}</div></div>`
+  return `<details class="msg-status"><summary class="msg-status-row">${summary}<span class="msg-status-chev">${icon('chevron')}</span></summary><div class="msg-status-body">${process}</div></details>`
+}
+
 function tokenBadgeHTML(m) {
   const value = formatTokensK(m.usage)
   if (!value) {
@@ -15340,25 +18710,22 @@ function renderMsg(m, idx = null) {
   }
   return `<div class="msg ai${state.shareMode ? ' share-mode' : ''}${on ? ' share-on' : ''}"${mi}>
     ${sharePickHTML(idx, on)}
-    <div class="ai-avatar">JG</div>
     <div class="ai-body">
-      ${todoBlock(m.todos)}
-      ${workflowBlock(m.workflows)}
-      ${subagentBlock(m.subagents)}
-      ${stepsBlock(m.steps)}
-      <div class="bubble">${m.text ? markdownHTML(m.text) : ''}${m.streaming ? '<span class="caret"></span>' : ''}</div>
+      ${statusBadgeHTML(m)}
+      <div class="bubble">${m.text ? markdownHTML(m.text) : ''}${m.streaming && state.chatBusy ? ((m.text || '').trim()
+        ? '<span class="caret"></span>'
+        : '<span class="stream-wait">正在生成回答…</span>') : ''}</div>
       ${visualBlock(m.visuals)}
       ${deliverableBlock(m.deliverables)}
       ${changeBlock(m.workspaceChanges)}
       ${m.citations?.length ? `<div class="cite-row">${m.citations.map((c) => `<span class="cite">${richTextHTML(c)}</span>`).join('')}</div>` : ''}
-      ${idx != null && !m.streaming ? `<div class="msg-actions">
+      ${idx != null && !(m.streaming && state.chatBusy) ? `<div class="msg-actions">
         <button type="button" class="msg-act icon" title="复制" aria-label="复制" data-copymsg="${idx}">${icon('copy')}</button>
         <button type="button" class="msg-act icon ${state.speakingIndex === idx ? 'on' : ''}" title="${state.speakingIndex === idx ? (state.speechLoading ? '正在生成语音' : (state.speechPaused ? '继续朗读' : '暂停朗读')) : '朗读这条回复'}" aria-label="朗读" data-speak="${idx}">${icon('volume')}</button>
         <button type="button" class="msg-act icon ${m.feedback === 'up' ? 'on' : ''}" title="有帮助" aria-label="有帮助" data-fb="${idx}" data-fbv="${m.feedback === 'up' ? 'clear' : 'up'}">${icon('thumbUp')}</button>
         <button type="button" class="msg-act icon ${m.feedback === 'down' ? 'on' : ''}" title="需改进" aria-label="需改进" data-fb="${idx}" data-fbv="${m.feedback === 'down' ? 'clear' : 'down'}">${icon('thumbDown')}</button>
         <button type="button" class="msg-act icon" title="分享" aria-label="分享" data-sharemsg="${idx}">${icon('share')}</button>
         ${tokenBadgeHTML(m)}
-        <button type="button" class="msg-act icon" title="重新生成这条回复" aria-label="重新生成" data-refreshmsg="${idx}">${icon('refresh')}</button>
         <span class="msg-time-inline" title="${esc(usageTip(m.usage, m.runStats))}">${esc(messageStamp(m))}</span>
         ${m.traceId ? `<button type="button" class="msg-act icon" title="更多" aria-label="更多" data-moremsg="${idx}">${icon('more')}</button>` : ''}
       </div>` : `<div class="msg-time">${esc(messageStamp(m))}${m.usage?.calls ? `<span title="${esc(usageTip(m.usage, m.runStats))}"> · ${esc(usageText(m.usage, m.runStats))}</span>` : ''}</div>`}
@@ -15968,26 +19335,37 @@ function renderInteraction() {
   }
   const qs = p.questions || []
   const planReview = qs.length === 1 && qs[0]?.intent?.kind === 'plan-review'
-  return `<div class="confirm-card">
-    <div class="confirm-title">${planReview ? '计划评审' : '需要你回答问题'}</div>
-    ${qs.map((q) => {
-      const selected = state.qSel?.[q.id] || []
-      const planLabel = (label) => {
-        if (!planReview) return label
-        if (label === 'Approve') return '批准执行'
-        if (label === 'Keep planning') return '继续规划'
-        return label
-      }
-      return `<div class="form-label">${esc(planReview ? '请确认是否按此计划执行' : (q.header || q.question))}</div>
-        ${planReview ? '' : (q.header ? `<div class="confirm-text">${esc(q.question)}</div>` : '')}
-        ${q.detail ? `<div class="confirm-draft">${esc(q.detail)}</div>` : ''}
-        ${(q.options || []).length ? `<div class="quick-row">${q.options.map((o) => `
-          <button class="quick" data-qopt="${esc(q.id)}" data-qlabel="${esc(o.label)}" title="${esc(o.description || '')}">${selected.includes(o.label) ? '✓ ' : ''}${esc(planLabel(o.label))}</button>`).join('')}</div>` : ''}
-        <input class="text-input" id="qCustom-${esc(q.id)}" placeholder="其他回答（可选）" value="${esc(state.qCustom?.[q.id] || '')}">
-      `}).join('')}
+  const total = Math.max(1, qs.length)
+  const step = Math.min(Math.max(0, Number(state.qStep) || 0), total - 1)
+  const q = qs[step]
+  if (!q) return ''
+  const selected = state.qSel?.[q.id] || []
+  const planLabel = (label) => {
+    if (!planReview) return label
+    if (label === 'Approve') return '批准执行'
+    if (label === 'Keep planning') return '继续规划'
+    return label
+  }
+  const last = step >= total - 1
+  return `<div class="confirm-card q-card">
+    <div class="confirm-title">${planReview ? '计划评审' : '需要你回答问题'}${total > 1 ? `<span class="q-step">${step + 1}/${total}</span>` : ''}</div>
+    ${planReview ? '<div class="form-label">请确认是否按此计划执行</div>' : ''}
+    ${q.header && !planReview ? `<div class="form-label">${esc(q.header)}</div>` : ''}
+    <div class="confirm-text">${esc(planReview ? '是否按上面的计划开始执行？' : (q.question || ''))}</div>
+    ${q.detail ? `<div class="confirm-draft">${esc(q.detail)}</div>` : ''}
+    ${(q.options || []).length ? `<div class="q-options">${q.options.map((o) => {
+      const on = selected.includes(o.label)
+      return `<button type="button" class="q-opt${on ? ' on' : ''}" data-qopt="${esc(q.id)}" data-qlabel="${esc(o.label)}" title="${esc(o.description || '')}">
+        <span class="q-box">${on ? '✓' : ''}</span>
+        <span class="q-main"><span class="q-label">${esc(planLabel(o.label))}</span>${o.description ? `<span class="q-desc">${esc(o.description)}</span>` : ''}</span>
+      </button>`
+    }).join('')}</div>` : ''}
+    <input class="text-input" id="qCustom-${esc(q.id)}" placeholder="其他回答（可选）" value="${esc(state.qCustom?.[q.id] || '')}">
     <div class="confirm-foot">
-      <button class="btn sm" id="qCancel">取消</button>
-      <button class="btn sm primary" id="qSubmit">确认回答</button>
+      ${step > 0 ? '<button class="btn sm" id="qPrev">上一题</button>' : '<button class="btn sm" id="qCancel">取消</button>'}
+      <span class="spacer"></span>
+      ${total > 1 && !last ? '<button class="btn sm" id="qSkip">跳过</button>' : ''}
+      <button class="btn sm primary" id="${last ? 'qSubmit' : 'qNext'}">${last ? '提交' : '下一题'}</button>
     </div>
   </div>`
 }
@@ -16051,7 +19429,7 @@ async function openRunStats(conversationId, traceId) {
 function openAdminTerminal() {
   const mask = openModal('平台开发终端', `
     <div class="mc-block" style="margin:0">
-      <div class="mc-block-head"><b>持久 PowerShell</b><span class="mc-id" id="termMeta">初始化…</span><span class="spacer"></span><button class="btn sm" id="termReset">重启终端</button></div>
+      <div class="mc-block-head"><b>持久 PowerShell</b><span class="mc-dim" id="termMeta">初始化…</span><span class="spacer"></span><button class="btn sm" id="termReset">重启终端</button></div>
       <div class="form-note">命令在服务端常驻 PowerShell 中执行，工作目录会在同一管理员会话内保持；仅管理员可用。</div>
       <pre id="termOut" class="mono" style="min-height:220px;max-height:46vh;overflow:auto;white-space:pre-wrap;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:10px;margin:8px 0">正在连接终端…</pre>
       <div style="display:flex;gap:8px;align-items:center">
@@ -16278,7 +19656,10 @@ async function renderHistory(el) {
 
 
 function openTaskRuns(a) {
-  const runs = (state.tasks || [])
+  const runs = (state.tasks || []).filter((x) => !a
+    || x.automationId === a.id
+    || x.id === a.lastTaskId
+    || (a.lastConversationId && x.conversationId === a.lastConversationId))
   const mask = openModal(`执行记录 · ${a ? a.name : '全部任务'}`, `
     <div class="tk-runs">
       ${runs.map((x) => {
@@ -16343,7 +19724,6 @@ async function loadTasks() {
   return state.tasks
 }
 
-
 async function renderTaskCenter(el) {
   const [{ body: autoBody }, tasks] = await Promise.all([api('/api/automations'), loadTasks()])
   state.automations = autoBody.items || []
@@ -16376,7 +19756,6 @@ async function renderTaskCenter(el) {
         <div class="tk-doc-name">${esc(sel.name)}</div>
         <span class="spacer"></span>
         <button class="tk-ico-btn" data-tkact="more" title="更多">${icon('dots')}</button>
-        <button class="tk-ico-btn" data-tkact="share" title="分享尚未接入" disabled style="opacity:.45;cursor:not-allowed">${icon('send')}</button>
       </div>
       <div class="tk-doc-scroll">
         <div class="tk-doc-inner">
@@ -16421,10 +19800,11 @@ async function renderTaskCenter(el) {
 
   const pinnedFirst = (a, b) => ((state.taskPins || []).includes(b.id) ? 1 : 0) - ((state.taskPins || []).includes(a.id) ? 1 : 0)
   const autoItem = (a) => `
-          <button class="tk-item${a.id === selId ? ' on' : ''}" data-auto="${a.id}">
+          <div class="tk-item${a.id === selId ? ' on' : ''}" data-auto="${a.id}">
             <span class="tk-item-main"><b>${esc(a.name)}</b><span>${esc(a.next || '—')} · ${esc(a.schedule)}</span></span>
-            ${a.status === 'active' ? '<span class="tk-dot"></span>' : ''}
-          </button>`
+            ${a.status === 'active' && !(state.taskRead || []).includes(a.id) ? '<span class="tk-dot"></span>' : ''}
+            <button type="button" class="tk-item-more" data-tkmenu="${a.id}" title="更多操作">${icon('dots')}</button>
+          </div>`
   const statusOf = (a) => (a.status === 'active' ? 'active' : (a.status === 'done' || a.status === 'completed' ? 'done' : 'paused'))
   let enabledStatus = state.taskStatus || ['active', 'paused', 'done']
   let taskQuery = String(state.taskQuery || '').trim().toLowerCase()
@@ -16447,9 +19827,99 @@ async function renderTaskCenter(el) {
   }
   const bindAutoRows = (root) => {
     root.querySelectorAll('[data-auto]').forEach((b) => b.addEventListener('click', () => {
-      state.taskSel = b.dataset.auto === state.taskSel ? '' : b.dataset.auto
+      const id = b.dataset.auto
+      if (!(state.taskRead || []).includes(id)) state.taskRead = [...(state.taskRead || []), id]
+      state.taskSel = id
       if (useSidebar) render()
       else renderView()
+    }))
+    bindTaskMenus(root)
+    const groups = root.querySelector('#tkGroups')
+    if (groups && !groups.dataset.blankBound) {
+      groups.dataset.blankBound = '1'
+      groups.addEventListener('click', (ev) => {
+        if (ev.target.closest('[data-auto]') || !state.taskSel) return
+        state.taskSel = ''
+        if (useSidebar) render()
+        else renderView()
+      })
+    }
+  }
+  const openTaskMenu = (anchor, a) => {
+    if (!beginPopover(anchor)) return
+    const active = a.status === 'active'
+    const pop = document.createElement('div')
+    pop.className = 'conv-menu tk-more-pop tk-action-menu'
+    pop.innerHTML = `
+      <button type="button" class="cm-item tk-menu-item" data-tkm="pause">
+        <span class="tk-menu-ico">${icon(active ? 'pause' : 'play')}</span>
+        <span class="tk-menu-label">${active ? '暂停' : '启用'}</span>
+      </button>
+      <button type="button" class="cm-item tk-menu-item" data-tkm="run">
+        <span class="tk-menu-ico">${icon('refresh')}</span>
+        <span class="tk-menu-label">立即运行</span>
+      </button>
+      <button type="button" class="cm-item tk-menu-item" data-tkm="edit">
+        <span class="tk-menu-ico">${icon('pen')}</span>
+        <span class="tk-menu-label">编辑</span>
+      </button>
+      <div class="tk-menu-sep"></div>
+      <button type="button" class="cm-item tk-menu-item danger" data-tkm="delete">
+        <span class="tk-menu-ico">${icon('trash')}</span>
+        <span class="tk-menu-label">删除</span>
+      </button>`
+    document.body.appendChild(pop)
+    finishPopover(pop, anchor)
+    const r = anchor.getBoundingClientRect()
+    pop.style.left = `${Math.max(8, r.right - pop.offsetWidth)}px`
+    pop.style.top = `${Math.max(8, Math.min(window.innerHeight - pop.offsetHeight - 8, r.bottom + 6))}px`
+    const closePop = () => pop.remove()
+    pop.querySelector('[data-tkm="pause"]').addEventListener('click', async () => {
+      const { ok, body } = await api('/api/automations/pause', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: a.id }) })
+      if (!ok) return toast(body.error || '切换任务状态失败', true)
+      a.status = body.item?.status || (active ? 'paused' : 'active')
+      closePop()
+      toast(`已${a.status === 'active' ? '启用' : '暂停'}「${a.name}」`)
+      renderView()
+    })
+    pop.querySelector('[data-tkm="run"]').addEventListener('click', async () => {
+      closePop()
+      const { ok, body: res } = await api('/api/automations/run', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: a.id }) })
+      if (!ok) return toast(res.error, true)
+      if (res.item) {
+        const cur = state.automations.find((x) => x.id === res.item.id)
+        if (cur) Object.assign(cur, res.item)
+      }
+      await loadTasks()
+      toast(`已触发执行，任务 ${res.task.id} 进入队列`)
+      renderView()
+    })
+    pop.querySelector('[data-tkm="edit"]').addEventListener('click', () => { closePop(); openAutomationForm(a) })
+    pop.querySelector('[data-tkm="delete"]').addEventListener('click', () => {
+      closePop()
+      const mask = openModal('删除定时任务', `
+        <div class="form-note">删除后该任务不再触发；已产生的执行记录与审计不受影响。</div>
+        <div class="form-foot"><span class="spacer"></span><button class="btn" data-mclose>取消</button><button class="btn danger" data-del>删除</button></div>`)
+      mask.querySelector('[data-mclose]').addEventListener('click', () => mask.remove())
+      const del = mask.querySelector('[data-del]')
+      del.addEventListener('click', async () => {
+        if (del.disabled) return
+        del.disabled = true
+        const { ok, body } = await api('/api/automations/delete', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: a.id }) })
+        if (!ok) { del.disabled = false; return toast(body.error || '删除定时任务失败', true) }
+        mask.remove()
+        state.automations = state.automations.filter((x) => x.id !== a.id)
+        if (state.taskSel === a.id) state.taskSel = ''
+        toast(`已删除「${a.name}」`)
+        renderView()
+      })
+    })
+  }
+  const bindTaskMenus = (root) => {
+    root.querySelectorAll('[data-tkmenu]').forEach((btn) => btn.addEventListener('click', (ev) => {
+      ev.stopPropagation()
+      const t = state.automations.find((x) => x.id === btn.dataset.tkmenu)
+      if (t) openTaskMenu(btn, t)
     }))
   }
   const taskListHTML = `
@@ -16563,7 +20033,6 @@ async function renderTaskCenter(el) {
     const act = b.dataset.tkact
     const sel = state.automations.find((x) => x.id === state.taskSel)
     if (!sel) return
-    if (act === 'share') return
     if (act === 'split') return
     if (act === 'panel') return
     if (act === 'plus') return
@@ -16592,7 +20061,7 @@ async function renderTaskCenter(el) {
         <div class="tk-menu-sep"></div>
         <button class="cm-item tk-menu-item" data-tk="move" disabled style="opacity:.45;cursor:not-allowed">
           <span class="tk-menu-ico">${icon('folder')}</span>
-          <span class="tk-menu-label">移至项目</span>
+          <span class="tk-menu-label">移至工作区</span>
           <span class="tk-menu-caret">${icon('chevron')}</span>
         </button>
         <div class="tk-more-sub" hidden>
@@ -16637,7 +20106,7 @@ async function renderTaskCenter(el) {
       })
       pop.querySelectorAll('[data-tk-project]').forEach((item) => item.addEventListener('click', () => {
         pop.remove()
-        toast(`已移至项目「${item.dataset.tkProject}」（演示）`)
+        toast(`已移至工作区「${item.dataset.tkProject}」（演示）`)
       }))
       pop.querySelector('[data-tk="pause"]').addEventListener('click', async () => {
         const { ok, body } = await api('/api/automations/pause', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: sel.id }) })
@@ -16713,7 +20182,7 @@ async function renderTaskCenter(el) {
 
   if (state.tasks.some((t) => ['running', 'queued'].includes(t.state))) {
     clearTimeout(renderTaskCenter._t)
-    renderTaskCenter._t = setTimeout(() => { if (state.view === 'tasks') renderView() }, 2600)
+    renderTaskCenter._t = setTimeout(() => { if (state.view === 'automation') renderView() }, 2600)
   }
 }
 
@@ -16738,7 +20207,7 @@ async function openWorktreePanel(project) {
   if (!project.cwd || project.status !== 'online') return toast('项目本地目录不可用', true)
   const mask = openModal('工作树', `
     <div style="min-width:680px;max-width:80vw">
-      <div class="mc-id" id="wtMeta">正在读取 Git 工作树…</div>
+      <div class="mc-dim" id="wtMeta">正在读取 Git 工作树…</div>
       <div style="display:flex;gap:8px;align-items:center;margin:10px 0 12px;flex-wrap:wrap">
         <button class="btn sm" id="wtRefresh">刷新</button>
         <button class="btn sm primary" id="wtNew">让 Agent 新建工作树</button>
@@ -16758,7 +20227,7 @@ async function openWorktreePanel(project) {
       <div style="display:flex;gap:10px;align-items:flex-start;flex-wrap:wrap">
         <div style="flex:1;min-width:260px">
           <div class="mono" style="font-size:12px;word-break:break-all">${esc(item.path)}</div>
-          <div class="mc-id" style="margin-top:4px">${esc(item.branch || '分离 HEAD')} · ${shortHead} · ${stateTag} ${dirty}${item.statusError ? ` · ${esc(item.statusError)}` : ''}</div>
+          <div class="mc-dim" style="margin-top:4px">${esc(item.branch || '分离 HEAD')} · ${shortHead} · ${stateTag} ${dirty}${item.statusError ? ` · ${esc(item.statusError)}` : ''}</div>
         </div>
         <div class="wt-actions" style="display:flex;gap:6px;flex-wrap:wrap">
           <button class="btn sm" data-wt-copy>复制路径</button>
@@ -16771,7 +20240,7 @@ async function openWorktreePanel(project) {
   const branchRowHTML = (branch) => `<div class="mc-block" data-wbname="${esc(branch.name)}" style="padding:10px;margin-bottom:8px">
     <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
       <div style="flex:1;min-width:220px"><div class="mono" style="font-size:12px">${esc(branch.name)}</div>
-      <div class="mc-id" style="margin-top:4px">不再被任何工作树占用</div></div>
+      <div class="mc-dim" style="margin-top:4px">不再被任何工作树占用</div></div>
       <div class="wt-branch-actions" style="display:flex;gap:6px;flex-wrap:wrap"><button class="btn sm" data-wb-del>删除分支</button></div>
     </div>
   </div>`
@@ -16861,7 +20330,7 @@ async function openWorktreePanel(project) {
     list.querySelectorAll('[data-wtpath]').forEach((row, index) => bindRow(row, body.items[index]))
     const orphans = (body.branches || []).filter((branch) => branch.orphan)
     if (orphans.length) {
-      list.insertAdjacentHTML('beforeend', `<div class="mc-id" style="margin:14px 0 8px"><b>孤立分支</b> · 工作树已移除，分支仍保留</div>${orphans.map(branchRowHTML).join('')}`)
+      list.insertAdjacentHTML('beforeend', `<div class="mc-dim" style="margin:14px 0 8px"><b>孤立分支</b> · 工作树已移除，分支仍保留</div>${orphans.map(branchRowHTML).join('')}`)
       list.querySelectorAll('[data-wbname]').forEach((row, index) => {
         const branch = orphans[index]
         row.querySelector('[data-wb-del]')?.addEventListener('click', () => confirmBranch(row, branch))
@@ -17713,7 +21182,7 @@ async function renderAdminCost(root, blocks) {
         <div class="mc-thead"><span>价格源</span><span>状态</span><span>最近检查</span><span>说明</span><span>操作</span></div>
         ${sourceRows || '<div class="mc-empty">尚未完成首次价格源检查</div>'}
       </div>
-      ${alerts.length ? `<div style="padding:10px 12px;border-top:1px solid #eceff3"><div class="mc-count" style="margin-bottom:6px">待核对变更 ${alerts.length} 条</div>${alerts.slice(0, 8).map((a) => `<div class="mc-row"><span class="mc-row-main">${esc(a.label || a.sourceId)}</span><span class="mc-row-cell">${esc(timeOf(a.at))} · 价格指纹 ${esc(String(a.fromHash || '').slice(0, 8))} → ${esc(String(a.toHash || '').slice(0, 8))}</span></div>`).join('')}</div>` : ''}
+      ${alerts.length ? `<div class="mc-rows" style="border-top:1px solid #eceff3"><div class="mc-count" style="margin-bottom:6px">待核对变更 ${alerts.length} 条</div>${alerts.slice(0, 8).map((a) => `<div class="mc-row mc-row-change"><span class="mc-row-main mc-change-name">${esc(a.label || a.sourceId)}</span><span class="mc-row-cell mc-change-meta">${esc(timeOf(a.at))} · 价格指纹 ${esc(String(a.fromHash || '').slice(0, 8))} → ${esc(String(a.toHash || '').slice(0, 8))}</span></div>`).join('')}</div>` : ''}
     </div>`
 
   blocks.querySelector('[data-price-check]')?.addEventListener('click', async (event) => {
@@ -17984,7 +21453,7 @@ async function renderAdmin(el) {
               <span><span class="mc-tag ${tone}">${label}</span></span>
               <span>${esc(item.applicant)}</span>
               <span>${esc(item.category)} · ${esc(item.ratio)}</span>
-              <span class="mc-acts">${acts}</span>
+              <span class="mc-acts">${acts}<button class="btn sm danger" data-tpldelete="${esc(item.id)}">删除</button></span>
             </div>`
           }).join('') || `<div class="mc-row">${tplFilter === 'all' ? '当前没有图像模板' : `当前没有${tplFilterLabel[tplFilter]}模板`}</div>`}
         </div>
@@ -18065,6 +21534,27 @@ async function renderAdmin(el) {
           state.imagegen.templatesLoaded = false
           state.reviewProgressLoaded = false
           toast(isOffline ? `模板「${item.title}」已下架` : '已退回该模板申请')
+          renderView()
+        })
+      }))
+      wrap.querySelectorAll('[data-tpldelete]').forEach((b) => b.addEventListener('click', () => {
+        const id = b.dataset.tpldelete
+        const item = templates.find((x) => x.id === id)
+        if (!item) return
+        const mask = openModal('删除图像模板', `
+          <div class="form-note">删除后该模板从模板库移除，申请人与员工都不再可见；历史生成记录不受影响。此操作不可恢复。</div>
+          <div class="form-foot"><span class="spacer"></span><button class="btn" data-mclose>取消</button><button class="btn danger" data-del>删除</button></div>`)
+        mask.querySelector('[data-mclose]').addEventListener('click', () => mask.remove())
+        const del = mask.querySelector('[data-del]')
+        del.addEventListener('click', async () => {
+          if (del.disabled) return
+          del.disabled = true
+          const { ok, body } = await api('/api/images/template-delete', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id }) })
+          if (!ok) { del.disabled = false; return toast(body.error || '删除模板失败', true) }
+          mask.remove()
+          state.imagegen.templatesLoaded = false
+          state.reviewProgressLoaded = false
+          toast(`已删除模板「${item.title}」`)
           renderView()
         })
       }))
@@ -19052,6 +22542,8 @@ function renderSettings(el) {
     })
   })
 
+  if (active === 'memory') initMemorySettings(el)
+
   el.querySelector('[data-act="changePassword"]')?.addEventListener('click', openChangePassword)
 
   const unavailableSettings = new Set(['workspace', 'workspaceReset', 'reauth', 'devices', 'diag', 'applyAccess', 'export', 'archive', 'clearCache', 'testMcp', 'update', 'help'])
@@ -19302,9 +22794,106 @@ async function loadReviewProgress() {
   }
 }
 
+function initMemorySettings(el) {
+  const list = el.querySelector('#memList')
+  const count = el.querySelector('#memCount')
+  const input = el.querySelector('#memInput')
+  const add = el.querySelector('#memAdd')
+  if (!list || !count || !input || !add) return
+  const kindLabel = { preference: '偏好', fact: '事实', decision: '决策', entity: '实体', task: '任务' }
+  const paint = async () => {
+    list.innerHTML = '<div class="set-desc" style="padding:8px 0">读取中…</div>'
+    const { ok, body } = await api('/api/memories?limit=200')
+    if (!ok) {
+      count.textContent = '读取失败'
+      list.innerHTML = `<div class="set-desc" style="padding:8px 0">${esc(body?.error || '记忆读取失败')}</div>`
+      return
+    }
+    const items = Array.isArray(body.items) ? body.items : []
+    count.textContent = `${Number(body.count || items.length)} 条 · ${body.embeddingEnabled ? '语义检索已启用' : '词法匹配（未配置向量接口）'}`
+    list.innerHTML = items.length
+      ? items.map((item) => `<div class="set-row" style="align-items:flex-start;border-top:1px solid var(--line)">
+          <div class="set-copy">
+            <div class="set-label">${esc(kindLabel[item.kind] || '事实')}${item.pinned ? ' · 已置顶' : ''}</div>
+            <div class="set-desc" style="margin-top:2px;white-space:normal">${esc(item.text)}</div>
+            <div class="set-desc mono" style="margin-top:4px">${esc(item.scope === 'project' ? `项目 ${item.scopeRef}` : item.scope === 'conversation' ? '本会话' : '全局')} · 使用 ${Number(item.useCount || 0)} 次${(item.tags || []).length ? ` · ${esc((item.tags || []).join(' / '))}` : ''}</div>
+          </div>
+          <div class="set-ctrl" style="display:flex;gap:6px">
+            ${item.pinned ? '' : `<button class="btn sm" data-mem-pin="${esc(item.id)}">置顶</button>`}
+            <button class="btn sm" data-mem-del="${esc(item.id)}">删除</button>
+          </div>
+        </div>`).join('')
+      : '<div class="set-desc" style="padding:10px 0">还没有长期记忆。聊天里说“记住：……”即可自动保存，也可以在上方手动添加。</div>'
+    list.querySelectorAll('[data-mem-del]').forEach((b) => b.addEventListener('click', async () => {
+      b.disabled = true
+      const { ok: done, body: result } = await api('/api/memories/delete', {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: b.dataset.memDel }),
+      })
+      if (!done) { b.disabled = false; return toast(result.error || '删除失败', true) }
+      toast('已归档这条记忆')
+      paint()
+    }))
+    list.querySelectorAll('[data-mem-pin]').forEach((b) => b.addEventListener('click', async () => {
+      const item = items.find((x) => x.id === b.dataset.memPin)
+      if (!item) return
+      b.disabled = true
+      const { ok: done, body: result } = await api('/api/memories', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ content: item.text, kind: item.kind, scope: item.scope, scopeRef: item.scopeRef, pinned: true }),
+      })
+      if (!done) { b.disabled = false; return toast(result.error || '置顶失败', true) }
+      toast('已置顶，之后每轮优先注入')
+      paint()
+    }))
+  }
+  add.addEventListener('click', async () => {
+    const content = String(input.value || '').trim()
+    if (!content) return toast('先写一条要记住的内容', true)
+    add.disabled = true
+    const { ok, body } = await api('/api/memories', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ content, kind: 'preference' }),
+    })
+    add.disabled = false
+    if (!ok) return toast(body.error || '保存失败', true)
+    input.value = ''
+    toast(body.created ? '已写入长期记忆' : '已更新这条记忆')
+    paint()
+  })
+  input.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); add.click() }
+  })
+  paint()
+}
+
 function settingsBody(tab) {
   const { user, counts, models } = state.boot
   const p = 'set-'
+
+  if (tab === 'memory') {
+    return {
+      title: '长期记忆',
+      groups: [
+        sgroup('记忆库', [
+          `<div class="set-row" style="align-items:flex-start">
+            <div class="set-copy">
+              <div class="set-label">已保存的长期记忆</div>
+              <div class="set-desc">按账号隔离，每轮只召回与当前请求最相关的少量条目注入模型；支持语义检索，向量接口不可用时自动降级为关键词匹配。</div>
+            </div>
+            <div class="set-ctrl"><span id="memCount" class="set-desc">读取中…</span></div>
+          </div>`,
+          `<div style="padding:0 18px 16px">
+            <div style="display:flex;gap:8px;align-items:center">
+              <input id="memInput" class="text-input" style="flex:1" placeholder="例如：以后汇报先给结论，再列不超过三条支撑证据">
+              <button class="btn sm" id="memAdd">添加</button>
+            </div>
+            <div class="set-desc" style="margin-top:6px">只有跨会话稳定的偏好、事实、决策才值得保存；一次性任务和敏感信息不要写进来。</div>
+            <div id="memList" style="margin-top:12px;max-height:46vh;overflow:auto">加载中…</div>
+          </div>`,
+        ]),
+      ],
+    }
+  }
 
   if (tab === 'general') {
     return {
@@ -20003,7 +23592,7 @@ function renderLogin(el) {
     <div class="login-page">
       <aside class="login-brandpane">
         <div class="login-brandinner">
-          <img src="./logo.png?v=2" alt="" class="login-mark">
+          <img src="./logo.png?v=3" alt="" class="login-mark">
           <div class="login-brand">九规智能中枢</div>
           <div class="login-sub">九江市规划设计集团 · 企业级 AI 中枢</div>
           <div class="login-section">安全域</div>
@@ -20302,12 +23891,11 @@ function openGrantDialog(r, grants) {
 
 
 const TASK_IDEAS = [
-  { name: '每日公示项目变更摘要', desc: '每天 08:30 读取公示项目台账，比昨日快照，摘要投递到项目组群', sch: '每天 08:30' },
-  { name: '本周工作小结草稿', desc: '每周五 17:00 汇总本周会话与项目结论，生成周报草稿投递到项目文档', sch: '每周五 17:00' },
-  { name: '城市体检指标月度快照', desc: '每月 1 日 09:00 生成体检指标快照表，口径变化单独列一节', sch: '每月 1 日 09:00' },
-  { name: '影像入库核验单', desc: '每季度首月 5 日核对影像范围、分辨率与元数据，生成核验单', sch: '每季度首月 5 日' },
-  { name: '审图意见周汇总', desc: '每周一 09:00 收集各项目审图意见，按专业归类并跟踪回复状态', sch: '每周一 09:00' },
-  { name: '知识库索引巡检', desc: '每周一 09:00 检查未建索引与解析失败的文档，生成待处理清单', sch: '每周一 09:00' },
+  {
+    name: '规划公示项目摘要', sch: '每天 08:30', permission: 'read-only',
+    desc: '每天 08:30 查询九江市自然资源局官网规划公示栏目，比昨日快照，摘要投递到对应项目组消息',
+    prompt: '通过云浏览器打开九江市自然资源局门户网站（bnr.jiujiang.gov.cn）「规划编制、实施批前公示」栏目，采集新增、变更与即将到期的公示事项（项目名称、位置、公示期限、反馈渠道），与昨日快照比对，按项目归并成 5 行以内摘要，投递到对应项目组消息；仅查询公开公示信息，不登录账号、不提交意见、不下载图纸。',
+  },
 ]
 
 
@@ -20316,38 +23904,140 @@ const TASK_IDEAS = [
 function openMoreConfig() {
   const { user } = state.boot
   const visibles = (id) => user.visibleModules.includes(id)
-  const aiItems = [['home', '首页'], ['imagegen', '图像'], ['tasks', '定时任务'], ['skills', '插件与技能'], ['projects', '项目']]
-  const moved = ENTERPRISE_ITEMS.filter(([id]) => state.moreSet.includes(id) && visibles(id))
-  const inRail = ENTERPRISE_ITEMS.filter(([id]) => !state.moreSet.includes(id) && visibles(id))
+  const aiItems = [['home', '首页'], ['imagegen', '图像'], ['automation', '定时任务'], ['skills', '插件与技能'], ['projects', '项目']]
+  const allEnt = orderedEnterpriseItems()
+  const movedEnt = allEnt.filter(([id]) => state.moreSet.includes(id) && visibles(id))
+  const inRail = allEnt.filter(([id]) => !state.moreSet.includes(id) && visibles(id))
+  const staticMore = orderedMoreItems().filter(([id]) => visibles(id) && !state.morePinned.includes(id))
+  const rawMoved = [...staticMore, ...movedEnt]
+  const allMoreIds = rawMoved.map(([id]) => id)
+  const savedMore = (Array.isArray(state.moreOrder) ? state.moreOrder : []).filter((id) => allMoreIds.includes(id))
+  if (savedMore.length !== allMoreIds.length || savedMore.some((id, i) => id !== (state.moreOrder || [])[i])) {
+    state.moreOrder = [...savedMore, ...allMoreIds.filter((id) => !savedMore.includes(id))]
+    localStorage.setItem('jg.moreOrder', JSON.stringify(state.moreOrder))
+  }
+  const moreRank = new Map((state.moreOrder || []).map((id, i) => [id, i]))
+  const moved = rawMoved.slice().sort((a, b) => {
+    const ai = moreRank.has(a[0]) ? moreRank.get(a[0]) : 9999
+    const bi = moreRank.has(b[0]) ? moreRank.get(b[0]) : 9999
+    return ai - bi
+  })
+  const grip = '<span class="mc-grip" aria-hidden="true"><svg viewBox="0 0 8 14" fill="currentColor"><circle cx="2" cy="2.5" r="1"/><circle cx="6" cy="2.5" r="1"/><circle cx="2" cy="7" r="1"/><circle cx="6" cy="7" r="1"/><circle cx="2" cy="11.5" r="1"/><circle cx="6" cy="11.5" r="1"/></svg></span>'
+  const row = ([id, label, ic], col, action) => `
+    <div class="mc-row" data-mc-row data-mc-id="${esc(id)}" data-mc-col="${col}" draggable="true" tabindex="0" role="listitem" aria-label="${esc(state.boot.modules[id]?.label || label)}，可拖动排序" title="拖动调整顺序，Alt+↑/↓ 也可调整">
+      ${grip}
+      <span class="ico">${icon(ic)}</span>
+      <span class="mc-name">${esc(state.boot.modules[id]?.label || label)}</span>
+      ${action || ''}
+    </div>`
   const mask = openModal('整理企业工作台', `
-    <div style="font-size:var(--fs-sub);color:var(--text-2);line-height:1.6;max-width:560px"></div>
+    <div class="mc-hint">拖动模块可调整顺序；右侧「已收进更多」会列出当前已经收进「更多」的全部模块。</div>
     <div class="mc-grid">
-      <div class="mc-col">
+      <div class="mc-col" data-mc-col="rail">
         <div class="mc-h">图标栏显示 <span class="mono">${inRail.length}</span></div>
-        ${inRail.map(([id, label, ic]) => `<div class="mc-row"><span class="ico">${icon(ic)}</span><span class="mc-name">${esc(state.boot.modules[id]?.label || label)}</span><button class="btn sm subtle" data-mc-out="${id}">收进更多</button></div>`).join('') || '<div class="mc-empty">全部已收进更多</div>'}
+        <div class="mc-list" data-mc-list="rail">
+          ${inRail.map((item) => row(item, 'rail', `<button class="btn sm subtle" data-mc-out="${item[0]}">收进更多</button>`)).join('') || '<div class="mc-empty">全部已收进更多</div>'}
+        </div>
       </div>
-      <div class="mc-col">
-        <div class="mc-h">收进更多 <span class="mono">${moved.length}</span></div>
-        ${moved.map(([id, label, ic]) => `<div class="mc-row"><span class="ico">${icon(ic)}</span><span class="mc-name">${esc(state.boot.modules[id]?.label || label)}</span><button class="btn sm subtle" data-mc-in="${id}">放回图标栏</button></div>`).join('') || '<div class="mc-empty">暂无</div>'}
+      <div class="mc-col" data-mc-col="more">
+        <div class="mc-h">已收进更多 <span class="mono">${moved.length}</span></div>
+        <div class="mc-list" data-mc-list="more">
+          ${moved.map((item) => row(item, 'more', state.moreSet.includes(item[0]) ? `<button class="btn sm subtle" data-mc-in="${item[0]}">放回图标栏</button>` : '')).join('') || '<div class="mc-empty">暂无已收进更多的模块。可从左侧点「收进更多」，或把模块拖到这里。</div>'}
+        </div>
       </div>
     </div>
     <div class="mc-fixed"><div class="mc-h">AI 工作台（固定）</div><div class="mc-tags">${aiItems.map(([id, label]) => `<span class="tag">${esc(state.boot.modules[id]?.label || label)}</span>`).join('')}</div><div class="mc-note"></div></div>`, { width: 720 })
   const sync = () => {
     localStorage.setItem('jg.moreSet', JSON.stringify(state.moreSet))
+    localStorage.setItem('jg.topOrder', JSON.stringify(state.topOrder))
+    localStorage.setItem('jg.moreOrder', JSON.stringify(state.moreOrder))
     renderRail()
+  }
+  const idsOf = (col) => [...mask.querySelectorAll(`[data-mc-row][data-mc-col="${col}"]`)].map((r) => r.dataset.mcId)
+  const commitOrder = (col, ids) => {
+    if (col === 'rail') state.topOrder = ids
+    else state.moreOrder = ids
+    sync(); mask.remove(); openMoreConfig()
+  }
+  const moveInOrder = (col, id, delta) => {
+    const ids = idsOf(col)
+    const from = ids.indexOf(id)
+    const to = from + delta
+    if (from < 0 || to < 0 || to >= ids.length) return
+    ids.splice(from, 1)
+    ids.splice(to, 0, id)
+    commitOrder(col, ids)
+    toast(`已调整「${state.boot.modules[id]?.label || id}」的顺序`)
   }
   mask.querySelectorAll('[data-mc-out]').forEach((b) => b.addEventListener('click', () => {
     const id = b.dataset.mcOut
     if (!state.moreSet.includes(id)) state.moreSet.push(id)
+    if (!state.moreOrder.includes(id)) state.moreOrder.push(id)
     sync(); mask.remove(); openMoreConfig()
     toast(`已把「${state.boot.modules[id]?.label || id}」收进更多`)
   }))
   mask.querySelectorAll('[data-mc-in]').forEach((b) => b.addEventListener('click', () => {
     const id = b.dataset.mcIn
     state.moreSet = state.moreSet.filter((x) => x !== id)
+    state.moreOrder = state.moreOrder.filter((x) => x !== id)
     sync(); mask.remove(); openMoreConfig()
     toast(`已把「${state.boot.modules[id]?.label || id}」放回图标栏`)
   }))
+  let drag = null
+  mask.querySelectorAll('[data-mc-row]').forEach((el) => {
+    el.addEventListener('dragstart', (ev) => {
+      if (ev.target.closest('button')) { ev.preventDefault(); return }
+      drag = { id: el.dataset.mcId, col: el.dataset.mcCol, el }
+      el.classList.add('dragging')
+      if (ev.dataTransfer) { ev.dataTransfer.effectAllowed = 'move'; ev.dataTransfer.setData('text/plain', drag.id) }
+    })
+    el.addEventListener('dragend', () => {
+      el.classList.remove('dragging')
+      mask.querySelectorAll('.mc-row.is-over').forEach((r) => r.classList.remove('is-over'))
+      drag = null
+    })
+    el.addEventListener('dragover', (ev) => {
+      if (!drag || drag.el === el || drag.col !== el.dataset.mcCol) return
+      ev.preventDefault(); ev.stopPropagation()
+      if (ev.dataTransfer) ev.dataTransfer.dropEffect = 'move'
+      el.classList.add('is-over')
+    })
+    el.addEventListener('dragleave', (ev) => { if (!el.contains(ev.relatedTarget)) el.classList.remove('is-over') })
+    el.addEventListener('drop', (ev) => {
+      if (!drag || drag.col !== el.dataset.mcCol) return
+      ev.preventDefault(); ev.stopPropagation()
+      const ids = idsOf(drag.col).filter((x) => x !== drag.id)
+      const target = el.dataset.mcId
+      const after = ev.clientY > el.getBoundingClientRect().top + el.getBoundingClientRect().height / 2
+      let at = ids.indexOf(target)
+      if (at < 0) at = ids.length
+      else if (after) at += 1
+      ids.splice(at, 0, drag.id)
+      el.classList.remove('is-over')
+      commitOrder(drag.col, ids)
+      toast(`已调整「${state.boot.modules[drag.id]?.label || drag.id}」的顺序`)
+    })
+    el.addEventListener('keydown', (ev) => {
+      if (!ev.altKey || (ev.key !== 'ArrowUp' && ev.key !== 'ArrowDown')) return
+      ev.preventDefault(); ev.stopPropagation()
+      moveInOrder(el.dataset.mcCol, el.dataset.mcId, ev.key === 'ArrowUp' ? -1 : 1)
+    })
+  })
+  mask.querySelectorAll('[data-mc-col]').forEach((colEl) => {
+    colEl.addEventListener('dragover', (ev) => {
+      if (!drag || drag.col !== colEl.dataset.mcCol) return
+      ev.preventDefault(); colEl.classList.add('is-over')
+    })
+    colEl.addEventListener('dragleave', (ev) => { if (!colEl.contains(ev.relatedTarget)) colEl.classList.remove('is-over') })
+    colEl.addEventListener('drop', (ev) => {
+      if (!drag || drag.col !== colEl.dataset.mcCol) return
+      ev.preventDefault(); ev.stopPropagation()
+      const ids = idsOf(drag.col).filter((x) => x !== drag.id)
+      ids.push(drag.id)
+      colEl.classList.remove('is-over')
+      commitOrder(drag.col, ids)
+    })
+  })
 }
 
 /* ===== 恢复：设置页配置常量 ===== */
@@ -20359,6 +24049,7 @@ const settingsTabs = [
   { id: 'network', label: '网络与凭证', group: '安全与数据', scope: 'personal', kw: '网络 政务 互联网 令牌 凭证 诊断' },
   { id: 'models', label: '模型与密钥', group: '安全与数据', scope: 'personal', kw: '模型 密钥 外发 个人 Key' },
   { id: 'usage', label: '用量与配额', group: '安全与数据', scope: 'personal', kw: 'token 用量 配额 账单 超额 模型' },
+  { id: 'memory', label: '长期记忆', group: '安全与数据', scope: 'personal', kw: '记忆 长期 偏好 事实 语义 记住 忘掉' },
   { id: 'data', label: '数据管理', group: '安全与数据', scope: 'personal', kw: '保留 导出 缓存 归档' },
   { id: 'integrations', label: '插件与工具', group: '集成', scope: 'personal', kw: '插件 技能 MCP 工具 地址' },
   { id: 'reviews', label: '审核进度', group: '集成', scope: 'personal', kw: '审核 进度 图像模板 插件 技能 通过 驳回 待审核' },
@@ -20433,4 +24124,19 @@ document.addEventListener('mouseover', (e) => {
     }
   }
 }, true)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 

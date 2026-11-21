@@ -1,5 +1,6 @@
 import { createRequire } from 'node:module'
 import { inflateSync } from 'node:zlib'
+import { getDocument as getPdfJsDocument } from 'pdfjs-dist/legacy/build/pdf.mjs'
 
 const require = createRequire(import.meta.url)
 const { PDFDocument, degrees } = require('./vendor/pdf-lib.min.js')
@@ -156,3 +157,57 @@ export function extractText(buffer) {
   const pages = streams.map((stream) => extractStreamText(stream)).filter((text) => text.trim())
   return { text: pages.join('\n\n'), pages: pages.length, streams: streams.length, note: '' }
 }
+
+/**
+ * 使用 PDF.js 提取文本，支持 ToUnicode/CID 字体映射，适合中文 PDF。
+ * 与上面的零依赖兜底提取分开：调用方可以在 PDF.js 失败时再退回简单提取。
+ */
+export async function extractTextAsync(buffer) {
+  const data = new Uint8Array(buffer)
+  let doc
+  try {
+    doc = await getPdfJsDocument({
+      data,
+      disableWorker: true,
+      useSystemFonts: true,
+      isEvalSupported: false,
+    }).promise
+  } catch (error) {
+    throw Object.assign(new Error(`PDF.js 无法打开文件：${error?.message || error}`), { code: 'PDFJS_OPEN_FAILED' })
+  }
+  const pageTexts = []
+  const pageCount = doc.numPages
+  try {
+    for (let pageNo = 1; pageNo <= pageCount; pageNo += 1) {
+      const page = await doc.getPage(pageNo)
+      const content = await page.getTextContent({ normalizeWhitespace: true, disableCombineTextItems: false })
+      let text = ''
+      let line = ''
+      for (const item of content.items || []) {
+        if (!item || typeof item.str !== 'string') continue
+        line += item.str
+        if (item.hasEOL) {
+          text += `${line.trimEnd()}\n`
+          line = ''
+        }
+      }
+      if (line.trim()) text += line
+      const normalized = text
+        .replace(/[ \t]+/g, ' ')
+        .replace(/ *\n */g, '\n')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim()
+      if (normalized) pageTexts.push(normalized)
+    }
+  } finally {
+    try { await doc.destroy() } catch (_) {}
+  }
+  return {
+    text: pageTexts.join('\n\n'),
+    pages: pageTexts.length,
+    pageTexts,
+    streams: pageCount,
+    note: pageTexts.length ? '' : 'PDF 中没有可提取的文本；可能是扫描件或加密文档。',
+  }
+}
+

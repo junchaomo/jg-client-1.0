@@ -17,8 +17,13 @@
     "electron": "45.2.1"
   },
   "dependencies": {
+    "@napi-rs/canvas": "^0.1.100",
+    "@tesseract.js-data/chi_sim": "^1.0.0",
+    "@tesseract.js-data/eng": "^1.0.0",
     "echarts": "^5.6.0",
     "mermaid": "^11.17.2",
-    "pinyin-pro": "^3.29.5"
+    "pdfjs-dist": "^4.10.38",
+    "pinyin-pro": "^3.29.5",
+    "tesseract.js": "^7.0.0"
   }
 }
