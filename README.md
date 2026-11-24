@@ -87,6 +87,57 @@ npm start
 
 首次打开会进入原型自带的安全域 / 账号选择页；选择后进入主界面。这是原型本身的行为，不是客户端新增的登录页。
 
+主服务默认同时监听两个端口：客户端入口 `127.0.0.1:54269`，云测试入口 `0.0.0.0:54270`。需要改端口时：
+```bat
+set PORT=54269
+set JG_CLOUD_PORT=54270
+set JG_CLOUD_HOST=0.0.0.0
+```
+`JG_CLOUD_PORT=0` 关闭云入口；`JG_CLOUD_HOST=127.0.0.1` 时只允许本机或内网穿透访问。云入口与客户端共用同一套会话和数据，公网测试请走 HTTPS 反向代理，不要把明文 HTTP 直接暴露。
+
+应用统一从客户端的子域名入口打开，不再把各自的动态端口交给前台：
+
+```text
+http://<appId>.localhost:54269/
+```
+
+例如 `http://jg-material-studio.localhost:54269/`、`http://traffic-flow.localhost:54269/`。中枢按 Host 识别应用并反向代理到该应用实际监听的 `127.0.0.1:<动态端口>`；应用仍按原有 `asContext` 校验登录，动态端口只作为内部实现，不显示在应用标签页里。
+
+- `JG_APP_GATEWAY=0` 可关闭应用网关，仅用于排障。
+- `JG_APP_GATEWAY_DOMAIN=localhost` 可改子域名后缀；改成其他域名时，需要该域名解析到中枢所在机器。
+- 应用启动接口 `POST /api/as/start` 会额外返回 `entryUrl`；`url` 仍保留为内部调试地址。
+- 云入口 `54270` 只用于 API 联调，不生成应用子域名入口。
+
+## 在线 Office 编辑（OnlyOffice）
+
+Word、Excel、PPT 不再只转 PDF 只读查看。中枢通过自托管 OnlyOffice Document Server 直接加载原文件，编辑器内可修改并写回源文件：
+
+- 项目文件/绝对路径：保存前先备份到 `data/office-saves`，再原子替换源文件。
+- 附件 `fileId`：保存时走 `putFile` 自动升版本，旧版本保留。
+- 只读 PDF 预览仍保留，作为 OnlyOffice 不可用时的兜底。
+- JWT 头默认 `AuthorizationJwt`，签发和校验统一使用秒级 `exp`。
+
+### 启动方式
+
+正式入口 `启动九规智能中枢.bat` 会先执行 `scripts/onlyoffice-deploy.ps1`，再启动 Electron。脚本会按需启动 Docker Desktop、创建或启动 `jg-onlyoffice` 容器，并等待健康检查；OnlyOffice 不可用时不阻断中枢，继续回退 PDF 预览。Electron 内部也会异步拉起同一脚本，`JG_ONLYOFFICE_AUTOSTART=0` 可关闭。
+
+容器健康后，`scripts/onlyoffice-fonts.ps1` 会检查并自动安装公文所需的中文字体别名，重建 `AllFonts.js`。字体包位于 `deploy/onlyoffice/fonts`，使用 GPL 授权的 Fandol 字体生成 family 别名；可保证跨终端 family 命中，但不是微软/方正 GB2312 字体的原始字形，详见 `deploy/onlyoffice/README.md`。
+
+Linux/内网服务器使用 `deploy/onlyoffice/docker-compose.yml`，完整参数、端口关系、反向代理和生产注意事项见 `deploy/onlyoffice/README.md`。
+
+### 关键配置
+
+```text
+JG_ONLYOFFICE_ENABLED=1
+JG_ONLYOFFICE_URL=http://127.0.0.1:8082
+JG_ONLYOFFICE_PUBLIC_URL=http://127.0.0.1:8082
+JG_ONLYOFFICE_DOCUMENT_HOST_URL=http://host.docker.internal:54270
+JG_ONLYOFFICE_SECRET=<64 位 hex>
+JG_ONLYOFFICE_HEADER=AuthorizationJwt
+```
+
+`data/onlyoffice.json` 保存默认配置和密钥，已被 `.gitignore` 排除。`publicUrl` 是浏览器访问地址；`documentHostUrl` 是 OnlyOffice 容器回源下载/回调中枢的地址，默认走中枢云入口 `54270`，不能写成容器访问不到的 `127.0.0.1:54269`。
+
 ## 目录
 
 ```
@@ -97,8 +148,12 @@ server.mjs             演示 API + M1 会话/持久化/权限层 + 文件/模�
 harness.mjs            DeepSeek Harness SDK 适配层（子进程、会话恢复、事件转步骤、工具审计）
 mcp-jg.mjs             本地 stdio MCP server，把产品 10 个内部工具暴露给 Harness
 model.mjs              OpenAI 兼容模型网关（模型测试与回退路径）
+onlyoffice.mjs         OnlyOffice 在线编辑、JWT 签名、forced save 与保存回调
 plugin-scan.mjs        插件 ZIP 静态检测
 db.mjs                 node:sqlite 会话、审计、文件对象、备份
+deploy/onlyoffice/     OnlyOffice Compose、部署说明、中文字体包与环境变量模板
+scripts/onlyoffice-deploy.ps1  平台启动前的 OnlyOffice 自动拉起与健康检查
+scripts/onlyoffice-fonts.ps1   OnlyOffice 中文字体安装、AllFonts 重建与校验
 dsh-runtime/           DeepSeek Harness 0.2.2-rc.1 完整运行时（已 gitignore）
 runtime/node.exe       Node 24.15 便携运行时（已 gitignore）
 data/                  本地 SQLite 数据（运行时生成，已 gitignore）

@@ -1,0 +1,36 @@
+{
+  "id": "todo-reminder",
+  "name": "待办提醒",
+  "version": "1.0.0",
+  "description": "在九规智能中枢里记录带截止时间的待办；到期提醒由中枢调度器写入铃铛，关闭应用窗口或重启中枢后仍会补发。",
+  "runtime": "node",
+  "entry": "server.mjs",
+  "appDir": ".",
+  "assetsDir": "assets",
+  "health": {
+    "path": "/api/health",
+    "timeoutMs": 15000,
+    "intervalMs": 500
+  },
+  "embed": {
+    "method": "browser"
+  },
+  "permissions": {
+    "network": ["127.0.0.1"],
+    "files": ["read", "write"],
+    "notifications": true,
+    "note": "仅通过中枢注入的 AS_HUB_URL 登记提醒；待办数据写入账号级 AS_DATA_DIR，不访问外部网络。"
+  },
+  "capabilities": {
+    "tools": [
+      {
+        "name": "todo.list",
+        "description": "列出当前中枢账号的待办事项及截止时间。",
+        "method": "GET",
+        "path": "/api/todos",
+        "sideEffect": false,
+        "inputSchema": { "type": "object", "properties": {} }
+      }
+    ]
+  }
+}

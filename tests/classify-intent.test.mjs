@@ -30,6 +30,7 @@ test('动作加对象才升级：整理表格、导出报告、跑构建属于�
     '帮我把这批图片压缩一下',
     '批量处理这些 CSV 文件',
     '做个工作流自动汇总周报',
+    '把这个公文格式标准做成 skill',
   ]
   for (const text of positives) {
     assert.equal(hasWorkIntent(text), true, `应判为工作意图：${text}`)
@@ -67,6 +68,30 @@ test('实时数据与工作区上下文问题不走轻量直连', () => {
   for (const text of workspace) {
     assert.equal(needsWorkspaceContext(text), true, text)
     assert.equal(isDirectAnswerable(text, { mode: 'chat' }), false, text)
+  }
+})
+
+test('未知命令式短句默认进工作模式，不因没命中关键词掉进只读对话', () => {
+  const unseenTasks = [
+    '帮我把这个流程跑一遍',
+    '帮我创建一份新的客户档案',
+    '把这份材料润色一下',
+  ]
+  for (const text of unseenTasks) {
+    assert.equal(isDirectAnswerable(text, { mode: 'chat' }), false, `不应轻量直答：${text}`)
+    assert.equal(classifyTask(text, { mode: 'chat' }), 'work', `应默认进 work：${text}`)
+  }
+})
+
+test('明确的知识问答仍走轻量直连，不被默认工作模式抬高成本', () => {
+  const direct = [
+    '城市体检的意义',
+    '用一句话说明城市体检数据的用途',
+    '分析一下城市更新的趋势',
+  ]
+  for (const text of direct) {
+    assert.equal(isDirectAnswerable(text, { mode: 'chat' }), true, text)
+    assert.notEqual(classifyTask(text, { mode: 'chat' }), 'work', text)
   }
 })
 

@@ -49,6 +49,8 @@ let sdkPromise = null
 // 每个沙箱根目录一个 Harness 进程：Work 用项目目录，Chat 用当前用户的托管根目录。
 const active = new Map()
 const MAX_ACTIVE_HARNESSES = 6
+// 同一个 runtime key 的首次创建必须串行，否则两个新会话会各起一个子进程并互相覆盖。
+const harnessGates = new Map()
 
 function keyOf({ apiKey, baseUrl, model, reasoningEffort, agentsHome, dshHome }) {
   return createHash('sha256').update(`${apiKey}|${baseUrl}|${model}|${reasoningEffort || ''}|${agentsHome || ''}|${dshHome || ''}`).digest('hex')
@@ -66,31 +68,58 @@ function sandboxRootFor(cwd) {
   const normalized = target.replace(/\\/g, '/')
   const chatBaseNormalized = chatBase.replace(/\\/g, '/')
   if (normalized.toLowerCase().startsWith(chatBaseNormalized.toLowerCase() + '/')) {
-    // Chat：每个会话独占一个 Harness 运行时，取消时只关闭该会话的运行时，
-    // 不波及其他会话；会话目录仍是真实执行 cwd。
-    const rest = normalized.slice(chatBaseNormalized.length + 1).split('/').filter(Boolean)
-    if (rest.length >= 2) return target
-    return join(chatBase, rest[0] || 'default')
+    // Chat：所有会话共享同一常驻运行时，真正隔离由 DSH Session 的 working directory
+    // 完成。每次新建对话不再重新启动 runtime，避免 3.9–4.4 秒的冷启动。
+    return chatBase
   }
   return target
 }
 
-function acquire(entry) {
-  const next = entry.queue.then(() => undefined, () => undefined)
-  let release
-  entry.queue = new Promise((resolve) => { release = resolve })
-  return next.then(() => () => release())
+/** 按 SDK sessionId 精确找处理器；没有绑定的子会话/杂事件不能落到别的会话。 */
+function handlerForEntry(entry, sessionId) {
+  const exact = entry.handlersBySession.get(String(sessionId || ''))
+  if (exact) return exact
+  if (!entry.handlersBySession.size) return entry.handlers
+  return null
 }
 
 async function getHarness(cfg, handlers = null, cwd = '', runtimeScope = '') {
+  const key = runtimeEntryKey(cfg, cwd, runtimeScope)
+  const previous = harnessGates.get(key) || Promise.resolve()
+  const current = previous.then(
+    () => getHarnessInternal(cfg, handlers, cwd, runtimeScope),
+    () => getHarnessInternal(cfg, handlers, cwd, runtimeScope),
+  )
+  harnessGates.set(key, current.then(() => undefined, () => undefined))
+  return current
+}
+
+async function getHarnessInternal(cfg, handlers = null, cwd = '', runtimeScope = '') {
   const sandboxRoot = sandboxRootFor(cwd)
   const userHome = cfg.dshHome || baseHome
   const key = runtimeEntryKey(cfg, cwd, runtimeScope)
-  if (active.has(key)) {
-    const entry = active.get(key)
-    entry.handlers = handlers
-    entry.usedAt = Date.now()
-    return entry.harness
+  const existing = active.get(key)
+  if (existing) {
+    // 运行时子进程可能被系统回收、被外部结束或自身崩溃。client.exitCode 一旦被
+    // 赋值就说明进程已退出；此时必须换新实例，不能把死进程继续分配给新会话。
+    const client = existing.harness?.client
+    const dead = !client
+      || client.exitCode !== undefined
+      || (client.child && (client.child.exitCode !== null || client.child.signalCode !== null))
+    if (dead) {
+      active.delete(key)
+      existing.handlerBridgeInstalled = false
+      try { existing.harness?.close?.()?.catch?.(() => {}) } catch {}
+      existing.runs?.clear()
+      existing.handlersBySession?.clear()
+    } else {
+      // 同一个常驻运行时会被多个会话复用：这里只更新“默认处理器”，真正的
+      // 事件/审批按 SDK sessionId 在 handlersBySession 里精确路由。
+      if (handlers) existing.handlers = handlers
+      existing.usedAt = Date.now()
+      await installHandlerBridge(existing)
+      return existing.harness
+    }
   }
   if (active.size >= MAX_ACTIVE_HARNESSES) {
     // 只回收空闲运行时；正在跑 run 的条目如果被淘汰，会把用户正在执行的任务直接杀掉。
@@ -122,6 +151,18 @@ async function getHarness(cfg, handlers = null, cwd = '', runtimeScope = '') {
     env.DSH_AGENTS_HOME = cfg.agentsHome
   }
   if (!env.JG_MCP_DEBUG) env.JG_MCP_DEBUG = join(userHome, 'mcp-debug.log')
+  const entry = {
+    key,
+    home: userHome,
+    harness: null,
+    handlers,
+    handlersBySession: new Map(),
+    usedAt: Date.now(),
+    toolCalls: new Map(),
+    runs: new Map(),
+    handlerBridgeInstalled: false,
+  }
+  const handlerFor = (sessionId) => handlerForEntry(entry, sessionId)
   const harness = new DeepSeekHarness({
     dshBin,
     dshHome: userHome,
@@ -129,59 +170,95 @@ async function getHarness(cfg, handlers = null, cwd = '', runtimeScope = '') {
     provider: 'deepseek-official',
     model: cfg.model || 'deepseek-flash',
     ...(cfg.reasoningEffort ? { reasoningEffort: cfg.reasoningEffort } : {}),
-    maxTokens: 8192,
+    maxTokens: Math.max(128, Number(process.env.JG_DSH_MAX_TOKENS || 8192)),
     initializeTimeoutMs: 90000,
     requestTimeoutMs: Number(process.env.JG_DSH_TIMEOUT_MS || 240000),
     env,
-    ...(handlers ? {
-      approvalRequests: typeof handlers.onApproval === 'function',
-      onUserQuestion: typeof handlers.onQuestion === 'function' ? handlers.onQuestion : undefined,
-    } : {}),
+    // 审批和提问都按 sessionId 路由到当前会话的处理器；同一运行时可同时承载多个会话。
+    approvalRequests: true,
+    onUserQuestion: async (params) => {
+      const target = handlerFor(params?.sessionId)
+      if (typeof target?.onQuestion !== 'function') {
+        throw new Error(`No active user-question handler for session ${params?.sessionId || ''}`)
+      }
+      return target.onQuestion(params)
+    },
   })
-  const entry = { key, home: userHome, harness, handlers, usedAt: Date.now(), queue: Promise.resolve(), toolCalls: new Map(), runs: new Map() }
-  if (handlers && typeof handlers.onApproval === 'function') {
-    // 必须先启动 client 再注册审批回调，否则 SDK 会把审批失败关闭为 unavailable。
-    harness.client.start()
-    harness.client.onRequest(async (method, params) => {
-      if (method !== 'approval/request') throw new Error(`Unsupported request: ${method}`)
-      // 审批请求本身不带工具参数；从同一 callId 的 tool/call 通知里补齐资源与参数。
-      const call = params?.callId ? entry.toolCalls.get(String(params.callId)) : null
-      const enriched = call
-        ? { ...params, toolArgs: call.arguments, toolNameResolved: call.name }
-        : params
-      return entry.handlers?.onApproval ? entry.handlers.onApproval(enriched) : { outcome: 'cancelled' }
-    })
-    // 监听同一运行时内的 session.event，缓存 tool/call 的 name + arguments，供审批卡展示。
-    const subscription = harness.client.subscribe((n) => n.method === 'session.event')
-    entry.subscription = subscription
-    ;(async () => {
-      try {
-        for await (const notification of subscription) {
-          const event = notification?.params?.event
-          if (!event || !event.type) continue
-          if (event.type === 'tool/call' && event.data?.callId) {
-            entry.toolCalls.set(String(event.data.callId), {
-              name: String(event.data.name || '工具调用'),
-              arguments: String(event.data.arguments || ''),
-            })
-            if (entry.toolCalls.size > 200) {
-              const oldest = entry.toolCalls.keys().next().value
-              if (oldest) entry.toolCalls.delete(oldest)
-            }
-          } else if (event.type === 'tool/result' && event.data?.message?.source?.callId) {
-            entry.toolCalls.delete(String(event.data.message.source.callId))
-          } else if (event.type === 'turn/end') {
-            entry.toolCalls.clear()
-          }
-          // 把本轮真实事件交给产品层，用于“正在执行”实时状态；不改变 DSH 行为。
-          if (typeof entry.handlers?.onEvent === 'function') {
-            try { entry.handlers.onEvent(event, String(notification?.params?.sessionId || '')) } catch {}
-          }        }
-      } catch {}
-    })()
-  }
+  entry.harness = harness
   active.set(key, entry)
+  await installHandlerBridge(entry)
   return harness
+}
+
+/** 为一个常驻运行时安装一次通知/审批桥；后续会话只更新按 sessionId 的处理器表。 */
+async function installHandlerBridge(entry) {
+  if (entry.handlerBridgeInstalled) return
+  entry.handlerBridgeInstalled = true
+  const harness = entry.harness
+  const handlerFor = (sessionId) => handlerForEntry(entry, sessionId)
+  // 必须先启动 client 再注册审批回调，否则 SDK 会把审批失败关闭为 unavailable。
+  harness.client.start()
+  harness.client.onRequest(async (method, params) => {
+    if (method !== 'approval/request') throw new Error(`Unsupported request: ${method}`)
+    // 审批请求本身不带工具参数；从同一 callId 的 tool/call 通知里补齐资源与参数。
+    const call = params?.callId ? entry.toolCalls.get(String(params.callId)) : null
+    const enriched = call
+      ? { ...params, toolArgs: call.arguments, toolNameResolved: call.name }
+      : params
+    const target = handlerFor(params?.sessionId)
+    return typeof target?.onApproval === 'function'
+      ? target.onApproval(enriched)
+      : { outcome: 'cancelled' }
+  })
+  // 一个 subscription 同时承接持久 Session 事件和瞬时 assistant-stream 文本帧。
+  const subscription = harness.client.subscribe(
+    (n) => n.method === 'session.event' || n.method === 'assistant.stream',
+  )
+  entry.subscription = subscription
+  ;(async () => {
+    try {
+      for await (const notification of subscription) {
+        const sessionId = String(notification?.params?.sessionId || '')
+        if (notification.method === 'assistant.stream') {
+          const frame = notification?.params?.frame
+          if (!frame) continue
+          const target = handlerFor(sessionId)
+          if (frame.type === 'chunk') {
+            const chunk = frame.chunk || {}
+            if (chunk.type === 'text-delta' && chunk.text) {
+              try { target?.onDelta?.({ text: String(chunk.text), sessionId, kind: 'text' }) } catch {}
+            } else if (chunk.type === 'reasoning-delta' && chunk.text) {
+              try { target?.onDelta?.({ reasoning: String(chunk.text), sessionId, kind: 'reasoning' }) } catch {}
+            }
+          } else if (frame.type === 'start') {
+            try { target?.onDelta?.({ reset: true, sessionId, kind: 'start' }) } catch {}
+          }
+          continue
+        }
+        const event = notification?.params?.event
+        if (!event || !event.type) continue
+        if (event.type === 'tool/call' && event.data?.callId) {
+          entry.toolCalls.set(String(event.data.callId), {
+            sessionId,
+            name: String(event.data.name || '工具调用'),
+            arguments: String(event.data.arguments || ''),
+          })
+          if (entry.toolCalls.size > 200) {
+            const oldest = entry.toolCalls.keys().next().value
+            if (oldest) entry.toolCalls.delete(oldest)
+          }
+        } else if (event.type === 'tool/result' && event.data?.message?.source?.callId) {
+          entry.toolCalls.delete(String(event.data.message.source.callId))
+        } else if (event.type === 'turn/end') {
+          for (const [callId, call] of entry.toolCalls) {
+            if (call.sessionId === sessionId) entry.toolCalls.delete(callId)
+          }
+        }
+        // 把本轮真实事件交给产品层，用于“正在执行”实时状态；不改变 DSH 行为。
+        try { handlerFor(sessionId)?.onEvent?.(event, sessionId) } catch {}
+      }
+    } catch {}
+  })()
 }
 
 async function loadSdk() {
@@ -618,9 +695,17 @@ export async function runAgent({ apiKey, baseUrl, model, text, sessionId, contex
   harnessRef = harness
   const entryKey = runtimeEntryKey(cfg, cwd, runtimeScope)
   const entry = active.get(entryKey)
-  const release = entry ? await acquire(entry) : () => {}
   // 先占位，避免会话初始化期间被“回收空闲运行时”误判为空闲；拿到 SDK session 后再补 id。
-  if (entry && runKey) entry.runs.set(String(runKey), { sessionId: '', startedAt: Date.now() })
+  const runState = entry && runKey ? { sessionId: '', startedAt: Date.now(), cancelPending: false } : null
+  if (entry && runState) entry.runs.set(String(runKey), runState)
+  let boundSessionId = ''
+  const bindSession = (session) => {
+    boundSessionId = String(session.id || '')
+    if (entry && guardedHandlers && boundSessionId) {
+      entry.handlersBySession.set(boundSessionId, guardedHandlers)
+    }
+    return session
+  }
   // 父会话 idle 时子代理可能还在跑；单独订阅运行时通知，补齐后续的 subagent.finished 正文。
   const backgroundNotifications = []
   const subagentSubscription = harness.client?.subscribe((n) => n.method === 'subagent.started' || n.method === 'subagent.finished')
@@ -631,9 +716,6 @@ export async function runAgent({ apiKey, baseUrl, model, text, sessionId, contex
         } catch {}
       })()
     : Promise.resolve()
-  if (entry) {
-    entry.toolCalls.clear()
-  }
   let promptText = String(text || '')
   let planActivate = false
   // `/plan <message>` 在 SDK 命令路由里只做 steer，命令自身不开始模型轮次；
@@ -684,14 +766,18 @@ export async function runAgent({ apiKey, baseUrl, model, text, sessionId, contex
       if (toolPolicy !== undefined) writeToolPolicyFile(dshHome, session.id, toolPolicy, maxRunCode)
     }
     // 通过 DSH 原生 Session Working Directory 绑定真实执行目录。
+    bindSession(session)
     if (cwd) await session.setWorkingDirectory(cwd)
     // DSH 原生权限预设：Auto 使用 workspace-write 沙箱，工作区内读写/测试/构建由沙箱直接放行；
     // 越界、外部写入和权限升级仍由 DSH 的 approval/request 升级到产品审批。手动模式保持 read-only。
     await session.run(`/permission ${resolvedPermissionPreset}`)
+    if (runState?.cancelPending || (typeof shouldCancel === 'function' && shouldCancel())) {
+      throw new HarnessError('用户已停止本轮执行', { code: 'RUN_CANCELLED', status: 409 })
+    }
     if (toolPolicy !== undefined) writeToolPolicyFile(dshHome, session.id, toolPolicy, maxRunCode)
     if (planActivate) await session.run('/plan')
     // 记录本轮正在执行的 SDK 会话，供产品按会话调用原生 session/cancel。
-    if (entry && runKey) entry.runs.set(String(runKey), { sessionId: String(session.id), startedAt: Date.now() })
+    if (runState) Object.assign(runState, { sessionId: String(session.id), startedAt: Date.now() })
     if (typeof onStart === 'function') onStart(String(session.id))
     if (typeof shouldCancel === 'function' && shouldCancel()) {
       throw new HarnessError('用户已停止本轮执行', { code: 'RUN_CANCELLED', status: 409 })
@@ -710,11 +796,12 @@ export async function runAgent({ apiKey, baseUrl, model, text, sessionId, contex
       // 会话可能已被清理或来自旧 DSH_HOME；退回新会话，不丢当前输入。
       try {
         const session = harness.session()
+        bindSession(session)
         if (cwd) await session.setWorkingDirectory(cwd)
         await session.run(`/permission ${resolvedPermissionPreset}`)
         if (toolPolicy !== undefined) writeToolPolicyFile(dshHome, session.id, toolPolicy, maxRunCode)
         if (planActivate) await session.run('/plan')
-        if (entry && runKey) entry.runs.set(String(runKey), { sessionId: String(session.id), startedAt: Date.now() })
+        if (runState) Object.assign(runState, { sessionId: String(session.id), startedAt: Date.now() })
         if (typeof onStart === 'function') onStart(String(session.id))
         result = await session.run(input)
         await settleSubagents()
@@ -726,9 +813,9 @@ export async function runAgent({ apiKey, baseUrl, model, text, sessionId, contex
     }
   } finally {
     if (entry && runKey) entry.runs.delete(String(runKey))
+    if (entry && boundSessionId) entry.handlersBySession.delete(boundSessionId)
     try { subagentSubscription?.close?.() } catch {}
     try { await subagentPump } catch {}
-    release()
   }
   const latencyMs = Date.now() - started
   if (budget.exceeded) throw new HarnessError(`本轮工具调用超过预算 ${budget.limit} 步，已停止执行。请缩小任务范围或提高预算后重试。`, { code: 'STEP_BUDGET_EXCEEDED', status: 409 })
@@ -772,10 +859,17 @@ function wrap(error) {
  * SDK 协议没有 job/kill；后台作业归属 Harness 进程，停止该沙箱根的运行时
  * 即可终止其全部后台作业。调用方必须先确认同目录没有其他会话在执行。
  */
-export async function stopBackgroundRuntime(cwd) {
+export async function stopBackgroundRuntime(cwd, runKey = '') {
   const root = sandboxRootFor(cwd).toLowerCase()
   const targets = [...active.entries()].filter(([key]) => key.toLowerCase().endsWith(`|${root}`))
   if (!targets.length) throw new HarnessError('该项目当前没有活跃的 Harness 运行时', { code: 'JOB_NO_RUNTIME', status: 409 })
+  for (const [, entry] of targets) {
+    // Chat 运行时被多个会话共享；只要还有别的会话在跑，关闭运行时会误杀。
+    const otherRuns = [...(entry.runs?.keys() || [])].filter((key) => String(key) !== String(runKey))
+    if (otherRuns.length) {
+      throw new HarnessError('该运行时还有其他会话正在执行，暂不能为停止后台作业关闭运行时', { code: 'JOB_RUNTIME_BUSY', status: 409 })
+    }
+  }
   for (const [key, entry] of targets) {
     active.delete(key)
     try { await entry.harness.close() } catch {}
@@ -808,26 +902,20 @@ export async function cancelRun(runKey) {
   // 按产品侧 runKey（会话 id）定位正在执行的运行时，而不是按 cwd 批量匹配；
   // Work 会话共享项目目录时也能只命中当前会话的运行时。
   const targets = [...active.entries()].filter(([, entry]) => entry.runs?.has(String(runKey)))
-  for (const [key, entry] of targets) {
+  for (const [, entry] of targets) {
     const run = entry.runs?.get(String(runKey))
     if (!run) continue
     if (!run.sessionId) {
-      // 会话还没完成初始化：没有可调用的原生 session/cancel，只能关闭该会话运行时。
-      active.delete(key)
-      try { await entry.harness.close() } catch {}
-      return { accepted: true, native: false, runtimeClosed: true, sessionId: '' }
+      // 会话还没完成初始化：运行时可被多个会话共享，不能关闭。
+      // 打标记，等 runAgent 在 /permission 或首步前自行退出。
+      run.cancelPending = true
+      return { accepted: true, native: false, runtimeClosed: false, pending: true, sessionId: '' }
     }
     try {
       await entry.harness.client.request('session/cancel', { sessionId: run.sessionId })
-      return { accepted: true, native: true, sessionId: run.sessionId }
+      return { accepted: true, native: true, runtimeClosed: false, sessionId: run.sessionId }
     } catch (error) {
-      // 当前 SDK 运行时没有暴露 session/cancel；关闭该会话独占的运行时，
-      // 让 session.run 立即结束，而不是等模型自己跑完。
-      if (/unknown .* method|not supported|session\/cancel/i.test(error?.message || '')) {
-        active.delete(key)
-        try { await entry.harness.close() } catch {}
-        return { accepted: true, native: false, runtimeClosed: true, sessionId: run.sessionId }
-      }
+      // 共享运行时不能靠关闭进程来取消，否则会误杀其他会话。
       throw new HarnessError(`DSH 会话取消失败：${error?.message || error}`, { code: 'SESSION_CANCEL_FAILED', status: 502 })
     }
   }

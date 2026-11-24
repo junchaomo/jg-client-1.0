@@ -10,6 +10,7 @@
     "eval:baseline": "node evals/run.mjs",
     "test:visual": "node --test tests/visual-engine.test.mjs",
     "test:image": "node --test tests/image-providers.test.mjs",
+    "test:settings": "node --test tests/settings-center.test.mjs tests/settings-center-live.test.mjs",
     "test:usage": "node --test tests/usage-summary.test.mjs",
     "test:runstats": "node --test tests/run-stats.test.mjs"
   },

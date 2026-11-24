@@ -115,7 +115,7 @@ export const modules = {
   more: { label: '更多' },
   contacts: { label: '通讯录' },
   im: { label: '工作消息' },
-  projects: { label: '工作区' },
+  projects: { label: '分组' },
   tasks: { label: '任务中心' },
   skills: { label: '插件与技能' },
   automation: { label: '定时任务' },
@@ -1111,6 +1111,9 @@ export const aiTools = [
   { name: 'approval_list', label: '检索本人审批决策记录', target: '平台', args: '{"q":"写操作","limit":20}', desc: '检索当前用户本人相关的工具审批决策记录（工具、操作、参数摘要、风险、放行/待审结果、审批人、时间）；仅返回本人记录。' },
   { name: 'app_data_list', label: '列出本人应用数据文件', target: '平台', args: '{"appId":"jg-material-studio"}', desc: '列出当前用户本人在指定已安装应用数据目录下的文件（相对路径、大小）；只读，不跨应用或跨用户。' },
   { name: 'app_data_read', label: '读取本人应用数据文件', target: '平台', args: '{"appId":"jg-material-studio","path":"records.json"}', desc: '读取本人应用数据目录内的文本类文件内容；路径越界拒绝，限制文件大小；只读，不修改应用数据。' },
+  { name: 'skill_publish', label: '发布技能到插件市场', target: '平台', args: '{"dir":"D:/skills/my-skill","name":"技能名称","version":"1.0.0","desc":"用途说明","scope":"全集团"}', desc: '把一个技能目录打包成 ZIP，走平台插件市场同一套检测、提交与入库流程后上架到「技能」分类。目录根必须有 SKILL.md；技能包只允许文档与静态资源，含 .py/.js/.sh 等可执行脚本会被拒绝，这类包应改用 plugin_publish。dryRun=true 只检测不发布。' },
+  { name: 'plugin_publish', label: '发布插件 Bundle 到插件市场', target: '平台', args: '{"dir":"D:/plugins/my-plugin","name":"插件名称","version":"1.0.0","desc":"用途说明"}', desc: '把一个 DSH Bundle 插件目录打包成 ZIP，检测 package.json 与 dsh.bundle 后提交并上架。适用于带代码的插件/技能扩展；目录根必须有 package.json。dryRun=true 只检测不发布。' },
+  { name: 'app_publish', label: '发布应用到应用市场', target: '平台', args: '{"dir":"D:/apps/my-app","version":"1.0.0","desc":"用途说明"}', desc: '把一个 AS 应用目录打包成 ZIP，检测 app.json 后提交并入库到应用市场。目录根必须有 app.json，runtime 只支持 node 或 python，entry 必须存在。dryRun=true 只检测不发布。' },
 ]
 
 
@@ -1186,6 +1189,8 @@ export const toolLedger = [
   { id: 'notebook_search', name: '智能笔记本检索', version: '0.8.0', endpoint: 'GET /api/notebooks', env: '三网各自部署', perm: '笔记本读', risk: '低', confirm: false, calls: 733 },
   { id: 'resource_query', name: '资源目录查询', version: '1.3.1', endpoint: 'GET /api/resources', env: '数据中心本域', perm: '资源读（服务端判定）', risk: '中', confirm: false, calls: 1104 },
   { id: 'task_create', name: '任务创建', version: '1.0.2', endpoint: 'POST /api/tasks', env: '三网各自部署', perm: '任务写', risk: '中', confirm: true, calls: 88 },
+  { id: 'office_get_selection', name: 'Office 选区读取', version: '1.0.0', endpoint: 'GET /api/office/selection/latest', env: '三网各自部署', perm: '当前文档选区读', risk: '低', confirm: false, calls: 0 },
+  { id: 'office_replace_selection', name: 'Office 选区原位替换', version: '1.0.0', endpoint: 'POST /api/ai/invoke', env: '三网各自部署', perm: '当前文档选区写（用户在本轮对话明确授权）', risk: '中', confirm: false, calls: 0 },
 ]
 
 /** 数据中心数据服务（PRD 5.4 数据服务）：对外复用目录的稳定接口与调用记录 */
@@ -1443,7 +1448,7 @@ for (const arr of [
   resources, plugins, notifications, apps, sampleConversations, tasks, automations,
   tickets, feedback, knowledgeDocs, auditSeed, cloudSystems, cloudCredentials,
   cloudSessions, cloudPolicy, projects, pluginMarket, notices, cloudSpaces, driveItems,
-  contacts, imThreads, academy, dutyCatalog, orgUnits, orgMembers, toolLedger,
+  contacts, imThreads, academy, dutyCatalog, orgUnits, orgMembers,
   dataServices, messagesSeed, modelPolicy, accessAnomalies, notebookSeed,
   satelliteQuarters, notebookTopics,
 ]) {

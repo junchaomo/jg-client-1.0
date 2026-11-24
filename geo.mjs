@@ -28,6 +28,26 @@ function bboxOf(points) {
   return { minX, minY, maxX, maxY, width: maxX - minX, height: maxY - minY }
 }
 
+/* CAD 图纸常混入标题块、图例或离群注记；直接用极值取景会把主体压成一条线。
+   用 1%–99% 分位取景，仍保留离群对象在画布内可见（可能落在边缘之外）。 */
+function robustBboxOf(points) {
+  if (points.length < 20) return bboxOf(points)
+  const xs = []
+  const ys = []
+  for (const [x, y] of points) {
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue
+    xs.push(x); ys.push(y)
+  }
+  if (xs.length < 20) return bboxOf(points)
+  xs.sort((a, b) => a - b)
+  ys.sort((a, b) => a - b)
+  const q = (arr, p) => arr[Math.max(0, Math.min(arr.length - 1, Math.floor((arr.length - 1) * p)))]
+  const minX = q(xs, 0.01), maxX = q(xs, 0.99)
+  const minY = q(ys, 0.01), maxY = q(ys, 0.99)
+  if (maxX - minX <= 0 || maxY - minY <= 0) return bboxOf(points)
+  return { minX, minY, maxX, maxY, width: maxX - minX, height: maxY - minY }
+}
+
 function projector(bbox, flipY = false) {
   const w = Math.max(bbox.width, 1e-9)
   const h = Math.max(bbox.height, 1e-9)
@@ -146,12 +166,26 @@ function dxfPairs(text) {
   return pairs
 }
 
-export function inspectDXF(buffer, name = 'DXF') {
+export function inspectDXF(buffer, name = 'DXF', options = {}) {
+  const maxEntities = Number(options.maxEntities) > 0 ? Number(options.maxEntities) : Infinity
   const text = Buffer.from(buffer).toString('utf8')
   if (!/^\s*0\s*\r?\nSECTION/m.test(text) && !/\bSECTION\b/.test(text)) throw new Error('不是可识别的 ASCII DXF（缺少 SECTION 结构）')
   const pairs = dxfPairs(text)
   const entities = []
   const points = []
+  let truncated = false
+  let seenEntities = 0
+  // 预览限额下不再只取文件头部实体：图纸常把图例/标题块放在前面，直接截断会只剩空白。
+  // 用蓄水池抽样在整份文件里均匀保留 maxEntities 个实体，主体图形才有机会进入预览。
+  const keepEntity = (entity) => {
+    seenEntities += 1
+    if (entities.length < maxEntities) { entities.push(entity); return }
+    truncated = true
+    if (Number.isFinite(maxEntities)) {
+      const slot = Math.floor(Math.random() * seenEntities)
+      if (slot < maxEntities) entities[slot] = entity
+    }
+  }
   let i = 0
   while (i < pairs.length) {
     if (pairs[i][0] === 0 && pairs[i][1] === 'LINE') {
@@ -166,7 +200,7 @@ export function inspectDXF(buffer, name = 'DXF') {
         if (code === 21) entity.y2 = Number(value)
         i += 1
       }
-      if ([entity.x1, entity.y1, entity.x2, entity.y2].every(Number.isFinite)) entities.push(entity)
+      if ([entity.x1, entity.y1, entity.x2, entity.y2].every(Number.isFinite)) keepEntity(entity)
       continue
     }
     if (pairs[i][0] === 0 && (pairs[i][1] === 'LWPOLYLINE' || pairs[i][1] === 'POLYLINE')) {
@@ -182,7 +216,7 @@ export function inspectDXF(buffer, name = 'DXF') {
         }
         i += 1
       }
-      if (entity.vertices.length >= 2) entities.push(entity)
+      if (entity.vertices.length >= 2) keepEntity(entity)
       continue
     }
     if (pairs[i][0] === 0 && pairs[i][1] === 'CIRCLE') {
@@ -196,7 +230,7 @@ export function inspectDXF(buffer, name = 'DXF') {
         if (code === 40) entity.r = Number(value)
         i += 1
       }
-      if ([entity.cx, entity.cy, entity.r].every(Number.isFinite)) entities.push(entity)
+      if ([entity.cx, entity.cy, entity.r].every(Number.isFinite)) keepEntity(entity)
       continue
     }
     if (pairs[i][0] === 0 && pairs[i][1] === 'TEXT') {
@@ -210,35 +244,38 @@ export function inspectDXF(buffer, name = 'DXF') {
         if (code === 1) entity.text = value
         i += 1
       }
-      if (Number.isFinite(entity.x) && Number.isFinite(entity.y)) entities.push(entity)
+      if (Number.isFinite(entity.x) && Number.isFinite(entity.y)) keepEntity(entity)
       continue
     }
     i += 1
   }
   const layers = new Set()
+  const textPoints = []
   for (const entity of entities) {
     layers.add(entity.layer || '0')
     if (entity.type === 'LINE') points.push([entity.x1, entity.y1], [entity.x2, entity.y2])
     else if (entity.vertices) points.push(...entity.vertices)
     else if (entity.type === 'CIRCLE') points.push([entity.cx - entity.r, entity.cy - entity.r], [entity.cx + entity.r, entity.cy + entity.r])
-    else if (entity.type === 'TEXT') points.push([entity.x, entity.y])
+    else if (entity.type === 'TEXT') textPoints.push([entity.x, entity.y])
   }
-  const bbox = bboxOf(points)
+  // 文字注记常有离群坐标，直接参与范围会把主体图形压成一条线；优先按几何实体取景。
+  const bbox = bboxOf(points) || bboxOf(textPoints)
   if (!bbox) throw new Error('DXF 中没有可显示的二维几何对象')
-  const project = projector(bbox)
+  const viewBbox = robustBboxOf(points)
+  const project = projector(viewBbox)
   const inner = entities.map((entity) => {
     if (entity.type === 'LINE') {
       const a = project([entity.x1, entity.y1])
       const b = project([entity.x2, entity.y2])
-      return `<line x1="${a[0]}" y1="${a[1]}" x2="${b[0]}" y2="${b[1]}" stroke="#0f766e" stroke-width="1.2"/>`
+      return `<line x1="${a[0]}" y1="${a[1]}" x2="${b[0]}" y2="${b[1]}" stroke="#0f766e" stroke-width="1" stroke-opacity="0.65"/>`
     }
     if (entity.vertices) {
-      return `<polyline points="${entity.vertices.map(project).map((p) => p.join(',')).join(' ')}" fill="none" stroke="#0f766e" stroke-width="1.2"/>`
+      return `<polyline points="${entity.vertices.map(project).map((p) => p.join(',')).join(' ')}" fill="none" stroke="#0f766e" stroke-width="1" stroke-opacity="0.65"/>`
     }
     if (entity.type === 'CIRCLE') {
       const c = project([entity.cx, entity.cy])
-      const scale = Math.max(1, Math.min((W - PAD * 2) / Math.max(bbox.width, 1e-9), (H - PAD * 2) / Math.max(bbox.height, 1e-9)))
-      return `<circle cx="${c[0]}" cy="${c[1]}" r="${round(entity.r * scale)}" fill="none" stroke="#0f766e" stroke-width="1.1"/>`
+      const scale = Math.max(1, Math.min((W - PAD * 2) / Math.max(viewBbox.width, 1e-9), (H - PAD * 2) / Math.max(viewBbox.height, 1e-9)))
+      return `<circle cx="${c[0]}" cy="${c[1]}" r="${round(entity.r * scale)}" fill="none" stroke="#0f766e" stroke-width="1" stroke-opacity="0.65"/>`
     }
     if (entity.type === 'TEXT') {
       const p = project([entity.x, entity.y])
@@ -256,15 +293,18 @@ export function inspectDXF(buffer, name = 'DXF') {
     bbox: [round(bbox.minX), round(bbox.minY), round(bbox.maxX), round(bbox.maxY)],
     crs: 'DXF 图纸坐标（未声明 GIS 坐标系）',
     pointCount: points.length,
+    truncated,
     // 保留解析出的实体，供平台格式基座做同格式回写；预览本身仍然只暴露 SVG。
     entities: entities.map((entity) => ({ ...entity })),
-    svg: svgWrap(inner, `DXF · ${entities.length} 个实体 · ${layers.size} 个图层`),
+    svg: svgWrap(inner, `DXF · ${entities.length} 个实体 · ${layers.size} 个图层${truncated ? ' · 已截断预览' : ''}`),
   }
 }
 
-export function inspectSpatial(buffer, name) {
+export function inspectSpatial(buffer, name, options = {}) {
   const ext = String(name || '').toLowerCase().split('.').pop()
   if (ext === 'json' || ext === 'geojson') return inspectGeoJSON(buffer, name)
-  if (ext === 'dxf') return inspectDXF(buffer, name)
+  if (ext === 'dxf') return inspectDXF(buffer, name, options)
   throw new Error(`暂不支持 ${ext || '未知'} 格式；当前独立运行时支持 GeoJSON 与 ASCII DXF，DWG 需先转换为 DXF。`)
 }
+
+

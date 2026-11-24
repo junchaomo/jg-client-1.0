@@ -1,0 +1,194 @@
+[
+  {
+    "family": "仿宋",
+    "subfamily": "Regular",
+    "file": "FangSong.otf",
+    "source": "FandolFang-Regular.otf"
+  },
+  {
+    "family": "仿宋_GB2312",
+    "subfamily": "Regular",
+    "file": "FangSong_GB2312.otf",
+    "source": "FandolFang-Regular.otf"
+  },
+  {
+    "family": "方正仿宋简体",
+    "subfamily": "Regular",
+    "file": "FZ_FangSong.otf",
+    "source": "FandolFang-Regular.otf"
+  },
+  {
+    "family": "方正仿宋_GBK",
+    "subfamily": "Regular",
+    "file": "FZ_FangSong_GBK.otf",
+    "source": "FandolFang-Regular.otf"
+  },
+  {
+    "family": "华文仿宋",
+    "subfamily": "Regular",
+    "file": "ST_FangSong.otf",
+    "source": "FandolFang-Regular.otf"
+  },
+  {
+    "family": "楷体",
+    "subfamily": "Regular",
+    "file": "KaiTi.otf",
+    "source": "FandolKai-Regular.otf"
+  },
+  {
+    "family": "楷体_GB2312",
+    "subfamily": "Regular",
+    "file": "KaiTi_GB2312.otf",
+    "source": "FandolKai-Regular.otf"
+  },
+  {
+    "family": "方正楷体简体",
+    "subfamily": "Regular",
+    "file": "FZ_KaiTi.otf",
+    "source": "FandolKai-Regular.otf"
+  },
+  {
+    "family": "方正楷体_GBK",
+    "subfamily": "Regular",
+    "file": "FZ_KaiTi_GBK.otf",
+    "source": "FandolKai-Regular.otf"
+  },
+  {
+    "family": "华文楷体",
+    "subfamily": "Regular",
+    "file": "ST_KaiTi.otf",
+    "source": "FandolKai-Regular.otf"
+  },
+  {
+    "family": "黑体",
+    "subfamily": "Regular",
+    "file": "SimHei.otf",
+    "source": "FandolHei-Regular.otf"
+  },
+  {
+    "family": "微软雅黑",
+    "subfamily": "Regular",
+    "file": "Microsoft_YaHei.otf",
+    "source": "FandolHei-Regular.otf"
+  },
+  {
+    "family": "微软雅黑 Light",
+    "subfamily": "Light",
+    "file": "Microsoft_YaHei_Light.otf",
+    "source": "FandolHei-Regular.otf"
+  },
+  {
+    "family": "等线",
+    "subfamily": "Regular",
+    "file": "DengXian.otf",
+    "source": "FandolHei-Regular.otf"
+  },
+  {
+    "family": "等线 Light",
+    "subfamily": "Light",
+    "file": "DengXian_Light.otf",
+    "source": "FandolHei-Regular.otf"
+  },
+  {
+    "family": "方正黑体简体",
+    "subfamily": "Regular",
+    "file": "FZ_Hei.otf",
+    "source": "FandolHei-Regular.otf"
+  },
+  {
+    "family": "方正黑体_GBK",
+    "subfamily": "Regular",
+    "file": "FZ_Hei_GBK.otf",
+    "source": "FandolHei-Regular.otf"
+  },
+  {
+    "family": "华文黑体",
+    "subfamily": "Regular",
+    "file": "ST_Hei.otf",
+    "source": "FandolHei-Regular.otf"
+  },
+  {
+    "family": "华文细黑",
+    "subfamily": "Regular",
+    "file": "ST_XiHei.otf",
+    "source": "FandolHei-Regular.otf"
+  },
+  {
+    "family": "幼圆",
+    "subfamily": "Regular",
+    "file": "YouYuan.otf",
+    "source": "FandolHei-Regular.otf"
+  },
+  {
+    "family": "宋体",
+    "subfamily": "Regular",
+    "file": "SimSun.otf",
+    "source": "FandolSong-Regular.otf"
+  },
+  {
+    "family": "新宋体",
+    "subfamily": "Regular",
+    "file": "NSimSun.otf",
+    "source": "FandolSong-Regular.otf"
+  },
+  {
+    "family": "方正书宋简体",
+    "subfamily": "Regular",
+    "file": "FZ_ShuSong.otf",
+    "source": "FandolSong-Regular.otf"
+  },
+  {
+    "family": "方正书宋_GBK",
+    "subfamily": "Regular",
+    "file": "FZ_ShuSong_GBK.otf",
+    "source": "FandolSong-Regular.otf"
+  },
+  {
+    "family": "华文宋体",
+    "subfamily": "Regular",
+    "file": "ST_Song.otf",
+    "source": "FandolSong-Regular.otf"
+  },
+  {
+    "family": "华文中宋",
+    "subfamily": "Regular",
+    "file": "ST_ZhongSong.otf",
+    "source": "FandolSong-Regular.otf"
+  },
+  {
+    "family": "方正小标宋简体",
+    "subfamily": "Regular",
+    "file": "FZ_XiaoBiaoSong.otf",
+    "source": "FandolSong-Bold.otf"
+  },
+  {
+    "family": "方正小标宋_GBK",
+    "subfamily": "Regular",
+    "file": "FZ_XiaoBiaoSong_GBK.otf",
+    "source": "FandolSong-Bold.otf"
+  },
+  {
+    "family": "小标宋",
+    "subfamily": "Regular",
+    "file": "XiaoBiaoSong.otf",
+    "source": "FandolSong-Bold.otf"
+  },
+  {
+    "family": "微软雅黑 Bold",
+    "subfamily": "Bold",
+    "file": "Microsoft_YaHei_Bold.otf",
+    "source": "FandolHei-Bold.otf"
+  },
+  {
+    "family": "等线 Bold",
+    "subfamily": "Bold",
+    "file": "DengXian_Bold.otf",
+    "source": "FandolHei-Bold.otf"
+  },
+  {
+    "family": "黑体 Bold",
+    "subfamily": "Bold",
+    "file": "SimHei_Bold.otf",
+    "source": "FandolHei-Bold.otf"
+  }
+]

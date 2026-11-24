@@ -40,6 +40,10 @@ const state = {
   modelGateway: { presets: [], custom: [], chat: [], image: [] },
   composerTools: ['T-DATA'],
   composerRefs: [],
+  docContext: null,
+  docContextDetached: false,
+  docContextTimer: 0,
+  docContextChannel: null,
   reasoningEffort: 'medium',
   deepThink: false,
   personalFiles: [
@@ -62,6 +66,7 @@ const state = {
   sbUserW: 0,
   setNavWidth: 208,
   notifications: [],
+  taskCenterItems: [],
   // 会话
   conversations: [],
   pinnedConvs: (() => { try { return JSON.parse(localStorage.getItem('jg.pinnedConvs') || '[]') } catch (e) { return [] } })(),
@@ -80,6 +85,7 @@ const state = {
   chatStartedAt: 0,
   chatTicker: null,
   chatTask: null,
+  chatRunConvId: '',
   speakingIndex: null,
   speechPaused: false,
   speechLoading: false,
@@ -128,7 +134,7 @@ const state = {
   cbW: 440,
   cbUserW: 0,
   imagegen: { prompt: '', ratio: '1:1', count: 1, style: '写实', shots: [], busy: false, modelId: '', references: [], assetsLoaded: false, assetsLoading: false, tab: 'templates', templates: [], templatesLoaded: false, templatesLoading: false, templateApps: [], templateAppsLoaded: false, templateAppsLoading: false },
-  pipeline: { datasets: [], loaded: false, loading: false, activeId: '', selected: null, layers: { water: true, sewer: true, gas: true, heat: true, power: true, telecom: true, industrial: true, gallery: true, other: true } },
+  pipeline: { datasets: [], loaded: false, loading: false, activeId: '', selected: null, layers: { supply: true, distribution: true, rain: true, intercept: true, sewage: true, combined: true, power: true, telecom: true, gas: true, heat: true, gallery: true, other: true } },
 }
 
 const layout = new AppLayout(document.getElementById('app'))
@@ -249,8 +255,32 @@ const statusMap = {
   rejected: { label: '已退回', cls: 'secret' },
 }
 
+let sessionWarnTimer = 0
+let sessionWarnedExpiresAt = 0
+
+/**
+ * 登录态到期提示：活跃 API 请求会把服务端过期时间与 cookie 一起后移，
+ * 这里按响应头/引导数据重排提醒；闲置到只剩 10 分钟时给出一次明确提示。
+ */
+function scheduleSessionExpiry(expiresAt) {
+  const at = Number(expiresAt || 0)
+  if (!at) return
+  if (sessionWarnTimer) clearTimeout(sessionWarnTimer)
+  const remain = at - Date.now()
+  if (remain <= 0) return
+  const delay = Math.max(0, remain - 10 * 60 * 1000)
+  sessionWarnTimer = setTimeout(() => {
+    if (sessionWarnedExpiresAt === at) return
+    sessionWarnedExpiresAt = at
+    const mins = Math.max(1, Math.round((at - Date.now()) / 60000))
+    toast(`登录状态将在约 ${mins} 分钟后到期；继续操作会自动续期，避免长时间闲置。`, true)
+  }, delay)
+}
+
 async function api(path, options = {}) {
   const res = await fetch(path, { credentials: 'same-origin', ...options })
+  const sessionExpiresAt = Number(res.headers.get('x-session-expires') || 0)
+  if (sessionExpiresAt) scheduleSessionExpiry(sessionExpiresAt)
   const body = await res.json().catch(() => ({}))
   return { ok: res.ok, status: res.status, body }
 }
@@ -264,11 +294,19 @@ async function postChat(payload, { onDelta } = {}) {
   let lastByteAt = Date.now()
   let healthFails = 0
   let probing = false
+  let abortReason = ''
   const idleLimitMs = 30000
   const hardLimitMs = 5 * 60 * 1000
   const startedAt = Date.now()
   const watchdog = setInterval(async () => {
-    if (Date.now() - startedAt > hardLimitMs) { controller.abort(); return }
+    if (Date.now() - startedAt > hardLimitMs) {
+      // 审批/提问卡片在等用户操作时不能按“无响应”中断：服务端审批超时是 8 分钟，
+      // 若这里 5 分钟先 abort，用户只会看到误报的“本机服务连续无响应”。
+      if (state.pendingInteraction) return
+      abortReason = 'timeout'
+      controller.abort()
+      return
+    }
     if (probing) return
     if (Date.now() - lastByteAt <= idleLimitMs) { healthFails = 0; return }
     probing = true
@@ -281,7 +319,7 @@ async function postChat(payload, { onDelta } = {}) {
     } finally {
       probing = false
     }
-    if (healthFails >= 3) controller.abort()
+    if (healthFails >= 3) { abortReason = 'health'; controller.abort() }
   }, 5000)
   try {
     const res = await fetch('/api/chat', {
@@ -350,6 +388,152 @@ function toast(message, bad = false) {
   el.className = `toast show${bad ? ' bad' : ''}`
   clearTimeout(toast._t)
   toast._t = setTimeout(() => { el.className = 'toast' }, 3200)
+}
+
+/*
+ * 安装进度环：与 POST /api/plugin-market/install 并行轮询服务端 job。
+ * 圆环在“服务端已确认的阶段区间”内缓慢上涨，只有接口成功才给 100%；
+ * 服务端返回 done=false 时绝不假装完成，避免把安装失败画成已安装。
+ */
+let activeInstallJob = ''
+function newInstallJobId() {
+  return `ij-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+}
+function startInstallProgress(button, { kind = 'skill', name = '' } = {}) {
+  if (!button) return null
+  if (button.dataset.installing === '1') return null
+  if (activeInstallJob) {
+    toast('请等待当前安装完成')
+    return null
+  }
+  const jobId = newInstallJobId()
+  activeInstallJob = jobId
+  button.dataset.installing = '1'
+  const compact = button.classList.contains('pl-act')
+  const prev = {
+    html: button.innerHTML,
+    className: button.className,
+    title: button.title,
+    busy: button.getAttribute('aria-busy'),
+  }
+  let floor = 6
+  let ceiling = 16
+  let label = '准备安装'
+  let shown = 0
+  let lastPainted = -1
+  let phaseAt = Date.now()
+  const startedAt = Date.now()
+  let stopped = false
+  let settled = false
+  let resolveDone = null
+  let raf = 0
+  let pollTimer = 0
+  button.classList.add('is-installing')
+  if (!compact) button.classList.add('jg-install-btn')
+  button.setAttribute('aria-busy', 'true')
+  button.innerHTML = compact
+    ? '<span class="jg-install-ring" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="正在安装"><i></i></span>'
+    : '<span class="jg-install-ring big" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="正在安装"><i></i></span><span class="jg-install-label">安装中 0%</span>'
+  const ring = button.querySelector('.jg-install-ring')
+  const labelEl = button.querySelector('.jg-install-label')
+  const typeName = kind === 'app' ? '应用' : kind === 'plugin' ? '插件' : '技能'
+  const paint = () => {
+    if (stopped) return
+    const elapsed = Date.now() - phaseAt
+    const target = Math.min(99, floor + Math.max(0, ceiling - floor) * (1 - Math.exp(-elapsed / 2200)))
+    shown += (target - shown) * 0.22
+    if (target - shown < 0.4) shown = target
+    const percent = Math.max(0, Math.min(99, Math.round(shown)))
+    if (percent !== lastPainted) {
+      lastPainted = percent
+      ring.style.setProperty('--p', String(percent))
+      ring.setAttribute('aria-valuenow', String(percent))
+      ring.setAttribute('aria-label', `${typeName}${name ? `「${name}」` : ''} ${label} ${percent}%`)
+      if (labelEl) labelEl.textContent = `安装中 ${percent}%`
+      button.title = `${name ? `${name} · ` : ''}${label} ${percent}%`
+    }
+    raf = requestAnimationFrame(paint)
+  }
+  raf = requestAnimationFrame(paint)
+
+  const release = () => {
+    if (activeInstallJob === jobId) activeInstallJob = ''
+  }
+  const restore = () => {
+    if (!button.isConnected) return
+    button.innerHTML = prev.html
+    button.className = prev.className
+    button.title = prev.title
+    if (prev.busy === null) button.removeAttribute('aria-busy')
+    else button.setAttribute('aria-busy', prev.busy)
+    delete button.dataset.installing
+  }
+  const settle = (ok, error = '') => {
+    if (settled) return Promise.resolve()
+    settled = true
+    clearTimeout(pollTimer)
+    const apply = () => {
+      stopped = true
+      release()
+      cancelAnimationFrame(raf)
+      ring.style.setProperty('--p', '100')
+      ring.classList.add(ok ? 'done' : 'fail')
+      ring.innerHTML = `<i>${ok ? '✓' : '!'}</i>`
+      ring.setAttribute('aria-valuenow', '100')
+      ring.setAttribute('aria-label', ok ? `${typeName}安装完成` : `${typeName}安装失败`)
+      if (labelEl) labelEl.textContent = ok ? '已安装' : '安装失败'
+      button.title = `${name ? `${name} · ` : ''}${ok ? '安装完成' : error || '安装失败'}`
+      if (!ok) setTimeout(restore, 900)
+      resolveDone?.()
+    }
+    if (ok) {
+      /* 秒装的技能/应用也要让眼睛看到一次圆环扫过，最短 380ms；后端早已完成，只是把收尾视觉做完。 */
+      const hold = Math.max(0, 380 - (Date.now() - startedAt))
+      if (hold > 0) {
+        floor = Math.max(floor, 84)
+        ceiling = 96
+        label = '正在收尾'
+        phaseAt = Date.now()
+        return new Promise((resolve) => {
+          resolveDone = resolve
+          setTimeout(apply, hold)
+        })
+      }
+    }
+    apply()
+    return Promise.resolve()
+  }
+  const poll = async () => {
+    if (stopped) return
+    try {
+      const res = await fetch(`/api/plugin-market/install/progress?jobId=${encodeURIComponent(jobId)}`, {
+        credentials: 'same-origin',
+        cache: 'no-store',
+        signal: AbortSignal.timeout(4000),
+      })
+      if (res.ok) {
+        const body = await res.json()
+        if (settled) return
+        if (body.done) {
+          settle(Boolean(body.ok), body.error || '')
+          return
+        }
+        if (Number.isFinite(body.percent)) {
+          if (body.label && body.label !== label) phaseAt = Date.now()
+          floor = Math.max(floor, Number(body.percent))
+          ceiling = Math.max(floor, Number(body.ceiling) || floor + 8)
+          label = body.label || label
+        }
+      }
+    } catch { /* 轮询失败不终止安装请求本身；下一轮继续 */ }
+    if (!stopped && !settled) pollTimer = setTimeout(poll, 650)
+  }
+  pollTimer = setTimeout(poll, 300)
+  return {
+    jobId,
+    done: () => settle(true),
+    fail: (error) => settle(false, error),
+  }
 }
 
 /* 统一浮层管理：同一个触发按钮第二次点击关闭，点击外部或按 Esc 也关闭。 */
@@ -612,6 +796,7 @@ function markdownHTML(value = '') {
 async function loadBoot() {
   const { body } = await api('/api/bootstrap')
   state.boot = body
+  scheduleSessionExpiry(body.session?.expiresAt || 0)
   state.runtimeSettings = body.settings || state.runtimeSettings
   loadUsageSummary().catch(() => {})
   if (!state.conversation?.id) state.executionPolicy = state.runtimeSettings.defaultPolicy === 'manual' ? 'manual' : 'auto'
@@ -625,6 +810,7 @@ async function loadBoot() {
   if (body.settings?.defaultEffort) state.reasoningEffort = body.settings.defaultEffort
   state.tasks = body.tasks || []
   state.conversations = body.conversations || []
+  ensureAutomationPins()
   state.modelGateway = body.modelGateway || { presets: [], custom: [], chat: [], image: [] }
   const chatChoices = state.modelGateway.chat || []
   if (!chatChoices.some((m) => m.id === state.composerModel)) {
@@ -650,6 +836,7 @@ async function loadBoot() {
     state.mcpServer = mcp.body.server || null
   }
   await loadNotifications()
+  ensureNotificationPolling()
 }
 
 async function refreshAuditIfOpen() {
@@ -758,14 +945,14 @@ function openProjectMenu(anchor, id) {
   </button>`
   pop.innerHTML = [
     item('pin', 'pin', p.pinned ? '取消置顶' : '置顶'),
-    item('edit', 'gear', '编辑工作区'),
+    item('edit', 'gear', '编辑分组'),
     '<div class="cm-sep"></div>',
     item('section', 'grid', '分区', true),
     item('reveal', 'folder', '在资源管理器中打开'),
     '<div class="cm-sep"></div>',
     item('archive', 'inbox', '归档线程'),
     '<div class="cm-sep"></div>',
-    item('remove', 'close', '移除工作区'),
+    item('remove', 'close', '移除分组'),
   ].join('')
   document.body.appendChild(pop)
   finishPopover(pop, anchor)
@@ -814,10 +1001,10 @@ function openProjectRowMenu(anchor, id) {
   menu.innerHTML = [
     item('new', 'compose', '新建线程'),
     item('check', 'shield', '成果检查'),
-    item('pin', 'pin', p.pinned ? '取消置顶工作区' : '置顶工作区'),
-    item('edit', 'gear', '编辑工作区'),
+    item('pin', 'pin', p.pinned ? '取消置顶分组' : '置顶分组'),
+    item('edit', 'gear', '编辑分组'),
     item('archive', 'inbox', '归档线程'),
-    item('remove', 'close', '移除工作区'),
+    item('remove', 'close', '移除分组'),
   ].join('')
   document.body.appendChild(menu)
   finishPopover(menu, anchor)
@@ -1028,10 +1215,10 @@ function archiveProjectChats(p) {
 }
 
 function confirmRemoveProject(p) {
-  const mask = openModal('移除工作区', `
-    <div class="notice">只移除平台记录，不会删除本地文件夹、文件或线程历史。工作区下的线程会转为普通聊天。</div>
+  const mask = openModal('移除分组', `
+    <div class="notice">只移除平台记录，不会删除本地文件夹、文件或线程历史。分组下的线程会转为普通聊天。</div>
     <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">
-      <button class="btn" data-cancel>取消</button><button class="btn" style="color:var(--danger)" data-ok>移除工作区</button>
+      <button class="btn" data-cancel>取消</button><button class="btn" style="color:var(--danger)" data-ok>移除分组</button>
     </div>`)
   mask.querySelector('[data-cancel]')?.addEventListener('click', () => mask.remove())
   mask.querySelector('[data-ok]')?.addEventListener('click', async () => {
@@ -1054,7 +1241,7 @@ function confirmRemoveProject(p) {
     try { localStorage.setItem('jg.projectSectionMap', JSON.stringify(state.projectSectionMap || {})) } catch (e) { /* 本地不可写时只保留进程内状态 */ }
     render()
     renderSidebar()
-    toast('工作区记录已移除，本地文件未删除')
+    toast('分组记录已移除，本地文件未删除')
   })
 }
 
@@ -1090,7 +1277,7 @@ function openProjectCard(anchor) {
     <div class="pc-meta"><span class="ico">${icon('chat')}</span>${p.convs || 0} 次聊天 · ${waiting} 个等待中</div>
     <div class="pc-sep"></div>
     <div class="pc-path"><span class="ico">${icon('folder')}</span><span class="mono">${esc(projPath(p))}</span></div>
-    <button class="pc-item" data-pcedit="${p.id}"><span class="ico">${icon('gear')}</span>编辑工作区</button>`
+    <button class="pc-item" data-pcedit="${p.id}"><span class="ico">${icon('gear')}</span>编辑分组</button>`
   document.body.appendChild(card)
   const r = anchor.getBoundingClientRect()
   const w = 304
@@ -1138,12 +1325,12 @@ function openProjectEditCard(anchor, id) {
     if (path === p.cwd && p.folderName) return p.folderName
     return String(path).replace(/[\\/]+$/, '').split(/[\\/]/).pop()
   }
-  const mask = openModal('编辑工作区', `
+  const mask = openModal('编辑分组', `
     <div style="padding:2px 4px 0">
       <div style="display:flex;align-items:center;height:54px;border:1.5px solid var(--accent);border-radius:13px;background:#fff;overflow:hidden">
         <span style="width:52px;display:grid;place-items:center;color:var(--text)"><span class="ico" style="width:22px;height:22px">${icon('folder')}</span></span>
         <span style="width:1px;height:24px;background:#dcdfe4"></span>
-        <input id="pceName" value="${esc(p.name)}" placeholder="工作区名称" style="flex:1;min-width:0;border:0;outline:0;background:transparent;height:52px;padding:0 16px;font:inherit;font-size:var(--fs-sub);color:var(--text)" />
+        <input id="pceName" value="${esc(p.name)}" placeholder="分组名称" style="flex:1;min-width:0;border:0;outline:0;background:transparent;height:52px;padding:0 16px;font:inherit;font-size:var(--fs-sub);color:var(--text)" />
       </div>
 
       <div style="margin:22px 0 10px;font-size:var(--fs-sub);font-weight:var(--fw-semi);color:var(--text)">本地文件夹</div>
@@ -1161,7 +1348,7 @@ function openProjectEditCard(anchor, id) {
       <textarea id="pceInstructions" rows="3" placeholder="例如：本项目统一使用中文命名；修改代码前先运行现有测试。更细的目录规则可写在 AGENTS.md。" style="width:100%;box-sizing:border-box;border:1px solid #e1e4e9;border-radius:12px;background:#fff;padding:11px 12px;font:inherit;font-size:var(--fs-meta);color:var(--text);resize:vertical;outline:none">${esc(p.instructions || '')}</textarea>
 
       <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:26px;padding-bottom:2px">
-        <button id="pceRemove" type="button" style="border:0;border-radius:10px;background:#fdeaea;color:#c0392b;padding:12px 18px;font:inherit;font-size:var(--fs-sub);cursor:pointer">移除工作区</button>
+        <button id="pceRemove" type="button" style="border:0;border-radius:10px;background:#fdeaea;color:#c0392b;padding:12px 18px;font:inherit;font-size:var(--fs-sub);cursor:pointer">移除分组</button>
         <div style="display:flex;align-items:center;gap:8px">
           <button class="btn" id="pceCancel" style="border:0;background:transparent;color:var(--muted)">取消</button>
           <button class="btn primary" id="pceSave" style="min-width:96px">保存</button>
@@ -1237,7 +1424,7 @@ function openProjectEditCard(anchor, id) {
   mask.querySelector('#pceCancel')?.addEventListener('click', () => mask.remove())
   mask.querySelector('#pceSave')?.addEventListener('click', async () => {
     const name = mask.querySelector('#pceName').value.trim()
-    if (!name) return toast('工作区名称不能为空', true)
+    if (!name) return toast('分组名称不能为空', true)
     const payload = {
       id: p.id,
       name,
@@ -1262,7 +1449,7 @@ function openProjectEditCard(anchor, id) {
     }
     mask.remove()
     render()
-    toast('工作区已更新')
+    toast('分组已更新')
   })
 
   let removeArmed = false
@@ -1272,7 +1459,7 @@ function openProjectEditCard(anchor, id) {
       removeArmed = true
       removeBtn.textContent = '再次点击确认移除'
       removeBtn.style.background = '#f8d7d7'
-      toast('仅移除工作区记录，不删除本地文件与线程历史')
+      toast('仅移除分组记录，不删除本地文件与线程历史')
       return
     }
     removeBtn.disabled = true
@@ -1293,7 +1480,7 @@ function openProjectEditCard(anchor, id) {
     state.projects = (state.projects || []).filter((x) => x.id !== p.id)
     state.sidebarProjects = (state.sidebarProjects || []).filter((x) => x.id !== p.id)
     render()
-    toast('工作区记录已移除，本地文件未删除')
+    toast('分组记录已移除，本地文件未删除')
   })
 
   setTimeout(() => mask.querySelector('#pceName')?.focus(), 30)
@@ -1343,7 +1530,7 @@ function openRecentHeadMenu(anchor) {
     <button class="cm-item" data-rh="order"><span class="ico">${icon('sort')}</span><span class="cm-label">聊天排序方式</span><span class="cm-arrow">›</span></button>
     <div class="cm-sep"></div>
     <div class="cm-label-dim">显示</div>
-    <button class="cm-item" data-rh="projects"><span class="ico">${icon('folder')}</span><span class="cm-label">工作区</span>${state.showProjects ? '<span class="cm-key">✓</span>' : ''}</button>
+    <button class="cm-item" data-rh="projects"><span class="ico">${icon('folder')}</span><span class="cm-label">分组</span>${state.showProjects ? '<span class="cm-key">✓</span>' : ''}</button>
     <div class="cm-sep"></div>
     <button class="cm-item" data-rh="section"><span class="ico">${icon('plus')}</span><span class="cm-label">新建分区</span></button>
     <div class="cm-sep"></div>
@@ -1617,14 +1804,14 @@ function renderSidebar() {
 
   const pinnedProjects = projects.filter((p) => p.pinned || (state.pinnedProjects || []).includes(p.id))
   const workspaceProjects = projects.filter((p) => !pinnedProjects.includes(p))
-  const notifyUnread = state.notifications.filter((n) => n.unread).length
+  const notifyUnread = notifyUnreadCount()
 
   sidebar.innerHTML = `
     <div class="brand">
       <button class="brand-name" id="brandMenu" title="九规智能中枢">九规智能中枢</button>
       <div class="brand-icons">
         <button class="brand-icon" id="sbSearch" title="搜索（Ctrl+K）"><span class="ico">${icon('search')}</span></button>
-        <button class="brand-icon" id="notifyTrigger" title="${notifyUnread ? `通知中心 · ${notifyUnread} 条未读` : '通知中心'}"><span class="ico">${icon('bell')}</span><span class="notify-dot"${notifyUnread ? '' : ' hidden'}></span></button>
+        <button class="brand-icon" id="notifyTrigger" title="${notifyUnread ? `任务中心 · ${notifyUnread} 条未读` : '任务中心'}"><span class="ico">${icon('bell')}</span><span class="notify-dot"${notifyUnread ? '' : ' hidden'}></span></button>
       </div>
     </div>
     <div class="sb-top-actions">
@@ -1636,12 +1823,12 @@ function renderSidebar() {
       ${pinnedProjects.map((p) => projBlock(p)).join('')}
       ${pins.map((c) => convRow(c, true)).join('')}
       ${pinnedProjects.length || pins.length ? '' : '<div class="sb-empty">暂无置顶内容</div>'}
-      ${state.showProjects ? `<div class="sb-label sb-label-row"><span>工作区</span>
-        <button class="sb-collapse" id="projNew" title="新建工作区"><span class="ico">${icon('plus')}</span></button>
-        <button class="sb-collapse" id="projMore" title="工作区显示设置"><span class="ico">${icon('dots')}</span></button>
+      ${state.showProjects ? `<div class="sb-label sb-label-row"><span>分组</span>
+        <button class="sb-collapse" id="projNew" title="新建分组"><span class="ico">${icon('plus')}</span></button>
+        <button class="sb-collapse" id="projMore" title="分组显示设置"><span class="ico">${icon('dots')}</span></button>
       </div>
       <div class="sb-projects${state.projMerge ? ' merged' : ''}">
-        ${workspaceProjects.map((p) => projBlock(p)).join('') || (pinnedProjects.length ? '' : '<div class="sb-empty">暂无工作区</div>')}
+        ${workspaceProjects.map((p) => projBlock(p)).join('') || (pinnedProjects.length ? '' : '<div class="sb-empty">暂无分组</div>')}
       </div>` : ''}
       ${(state.sidebarSections || []).map((sec) => {
         const kids = convs.filter((c) => sectionOf[c.id] === sec.id && !pins.includes(c))
@@ -1886,6 +2073,37 @@ function mountPageSidebar() {
 
 
 
+/** 定时任务产生的消息默认置顶；用户手动取消后不再自动置顶。 */
+function isAutomationConv(c) {
+  return Boolean(c?.automationId) || /^定时任务\s*·\s*/.test(String(c?.title || ''))
+}
+
+function pinnedOptOut() {
+  try { return new Set(JSON.parse(localStorage.getItem('jg.pinOptOut') || '[]')) } catch (e) { return new Set() }
+}
+
+function setPinnedOptOut(id, on) {
+  const set = pinnedOptOut()
+  if (on) set.add(id)
+  else set.delete(id)
+  try { localStorage.setItem('jg.pinOptOut', JSON.stringify([...set])) } catch (e) { /* 本地不可写时只保留进程内状态 */ }
+}
+
+function ensureAutomationPins() {
+  const pinned = new Set(state.pinnedConvs || [])
+  const optOut = pinnedOptOut()
+  let changed = false
+  for (const conv of state.conversations || []) {
+    if (!isAutomationConv(conv) || optOut.has(conv.id) || pinned.has(conv.id)) continue
+    pinned.add(conv.id)
+    changed = true
+  }
+  if (!changed) return false
+  state.pinnedConvs = [...pinned]
+  try { localStorage.setItem('jg.pinnedConvs', JSON.stringify(state.pinnedConvs)) } catch (e) { /* 本地不可写时只保留进程内状态 */ }
+  return true
+}
+
 function togglePinnedConversation(id) {
   const conv = (state.conversations || []).find((c) => c.id === id)
   if (!conv) return
@@ -1895,6 +2113,7 @@ function togglePinnedConversation(id) {
   else next.add(id)
   state.pinnedConvs = Array.from(next)
   try { localStorage.setItem('jg.pinnedConvs', JSON.stringify(state.pinnedConvs)) } catch (e) { /* 本地不可写时只保留进程内状态 */ }
+  if (isAutomationConv(conv)) setPinnedOptOut(id, wasPinned)
   renderSidebar()
   toast(wasPinned ? `已取消置顶「${conv.title}」` : `已置顶「${conv.title}」`)
 }
@@ -1921,7 +2140,7 @@ function openConversationMenu(anchor, id) {
     ['archive', 'inbox', '归档', 'Ctrl+Shift+A'],
     ['delete', 'close', '删除', ''],
     ['—', '', '', ''],
-    ['move', 'folder', '移至工作区', ''],
+    ['move', 'folder', '移至分组', ''],
   ]
   const pop = document.createElement('div')
   pop.className = 'conv-menu'
@@ -1957,7 +2176,7 @@ function openMoveToProject(anchor, id) {
   const projects = state.sidebarProjects || state.projects || []
   const pop = document.createElement('div')
   pop.className = 'conv-menu'
-  pop.innerHTML = `<div class="cm-head">移至工作区</div>` + projects.map((p) => `
+  pop.innerHTML = `<div class="cm-head">移至分组</div>` + projects.map((p) => `
     <button class="cm-item" data-mp="${p.id}"><span class="ico">${icon('folder')}</span><span class="cm-label">${esc(p.name)}</span></button>`).join('')
   document.body.appendChild(pop)
   finishPopover(pop, anchor)
@@ -2305,8 +2524,8 @@ function bindSidebarResize() {
 
 
 const PAGE_LAYOUTS = {
-  home: { sidebar: true, sidebarTitle: '工作区' },
-  chat: { sidebar: true, sidebarTitle: '工作区' },
+  home: { sidebar: true, sidebarTitle: '分组' },
+  chat: { sidebar: true, sidebarTitle: '分组' },
   tasks: { sidebar: true, sidebarTitle: '定时任务' },
   automation: { sidebar: true, sidebarTitle: '定时任务' },  skills: { sidebar: true, sidebarTitle: '插件与技能' },
   settings: { sidebar: true, sidebarTitle: '设置' },
@@ -2614,75 +2833,218 @@ function toggleGlobalSidebar() {
   renderMenubar()
 }
 
+function notifyUnreadCount() {
+  return state.notifications.filter((item) => item.unread).length + state.taskCenterItems.filter((item) => item.unread).length
+}
+
 function openNotifications(anchor) {
   if (!beginPopover(anchor)) return
-  const items = state.notifications
-  const unread = items.filter((n) => n.unread).length
   const pop = document.createElement('div')
-  pop.className = 'notify-pop'
+  pop.className = 'notify-pop task-center-pop'
   pop.innerHTML = `
-    <div class="notify-head">
-      <span class="notify-title">通知</span>
-      <span class="notify-sub">${unread ? `${unread} 条未读` : '全部已读'}</span>
-      <span class="spacer"></span>
-      <button class="btn sm" id="readAll">全部已读</button>
-    </div>
-    <div class="notify-list">
-      ${items.length ? items.map((n) => `
-        <button class="notify-item${n.unread ? ' unread' : ''}" data-nid="${esc(n.id)}" data-nav-to="${esc(n.nav || '')}" data-conv="${esc(n.conversationId || '')}">
-          <span class="notify-mark ${n.kind}"></span>
-          <span class="notify-copy">
-            <span class="notify-name">${esc(n.title)}</span>
-            <span class="notify-body">${esc(n.body)}</span>
-            <span class="notify-time">${esc(n.time || '')}</span>
-          </span>
-        </button>`).join('') : '<div class="notify-empty">暂无通知</div>'}
-    </div>
-    <div class="notify-foot">通知与审计同源：安全事件不可关闭，其余可在设置中调整</div>`
-
+    <div class="notify-head"><span class="notify-title">任务中心</span><span class="spacer"></span>
+      <button class="btn sm" data-inbox-action="clear" hidden>清空已读</button><button class="btn sm" data-inbox-action="archive">归档已读</button><button class="btn sm" data-inbox-action="read">全部已读</button></div>
+    <div class="task-center-tabs"><button class="on" data-inbox-tab="tasks">任务</button><button data-inbox-tab="notifications">通知</button><span class="spacer"></span>
+      <span data-task-filter-wrap><button class="on" data-task-filter="all">全部</button><button data-task-filter="unread">未读</button></span></div>
+    <div class="notify-list" data-inbox-list></div><div class="notify-foot" data-inbox-foot></div>`
   document.body.appendChild(pop)
   finishPopover(pop, anchor)
   const rect = anchor.getBoundingClientRect()
-  pop.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - 338))}px`
-  const ph = pop.offsetHeight
-  pop.style.top = `${Math.max(8, Math.min(window.innerHeight - ph - 8, rect.bottom + 8))}px`
-
-  pop.querySelector('#readAll').addEventListener('click', async () => {
-    await api('/api/notifications/read', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: 'all' }) })
+  pop.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - 450))}px`
+  pop.style.top = `${Math.max(slideTopOffset() + 8, Math.min(window.innerHeight - pop.offsetHeight - 8, rect.bottom + 8))}px`
+  let activeTab = 'tasks'
+  let taskFilter = 'all'
+  const timeLabel = (task) => {
+    const ts = Number(task.finishedAt || task.createdAt || 0)
+    return ts ? new Date(ts).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }) : '—'
+  }
+  const renderContent = () => {
+    const tasks = state.taskCenterItems.filter((task) => taskFilter === 'all' || task.unread)
+    const taskUnread = state.taskCenterItems.filter((task) => task.unread).length
+    const noticeUnread = state.notifications.filter((item) => item.unread).length
+    pop.querySelectorAll('[data-inbox-tab]').forEach((button) => button.classList.toggle('on', button.dataset.inboxTab === activeTab))
+    pop.querySelector('[data-task-filter-wrap]').hidden = activeTab !== 'tasks'
+    pop.querySelectorAll('[data-task-filter]').forEach((button) => button.classList.toggle('on', button.dataset.taskFilter === taskFilter))
+    pop.querySelector('[data-inbox-action="archive"]').hidden = activeTab !== 'tasks'
+    pop.querySelector('[data-inbox-action="clear"]').hidden = activeTab !== 'notifications'
+    const list = pop.querySelector('[data-inbox-list]')
+    if (activeTab === 'tasks') {
+      list.innerHTML = tasks.length ? tasks.map((task) => {
+        const [cls, label] = TASK_STATE_MAP[task.state] || ['', task.state]
+        return `<button class="notify-item task-run-item${task.unread ? ' unread' : ''}" data-run-id="${esc(task.id)}">
+          <span class="notify-mark ${task.state === 'done' ? 'ok' : task.state === 'failed' ? 'danger' : 'warn'}"></span>
+          <span class="notify-copy"><span class="notify-name">${esc(task.title)}<span class="tag ${cls}">${label}</span></span>
+            <span class="notify-body">${esc(task.reason || task.replyText || (['running', 'queued', 'resuming'].includes(task.state) ? `执行进度 ${task.progress}%` : '本次执行没有文字结果'))}</span>
+            <span class="notify-time">${task.kind === 'automation-run' ? '定时执行' : '会话执行'} · ${esc(timeLabel(task))}${task.outputCount ? ` · ${task.outputCount} 个文件` : ''}</span></span>
+        </button>`
+      }).join('') : `<div class="notify-empty">${taskFilter === 'unread' ? '没有未读任务' : '暂无执行记录；聊天和定时任务的真实执行会出现在这里'}</div>`
+      pop.querySelector('[data-inbox-foot]').textContent = `${taskUnread} 条未读 · 每次执行独立归档，定时规则在“定时任务”模块管理`
+      list.querySelectorAll('[data-run-id]').forEach((button) => button.addEventListener('click', async () => {
+        const task = state.taskCenterItems.find((item) => item.id === button.dataset.runId)
+        if (!task) return
+        if (task.unread) {
+          await api('/api/task-center/read', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: task.id }) })
+          task.unread = false
+          refreshNotifyChrome()
+        }
+        pop.remove()
+        openTaskCenterItem(task)
+      }))
+    } else {
+      const items = state.notifications
+      list.innerHTML = items.length ? items.map((n) => `<button class="notify-item${n.unread ? ' unread' : ''}" data-nid="${esc(n.id)}" data-nav-to="${esc(n.nav || '')}" data-conv="${esc(n.conversationId || '')}" data-app="${esc(n.appId || '')}">
+        <span class="notify-mark ${n.kind}"></span><span class="notify-copy"><span class="notify-name">${esc(n.title)}</span><span class="notify-body">${esc(n.body)}</span><span class="notify-time">${esc(n.time || '')}</span></span></button>`).join('') : '<div class="notify-empty">暂无系统通知</div>'
+      pop.querySelector('[data-inbox-foot]').textContent = `${noticeUnread} 条未读 · 审批、授权、安全和应用提醒`
+      list.querySelectorAll('[data-nid]').forEach((button) => button.addEventListener('click', async () => {
+        await api('/api/notifications/read', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: button.dataset.nid }) })
+        await loadNotifications()
+        pop.remove()
+        if (button.dataset.app) { const opened = await openAppFromNotification(button.dataset.app); if (opened) return }
+        if (button.dataset.conv) { const opened = await openConversation(button.dataset.conv); if (opened) return }
+        if (button.dataset.navTo) { state.view = button.dataset.navTo; render() }
+      }))
+    }
+  }
+  pop.querySelectorAll('[data-inbox-tab]').forEach((button) => button.addEventListener('click', () => { activeTab = button.dataset.inboxTab; renderContent() }))
+  pop.querySelectorAll('[data-task-filter]').forEach((button) => button.addEventListener('click', () => { taskFilter = button.dataset.taskFilter; renderContent() }))
+  pop.querySelector('[data-inbox-action="read"]').addEventListener('click', async () => {
+    const endpoint = activeTab === 'tasks' ? '/api/task-center/read' : '/api/notifications/read'
+    await api(endpoint, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: 'all' }) })
     await loadNotifications()
-    pop.remove()
+    if (pop.isConnected) renderContent()
   })
-  pop.querySelectorAll('[data-nid]').forEach((b) => {
-    b.addEventListener('click', async () => {
-      await api('/api/notifications/read', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: b.dataset.nid }) })
+  pop.querySelector('[data-inbox-action="clear"]').addEventListener('click', () => {
+    const clearable = state.notifications.filter((item) => !item.unread && !String(item.title || '').includes('安全事件'))
+    if (!clearable.length) return toast('没有可清除的已读通知', true)
+    const mask = openModal('清空已读通知', `<div class="form-note">将移除 ${clearable.length} 条已读通知；未读通知与安全事件保留，审计记录不受影响。</div><div class="form-foot"><span class="spacer"></span><button class="btn danger" data-clear-confirm>确认清空</button></div>`)
+    mask.querySelector('[data-clear-confirm]').addEventListener('click', async () => {
+      const { ok, body } = await api('/api/notifications/clear', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+      if (!ok) return toast(body.error || '清空失败', true)
+      mask.remove()
       await loadNotifications()
-      pop.remove()
-      if (b.dataset.conv) { const opened = await openConversation(b.dataset.conv); if (opened) return }
-      if (b.dataset.navTo) { state.view = b.dataset.navTo; render() }
+      if (pop.isConnected) renderContent()
+      toast(`已清除 ${body.removed} 条已读通知`)
     })
   })
-
+  pop.querySelector('[data-inbox-action="archive"]').addEventListener('click', async () => {
+    const { ok, body } = await api('/api/task-center/archive', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: 'all' }) })
+    if (!ok) return toast(body.error || '归档失败', true)
+    await loadNotifications()
+    if (pop.isConnected) renderContent()
+    toast(body.archived ? `已归档 ${body.archived} 条已读执行记录` : '没有可归档的已读记录')
+  })
+  renderContent()
+  void loadNotifications().then(() => { if (pop.isConnected) renderContent() }).catch(() => {})
   setTimeout(() => document.addEventListener('click', function close(ev) {
     if (!pop.contains(ev.target) && !anchor.contains(ev.target)) { pop.remove(); document.removeEventListener('click', close) }
   }), 0)
 }
+function openTaskCenterItem(task) {
+  const [cls, label] = TASK_STATE_MAP[task.state] || ['', task.state]
+  const resumable = task.kind === 'chat-run' && task.conversationId && ['failed', 'interrupted'].includes(task.state)
+  const mask = openModal(`执行详情 · ${task.title}`, `
+    <div class="task-run-detail">
+      <div style="display:flex;align-items:center;gap:10px"><span class="tag ${cls}">${label}</span><span class="mono">${task.kind === 'automation-run' ? '定时任务执行' : '会话任务执行'} · ${esc(task.target || '')}</span></div>
+      ${['queued', 'running', 'resuming'].includes(task.state) ? `<div class="tk-run-prog" style="margin:16px 0"><span class="prog"><span style="width:${task.progress || 0}%"></span></span><span class="mono">${task.progress || 0}%</span></div>` : ''}
+      ${task.reason ? `<div class="form-note" style="margin-top:14px">${esc(task.reason)}</div>` : ''}
+      <div class="tk-doc-lead" style="margin-top:16px">执行结果</div>
+      <p style="white-space:pre-wrap;line-height:1.75">${esc(task.replyText || '本次执行没有文字结果')}</p>
+      ${(task.sourceLinks || []).length ? `<div class="tk-links"><span class="tk-links-k">消息源</span>${task.sourceLinks.map((link) => `<a class="tk-link" href="${esc(link.url)}" data-weblink="${esc(link.url)}">${icon('globe')}${esc(link.name || link.url)}</a>`).join('')}</div>` : ''}
+    </div>
+    <div class="form-foot"><span class="mono">${task.finishedAt || task.createdAt ? new Date(task.finishedAt || task.createdAt).toLocaleString('zh-CN', { hour12: false }) : '—'}${task.outputCount ? ` · ${task.outputCount} 个任务文件` : ''}</span><span class="spacer"></span>
+      ${task.outputCount ? '<button class="btn" data-run-files>查看任务文件</button>' : ''}
+      ${task.conversationId ? '<button class="btn" data-run-conversation>回到原会话</button>' : ''}
+      ${resumable ? '<button class="btn primary" data-run-resume>继续执行</button>' : ''}
+    </div>`, { wide: true })
+  mask.querySelector('[data-run-files]')?.addEventListener('click', () => openTaskFiles({ id: task.automationId || '', name: task.automationName || task.title }, task.id))
+  mask.querySelector('[data-run-conversation]')?.addEventListener('click', async () => { mask.remove(); await openConversation(task.conversationId) })
+  const resume = mask.querySelector('[data-run-resume]')
+  resume?.addEventListener('click', async () => {
+    if (resume.disabled) return
+    resume.disabled = true
+    const { ok, body } = await api('/api/tasks/resume', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: task.id }) })
+    if (!ok) { resume.disabled = false; return toast(body.error || '恢复执行失败', true) }
+    mask.remove()
+    toast('已在原会话发起恢复执行')
+    await loadNotifications().catch(() => {})
+  })
+}
 
 function refreshNotifyChrome() {
-  const unread = state.notifications.filter((n) => n.unread).length
+  const unread = notifyUnreadCount()
   document.querySelectorAll('#notifyTrigger').forEach((btn) => {
     const dot = btn.querySelector('.notify-dot')
     if (!dot) return
     dot.hidden = unread === 0
-    btn.title = unread ? `通知中心 · ${unread} 条未读` : '通知中心'
+    btn.title = unread ? `任务中心 · ${unread} 条未读` : '任务中心'
   })
   if (state.boot && document.getElementById('railbar')) renderRail()
 }
 
 async function loadNotifications() {
-  const { body } = await api('/api/notifications')
+  const [{ body }, { body: taskBody }] = await Promise.all([api('/api/notifications'), api('/api/task-center')])
   state.notifications = body.items || []
+  state.taskCenterItems = taskBody.items || []
   refreshNotifyChrome()
   return state.notifications
+}
+
+/* 铃铛是站内提醒的最后一张网：轮询只负责“发现”，提醒本身已经由中枢写进通知表。
+   页面从后台回到前台时立刻补一次，避免最小化期间到期、回来还要等下一轮。 */
+async function pollNotifications() {
+  if (document.hidden) return
+  try {
+    const before = notifyUnreadCount()
+    await loadNotifications()
+    const after = notifyUnreadCount()
+    if (after > before) {
+      const latestTask = state.taskCenterItems.find((item) => item.unread)
+      const latestNotice = state.notifications.find((n) => n.unread)
+      const latest = latestTask || latestNotice
+      if (latest) toast(`${latest.title}${latest.reason || latest.body ? ' · ' + (latest.reason || latest.body) : ''}`, latest.kind === 'danger' || latest.state === 'failed')
+    }
+  } catch { /* 中枢重启等瞬时失败下一轮再取 */ }
+}
+
+function ensureNotificationPolling() {
+  if (state.notifyPoll) return
+  state.notifyPoll = setInterval(pollNotifications, 10000)
+  if (!state.notifyVisibilityBound) {
+    state.notifyVisibilityBound = true
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) pollNotifications()
+    })
+  }
+}
+
+/* 应用通知的深链：不满足于切到应用列表，而是找到已安装的市场条目，
+   打开详情并触发原有的「启动并打开」按钮，复用租约、标签和网关入口。 */
+async function openAppFromNotification(appId) {
+  const id = String(appId || '').trim()
+  if (!id) return false
+  const findApp = () => (state.market || []).find((m) => m.kind === 'app'
+    && m.installed
+    && (m.appId === id || m.id === id))
+  let app = findApp()
+  if (!app) {
+    const list = await api('/api/plugin-market')
+    if (list.ok) state.market = list.body.items || []
+    app = findApp()
+  }
+  if (!app) {
+    toast('这个提醒所属的应用已不在本机安装', true)
+    return false
+  }
+  openPluginSlide(app.id)
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  const slide = document.getElementById('slide')
+  const start = slide?.querySelector('[data-as-start]')
+  if (!start) {
+    toast('应用详情已打开；应用包不可用，暂时不能启动', true)
+    return true
+  }
+  start.click()
+  return true
 }
 
 /* --------------------------- 全局搜索面板 --------------------------- */
@@ -2704,7 +3066,7 @@ async function openSearchPalette(initial = '') {
       <div class="search-tabs" role="tablist" aria-label="搜索范围">
         <button class="search-tab on" data-filter="all" role="tab" aria-selected="true">全部<span class="search-tab-count" data-count="all"></span></button>
         <button class="search-tab" data-filter="chats" role="tab" aria-selected="false">聊天<span class="search-tab-count" data-count="conversations"></span></button>
-        <button class="search-tab" data-filter="projects" role="tab" aria-selected="false">工作区<span class="search-tab-count" data-count="projects"></span></button>
+        <button class="search-tab" data-filter="projects" role="tab" aria-selected="false">分组<span class="search-tab-count" data-count="projects"></span></button>
         <button class="search-tab" data-filter="files" role="tab" aria-selected="false">文件<span class="search-tab-count" data-count="files"></span></button>
         <button class="search-tab" data-filter="notebooks" role="tab" aria-selected="false">知识库<span class="search-tab-count" data-count="notebooks"></span></button>
         <button class="search-tab" data-filter="more" role="tab" aria-selected="false">更多<span class="search-tab-count" data-count="more"></span></button>
@@ -2759,6 +3121,7 @@ async function openSearchPalette(initial = '') {
     network: '网络 政务网 互联网 令牌 凭证 诊断 代理 证书 网络与凭证',
     models: '模型 密钥 外发 个人 Key 默认模型 推理 网关 模型与密钥',
     usage: 'token 用量 配额 账单 超额 模型 统计 用量与配额',
+    access: '授权 申请 数据 资源 审批 期限 用途 授权范围',
     memory: '长期记忆 偏好 事实 决策 语义召回 记住 忘掉',
     data: '保留 导出 缓存 归档 导入 数据管理 清理 存储',
     integrations: '插件 技能 MCP 工具 地址 安装 启用 插件与工具',
@@ -2896,9 +3259,9 @@ async function openSearchPalette(initial = '') {
   </button>`
 
   const placeholders = {
-    all: '搜索会话、工作区、云空间、知识库、数据资源与应用',
+    all: '搜索会话、分组、云空间、知识库、数据资源与应用',
     chats: '搜索聊天记录',
-    projects: '搜索工作区',
+    projects: '搜索分组',
     files: '搜索云空间文件与正文',
     notebooks: '搜索智能笔记本',
     more: '搜索数据资源、应用与任务',
@@ -3014,7 +3377,7 @@ async function openSearchPalette(initial = '') {
     iconHtml: `<span class="search-row-ico">${icon('folder')}</span>`,
     title: p.name,
     snippet: p.snippet || p.desc || p.cwd || '',
-    meta: p.status === 'online' ? '工作区 · 在线' : '工作区',
+    meta: p.status === 'online' ? '分组 · 在线' : '分组',
     query,
   })
 
@@ -3071,7 +3434,7 @@ async function openSearchPalette(initial = '') {
 
     if (filter === 'all' || filter === 'projects') {
       const group = groupOf('projects')
-      if (dataReady) add('工作区', group?.items || [], projectRow, group?.total)
+      if (dataReady) add('分组', group?.items || [], projectRow, group?.total)
     }
 
     if (filter === 'all' || filter === 'files') {
@@ -3100,13 +3463,13 @@ async function openSearchPalette(initial = '') {
       parts.push(section('导航', navRows.filter((id) => hit(modules[id]?.label || id)).slice(0, 5).map(navRow).join('')))
     }
 
-    if (query && loading) parts.push('<div class="search-empty search-loading">正在检索会话、工作区、云空间与知识库…</div>')
+    if (query && loading) parts.push('<div class="search-empty search-loading">正在检索会话、分组、云空间与知识库…</div>')
     if (searchError) parts.push(`<div class="search-warn">${esc(searchError)}</div>`)
 
     body.innerHTML = parts.filter(Boolean).join('')
     if (!body.innerHTML) {
       const hint = !query
-        ? (filter === 'actions' ? '输入关键词搜索操作与设置' : '输入关键词搜索会话、工作区、云空间文件、知识库、数据资源与应用')
+        ? (filter === 'actions' ? '输入关键词搜索操作与设置' : '输入关键词搜索会话、分组、云空间文件、知识库、数据资源与应用')
         : `没有找到「${esc(input.value.trim())}」相关结果`
       body.innerHTML = `<div class="search-empty">${esc(hint)}</div>`
     }
@@ -3266,6 +3629,10 @@ async function renderViewInner() {
   const view = document.getElementById('view')
   if (!state.boot.authed) return renderLogin(view)
   if (state.boot.mustChangePassword) return renderPasswordSetup(view)
+  // 已进入主界面：原生标题栏跟随菜单栏浅蓝灰（登录/改密态由 setLoginChrome 置白）。
+  if (window.jgClient && typeof window.jgClient.setTitleBarTheme === 'function') {
+    window.jgClient.setTitleBarTheme('app')
+  }
   const guestBase = ['home', 'settings', 'imagegen', 'cloudbrowser', 'more']
   const guestGrants = (state.boot.user.grants || [])
   if (state.boot.user.role === 'guest' && !guestBase.includes(state.view) && !guestGrants.includes(state.view)) {
@@ -3352,7 +3719,7 @@ function composerPlusItems() {
   const plugins = installed.filter((p) => p.kind !== 'personal')
   const dcCount = typeof state.dataCenterResourceCount === 'number' ? state.dataCenterResourceCount : null
   return [
-    { act: 'attach', ic: 'plus', label: '添加图片', desc: '从计算机上传图片或文件' },
+    { act: 'attach', ic: 'plus', label: '添加图片或文件', desc: '从计算机上传图片或文件' },
     { act: 'deepThink', ic: 'spark', label: `${state.deepThink ? '✓ ' : ''}深度思索`, desc: state.deepThink ? '已开启 · 当前会话使用推理模型' : 'DeepSeek Reasoner · 更深层推理' },
     {
       act: 'library',
@@ -3429,6 +3796,7 @@ function paintComposerPlus(pop, items, pickerKind) {
     const owner = pop.closest('.jg-modal-mask') || pop
     owner.remove()
     if (window.__plusPop === owner) window.__plusPop = null
+    renderView()
   }
   pop.querySelectorAll('[data-plus]:not([disabled])').forEach((b) => b.addEventListener('click', (e) => {
     e.stopPropagation()
@@ -3478,7 +3846,7 @@ function paintComposerPlus(pop, items, pickerKind) {
       return
     }
     closePop()
-    if (act === 'attach') openChatAttachment()
+    if (act === 'attach') pickLocalAttachment()
     if (act === 'library') openLibraryPicker()
     if (act === 'draw') openDrawingBoard()
     if (act === 'web') {
@@ -3722,6 +4090,88 @@ function composerPrompt(fallback) {
   return String(state.draft || '').trim() || (composerHasImage() ? '请查看并分析这张图片' : fallback)
 }
 
+/* 左侧对话的 Office 选区上下文。正文只保存在服务端，前端只带 docKey/hash 作为绑定。 */
+function docContextChipHTML() {
+  const d = state.docContext
+  if (!d?.docKey || !d.chars) return ''
+  const name = String(d.docName || '当前文档')
+  return `<div class="hh-doc-ctx" data-doc-ctx title="本轮对话已引用右侧文档选区；点击 × 可临时取消">
+    <span class="hh-doc-ctx-label">Office 选区</span>
+    <span class="hh-doc-ctx-name"><b>${esc(name)}</b></span>
+    <span class="hh-doc-ctx-meta">已选 ${d.chars} 字</span>
+    <button type="button" class="hh-doc-ctx-x" data-doc-ctx-x aria-label="取消引用选区">×</button>
+  </div>`
+}
+
+function paintDocContext() {
+  document.querySelectorAll('[data-doc-ctx-slot]').forEach((slot) => {
+    slot.innerHTML = docContextChipHTML()
+  })
+}
+
+function detachDocContext() {
+  state.docContextDetached = true
+  state.docContextDetachedHash = state.docContext?.hash || ''
+  state.docContext = null
+  paintDocContext()
+}
+
+async function refreshOfficeSelection() {
+  if (state.docContextDetached) {
+    /* 用户点过 × 后，只有文档里重新选中了不同内容才重新挂上。 */
+    const { ok, body } = await api('/api/office/selection/latest').catch(() => ({ ok: false, body: {} }))
+    const latest = ok ? body.selection : null
+    if (!latest?.hash || latest.hash === state.docContextDetachedHash) return
+    state.docContextDetached = false
+  }
+  const { ok, body } = await api('/api/office/selection/latest').catch(() => ({ ok: false, body: {} }))
+  if (!ok) return
+  const selection = body.selection
+  const next = selection && selection.chars ? {
+    docKey: selection.docKey,
+    docName: selection.docName,
+    path: selection.path,
+    hash: selection.hash,
+    chars: selection.chars,
+    connected: selection.connected,
+  } : null
+  const changed = String(next?.hash || '') !== String(state.docContext?.hash || '')
+  state.docContext = next
+  if (changed) paintDocContext()
+}
+
+function setupOfficeBridge() {
+  if (state.docContextTimer) return
+  try {
+    state.docContextChannel = new BroadcastChannel('jg-office-bridge')
+    state.docContextChannel.onmessage = (event) => {
+      if (event.data?.type !== 'selection' || !event.data.selection) return
+      const selection = event.data.selection
+      if (state.docContextDetached && selection.hash === state.docContextDetachedHash) return
+      state.docContextDetached = false
+      state.docContext = selection.chars ? {
+        docKey: selection.docKey, docName: selection.docName, path: selection.path,
+        hash: selection.hash, chars: selection.chars, connected: selection.connected,
+      } : null
+      paintDocContext()
+    }
+  } catch (_) { state.docContextChannel = null }
+  document.addEventListener('click', (event) => {
+    if (event.target.closest('[data-doc-ctx-x]')) detachDocContext()
+  })
+  state.docContextTimer = setInterval(() => {
+    if (document.visibilityState === 'hidden' || !document.querySelector('[data-doc-ctx-slot]')) return
+    refreshOfficeSelection().catch(() => {})
+  }, 1800)
+  refreshOfficeSelection().catch(() => {})
+}
+
+function docContextPayload() {
+  const d = state.docContext
+  if (!d?.docKey || !d.hash) return null
+  return { docKey: d.docKey, docName: d.docName, path: d.path, hash: d.hash, chars: d.chars }
+}
+
 function imageMimeForName(name = '') {
   const ext = (String(name).toLowerCase().match(/\.([a-z0-9]+)$/) || [])[1] || ''
   return ({ png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif', bmp: 'image/bmp' })[ext] || ''
@@ -3833,6 +4283,11 @@ function openComposerPlus(anchor) {
   mask.querySelector('.jg-modal')?.classList.add('plus-modal')
   const panel = mask.querySelector('#composerPlusPanel')
   window.__plusPop = mask
+  // 弹窗无论经 ×、遮罩、Esc 还是行内按钮关闭，移除后都刷新 composer，使技能/插件回显即时更新。
+  const closeObserver = new MutationObserver(() => {
+    if (!mask.isConnected) { closeObserver.disconnect(); renderView() }
+  })
+  closeObserver.observe(document.body, { childList: true, subtree: true })
   paintComposerPlus(panel, composerPlusItems(), null)
   api('/api/resources').then(({ ok, body } = {}) => {
     if (window.__plusPop !== mask || !panel.isConnected) return
@@ -3842,6 +4297,31 @@ function openComposerPlus(anchor) {
     // 仍停留在根菜单时刷新可引用数量；进入技能/插件子列表后不打断。
     if (panel.querySelector('[data-plus="library"]')) paintComposerPlus(panel, composerPlusItems(), null)
   }).catch(() => {})
+}
+
+async function pickLocalAttachment() {
+  if (state.attachingFile) return toast('附件正在上传，请稍候', true)
+  const input = document.createElement('input')
+  input.type = 'file'
+  input.hidden = true
+  document.body.appendChild(input)
+  input.addEventListener('change', async () => {
+    const file = input.files && input.files[0]
+    input.remove()
+    if (!file) return
+    state.attachingFile = true
+    toast('正在上传附件…')
+    try {
+      const ref = await uploadChatFile(file)
+      if (!ref) return
+      addComposerRef(ref)
+      renderView()
+      toast(`已添加「${ref.label}」；附件已保存到本机附件库`)
+    } finally {
+      state.attachingFile = false
+    }
+  }, { once: true })
+  input.click()
 }
 
 async function openChatAttachment() {
@@ -3932,6 +4412,127 @@ async function openProjectPicker() {
     mask.remove()
     renderView()
   }))
+}
+
+const IMG_EXT_RE = /\.(png|jpe?g|webp|gif|bmp)$/i
+function isImageFileLike(name = '', mime = '') {
+  const m = String(mime || '').toLowerCase().split(';')[0]
+  if (/^image\/(png|jpeg|webp|gif|bmp)$/i.test(m)) return true
+  return IMG_EXT_RE.test(String(name || ''))
+}
+function isImageRef(r) { return !!r?.preview || isImageFileLike(r.label || '') }
+
+async function uploadChatFile(file) {
+  try {
+    const uploaded = await uploadBinaryFile(file, 'chat')
+    if (!uploaded.ok || !uploaded.file?.id) {
+      toast(uploaded.body?.error || '附件上传失败', true)
+      return null
+    }
+    let preview = ''
+    if (isImageFileLike(file.name || '', file.type || '')) {
+      try { preview = URL.createObjectURL(file) } catch {}
+    }
+    return { kind: 'file', id: uploaded.file.id, label: file.name, preview, size: uploaded.file.size, mime: uploaded.file.mime }
+  } catch (error) {
+    toast(error?.message || '附件上传失败', true)
+    return null
+  }
+}
+
+function openComposerImagePreview(ref) {
+  if (!ref?.preview) return
+  openModal('图片预览', `<img src="${esc(ref.preview)}" alt="${esc(ref.label || '图片附件')}" style="display:block;max-width:100%;max-height:72vh;object-fit:contain;margin:0 auto;border-radius:10px">`)
+}
+
+function refTypeMeta(r) {
+  const name = String(r?.label || '')
+  const ext = (name.match(/\.([a-z0-9]+)$/i) || [])[1]?.toLowerCase() || ''
+  if (isImageFileLike(name)) return { label: '图片', icon: 'image' }
+  const map = {
+    pdf: ['PDF', 'doc'], doc: ['Word', 'doc'], docx: ['Word', 'doc'],
+    xls: ['表格', 'table'], xlsx: ['表格', 'table'], csv: ['表格', 'table'],
+    ppt: ['演示', 'layers'], pptx: ['演示', 'layers'],
+    zip: ['压缩包', 'doc'], rar: ['压缩包', 'doc'], '7z': ['压缩包', 'doc'],
+    gdb: ['数据库', 'database'], shp: ['数据库', 'database'], dwg: ['图纸', 'cad'],
+  }
+  const hit = map[ext]
+  if (hit) return { label: hit[0], icon: hit[1] }
+  if (r?.kind === 'project') return { label: '项目', icon: 'folder' }
+  return { label: '文件', icon: 'doc' }
+}
+
+function composerRefChip(r) {
+  const img = isImageRef(r)
+  if (img) {
+    const thumb = r.preview
+      ? `<img class="hh-ref-thumb" src="${esc(r.preview)}" alt="${esc(r.label || '图片附件')}" data-refpreview="${esc(r.id)}">`
+      : `<span class="hh-ref-ico">${icon('image')}</span>`
+    return `<span class="hh-ref image" data-refdrop="${esc(r.id)}">${thumb}<span class="hh-ref-body"><span class="hh-ref-text">${esc(composerRefLabel(r))}</span><span class="hh-ref-sub">图片</span></span><span class="hh-ref-x" data-refdrop-x="${esc(r.id)}" title="移除">×</span></span>`
+  }
+  const meta = refTypeMeta(r)
+  return `<span class="hh-ref" data-refdrop="${esc(r.id)}" data-refpreview="${esc(r.id)}" data-refname="${esc(r.label || '')}">
+    <span class="hh-ref-ico">${icon(meta.icon)}</span>
+    <span class="hh-ref-body"><span class="hh-ref-text">${esc(composerRefLabel(r))}</span><span class="hh-ref-sub">${esc(meta.label)}</span></span>
+    <span class="hh-ref-x" data-refdrop-x="${esc(r.id)}" title="移除">×</span>
+  </span>`
+}
+
+function composerToolChips() {
+  const picked = (state.composerTools || [])
+    .map((id) => (state.plugins || []).find((p) => p.id === id))
+    .filter(Boolean)
+  if (!picked.length) return ''
+  return `<div class="hh-tools">${picked.map((p) => `
+    <span class="hh-tool" data-toolchip="${esc(p.id)}" title="${esc(p.desc || p.name)}">
+      <span class="ico">${icon(p.kind === 'personal' ? 'spark' : 'plugin')}</span>
+      <span class="hh-tool-name">${esc(p.name)}</span>
+      <span class="hh-tool-x" data-toolchip-x="${esc(p.id)}" title="移除">×</span>
+    </span>`).join('')}</div>`
+}
+
+function bindComposerDrop(composer) {
+  if (!composer) return
+  let depth = 0
+  const hasFiles = (ev) => Array.from(ev.dataTransfer?.types || []).includes('Files')
+  composer.addEventListener('dragenter', (ev) => {
+    if (!hasFiles(ev)) return
+    ev.preventDefault()
+    depth += 1
+    composer.classList.add('drop-over')
+  })
+  composer.addEventListener('dragover', (ev) => {
+    if (hasFiles(ev)) ev.preventDefault()
+  })
+  composer.addEventListener('dragleave', () => {
+    depth -= 1
+    if (depth <= 0) { depth = 0; composer.classList.remove('drop-over') }
+  })
+  composer.addEventListener('drop', async (ev) => {
+    if (!hasFiles(ev)) return
+    ev.preventDefault()
+    depth = 0
+    composer.classList.remove('drop-over')
+    const files = Array.from(ev.dataTransfer?.files || [])
+    if (!files.length) return
+    if (state.attachingFile) return toast('附件正在上传，请稍候', true)
+    state.attachingFile = true
+    toast(`正在上传附件 ${files.length} 个…`)
+    try {
+      const added = []
+      for (const file of files) {
+        const ref = await uploadChatFile(file)
+        if (ref) added.push(ref)
+      }
+      for (const ref of added) addComposerRef(ref)
+      if (added.length) {
+        renderView()
+        toast(`已添加 ${added.length} 个附件`)
+      }
+    } finally {
+      state.attachingFile = false
+    }
+  })
 }
 
 function addComposerRef(ref) {
@@ -4278,7 +4879,7 @@ async function openWorkspacePicker(trigger) {
       b.style.display = !q || b.textContent.toLowerCase().includes(q) ? '' : 'none'
     })
   })
-  wrap.querySelector('[data-wtab="file"]').addEventListener('click', () => { wrap.remove(); openChatAttachment() })
+  wrap.querySelector('[data-wtab="file"]').addEventListener('click', () => { wrap.remove(); pickLocalAttachment() })
   wrap.querySelector('[data-wtab="plugin"]').addEventListener('click', () => { wrap.remove(); openComposerPlus(anchor) })
   wrap.querySelector('[data-wnew]').addEventListener('click', () => {
     wrap.remove()
@@ -4461,12 +5062,13 @@ async function renderHome(el) {
   <div class="home-home" style="padding-top:30vh">
     <div class="hh-center">
       <div class="hh-title" style="margin-bottom:18px">${esc(rh.title)}</div>
-      ${(state.composerRefs || []).length ? `<div class="hh-refs" style="justify-content:center;margin:0 auto 10px;max-width:820px">
-        ${state.composerRefs.map((r) => `<span class="hh-ref" data-refdrop="${esc(r.id)}">
-          ${r.preview ? `<img class="hh-ref-thumb" src="${esc(r.preview)}" alt="图片附件" style="width:22px;height:22px;border-radius:5px;object-fit:cover;flex:none">` : `<span class="ico">${icon(r.kind === 'project' ? 'folder' : 'doc')}</span>`}${esc(composerRefLabel(r))}<span class="hh-ref-x">×</span>
-        </span>`).join('')}
-      </div>` : ''}
       <div class="hh-composer" style="width:100%;max-width:820px;margin:0 auto;box-sizing:border-box">
+        <div data-doc-ctx-slot>${docContextChipHTML()}</div>
+        ${(state.composerRefs || []).length ? `<div class="hh-refs">
+          ${state.composerRefs.map((r) => composerRefChip(r)).join('')}
+        </div>` : ''}
+        ${composerToolChips()}
+        <div class="hh-composer-main">
         <div style="display:flex;align-items:center;gap:6px;flex:none">
           <button class="hc-plus" id="attachBtn" title="添加图片、文件或工具"><span class="ico">${icon('plus')}</span></button>
           ${state.pendingInteraction?.kind === 'approval' ? approvalControl() : ''}
@@ -4476,6 +5078,7 @@ async function renderHome(el) {
         <div class="hc-right">
           <button class="hc-mic" id="micBtn" title="语音输入"><span class="ico">${icon('mic')}</span></button>
           <button class="hc-send" id="sendBtn" title="发送">${icon('up')}</button>
+        </div>
         </div>
       </div>
       <div class="quick-row" style="justify-content:space-between;align-items:center;margin:8px auto 0;width:100%;max-width:820px;box-sizing:border-box">
@@ -4496,6 +5099,7 @@ async function renderHome(el) {
       if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); closeMentionMenu(); submitTask() }
     })
     bindComposerPaste(draft)
+    bindComposerDrop(draft?.closest('.hh-composer, .chat-composer'))
   }
   el.querySelector('#projectContext')?.addEventListener('click', openWorkspacePicker)
   el.querySelector('#taskModeBtn')?.addEventListener('click', (ev) => { ev.stopPropagation(); openTaskModeMenu(ev.currentTarget) })
@@ -4507,9 +5111,23 @@ async function renderHome(el) {
     renderView()
   }))
   el.querySelector('#attachBtn')?.addEventListener('click', (ev) => openComposerPlus(ev.currentTarget))
-  el.querySelectorAll('[data-refdrop]').forEach((b) => b.addEventListener('click', () => {
-    removeComposerRef(b.dataset.refdrop)
+  el.querySelectorAll('[data-refdrop-x]').forEach((b) => b.addEventListener('click', (ev) => {
+    ev.stopPropagation()
+    removeComposerRef(b.dataset.refdropX)
     renderView()
+  }))
+  el.querySelectorAll('[data-toolchip-x]').forEach((b) => b.addEventListener('click', (ev) => {
+    ev.stopPropagation()
+    const id = b.dataset.toolchipX
+    state.composerTools = state.composerTools.filter((t) => t !== id)
+    renderView()
+  }))
+  el.querySelectorAll('[data-refpreview]').forEach((b) => b.addEventListener('click', (ev) => {
+    ev.stopPropagation()
+    const ref = (state.composerRefs || []).find((x) => x.id === b.dataset.refpreview)
+    if (!ref) return
+    if (isImageRef(ref)) openComposerImagePreview(ref)
+    else openUnifiedPreview({ fileId: ref.id, name: ref.label || '附件' })
   }))
   el.querySelector('#micBtn')?.addEventListener('click', (ev) => startVoiceInput(ev.currentTarget))
   el.querySelector('#sendBtn')?.addEventListener('click', submitTask)
@@ -4589,7 +5207,7 @@ async function openConversation(id) {
 // 待审批卡片和 Manual 策略。所有入口（侧栏顶部与“最近”栏）共用这一个重置函数，
 // 避免两处按钮行为漂移。
 function startFreshChat() {
-  stopInteractionPoll()
+  if (!state.chatBusy) stopInteractionPoll()
   state.shareMode = false
   state.shareSelection = []
   state.view = 'home'
@@ -4651,16 +5269,16 @@ async function renderProjects(el) {
   const pageItems = list.slice((page - 1) * pageSize, page * pageSize)
   el.innerHTML = `
     <div class="prj-head">
-      <div class="view-title">工作区</div>
+      <div class="view-title">分组</div>
       <div class="prj-head-actions">
-        <div class="search prj-search"><span class="ico">${icon('search')}</span><input id="prjSearch" placeholder="搜索工作区或文件夹" value="${esc(q)}"></div>
+        <div class="search prj-search"><span class="ico">${icon('search')}</span><input id="prjSearch" placeholder="搜索分组或文件夹" value="${esc(q)}"></div>
         <button class="btn primary" id="prjNew">${icon('plus')}关联文件夹</button>
       </div>
     </div>
-    <div style="margin:-4px 0 14px;font-size:var(--fs-meta);color:var(--muted);line-height:1.6">一个项目就是一个本地工作区；同一文件夹下的多个线程共享文件、指令与执行环境。</div>
+    <div style="margin:-4px 0 14px;font-size:var(--fs-meta);color:var(--muted);line-height:1.6">一个项目就是一个分组；同一文件夹下的多个线程共享文件、指令与执行环境。</div>
     <div class="prj-table">
       <div class="prj-thead">
-        <span class="prj-th-name">工作区</span>
+        <span class="prj-th-name">分组</span>
         <span class="spacer"></span>
         <span class="prj-th-time">已更新 <button class="prj-sort" id="prjSort" title="切换排序">${dir < 0 ? '↓' : '↑'}</button></span>
         <span class="prj-th-acts"></span>
@@ -4677,9 +5295,9 @@ async function renderProjects(el) {
           <span class="prj-acts">
             <button class="icon-btn" data-pmore="${p.id}" title="更多">${icon('dots')}</button>
             <button class="icon-btn${p.pinned ? ' on' : ''}" data-ppin="${p.id}" title="${p.pinned ? '取消置顶' : '置顶'}">${icon('pin')}</button>
-            <button class="icon-btn" data-pnewchat="${p.id}" title="在该工作区新建线程">${icon('compose')}</button>
+            <button class="icon-btn" data-pnewchat="${p.id}" title="在该分组新建线程">${icon('compose')}</button>
           </span>
-        </div>`).join('') : '<div class="prj-empty">还没有工作区。点右上角「关联文件夹」，把一个本地目录变成项目。</div>'}
+        </div>`).join('') : '<div class="prj-empty">还没有分组。点右上角「关联文件夹」，把一个本地目录变成项目。</div>'}
     </div>
     ${pages > 1 ? `<div class="ac-pager prj-pager">
       <button class="ac-pg" data-ppage="${page - 1}" ${page <= 1 ? 'disabled' : ''}>上一页</button>
@@ -4740,7 +5358,7 @@ function openProjectFiles({ projectId = '', conversationId = '' } = {}) {
       </div>
       <div style="flex:1;min-width:0;display:flex;flex-direction:column">
         <div class="mc-dim" id="fileHead">选择左侧文件预览</div>
-        <pre id="fileBody" class="mono" style="flex:1;overflow:auto;white-space:pre-wrap;word-break:break-word;margin:8px 0 0;padding:10px;background:var(--panel);border:1px solid var(--line);border-radius:8px;min-height:260px"></pre>
+        <div id="fileBody" class="mono" style="flex:1;overflow:auto;white-space:pre-wrap;word-break:break-word;margin:8px 0 0;padding:10px;background:var(--panel);border:1px solid var(--line);border-radius:8px;min-height:260px"></div>
       </div>
     </div>`)
   const rootEl = mask.querySelector('#fileRoot')
@@ -4750,6 +5368,8 @@ function openProjectFiles({ projectId = '', conversationId = '' } = {}) {
   const iconFor = (item) => item.type === 'dir' ? icon('folder') : (['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg'].includes(item.ext) ? icon('image') : icon('doc'))
   const preview = async (item) => {
     headEl.textContent = `${item.path} · ${item.type === 'dir' ? '目录' : (item.size < 1024 ? `${item.size} B` : `${(item.size / 1024).toFixed(1)} KB`)}`
+    bodyEl.style.padding = '10px'
+    bodyEl.style.whiteSpace = 'pre-wrap'
     bodyEl.textContent = '正在读取…'
     const { ok, body } = await api(`/api/files/content?${query}&path=${encodeURIComponent(item.path)}`)
     if (!ok) { bodyEl.textContent = body?.error || '读取失败'; return }
@@ -4758,6 +5378,17 @@ function openProjectFiles({ projectId = '', conversationId = '' } = {}) {
       return
     }
     if (body.binary) {
+      const ext = String(item.ext || '').toLowerCase()
+      const supported = new Set(['.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.pdf', '.dxf', '.shp', '.geojson', '.zip'])
+      if (supported.has(ext)) {
+        const target = unifiedPreviewUrl({
+          projectId, conversationId, path: item.path, name: item.name,
+        })
+        bodyEl.style.padding = '0'
+        bodyEl.innerHTML = `<div style="height:58vh;min-height:320px"><iframe src="${esc(target)}" title="${esc(item.name)} 预览" style="width:100%;height:100%;border:0;border-radius:8px;background:#fff"></iframe></div>`
+        return
+      }
+      bodyEl.style.whiteSpace = 'pre-wrap'
       bodyEl.textContent = '二进制文件，不提供文本预览。'
       return
     }
@@ -4821,11 +5452,30 @@ async function loadProjectMemoryList(slide, projectId) {
     </div>`).join('')
 }
 
-function openProject(id) {
+async function openProject(id) {
   const p = (state.projects || []).find((x) => x.id === id)
     || (state.sidebarProjects || []).find((x) => x.id === id)
     || state.boot?.projects?.find?.((x) => x.id === id)
   if (!p) return
+  const [taskResult, convResult] = await Promise.all([
+    api(`/api/tasks?projectId=${encodeURIComponent(p.id)}`).catch(() => ({ ok: false, body: { items: [] } })),
+    api('/api/conversations').catch(() => ({ ok: false, body: { items: [] } })),
+  ])
+  // 项目详情的线程列表不能只依赖当前窗口的增量缓存：后台任务、其他窗口或直接 API 创建的会话
+  // 不会推送到本窗口。打开详情时回源一次，避免出现“线程 0”而列表页显示 18。
+  if (Array.isArray(convResult.body?.items)) {
+    const known = new Map((state.conversations || []).map((c) => [c.id, c]))
+    const added = convResult.body.items.some((c) => !known.has(c.id))
+    convResult.body.items.forEach((c) => known.set(c.id, { ...(known.get(c.id) || {}), ...c }))
+    state.conversations = [...known.values()]
+    // 详情已经回源到新线程，但侧边栏是上一次 render 的静态 DOM；如果只更新 state，
+    // 关闭详情后分组里仍看不到新线程。新增线程时同步重绘一次，元数据更新不触发。
+    if (added) renderSidebar()
+  }
+  const allProjectTasks = (taskResult.body?.items || []).filter((t) => t.kind === 'chat-run')
+  const projectTaskPageSize = 100
+  const showAllProjectTasks = Boolean(state.projectTaskShowAll?.[p.id])
+  const projectTasks = showAllProjectTasks ? allProjectTasks : allProjectTasks.slice(0, projectTaskPageSize)
   const slide = ensureSlide()
   const online = p.status === 'online'
   const autoReview = (state.agentEntries || []).find((x) => x.id === 'auto-review')
@@ -4835,14 +5485,34 @@ function openProject(id) {
     ? `${agentsFiles.slice(0, 3).map((f) => f.path || f.name).join('、')}${agentsFiles.length > 3 ? ` 等 ${agentsFiles.length} 个文件` : ''}${p.agents?.truncated ? '（已按 32KB 截断）' : ''}`
     : '未发现 AGENTS.md 或 AGENTS.override.md；可在工作区根目录新建。'
   const threadRows = threads.length
-    ? threads.slice(0, 20).map((c) => `<button class="lib-row" data-prjthread="${esc(c.id)}" style="width:100%;border:0;border-bottom:1px solid var(--line);border-radius:0;text-align:left">
+    ? threads.slice(0, 50).map((c) => `<button class="lib-row" data-prjthread="${esc(c.id)}" style="width:100%;border:0;border-bottom:1px solid var(--line);border-radius:0;text-align:left">
         <span class="ico">${icon('chat')}</span>
         <span class="lib-name" style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.title || '未命名线程')}</span>
         <span class="lib-meta">${esc(c.status === 'running' ? '运行中' : (c.time || '—'))}${c.worktreePath ? ` · ${esc(c.worktreeBranch || '游离 HEAD')}` : ''}</span>
       </button>`).join('')
     : `<div style="padding:14px;color:var(--muted);font-size:var(--fs-meta)">还没有线程；点下方「新建线程」开始。</div>`
+  const taskStateLabel = (s) => ({ queued: '排队中', running: '执行中', done: '已完成', failed: '失败', interrupted: '已中断', cancelled: '已取消' }[s] || s)
+  const taskRows = projectTasks.length
+    ? projectTasks.map((t) => {
+      const resumeStarted = t.resumeState === 'started'
+      const resumable = ['interrupted', 'failed'].includes(t.state) && t.conversationId && !resumeStarted
+      const stateText = t.resumeState === 'requesting'
+        ? '已发起恢复'
+        : resumeStarted ? `${taskStateLabel(t.state)} · 已发起恢复` : taskStateLabel(t.state)
+      return `<div class="lib-row" style="width:100%;border-bottom:1px solid var(--line);border-radius:0">
+        <span class="ico">${icon(t.state === 'running' ? 'play' : 'doc')}</span>
+        <span class="lib-name" style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(t.title || t.prompt || '未命名任务')}</span>
+        <span class="lib-meta">${esc(stateText)}${t.artifacts ? ` · ${t.artifacts} 个产出` : ''}${t.reason ? ` · ${esc(String(t.reason).slice(0, 24))}` : ''}</span>
+        ${resumable ? `<button class="btn sm" data-prjtask-resume="${esc(t.id)}">${t.resumeState === 'failed' ? '重试恢复' : '恢复执行'}</button>` : ''}
+      </div>`
+    }).join('') + (allProjectTasks.length > projectTasks.length
+      ? `<div style="padding:12px 14px;color:var(--muted);font-size:var(--fs-meta);display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span>共 ${allProjectTasks.length} 条执行记录，当前显示最近 ${projectTasks.length} 条。</span><button class="btn sm" data-prjtasks-all>查看全部 ${allProjectTasks.length} 条</button></div>`
+      : showAllProjectTasks && allProjectTasks.length > projectTaskPageSize
+        ? `<div style="padding:12px 14px;color:var(--muted);font-size:var(--fs-meta);display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span>已显示全部 ${allProjectTasks.length} 条执行记录。</span><button class="btn sm" data-prjtasks-collapse>收起</button></div>`
+        : '')
+    : `<div style="padding:14px;color:var(--muted);font-size:var(--fs-meta)">这个分组还没有执行记录；新建线程并在工作模式下发任务后，会在这里按项目归集。</div>`
   slide.innerHTML = `
-    <div class="slide-head"><div><div class="slide-title">${esc(p.name)}</div><div class="slide-sub">本地工作区 · ${online ? '已连接' : '不可用'} · 更新 ${relTime(p.updated)}</div></div><span class="spacer"></span><button class="btn subtle" data-close>${icon('close')}</button></div>
+    <div class="slide-head"><div><div class="slide-title">${esc(p.name)}</div><div class="slide-sub">本地分组 · ${online ? '已连接' : '不可用'} · 更新 ${relTime(p.updated)}</div></div><span class="spacer"></span><button class="btn subtle" data-close>${icon('close')}</button></div>
     <div class="slide-body">
       <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px">
         <span class="tag">${online ? '本地文件夹已连接' : '本地文件夹不可用'}</span>
@@ -4856,14 +5526,19 @@ function openProject(id) {
       </div>
       <div class="kv-row">
         <div class="kv-box"><span>线程</span><b>${threads.length}</b></div>
+        <div class="kv-box"><span>执行</span><b>${Math.max(Number(p.runs) || 0, allProjectTasks.length)}</b></div>
+        <div class="kv-box"><span>产出</span><b>${Math.max(Number(p.artifacts) || 0, allProjectTasks.reduce((n, t) => n + Number(t.artifacts || 0), 0))}</b></div>
         <div class="kv-box"><span>根目录文件</span><b>${p.files || 0}</b></div>
         <div class="kv-box"><span>Git</span><b id="prjGitBranch">—</b></div>
       </div>
       <div class="field"><div class="field-label">线程</div>
         <div style="max-height:210px;overflow:auto;border:1px solid var(--line);border-radius:10px;background:#fff">${threadRows}</div>
       </div>
-      <div class="field"><div class="field-label">工作区说明</div><div class="field-value">${esc(p.desc || '未填写工作区说明')}</div></div>
-      <div class="field"><div class="field-label" style="display:flex;align-items:center;justify-content:space-between;gap:8px"><span>工作区指令</span><button class="btn sm" data-editprj>编辑</button></div><div class="field-value">${esc(p.instructions || '未设置；可在新建或编辑工作区时补充统一约定。')}</div></div>
+      <div class="field"><div class="field-label">执行记录 <span style="color:var(--muted);font-weight:400">（共 ${allProjectTasks.length} 条，中断任务可一键恢复）</span></div>
+        <div style="max-height:260px;overflow:auto;border:1px solid var(--line);border-radius:10px;background:#fff">${taskRows}</div>
+      </div>
+      <div class="field"><div class="field-label">分组说明</div><div class="field-value">${esc(p.desc || '未填写分组说明')}</div></div>
+      <div class="field"><div class="field-label" style="display:flex;align-items:center;justify-content:space-between;gap:8px"><span>工作区指令</span><button class="btn sm" data-editprj>编辑</button></div><div class="field-value">${esc(p.instructions || '未设置；可在新建或编辑分组时补充统一约定。')}</div></div>
       <div class="field"><div class="field-label">工作区记忆 <span style="color:var(--muted);font-weight:400">（统一自动沉淀，按工作区归类）</span></div><div class="field-value" id="prjMemoryList" style="white-space:pre-wrap">正在读取记忆…</div></div></div>
       <div class="field"><div class="field-label">仓库指令（AGENTS.md）</div><div class="field-value">${esc(agentsSummary)}</div></div>
       <div class="field"><div class="field-label">工作区上下文</div><div class="field-value">Agent 直接读取该本地目录中的文件；同一工作区下的多个线程共享目录与指令，但聊天记录彼此独立。</div></div>
@@ -4882,7 +5557,7 @@ function openProject(id) {
       <button class="btn primary" data-ask ${p.cwd ? '' : 'disabled'}>新建线程</button>
       ${p.cwd ? '<button class="btn" data-worktrees>工作树</button>' : ''}
       ${p.cwd ? '<button class="btn" data-files>浏览文件</button>' : ''}
-      ${p.cwd ? `<button class="btn" data-check ${online ? '' : 'disabled'} title="${online ? '只读检查成果中的指标、日期与版本冲突' : '工作区文件夹当前不可用'}">成果检查</button>` : ''}
+      ${p.cwd ? `<button class="btn" data-check ${online ? '' : 'disabled'} title="${online ? '只读检查成果中的指标、日期与版本冲突' : '分组文件夹当前不可用'}">成果检查</button>` : ''}
       <button class="btn" data-rename>重命名</button>
       <button class="btn" data-remove>移除</button>
     </div>`
@@ -4898,20 +5573,39 @@ function openProject(id) {
     slide.classList.remove('open')
     await openConversation(button.dataset.prjthread)
   }))
+  slide.querySelectorAll('[data-prjtask-resume]').forEach((button) => button.addEventListener('click', async () => {
+    if (button.disabled) return
+    button.disabled = true
+    const { ok, body: res } = await api('/api/tasks/resume', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id: button.dataset.prjtaskResume }),
+    })
+    if (!ok) { button.disabled = false; return toast(res.error || '恢复执行失败', true) }
+    toast('已发起恢复执行；结果会进入新的任务记录')
+    setTimeout(() => { if (state.views?.includes?.('projects') || state.view === 'projects') renderView() }, 1200)
+  }))
+  slide.querySelector('[data-prjtasks-all]')?.addEventListener('click', () => {
+    state.projectTaskShowAll = { ...(state.projectTaskShowAll || {}), [p.id]: true }
+    void openProject(p.id)
+  })
+  slide.querySelector('[data-prjtasks-collapse]')?.addEventListener('click', () => {
+    state.projectTaskShowAll = { ...(state.projectTaskShowAll || {}), [p.id]: false }
+    void openProject(p.id)
+  })
   slide.querySelector('[data-ask]')?.addEventListener('click', () => {
     slide.classList.remove('open')
     startProjectChat(p)
   })
   slide.querySelector('[data-rename]')?.addEventListener('click', () => {
-    const mask = openModal('重命名工作区', `
-      <div class="field"><div class="field-label">工作区名称</div><input class="text-input" id="renamePrj" value="${esc(p.name)}" /></div>
+    const mask = openModal('重命名分组', `
+      <div class="field"><div class="field-label">分组名称</div><input class="text-input" id="renamePrj" value="${esc(p.name)}" /></div>
       <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">
         <button class="btn" data-cancel>取消</button><button class="btn primary" data-ok>保存</button>
       </div>`)
     mask.querySelector('[data-cancel]').addEventListener('click', () => mask.remove())
     mask.querySelector('[data-ok]').addEventListener('click', async () => {
       const name = mask.querySelector('#renamePrj').value.trim()
-      if (!name) return toast('工作区名称不能为空', true)
+      if (!name) return toast('分组名称不能为空', true)
       const { ok, body } = await api('/api/projects/update', {
         method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ id: p.id, name }),
@@ -4919,15 +5613,15 @@ function openProject(id) {
       if (!ok) return toast(body.error || '重命名失败', true)
       mask.remove()
       if (state.activeProjectId === p.id) state.activeProjectName = name
-      toast('工作区已重命名')
+      toast('分组已重命名')
       render()
     })
   })
   slide.querySelector('[data-remove]')?.addEventListener('click', () => {
-    const mask = openModal('移除工作区', `
-      <div class="notice">只移除平台记录，不会删除本地文件夹、文件或线程历史。工作区下的线程会转为普通聊天。</div>
+    const mask = openModal('移除分组', `
+      <div class="notice">只移除平台记录，不会删除本地文件夹、文件或线程历史。分组下的线程会转为普通聊天。</div>
       <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">
-        <button class="btn" data-cancel>取消</button><button class="btn" style="color:var(--danger)" data-ok>移除工作区</button>
+        <button class="btn" data-cancel>取消</button><button class="btn" style="color:var(--danger)" data-ok>移除分组</button>
       </div>`)
     mask.querySelector('[data-cancel]').addEventListener('click', () => mask.remove())
     mask.querySelector('[data-ok]').addEventListener('click', async () => {
@@ -4945,7 +5639,7 @@ function openProject(id) {
       }
       state.projects = (state.projects || []).filter((x) => x.id !== p.id)
       state.sidebarProjects = (state.sidebarProjects || []).filter((x) => x.id !== p.id)
-      toast('工作区记录已移除，本地文件未删除')
+      toast('分组记录已移除，本地文件未删除')
       render()
     })
   })
@@ -5254,9 +5948,9 @@ async function openDeliverableCheck(project) {
 
 function openProjectForm(onDone) {
   const hasBridge = Boolean(window.jgClient && window.jgClient.chooseFolder)
-  const mask = openModal('新建工作区', `
+  const mask = openModal('新建分组', `
     <div style="padding:4px 4px 2px">
-      <div class="field-label" style="font-size:var(--fs-sub);margin-bottom:10px">工作区名称</div>
+      <div class="field-label" style="font-size:var(--fs-sub);margin-bottom:10px">分组名称</div>
       <div id="prjNameWrap" style="display:flex;align-items:center;height:54px;border:1.5px solid var(--accent);border-radius:13px;background:#fff;overflow:hidden">
         <span style="width:50px;display:grid;place-items:center;color:var(--text)"><span class="ico" style="width:22px;height:22px">${icon('folder')}</span></span>
         <span style="width:1px;height:24px;background:#dcdfe4"></span>
@@ -5274,7 +5968,7 @@ function openProjectForm(onDone) {
 
       <div style="display:flex;align-items:flex-start;gap:12px;margin-top:16px;border-radius:12px;background:#f4f5f6;padding:14px 16px">
         <span class="ico" style="width:24px;height:24px;flex:none;color:var(--muted);margin-top:1px">${icon('spark')}</span>
-        <div style="font-size:var(--fs-meta);color:var(--text-2);line-height:1.7">像 Codex 的 Project 一样：一个工作区对应一个本地文件夹，工作区下的多个线程共享文件、执行环境和指令，但聊天记录彼此独立。</div>
+        <div style="font-size:var(--fs-meta);color:var(--text-2);line-height:1.7">像 Codex 的 Project 一样：一个分组对应一个本地文件夹，分组下的多个线程共享文件、执行环境和指令，但聊天记录彼此独立。</div>
       </div>
 
       <div class="field-label" style="font-size:var(--fs-sub);margin:18px 0 8px">工作区指令（可选）</div>
@@ -5282,7 +5976,7 @@ function openProjectForm(onDone) {
 
       <div style="display:flex;align-items:center;justify-content:space-between;margin-top:18px">
         <div style="font-size:var(--fs-meta);color:var(--muted)">长期事实、偏好与决策由统一自动记忆沉淀，按工作区自动归类，无需手工填写。</div>
-        <button class="btn primary" data-ok disabled style="min-width:126px;height:44px;border-radius:22px;font-size:var(--fs-sub);background:#b9bdc4 !important;color:#fff !important;border-color:#b9bdc4 !important">创建工作区</button>
+        <button class="btn primary" data-ok disabled style="min-width:126px;height:44px;border-radius:22px;font-size:var(--fs-sub);background:#b9bdc4 !important;color:#fff !important;border-color:#b9bdc4 !important">创建分组</button>
       </div>
     </div>`)
   const modal = mask.querySelector('.jg-modal')
@@ -5328,16 +6022,16 @@ function openProjectForm(onDone) {
   })
   mask.querySelector('[data-ok]').addEventListener('click', async () => {
     const cwd = cwdInput.value.trim()
-    const name = nameInput.value.trim() || folderNameOf(cwd) || '本地工作区'
+    const name = nameInput.value.trim() || folderNameOf(cwd) || '本地分组'
     const instructions = mask.querySelector('#prjInstructions')?.value.trim() || ''
     if (!cwd) return toast('请选择本地文件夹', true)
     const { ok, body } = await api('/api/projects/create', {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ name, desc: '', cwd, instructions }),
     })
-    if (!ok) return toast(body.error || '创建工作区失败', true)
+    if (!ok) return toast(body.error || '创建分组失败', true)
     mask.remove()
-    toast(body.existing ? `已打开现有工作区「${body.item.name}」` : `已创建工作区「${name}」`)
+    toast(body.existing ? `已打开现有分组「${body.item.name}」` : `已创建分组「${name}」`)
     state.sidebarProjects = [body.item, ...(state.sidebarProjects || []).filter((p) => p.id !== body.item.id)].slice(0, 3)
     state.projects = [body.item, ...(state.projects || []).filter((p) => p.id !== body.item.id)]
     if (typeof onDone === 'function') { onDone(body.item); return }
@@ -5386,11 +6080,21 @@ function openToolsMenu(anchor) {
   }), 0)
 }
 
+function attachmentOnlyPrompt(refs = []) {
+  const items = (refs || []).filter((r) => r && ['file', 'library', 'project'].includes(r.kind))
+  const names = items.map((r) => String(r.label || '').trim()).filter(Boolean).slice(0, 4)
+  if (names.length === 1) return `请处理我上传的附件「${names[0]}」；如果我上一条消息已有要求，就按上一条要求执行。`
+  if (names.length > 1) return `请处理我上传的 ${names.length} 个附件（${names.join('、')}）；如果我上一条消息已有要求，就按上一条要求执行。`
+  return '请处理我引用的上下文；如果我上一条消息已有要求，就按上一条要求执行。'
+}
+
 async function submitTask() {
   closeSlashMenu()
   if (state.pastingImages) return toast('图片还在上传，请稍候再发送', true)
-  const text = composerPrompt('')
-  if (!text) return toast('请输入任务描述，或粘贴图片附件', true)
+  const typed = composerPrompt('')
+  const refs = state.composerRefs || []
+  const text = typed || (refs.length ? attachmentOnlyPrompt(refs) : '')
+  if (!text) return toast('请输入任务描述，或添加附件后再发送', true)
   if (state.activeProjectId) {
     const p = currentProject()
     if (!p || p.status !== 'online') return toast('项目本地文件夹不可用，请重新连接或解除项目后再执行', true)
@@ -5401,7 +6105,8 @@ async function submitTask() {
   state.chatError = ''
   state.pendingConfirm = null
   state.view = 'chat'
-  state.chatBusy = true
+  /* busy 状态统一由 sendMessage 内部置位；这里不能提前预置，否则会被 sendMessage
+     开头的防重入检查当成重复提交直接拦截，导致首页消息不上屏、卡在空思考态。 */
   render()
   await sendMessage(text)
 }
@@ -5423,27 +6128,35 @@ async function stopJob(jobId) {
 
 async function cancelChat() {
   if (!state.chatBusy) return
+  // 停止必须打到真正在跑的那个会话；用户可能已经切到别的会话在看结果。
+  const runConvId = state.chatRunConvId || state.conversation?.id || ''
+  if (!runConvId) return
+  const running = state.conversations.find((c) => c.id === runConvId)
   stopInteractionPoll()
   stopThinkingClock()
   state.pendingInteraction = null
   state.chatAbort = true
   state.chatRunId += 1
   state.chatBusy = false
+  state.chatRunConvId = ''
   state.chatSteps = []
   renderView()
   const { ok, body } = await api('/api/chat/cancel', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ conversationId: state.conversation?.id }),
+    body: JSON.stringify({ conversationId: runConvId }),
   })
-  if (ok && body.conversation) state.conversation = body.conversation
+  if (ok && body.conversation && state.conversation?.id === runConvId) state.conversation = body.conversation
+  else if (ok && body.conversation) upsertConversationMeta(body.conversation)
   state.chatAbort = false
   renderView()
-  toast(ok ? '已停止本轮生成' : (body.error || '停止失败'), !ok)
+  const label = running?.title ? `「${running.title}」` : '本轮'
+  toast(ok ? `${label}已停止生成` : (body.error || '停止失败'), !ok)
 }
 
-function startInteractionPoll() {
+function startInteractionPoll(conversationId = state.conversation?.id || '') {
   stopInteractionPoll()
+  const runConvId = String(conversationId || '')
   state.pendingInteraction = null
   state.chatTask = {
     progressText: state.deepThink ? '深度思索中' : '正在建立任务上下文',
@@ -5454,19 +6167,20 @@ function startInteractionPoll() {
   state.qStep = 0
   let seen = ''
   state.interactionPoll = setInterval(async () => {
-    if (!state.chatBusy) return
-    const conversationId = state.conversation?.id || ''
+    if (!state.chatBusy || state.chatRunConvId !== runConvId) return
     const [pendingRes, taskRes] = await Promise.all([
-      api(`/api/chat/pending?conversationId=${encodeURIComponent(conversationId)}`),
-      api(`/api/chat/task?conversationId=${encodeURIComponent(conversationId)}`),
+      api(`/api/chat/pending?conversationId=${encodeURIComponent(runConvId)}`),
+      api(`/api/chat/task?conversationId=${encodeURIComponent(runConvId)}`),
     ])
-    if (!state.chatBusy) return
-    if (taskRes?.ok && taskRes.body?.task) updateThinkingActivity(taskRes.body.task)
+    if (!state.chatBusy || state.chatRunConvId !== runConvId) return
+    if (taskRes?.ok && taskRes.body?.task && state.conversation?.id === runConvId) updateThinkingActivity(taskRes.body.task)
     if (!pendingRes?.ok) return
     const item = pendingRes.body.item || null
     const sig = item?.id || ''
     if (sig === seen) return
     seen = sig
+    // 审批/提问卡片只能画在它所属的会话里；切到别的会话时不污染当前页面。
+    if (state.conversation?.id !== runConvId) return
     state.pendingInteraction = item
     state.qSel = {}
     state.qCustom = {}
@@ -5534,8 +6248,14 @@ function upsertConversationMeta(conv) {
 async function sendMessage(text, options = {}) {
   closeSlashMenu()
   closeMentionMenu()
+  if (state.chatBusy) {
+    const running = state.conversations.find((c) => c.id === state.chatRunConvId)
+    toast(running ? `「${running.title || '另一会话'}」正在生成，请先到该会话停止或等待完成` : '当前有会话正在生成，请先停止或等待完成', true)
+    return
+  }
   const regenerate = options.regenerate === true
   const messageIndex = Number(options.messageIndex)
+  await refreshOfficeSelection().catch(() => {})
   state.chatAbort = false
   const runId = ++state.chatRunId
   const idempotencyKey = (globalThis.crypto?.randomUUID?.() || `chat-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`)
@@ -5544,7 +6264,9 @@ async function sendMessage(text, options = {}) {
   startThinkingClock()
   state.chatError = ''
   state.pendingConfirm = null
-  const refs = (state.composerRefs || []).map((r) => ({ kind: r.kind, id: r.id }))
+  const composerRefsSnapshot = state.composerRefs || []
+  const refs = composerRefsSnapshot.map((r) => ({ kind: r.kind, id: r.id }))
+  const localRefs = composerRefsSnapshot.map((r) => ({ kind: r.kind, id: r.id, label: r.label, preview: r.preview, size: r.size, mime: r.mime, type: r.type }))
   clearComposerRefs()
   let conv = state.conversation
   if (!regenerate && !conv) {
@@ -5561,9 +6283,10 @@ async function sendMessage(text, options = {}) {
     renderSidebar()
   }
   if (!conv) return
-  if (!regenerate) conv.messages.push({ role: 'user', text, time: '刚刚', createdAt: new Date().toISOString() })
+  state.chatRunConvId = conv.id
+  if (!regenerate) conv.messages.push({ role: 'user', text, time: '刚刚', createdAt: new Date().toISOString(), refs: localRefs })
   renderView()
-  startInteractionPoll()
+  startInteractionPoll(conv.id)
 
   /* 先放一条占位气泡：服务端走 SSE 时正文会直接长在这里，不再等整段答案。 */
   let streamDraft = null
@@ -5581,13 +6304,14 @@ async function sendMessage(text, options = {}) {
 
   const res = await postChat({
     text,
-    conversationId: state.conversation?.id,
+    conversationId: conv.id,
     model: state.composerModel,
     tools: state.composerTools,
     reasoningEffort: state.reasoningEffort || 'medium',
     deepThink: Boolean(state.deepThink),
     ownApiKey: localStorage.getItem('jg.ownKey') || '',
     refs,
+    docContext: docContextPayload(),
     mode: state.taskMode || 'auto',
     projectId: state.activeProjectId || state.conversation?.projectId || '',
     worktreePath: state.activeWorktreePath || state.conversation?.worktreePath || '',
@@ -5611,7 +6335,11 @@ async function sendMessage(text, options = {}) {
       status: 0,
       body: {
         error: aborted
-          ? '连接中断：本机服务连续无响应（可能异常退出或卡死），请重试'
+          ? (abortReason === 'health'
+            ? '连接中断：本机服务连续无响应（可能异常退出或卡死），请重试'
+            : abortReason === 'timeout'
+              ? '本轮执行超过 5 分钟仍未返回；任务可能仍在后台运行，可到任务中心查看结果，稍后再试'
+              : '本轮请求已中断，请重试')
           : (error?.message || '网络请求失败，请稍后重试'),
       },
     }
@@ -5623,29 +6351,47 @@ async function sendMessage(text, options = {}) {
   }
 
   stopInteractionPoll()
-  state.pendingInteraction = null
   if (runId !== state.chatRunId) return
+  const viewingRun = state.conversation?.id === conv.id
+  if (viewingRun) state.pendingInteraction = null
+  if (state.chatRunConvId === conv.id) state.chatRunConvId = ''
 
   if (!res.ok) {
     stopThinkingClock()
     state.chatBusy = false
     state.chatSteps = []
-    state.chatError = res.body.error || '模型或工具调用失败'
-    renderView()
+    if (viewingRun) {
+      state.chatError = res.body.error || '模型或工具调用失败'
+      renderView()
+    } else {
+      upsertConversationMeta({ ...conv, status: 'failed' })
+      renderSidebar()
+      toast(`「${conv.title || '会话'}」执行失败，打开该会话可重试`, true)
+    }
     return
   }
   if (res.body.duplicate) {
     stopThinkingClock()
     state.chatBusy = false
-    if (res.body.conversation) state.conversation = res.body.conversation
+    upsertConversationMeta(res.body.conversation || conv)
+    if (viewingRun && res.body.conversation) state.conversation = res.body.conversation
     renderView()
     toast('该请求此前已提交，已返回原会话结果')
     return
   }
 
-  state.conversation = res.body.conversation
-  upsertConversationMeta(state.conversation)
+  upsertConversationMeta(res.body.conversation)
   renderSidebar()
+  if (viewingRun) state.conversation = res.body.conversation
+  else toast(`「${res.body.conversation?.title || conv.title || '会话'}」已完成`)
+  if (!viewingRun) {
+    // 另一个会话跑完时只更新侧栏，不覆盖用户当前正在看的会话正文。
+    stopThinkingClock()
+    state.chatBusy = false
+    state.chatTask = null
+    renderSidebar()
+    return
+  }
   const convMeta = state.conversations.find((c) => c.id === state.conversation?.id)
   if (convMeta && state.conversation?.title) convMeta.title = state.conversation.title
   const citations = (res.body.citations || []).map((c) => c.id || c)
@@ -6481,13 +7227,17 @@ async function openResource(id) {
 }
 
 function slideTopOffset() {
-  /* 抽屉不该盖住最上层那条工具栏：按顶部栏的实际高度把抽屉往下让，
-     顶部栏不存在或是贴顶隐藏时退回 0，面板仍然占满高度。 */
-  const bar = document.querySelector('.topbar')
-  if (!bar) return 0
-  const rect = bar.getBoundingClientRect()
-  if (rect.height <= 0 || rect.top > 1) return 0
-  return Math.round(rect.height)
+  /* 抽屉固定在视口右侧，必须让出顶部这两道栏：优先取更靠下、可见的 topbar 底边；
+     topbar 被视图隐藏时退回最顶层 menubar 底边；两道都不可见（如登录态全屏）才占满高度。
+     返回可见栏的底边纵坐标，而非单道栏高度。 */
+  const pick = (sel) => {
+    const el = document.querySelector(sel)
+    if (!el) return null
+    const rect = el.getBoundingClientRect()
+    if (rect.height <= 0 || rect.top > 1) return null
+    return Math.round(rect.bottom)
+  }
+  return pick('.topbar') ?? pick('.menubar') ?? 0
 }
 
 function ensureSlide() {
@@ -6566,6 +7316,21 @@ async function renderSkills(el) {
   state.market = marketBody.items || []
   state.plugins = plugBody.items || []
   const subs = subBody.items || []
+  /* 同一个应用/插件/技能被反复提交过审会留下多条历史版本记录（后端作为审核台账保留）。
+     个人「我创建的」列表只展示每组最新一条，避免旧版本逐条平铺；旧记录与历史检测报告仍保留在后台台账。
+     分组键：应用优先 appId，缺失时退化为名称；插件/技能用名称。择优：提交时间最新，并列时取 id 更大（入库更晚）。 */
+  const subGroupKey = (x) => `${x.kind || ''}::${x.appId || x.name || x.id}`
+  const latestSubs = (list) => {
+    const map = new Map()
+    for (const x of list) {
+      const k = subGroupKey(x)
+      const prev = map.get(k)
+      if (!prev) { map.set(k, x); continue }
+      const cmp = String(x.submitted).localeCompare(String(prev.submitted)) || String(x.id).localeCompare(String(prev.id))
+      if (cmp > 0) map.set(k, x)
+    }
+    return [...map.values()].sort((a, b) => String(b.submitted).localeCompare(String(a.submitted)) || String(b.id).localeCompare(String(a.id)))
+  }
   const tab = state.skillTab || 'app'
   const scop = state.skillScope || 'public'
 
@@ -6609,7 +7374,7 @@ async function renderSkills(el) {
         ? `<button class="pl-act" data-mmenu="${esc(m.id)}" data-mname="${esc(m.name)}" title="已安装，更多操作">${icon('dots')}</button>`
         : m.available === false
           ? `<span class="tag" style="font-size:10px">待上架</span>`
-          : `<button class="pl-act add" data-minstall="${m.id}" title="安装到当前账号">${icon('plus')}</button>`}
+          : `<button class="pl-act add" data-minstall="${m.id}" data-mkind="${t}" data-mname="${esc(m.name)}" title="安装到当前账号">${icon('plus')}</button>`}
     </div>`
   }
 
@@ -6644,7 +7409,7 @@ async function renderSkills(el) {
     return [...groups.entries()].map(([name, cards]) => sec(name, cards.map(marketCard).join(''))).join('')
   }
 
-  const pluginSubs = subs.filter((x) => x.kind !== 'skill' && x.kind !== 'app')
+  const pluginSubs = latestSubs(subs.filter((x) => x.kind !== 'skill' && x.kind !== 'app'))
   const personalSections = `
     ${sec('我创建的插件', pluginSubs.length ? pluginSubs.map((x, i) => {
       const st = { pending: ['warn', '待审核'], approved: ['ok', '已上架'], rejected: ['bad', '已退回'] }[x.status] || ['', x.status]
@@ -6665,7 +7430,7 @@ async function renderSkills(el) {
   const appMarketSections = filterMarket('app').length
     ? marketSections('app')
     : `<section class="pl-sec"><h2 class="pl-sec-title">应用市场<span class="pl-arrow">›</span></h2><div class="sk-empty">当前没有可安装的应用。带 app.json 的应用包通过审核后，会由 AS Runtime 以机器级单例进程运行。</div></section>`
-  const appSubs = subs.filter((x) => x.kind === 'app')
+  const appSubs = latestSubs(subs.filter((x) => x.kind === 'app'))
   const appPersonalSections = `
     ${sec('我创建的应用', appSubs.length ? appSubs.map((x, i) => {
       const st = { pending: ['warn', '待审核'], approved: ['ok', '已上架'], rejected: ['bad', '已退回'] }[x.status] || ['', x.status]
@@ -6676,7 +7441,7 @@ async function renderSkills(el) {
         <button class="pl-act" data-subreport="${x.id}" title="查看检测报告">${icon('doc')}</button>
       </div>`
     }).join('') : '<div class="sk-empty">当前账号还没有创建应用，点右上「添加」上传带 app.json 的应用包</div>')}`
-  const skillSubs = subs.filter((x) => x.kind === 'skill')
+  const skillSubs = latestSubs(subs.filter((x) => x.kind === 'skill'))
   const skillPersonalSections = `
     ${sec('我创建的技能', skillSubs.length ? skillSubs.map((x, i) => {
       const st = { pending: ['warn', '待审核'], approved: ['ok', '已上架'], rejected: ['bad', '已退回'] }[x.status] || ['', x.status]
@@ -6730,7 +7495,6 @@ async function renderSkills(el) {
               <input id="skSearch" placeholder="搜索${tab === 'plugin' ? '插件' : tab === 'app' ? '应用' : '技能'}" value="${esc(state.skillQuery || '')}" />
             </label>
             <button class="pl-ico-btn pl2-tool" id="skRefresh" title="刷新">${icon('refresh')}</button>
-            ${tab === 'app' ? `<button class="pl-add pl2-add" id="skUpdates" title="${appUpdateCount ? `${appUpdateCount} 个应用有新版本` : '检查应用更新'}">更新${appUpdateCount ? ` · ${appUpdateCount}` : ''}</button>` : ''}
             <button class="pl-add pl2-add" id="skAddLeft">添加</button>
           </div>
           <div class="pl-sub">${sub}</div>
@@ -6755,7 +7519,6 @@ async function renderSkills(el) {
   el.querySelectorAll('[data-sktab]').forEach((b) => { b.onclick = () => { state.skillTab = b.dataset.sktab; renderView() } })
   el.querySelectorAll('[data-skscope]').forEach((b) => { b.onclick = () => { state.skillScope = b.dataset.skscope; renderView() } })
   el.querySelector('#skRefresh').addEventListener('click', () => { toast('已刷新插件目录'); renderView() })
-  el.querySelector('#skUpdates')?.addEventListener('click', () => openUpdatesSlide())
   const search = el.querySelector('#skSearch')
   const applyQuery = () => {
     const q = search.value.trim().toLowerCase()
@@ -6776,9 +7539,29 @@ async function renderSkills(el) {
   })
   el.querySelectorAll('[data-minstall]').forEach((b) => b.addEventListener('click', async (e) => {
     e.stopPropagation()
-    const { ok, body } = await api('/api/plugin-market/install', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: b.dataset.minstall }) })
-    if (!ok) return toast(body.error || '安装失败', true)
-    toast(body.message || (body.item.installed ? `已安装「${body.item.name}」，下一轮对话生效` : `已卸载「${body.item.name}」`))
+    const progress = startInstallProgress(b, {
+      kind: b.dataset.mkind || 'skill',
+      name: b.dataset.mname || '',
+    })
+    if (!progress) return
+    let result
+    try {
+      result = await api('/api/plugin-market/install', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ id: b.dataset.minstall, jobId: progress.jobId }),
+      })
+    } catch (error) {
+      progress.fail('网络异常')
+      return toast(`安装失败：${error.message || error}`, true)
+    }
+    if (!result.ok) {
+      progress.fail(result.body.error || '安装失败')
+      return toast(result.body.error || '安装失败', true)
+    }
+    await progress.done()
+    toast(result.body.message || (result.body.item.installed ? `已安装「${result.body.item.name}」，下一轮对话生效` : `已卸载「${result.body.item.name}」`))
+    await sleep(260)
     renderView()
   }))
   el.querySelectorAll('[data-mmenu]').forEach((b) => b.addEventListener('click', (e) => {
@@ -6935,55 +7718,6 @@ function appUpdateList() {
     })
 }
 
-async function refreshMarketState() {
-  const { ok, body } = await api('/api/plugin-market')
-  if (ok) state.market = body.items || []
-  return state.market || []
-}
-
-async function openUpdatesSlide() {
-  const list = appUpdateList()
-  const slide = ensureSlide()
-  const row = (m) => `<div style="display:flex;gap:10px;align-items:center;padding:12px 0;border-bottom:1px solid var(--line,#eceff3)">
-      <div style="flex:1;min-width:0">
-        <div style="font-weight:600">${esc(m.name)}</div>
-        <div style="font-size:12px;color:var(--muted,#6b7280);margin-top:2px">v${esc(m.installedVersion || '—')} → v${esc(m.marketVersion)}${m.runtime?.running ? ' · 正在运行，更新会先停掉它' : ''}</div>
-      </div>
-      <button class="btn sm" data-upd="${esc(m.id)}">更新</button>
-    </div>`
-  slide.innerHTML = `
-    <div class="slide-head"><div><div class="slide-title">应用更新</div><div class="slide-sub">${list.length ? `${list.length} 个应用有新版本` : '所有已安装应用都是最新版本'}</div></div><span class="spacer"></span><button class="btn subtle" data-close>${icon('close')}</button></div>
-    <div class="slide-body">
-      ${list.length ? list.map(row).join('') : '<div class="notice neutral">没有可更新的应用。市场发布新版本后，这里会出现「更新」。</div>'}
-      <div class="notice neutral" style="margin-top:12px">更新只改本机版本指针；正在运行的旧版本进程会被停止，重新「打开应用」即用新版本。账号数据不随版本走，更新不会丢项目。</div>
-    </div>
-    <div class="slide-foot"><button class="btn primary" data-upd-all ${list.length ? '' : 'disabled'}>全部更新${list.length ? `（${list.length}）` : ''}</button></div>`
-  wireSlide(slide)
-  const doUpdate = async (ids) => {
-    let done = 0
-    const failed = []
-    for (const id of ids) {
-      const item = (state.market || []).find((x) => x.id === id)
-      if (!item) continue
-      const { ok, body } = await api('/api/as/version', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id, version: item.marketVersion }) })
-      if (!ok) { failed.push(`${item.name}：${body.error || '更新失败'}`); continue }
-      done += 1
-      releaseAsLease(id)
-      removeAsTab(id, true)
-    }
-    await refreshMarketState()
-    slide.classList.remove('open')
-    if (failed.length) toast(failed[0], true)
-    if (done) toast(`已更新 ${done} 个应用；正在运行的旧版本进程已停止，重新打开即用新版本`)
-    if (state.view === 'skills') renderView()
-  }
-  slide.querySelectorAll('[data-upd]').forEach((b) => b.addEventListener('click', () => doUpdate([b.dataset.upd])))
-  slide.querySelector('[data-upd-all]')?.addEventListener('click', () => {
-    const ids = appUpdateList().map((m) => m.id)
-    if (ids.length) doUpdate(ids)
-  })
-}
-
 /* 「可更新」标签的直连入口：不用先开抽屉，点一下就按当前账号切到目标版本。
    与抽屉里的“更新到 vX”共用同一条 /api/as/version 链路，所以回收旧进程、重拉市场的行为一致。 */
 function compareAppVersion(a, b) {
@@ -7025,6 +7759,7 @@ function openPluginSlide(id) {
   const m = (state.market || []).find((x) => x.id === id)
   if (!m) return
   const isApp = m.kind === 'app'
+  const installKind = isApp ? 'app' : m.kind === 'bundle' ? 'plugin' : 'skill'
   const appRuntime = m.runtime || {}
   const appCaps = isApp ? (m.appCapabilities || null) : null
   const surface = isApp ? null : pluginSurfaceFor(m)
@@ -7035,7 +7770,7 @@ function openPluginSlide(id) {
   slide.innerHTML = `
     <div class="slide-head"><div><div class="slide-title">${esc(m.name)}</div><div class="slide-sub">${esc(m.publisher)} · ${esc(m.section)} · ID ${esc(m.id)}</div></div></div>
     <div class="slide-body">
-      <div style="display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap"><span class="tag ${m.installed ? 'ok' : ''}">${m.installed ? '已安装' : '未安装'}</span><span class="tag ${m.available === false ? 'warn' : ''}">${m.available === false ? (appPkgStale ? '包缺失 · 待重新入库' : '待上架') : m.locked ? '系统内置' : '可安装'}</span><span class="tag">${isApp ? '应用' : m.origin === 'community' ? '社区提交' : '官方/内置'}</span>${isApp ? `<span class="tag ${appRuntime.running ? 'ok' : ''}" data-as-state>${appRuntime.running ? `运行中 · ${appRuntime.port || ''}` : '未运行'}</span>` : ''}<span class="tag">${esc(m.scope)}</span></div>
+      <div style="display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap"><span class="tag ${m.installed ? 'ok' : ''}">${m.installed ? '已安装' : '未安装'}</span><span class="tag ${m.available === false ? 'warn' : ''}">${m.available === false ? (appPkgStale ? '包缺失 · 待重新入库' : '待上架') : m.locked ? '系统内置' : '可安装'}</span><span class="tag">${isApp ? '应用' : m.origin === 'community' ? '社区提交' : '官方/内置'}</span>${isApp ? `<span class="tag ${appRuntime.running ? 'ok' : ''}" data-as-state>${appRuntime.running ? '运行中 · 中枢入口' : '未运行'}</span>` : ''}<span class="tag">${esc(m.scope)}</span></div>
       <div class="field"><div class="field-label">功能说明</div><div class="field-value">${esc(m.desc)}</div></div>
       <div class="field"><div class="field-label">来源</div><div class="field-value">${isApp
         ? `AS 应用包 · 市场 v${esc(m.marketVersion || m.version || '—')} · 已安装 v${esc(m.installedVersion || '—')}${m.runningVersion ? ` · 运行 v${esc(m.runningVersion)}` : ''}`
@@ -7058,7 +7793,7 @@ function openPluginSlide(id) {
           : (appCaps?.declared ? `capabilities 已声明，但当前没有可调用工具。${appCaps.note ? `<div style="font-size:11px;color:var(--muted,#6b7280);margin-top:4px">${esc(appCaps.note)}</div>` : ''}` : 'app.json 尚未声明 capabilities；应用可以启动，但中枢 AI 暂时看不到它的业务工具。')
       }</div></div>` : ''}
       <div class="field"><div class="field-label">安装状态</div><div class="field-value">${isApp ? (appPkgStale ? '本账号仍有安装记录，但应用包已从本机缺失——同一 appId 的其它市场条目被删除时会连带删除整包。重新上传应用包并通过审核即可恢复，账号安装记录无需重做。' : m.available === false ? '应用包尚未入库，暂不能安装。' : '安装只登记当前账号；启动时按机器级单例进程运行，账号数据目录彼此隔离。') : m.locked ? (m.product ? '该插件由平台内置，随平台统一维护；无需按账号安装或卸载。' : '该技能已作为全客户端基线安装，由平台统一维护，不能按单个账号卸载。') : m.available === false ? '该插件尚未提供可安装的技能包，暂不能安装。上架后会显示安装入口。' : `安装到${esc(m.installScope || '当前账号或项目技能目录')}；安装或卸载后，下一轮对话生效。`}</div></div>
-      ${isApp && m.installed ? `<div class="field"><div class="field-label">运行态</div><div class="field-value">${appRuntime.running ? `PID ${esc(appRuntime.pid || '—')} · 端口 ${esc(appRuntime.port || '—')} · 租约 ${esc(appRuntime.leaseCount ?? 0)} · 健康 ${esc(appRuntime.health || 'running')}` : '当前未运行；点击「启动并打开」后由 AS Runtime 分配动态端口并做健康检查。'}${appRuntime.lastError ? `<br><span class="mono">${esc(appRuntime.lastError)}</span>` : ''}</div></div>` : ''}
+      ${isApp && m.installed ? `<div class="field"><div class="field-label">运行态</div><div class="field-value">${appRuntime.running ? `PID ${esc(appRuntime.pid || '—')} · 入口 中枢网关 · 租约 ${esc(appRuntime.leaseCount ?? 0)} · 健康 ${esc(appRuntime.health || 'running')}` : '当前未运行；点击「启动并打开」后由 AS Runtime 分配动态端口并做健康检查。'}${appRuntime.lastError ? `<br><span class="mono">${esc(appRuntime.lastError)}</span>` : ''}</div></div>` : ''}
       ${(m.kind !== 'bundle' && m.kind !== 'app' && !m.locked && m.available !== false && !m.installed) ? `<div class="field"><div class="field-label">安装范围</div><div class="field-value">
         <select class="text-input" id="mktInstallScope"><option value="user">仅当前账号</option><option value="project">当前项目（仅该项目会话可见）</option></select>
         <select class="text-input" id="mktInstallProject" style="display:none;margin-top:6px">${(state.projects || []).filter((p) => p.cwd).map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('')}</select>
@@ -7192,6 +7927,7 @@ function openPluginSlide(id) {
         if (paneUp && !hadTab) removeAsTab(m.id, true)
         return toast(body.error || '应用启动失败', true)
       }
+      const openUrl = body.entryUrl || body.url
       if (asCanceledStarts.has(m.id)) {
         asCanceledStarts.delete(m.id)
         try { await api('/api/as/stop', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: m.id, leaseId: body.leaseId || '', force: true }) }) } catch (_) {}
@@ -7218,7 +7954,7 @@ function openPluginSlide(id) {
                 leaseId = again.body.leaseId
                 if (state.asLeases[m.id]) {
                   state.asLeases[m.id].leaseId = leaseId
-                  state.asLeases[m.id].url = again.body.url
+                  state.asLeases[m.id].url = again.body.entryUrl || again.body.url
                 }
                 setAsTabStatus(m.id, 'running')
                 return
@@ -7231,22 +7967,22 @@ function openPluginSlide(id) {
           toast(rt?.running ? '应用进程仍在后台运行，已重新连接' : '应用进程已停止', true)
         }
       }, 15000)
-      state.asLeases[m.id] = { leaseId, timer, url: body.url }
+      state.asLeases[m.id] = { leaseId, timer, url: openUrl }
       if (state.asLeases[m.id].idleTimer) { clearTimeout(state.asLeases[m.id].idleTimer); state.asLeases[m.id].idleTimer = null }
       if (useElectron) {
-        const tab = upsertAsTab(m, body.url, 'loading')
+        const tab = upsertAsTab(m, openUrl, 'loading')
         if (tab) {
           state.cloudTab = tab.id
           asPaneAppId = tab.id
           state.cloudOpen = true
           if (!paneUp) paneUp = await openAppCloudTab(tab)
           renderCloudPanel()
-          setTimeout(() => collectHistory({ kind: 'app', appId: m.id, url: body.url, title: m.name }), 600)
+          setTimeout(() => collectHistory({ kind: 'app', appId: m.id, url: openUrl, title: m.name }), 600)
         }
       } else if (popup && !popup.closed) {
-        popup.location.href = body.url
+        popup.location.href = openUrl
       } else {
-        window.open(body.url, '_blank', 'noopener,noreferrer')
+        window.open(openUrl, '_blank', 'noopener,noreferrer')
       }
       toast(useElectron ? `已启动「${m.name}」，已加入右侧浏览器标签` : `已启动「${m.name}」，界面已在新窗口打开`)
       const st = await api(`/api/as/status?id=${encodeURIComponent(m.id)}`)
@@ -7287,9 +8023,11 @@ function openPluginSlide(id) {
   }
   slide.querySelector('[data-as-update]')?.addEventListener('click', () => switchAsVersion(m.marketVersion))
   slide.querySelector('[data-as-version]')?.addEventListener('click', () => switchAsVersion(slide.querySelector('#asVersionSelect')?.value))
-  slide.querySelector('[data-toggle]')?.addEventListener('click', async () => {
+  const toggleBtn = slide.querySelector('[data-toggle]')
+  toggleBtn?.addEventListener('click', async () => {
     const scopeEl = slide.querySelector('#mktInstallScope')
     const projectEl = slide.querySelector('#mktInstallProject')
+    const installing = !m.installed
     const payload = { id: m.id }
     if (m.installed) {
       payload.scope = m.installedScope || 'user'
@@ -7298,13 +8036,29 @@ function openPluginSlide(id) {
       if (scopeEl) payload.scope = scopeEl.value
       if (scopeEl?.value === 'project') payload.projectId = projectEl?.value || ''
     }
-    const { ok, body } = await api('/api/plugin-market/install', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) })
-    if (!ok) return toast(body.error, true)
+    const progress = installing ? startInstallProgress(toggleBtn, { kind: installKind, name: m.name }) : null
+    if (installing && !progress) return
+    if (progress) payload.jobId = progress.jobId
+    let result
+    try {
+      result = await api('/api/plugin-market/install', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) })
+    } catch (error) {
+      progress?.fail('网络异常')
+      return toast(`安装失败：${error.message || error}`, true)
+    }
+    if (!result.ok) {
+      progress?.fail(result.body.error || '安装失败')
+      return toast(result.body.error, true)
+    }
     if (m.installed) { removeAsTab(m.id, true); releaseAsLease(m.id) }
+    if (progress) {
+      await progress.done()
+      await sleep(260)
+    }
     const plugins = await api('/api/plugins')
     if (plugins.ok) state.plugins = plugins.body.items || []
     slide.classList.remove('open')
-    toast(body.message || (body.item.installed ? `已安装「${m.name}」，下一轮对话生效` : `已卸载「${m.name}」`))
+    toast(result.body.message || (result.body.item.installed ? `已安装「${m.name}」，下一轮对话生效` : `已卸载「${m.name}」`))
     renderView()
   })
   slide.querySelector('[data-log]').addEventListener('click', () => toast('调用记录按任务、参数与结果留存，可在审计中回查'))
@@ -7464,17 +8218,40 @@ function openPluginReport(sub) {
 /* ------------------------------- apps ------------------------------- */
 
 async function renderApps(el) {
-  const { body } = await api('/api/apps')
+  const [{ body }, { body: marketBody }, { body: asBody }] = await Promise.all([
+    api('/api/apps'),
+    api('/api/plugin-market').catch(() => ({ ok: false, body: { items: [] } })),
+    api('/api/as/status').catch(() => ({ ok: false, body: { items: [] } })),
+  ])
   state.apps = body.items
+  state.market = marketBody.items || state.market || []
+  const marketApps = (state.market || []).filter((m) => m.kind === 'app' && m.installed)
+  const runtimeById = new Map((asBody.items || []).map((x) => [x.appId || x.id, x.runtime || {}]))
   const badge = (s) => ({ published: ['ok', '已发布'], review: ['warn', '审核中'], draft: ['', '草稿'] }[s] || ['', s])
   const items = body.items || []
   el.innerHTML = `
   <div class="view-head">
     <div>
       <div class="view-title">应用</div>
-      
+      <div class="view-sub">本机安装 ${marketApps.length} 个应用 · 业务应用 ${items.length} 个</div>
     </div>
   </div>
+  <div class="view-sub" style="margin:14px 0 8px">已安装应用</div>
+  <div class="app-grid">
+    ${marketApps.map((m) => {
+      const rt = runtimeById.get(m.appId || m.id) || {}
+      const running = Boolean(rt.running)
+      return `
+      <div class="app-card" data-as-open="${esc(m.appId || m.id)}" style="cursor:pointer" title="打开应用">
+        <div class="app-card-top"><span class="type-ico">${icon('grid')}</span><span class="tag ${running ? 'ok' : ''}">${running ? '运行中' : (rt.autoStart === false ? '已停止' : '待启动')}</span></div>
+        <div class="app-card-name">${esc(m.name)}</div>
+        <div class="app-card-desc">${esc(m.desc || '')}</div>
+        <div class="app-card-meta">应用市场 · v${esc(m.version || '1.0')}${rt.port ? ` · :${esc(String(rt.port))}` : ''}</div>
+      </div>`
+    }).join('')}
+    ${marketApps.length ? '' : '<div class="empty">应用市场还没有安装应用</div>'}
+  </div>
+  <div class="view-sub" style="margin:18px 0 8px">业务应用</div>
   <div class="app-grid">
     ${items.map((a) => {
       const [tone, label] = badge(a.status)
@@ -7486,8 +8263,14 @@ async function renderApps(el) {
         <div class="app-card-meta">${esc(a.dept || '')} · v${esc(a.version || '1.0')}<br>${esc(a.maintainer || '')}</div>
       </div>`
     }).join('')}
-    ${items.length ? '' : '<div class="empty">还没有登记应用</div>'}
+    ${items.length ? '' : '<div class="empty">还没有登记业务应用</div>'}
   </div>`
+  el.querySelectorAll('[data-as-open]').forEach((card) => card.addEventListener('click', async () => {
+    const appId = card.dataset.asOpen
+    if (!appId) return
+    const opened = await openAppFromNotification(appId)
+    if (!opened) toast('应用入口打开失败，请到应用市场重试', true)
+  }))
 }
 
 const NB_MAX_SOURCES = 20
@@ -7520,7 +8303,8 @@ function notebookSourceHost(source) {
 
 /* 左栏来源列表；与来源阅读器共用同一栏，阅读时由阅读器替换。 */
 function notebookSourceListMarkup(sources) {
-  return `<div class="nbx-head"><span>来源</span><span class="mono">${sources.length}/20</span><span class="spacer"></span><button class="nbx-link" id="nbAddSource">${icon('plus')}添加</button></div>
+  const fileCount = sources.filter((x) => x.kind === 'file').length
+  return `<div class="nbx-head"><span>来源</span><span class="mono">${fileCount}/20</span><span class="spacer"></span><button class="nbx-link" id="nbAddSource">${icon('plus')}添加</button></div>
     <div class="nbx-scroll">
       ${sources.length ? sources.map((sc) => `
         <div class="nbx-row ${sc.canSee === false ? 'locked' : ''}">
@@ -8500,6 +9284,7 @@ function renderNotebookStart(el, nb, sources, detail) {
   const maxSources = limits.maxSources || NB_MAX_SOURCES
   const usedQuota = limits.usedBytes || 0
   const maxQuota = limits.quotaBytes || 15 * 1024 ** 3
+  const fileCount = sources.filter((x) => x.kind === 'file').length
   const rows = sources.map((sc) => `
     <div class="nbs-row ${sc.canSee === false ? 'locked' : ''}">
       <button class="nbs-row-main" ${sc.kind ? `data-ext="${esc(sc.resourceId)}"` : `data-src="${esc(sc.resourceId)}"`}>
@@ -8516,11 +9301,11 @@ function renderNotebookStart(el, nb, sources, detail) {
   <div class="nbs">
     <div class="nbs-top">
       <button class="nbs-back" id="nbsBack" title="返回全部笔记本">${icon('arrow')}</button>
-      <span class="nbs-mark">${icon('wave')}</span>
-      <b class="nbs-title">${esc(nb.title || '未命名的笔记本')}</b>
+      <span class="nbs-mark">${icon('book')}</span>
+      <span class="nbs-title nbx-title-edit" id="nbTitleEdit" contenteditable="plaintext-only" role="textbox" aria-label="重命名笔记本" spellcheck="false">${esc(nb.title || '未命名的笔记本')}</span><button type="button" class="nbx-title-pen" id="nbTitlePen" title="编辑名称" aria-label="编辑笔记本名称">${icon('pen')}</button>
     </div>
-    <aside class="nbs-src">
-      <div class="nbs-src-head"><span>来源</span><span class="nbs-count">${sources.length}/${maxSources}</span><button class="nbs-fold" title="收起来源栏">${icon('list')}</button></div>
+    <aside class="nbs-src" id="nbsSrc">
+      <div class="nbs-src-head"><span>来源</span><span class="nbs-count">${fileCount}/${maxSources}</span><button class="nbs-fold" title="收起来源栏">${icon('list')}</button></div>
       <div class="nbs-actions">
         <button class="nbs-pill" id="nbsAdd">${icon('plus')}添加来源</button>
         <button class="nbs-pill" id="nbsNote">${icon('plus')}创建笔记</button>
@@ -8534,15 +9319,9 @@ function renderNotebookStart(el, nb, sources, detail) {
           <button class="nbs-go" id="nbsGo" title="搜索来源">${icon('arrow')}</button>
         </div>
       </div>
-      <div class="nbs-list">
-        ${rows || `<div class="nbs-empty">
-          <span class="nbs-empty-ico">${icon('doc')}</span>
-          <b>已保存的来源将显示在此处</b>
-          <p>上传本地文件，引用数据中心、云空间的资源，或从 gov、edu、org 等官方权威站点检索网页。</p>
-          <span class="nbs-empty-hint">将文件拖到此处或 <button class="nbs-link" id="nbsEmptyAdd">添加来源</button></span>
-        </div>`}
-      </div>
-      <div class="nbs-principle">来源 ${sources.length}/${maxSources} · 个人容量 ${nbSize(usedQuota)} / ${nbSize(maxQuota)}<br>只建立引用，不复制原文件 · 网页来源只收录官方权威站点</div>
+      <div class="nbs-list" id="nbsList"></div>
+      <div class="nbs-principle">本地文件 ${fileCount}/${maxSources} · 个人容量 ${nbSize(usedQuota)} / ${nbSize(maxQuota)}<br>网页、数据中心与云空间引用不占文件名额 · 网页来源只收录官方权威站点</div>
+      <input type="file" id="nbsFile" multiple hidden>
     </aside>
 
     <section class="nbs-canvas">
@@ -8560,7 +9339,7 @@ function renderNotebookStart(el, nb, sources, detail) {
       <div class="nbs-composer">
         <button class="nbs-plus" id="nbsComposerAdd" title="添加来源">${icon('plus')}</button>
         <textarea id="nbsAskQ" rows="1" placeholder="提问或创作内容"></textarea>
-        <span class="nbs-src-count">${sources.length}/${maxSources} 个来源</span>
+        <span class="nbs-src-count">${sources.length} 个来源</span>
         <button class="nbs-send" id="nbsAsk" title="发送">${icon('up')}</button>
       </div>
     </section>
@@ -8569,22 +9348,419 @@ function renderNotebookStart(el, nb, sources, detail) {
   ${notebookNoteModal(openNote ? note : null)}`
 
   el.querySelector('#nbsBack')?.addEventListener('click', () => { state.nbOpen = false; state.nbStart = false; renderView() })
+  bindNotebookTitleEdit(el, nb)
 
-  const openPicker = (mode = 'file', q = '') => openNotebookSourcePicker(detail, { mode, query: q })
-  const searchFromCard = () => {
-    const q = el.querySelector('#nbsQ')?.value.trim() || ''
-    openPicker(el.dataset.nbsScope || 'data', q)
+  // —— 来源检索就地化：关键词在当前侧栏输入，结果就地选中，不再弹重复弹窗 ——
+  const listEl = el.querySelector('#nbsList')
+  const qEl = el.querySelector('#nbsQ')
+  const fileInput = el.querySelector('#nbsFile')
+  const srcEl = el.querySelector('#nbsSrc')
+  const existing = new Set(sources.map((x) => x.resourceId))
+  let baseCount = sources.filter((x) => x.kind === 'file').length
+  let full = baseCount >= maxSources
+  const cands = (detail?.candidates || []).filter((r) => !existing.has(r.id))
+  let scope = el.dataset.nbsScope || 'data'
+  let view = 'saved'
+  let dataItems = []
+  let cloudItems = []
+  let webQuery = ''
+  let webResults = []
+  let webDiagnostics = null
+  const webSelected = new Set()
+  let webAdding = false
+  let webSearchSeq = 0
+  let webLimit = 30
+  let webLoading = false
+  let webError = ''
+  let webSearched = false
+  let cloudFiles = []
+  let cloudLoading = false
+  let cloudError = ''
+  let cloudLoaded = false
+
+  const emptyHint = `<div class="nbs-empty">
+      <span class="nbs-empty-ico">${icon('doc')}</span>
+      <b>已保存的来源将显示在此处</b>
+      <p>上传本地文件，引用数据中心、云空间的资源，或从 gov、edu、org 等官方权威站点检索网页。</p>
+      <span class="nbs-empty-hint">将文件拖到此处或 <button class="nbs-link" data-nbfile>添加来源</button></span>
+    </div>`
+
+  const renderSaved = () => {
+    view = 'saved'
+    qEl.placeholder = '搜索数据中心、云空间或官方网页'
+    listEl.innerHTML = rows || emptyHint
   }
-  el.querySelector('#nbsAdd')?.addEventListener('click', () => openPicker('file'))
-  el.querySelector('#nbsEmptyAdd')?.addEventListener('click', () => openPicker('file'))
-  el.querySelector('#nbsComposerAdd')?.addEventListener('click', () => openPicker('file'))
-  el.querySelector('#nbsGo')?.addEventListener('click', searchFromCard)
-  el.querySelector('#nbsQ')?.addEventListener('keydown', (e) => { if (e.key === 'Enter') searchFromCard() })
-  el.querySelectorAll('.nbs-scope').forEach((b) => b.addEventListener('click', () => {
-    el.dataset.nbsScope = b.dataset.scope
-    el.querySelectorAll('.nbs-scope').forEach((x) => x.classList.toggle('on', x === b))
-    searchFromCard()
-  }))
+
+  const paintWebSelection = () => {
+    const limit = Infinity
+    const picked = webSelected.size
+    listEl.querySelectorAll('[data-web-pick]').forEach((box) => {
+      const index = Number(box.dataset.webPick)
+      const checked = webSelected.has(index)
+      box.checked = checked
+      box.disabled = webAdding
+      box.closest('.nbsm-web-row')?.classList.toggle('sel', checked)
+    })
+    const allBtn = listEl.querySelector('[data-web-all]')
+    if (allBtn) {
+      const allCount = Math.min(limit, webResults.length)
+      allBtn.disabled = webAdding || allCount <= 0
+      allBtn.textContent = picked >= allCount ? '取消全选' : '全选'
+    }
+    const countEl = listEl.querySelector('[data-web-count]')
+    if (countEl) countEl.textContent = picked ? `已选 ${picked} 条` : '已选 0 条'
+    const addBtn = listEl.querySelector('[data-web-add]')
+    if (addBtn) {
+      addBtn.disabled = webAdding || picked === 0
+      addBtn.textContent = webAdding ? '抓取并加入…' : (picked ? `加入选中（${picked}）` : '加入选中')
+    }
+  }
+
+  const webIntro = () => `<div class="nbsm-web-intro">
+        <span class="nbsm-web-badge">${icon('globe')}官方站点垂直检索</span>
+        <b>先检索，再选择要加入来源的网页</b>
+        <p>按你输入的关键词，同时检索中国政府网、生态环境部、央视网等官方站内搜索；再用 Bing RSS 兜底补齐。多个关键词用空格分隔，作为一次查询同时匹配，词越多范围越窄。网页正文在加入时抓取，问答会引用真实网页内容。</p>
+        <div class="nbsm-web-chips"><span>.gov.cn</span><span>news.cn</span><span>qstheory.cn</span><span>people.com.cn</span><span>.edu.cn</span><span>.org.cn</span></div>
+        <div class="nbsm-web-examples">试试：<button data-web-example="城市更新 老旧小区">城市更新 老旧小区</button><button data-web-example="城市体检 试点">城市体检 试点</button></div>
+      </div>`
+
+  const renderWeb = () => {
+    if (webLoading) return `<div class="nbsm-empty nbsm-web-loading">${icon('globe')}<b>正在检索官方网页…</b><span>服务端按政府、官方媒体、高校与机构分级过滤，不需要手动选择范围。</span></div>`
+    if (webError) return `<div class="nbsm-empty"><b>网络检索没有完成</b><span>${esc(webError)}</span><button class="btn sm" data-web-retry>重新检索</button></div>`
+    if (!webSearched) return webIntro()
+    if (!webResults.length) return `<div class="nbsm-empty"><b>没有找到官方网页</b><span>检索词“${esc(webQuery)}”没有返回可用的官方站点结果。换一个更具体的主题词后重试。</span><button class="btn sm" data-web-again>修改关键词</button></div>`
+    const diag = webDiagnostics || {}
+    const filtered = (Number(diag.filteredCount) || 0) + (Number(diag.duplicateCount) || 0)
+    const mediaCount = webResults.filter((x) => x.authorityLabel === '官方媒体' || x.authorityLabel === '中央广播电视总台' || x.authorityLabel === '新华社' || x.authorityLabel === '人民日报' || x.authorityLabel === '求是网').length
+    const providerParts = (Array.isArray(diag.providers) ? diag.providers : [])
+      .map((p) => `${p.label || p.key} ${p.status === 'failed' ? '失败' : (Number(p.count) || 0)}`)
+    const coverage = diag.siteCoverage || {}
+    const govCount = (Number(coverage.central) || 0) + (Number(coverage.jiangxi) || 0) + (Number(coverage.jiujiang) || 0)
+    const coverageText = coverage.total
+      ? `官方站点库 ${coverage.total} 个（政府 ${govCount} / 协会 ${Number(coverage.association) || 0} / 高校 ${Number(coverage.university) || 0}）`
+      : ''
+    const diagParts = [
+      coverageText,
+      ...providerParts,
+      diag.failedQueries ? `${diag.failedQueries} 个检索源失败` : '',
+      filtered ? `过滤 ${filtered} 条` : '',
+      mediaCount ? `官方媒体 ${mediaCount} 条` : '',
+      diag.cached ? '命中缓存' : '',
+    ].filter(Boolean)
+    const diagText = diagParts.join(' · ') || '官方站点垂直检索 + Bing RSS 兜底'
+    return `<div class="nbsm-sect"><span>官方网页</span><em>${webResults.length} 条 · 按相关度排序${diag.truncated ? ` · 仅展示前 ${webLimit} 条` : ''}</em></div>
+      <div class="nbsm-web-diag ${diag.failedQueries ? 'warn' : ''}">${diag.failedQueries ? '检索不完整：' : ''}${esc(diagText)}</div>
+      ${webResults.map((x, i) => `<div class="nbsm-web-row ${webSelected.has(i) ? 'sel' : ''}">
+        <input class="nbsm-web-check" type="checkbox" data-web-pick="${i}" ${webSelected.has(i) ? 'checked' : ''} aria-label="选择这条网页来源">
+        <span class="nbsm-row-ico">${icon('globe')}</span>
+        <div class="nbsm-web-main">
+          <b>${esc(x.title || x.url)}</b>
+          <span class="nbsm-web-host">${x.authorityLabel ? `<i class="nbsm-web-rank">${esc(x.authorityLabel)}</i>` : ''}${esc(x.host || x.domain || '')}${x.publishedAt ? ' · ' + esc(String(x.publishedAt).slice(0, 10)) : ''}${Number(x.mergedCount) > 1 ? ` · 已合并 ${Number(x.mergedCount)} 条重复` : ''}</span>
+          ${x.snippet ? `<p>${esc(x.snippet)}</p>` : ''}
+        </div>
+        <button class="nbsm-web-open" data-web-open="${i}" title="打开原网页">${icon('arrow')}</button>
+      </div>`).join('')}
+      <div class="nbsm-web-note">结果来自中国政府网、生态环境部、江西省政府站群、九江市政务站群、央视网等官方站内搜索，以及 Bing RSS 兜底的真实链接；国务院部门、行业协会、高校站点已纳入权威源库，协会与高校以域名过滤和 Bing 兜底为主，命中数量取决于搜索引擎收录，加入时会抓取网页正文。</div>
+      <div class="nbsm-web-batch">
+        <button class="nbsm-web-all" data-web-all>全选</button>
+        <span class="nbsm-web-count" data-web-count>已选 0 条</span>
+        <button class="btn sm" data-web-add disabled>加入选中</button>
+      </div>`
+  }
+
+  const renderData = () => {
+    const q = (qEl.value || '').trim().toLowerCase()
+    dataItems = cands.filter((x) => !q || (x.name + ' ' + (x.owner || '') + ' ' + (x.format || '')).toLowerCase().includes(q))
+    return dataItems.length ? `<div class="nbsm-sect"><span>数据中心资源</span><em>${dataItems.length} 项可引用 · 不占个人容量</em></div>
+      ${dataItems.map((x, i) => `<div class="nbsm-row">
+          <span class="nbsm-row-ico">${icon('database')}</span>
+          <div class="nbsm-row-main"><b>${esc(x.name)}</b><span>${esc(x.format || '')} · ${esc(x.owner || '')} · ${esc(x.version || '')}</span></div>
+          <span class="tag">${esc(x.security || '')}</span>
+          <button class="btn sm" data-data="${i}">加入</button>
+        </div>`).join('')}` : `<div class="nbsm-empty">没有匹配的数据中心资源。可先在数据中心登记，或调整网络与授权范围。</div>`
+  }
+
+  const renderCloud = () => {
+    if (cloudLoading) return `<div class="nbsm-empty">${icon('cloud')}<b>正在读取云空间文件…</b><span>只列出服务端已保存正文、且你有权限读取的云文件。</span></div>`
+    if (cloudError) return `<div class="nbsm-empty"><b>云空间文件读取失败</b><span>${esc(cloudError)}</span><button class="btn sm" data-cloud-retry>重新读取</button></div>`
+    if (!cloudLoaded) return `<div class="nbsm-empty"><b>云空间文件尚未读取</b><span>点击后从服务端读取真实云文件。</span><button class="btn sm" data-cloud-load>读取云空间文件</button></div>`
+    const q = (qEl.value || '').trim().toLowerCase()
+    cloudItems = cloudFiles.filter((x) => !q || (x.name + ' ' + (x.path || '')).toLowerCase().includes(q))
+    return cloudItems.length ? `<div class="nbsm-sect"><span>云空间文件</span><em>${cloudItems.length} 个 · 不占个人容量</em></div>
+        ${cloudItems.map((x, i) => `<div class="nbsm-row">
+          <span class="nbsm-row-ico">${icon('cloud')}</span>
+          <div class="nbsm-row-main"><b>${esc(x.name)}</b><span>${esc(x.path || '云空间')} · ${esc(x.format || '')}${x.size ? ' · ' + esc(x.size) : ''}</span></div>
+          <button class="btn sm" data-cloud="${i}">引用</button>
+        </div>`).join('')}` : `<div class="nbsm-empty">云空间中没有可读取的文件。请先在「云空间」上传文件，刷新后再引用。</div>`
+  }
+
+  const paintPick = () => {
+    qEl.placeholder = scope === 'cloud' ? '搜索云空间文件'
+      : scope === 'web' ? '搜索官方网页（多个关键词用空格分隔，词越多范围越窄）'
+        : '搜索数据中心资源'
+    const back = `<button class="nbs-link nbs-pick-back" data-nbback-saved>← 已保存来源</button>`
+    const body = scope === 'web' ? renderWeb() : scope === 'cloud' ? renderCloud() : renderData()
+    listEl.innerHTML = back + body
+    if (scope === 'web') paintWebSelection()
+  }
+
+  const renderList = () => {
+    if (view === 'saved') renderSaved()
+    else paintPick()
+  }
+
+  async function runWebSearch(value) {
+    const q = String(value || '').trim()
+    if (!q) return toast('请输入要检索的关键词', true)
+    const seq = ++webSearchSeq
+    webQuery = q
+    webSearched = true
+    webResults = []
+    webDiagnostics = null
+    webSelected.clear()
+    webError = ''
+    webLoading = true
+    qEl.value = q
+    paintPick()
+    let lastError = null
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const { body: r } = await api('/api/notebook/web-search', { method: 'POST', body: JSON.stringify({ q }) })
+        if (seq !== webSearchSeq) return
+        if (!r?.ok) throw new Error(r?.error || '检索失败')
+        webResults = Array.isArray(r.results) ? r.results : []
+        webDiagnostics = r.diagnostics || null
+        webLimit = Number(r.limit) || 50
+        lastError = null
+        break
+      } catch (err) {
+        if (seq !== webSearchSeq) return
+        lastError = err
+        const networkError = /Failed to fetch|NetworkError|fetch failed|Load failed/i.test(String(err?.message || err))
+        if (attempt === 0 && networkError) {
+          await new Promise((resolve) => setTimeout(resolve, 900))
+          if (seq !== webSearchSeq) return
+          continue
+        }
+        break
+      }
+    }
+    if (lastError) {
+      const networkError = /Failed to fetch|NetworkError|fetch failed|Load failed/i.test(String(lastError?.message || lastError))
+      webError = networkError
+        ? '本机检索服务连接中断（Failed to fetch）。请点“重新检索”；若仍失败，重启客户端。'
+        : String(lastError?.message || lastError || '检索失败')
+    }
+    if (seq === webSearchSeq) {
+      webLoading = false
+      paintPick()
+    }
+  }
+
+  async function loadCloudFiles() {
+    if (cloudLoading) return
+    cloudLoading = true
+    cloudError = ''
+    paintPick()
+    try {
+      const { body: r } = await api('/api/notebook/cloud-files')
+      if (!r?.ok) throw new Error(r?.error || '云空间文件读取失败')
+      cloudFiles = Array.isArray(r.items) ? r.items : []
+      cloudLoaded = true
+    } catch (err) {
+      cloudError = String(err?.message || err || '云空间文件读取失败')
+    } finally {
+      cloudLoading = false
+      paintPick()
+    }
+  }
+
+  async function addSelectedWebSources() {
+    if (webAdding) return
+    const picks = [...webSelected].map((i) => webResults[i]).filter(Boolean)
+    if (!picks.length) return toast('请先选择要加入的网页', true)
+    webAdding = true
+    paintWebSelection()
+    try {
+      const { body: r } = await api('/api/notebook/source', {
+        method: 'POST',
+        body: JSON.stringify({ id: state.notebookId, sources: picks.map((x) => ({
+          kind: 'web', name: x.title || x.url, url: x.url, snippet: x.snippet || '', publishedAt: x.publishedAt || '',
+        })) }),
+      })
+      const added = Array.isArray(r?.added) ? r.added : []
+      const failed = Array.isArray(r?.failed) ? r.failed : []
+      if (!added.length) {
+        toast(failed[0]?.error || r?.error || '没有加入任何网页来源', true)
+        return
+      }
+      const addedUrls = new Set(added.flatMap((x) => [x.requestedUrl, x.url]).filter(Boolean))
+      webResults = webResults.filter((x) => !addedUrls.has(x.url))
+      webSelected.clear()
+      if (failed.length) {
+        toast(`已加入 ${added.length} 条，${failed.length} 条失败：${failed[0]?.error || '请重试'}`, true)
+        paintPick()
+        return
+      }
+      toast(`已加入 ${added.length} 条来源`)
+      renderView()
+    } catch (err) {
+      toast(String(err?.message || err || '加入失败'), true)
+    } finally {
+      webAdding = false
+      if (listEl.isConnected) paintWebSelection()
+    }
+  }
+
+  const setScope = (s) => {
+    scope = s
+    el.dataset.nbsScope = s
+    el.querySelectorAll('.nbs-scope').forEach((x) => x.classList.toggle('on', x.dataset.scope === s))
+    view = 'pick'
+    if (scope === 'cloud' && !cloudLoaded && !cloudLoading) loadCloudFiles()
+    if (scope === 'web' && qEl.value.trim() && !webLoading) runWebSearch(qEl.value)
+    renderList()
+  }
+
+  const doSearch = () => {
+    if (scope === 'web') runWebSearch(qEl.value)
+    else { view = 'pick'; renderList() }
+  }
+
+  const addFiles = async (files) => {
+    if (!files.length) return
+    if (full) return toast(`每本笔记本最多 ${maxSources} 个来源，请先移除不用的来源`, true)
+    const room = maxSources - baseCount
+    const picked = files.slice(0, room)
+    if (files.length > room) toast(`每本笔记本最多 ${maxSources} 个来源，本次只添加前 ${room} 个`)
+    let okCount = 0
+    for (const f of picked) {
+      const ext = (f.name.split('.').pop() || '').toUpperCase()
+      const uploaded = await uploadBinaryFile(f, 'notebook')
+      if (!uploaded.ok || !uploaded.file?.id) {
+        toast(uploaded.body?.error || `《${f.name}》上传失败`, true)
+        continue
+      }
+      const ok = await addNotebookGenericSource({
+        kind: 'file',
+        name: f.name,
+        format: ext,
+        sizeBytes: uploaded.file.size,
+        fileId: uploaded.file.id,
+      })
+      if (ok) okCount += 1
+    }
+    if (okCount) toast(`已上传并添加 ${okCount} 个本地文件来源`)
+    renderView()
+  }
+
+  // 事件委托：列表区重建后绑定不丢
+  listEl.addEventListener('click', async (e) => {
+    const back = e.target.closest('[data-nbback-saved]')
+    if (back) return renderSaved()
+    const fileLink = e.target.closest('[data-nbfile]')
+    if (fileLink) return fileInput?.click()
+
+    const srcBtn = e.target.closest('[data-src]')
+    if (srcBtn) return openResource(srcBtn.dataset.src)
+    const extBtn = e.target.closest('[data-ext]')
+    if (extBtn) {
+      const sc = sources.find((x) => x.resourceId === extBtn.dataset.ext)
+      if (sc?.kind === 'web' && sc.url) return openNotebookWebUrl(sc.url)
+      return toast(sc?.url ? `外部来源：${sc.url}` : `外部来源：${sc?.name || ''}`)
+    }
+    const rmBtn = e.target.closest('[data-rm]')
+    if (rmBtn) {
+      const { body: r } = await api('/api/notebook/source', { method: 'POST', body: JSON.stringify({ id: state.notebookId, removeSource: rmBtn.dataset.rm }) })
+      if (r?.ok) { toast('已移除来源'); renderView() } else toast(r?.error || '操作失败')
+      return
+    }
+
+    const example = e.target.closest('[data-web-example]')
+    if (example) { qEl.value = example.dataset.webExample; runWebSearch(example.dataset.webExample); return }
+    const retry = e.target.closest('[data-web-retry]')
+    if (retry) return runWebSearch(webQuery || qEl.value)
+    const again = e.target.closest('[data-web-again]')
+    if (again) return qEl.focus()
+    const openW = e.target.closest('[data-web-open]')
+    if (openW) return openNotebookWebUrl(webResults[Number(openW.dataset.webOpen)]?.url)
+    const allBtn = e.target.closest('[data-web-all]')
+    if (allBtn) {
+      const allCount = webResults.length
+      if (webSelected.size >= allCount) webSelected.clear()
+      else { webSelected.clear(); for (let i = 0; i < allCount; i += 1) webSelected.add(i) }
+      paintWebSelection()
+      return
+    }
+    const addBatch = e.target.closest('[data-web-add]')
+    if (addBatch) return addSelectedWebSources()
+    const dataBtn = e.target.closest('[data-data]')
+    if (dataBtn) {
+      const x = dataItems[Number(dataBtn.dataset.data)]
+      const { body: r } = await api('/api/notebook/source', { method: 'POST', body: JSON.stringify({ id: state.notebookId, resourceId: x.id, versionMode: 'follow' }) })
+      if (r?.ok) { toast('已加入数据中心引用（不占个人容量）'); renderView() } else toast(r?.error || '添加失败')
+      return
+    }
+    const cloudRetry = e.target.closest('[data-cloud-retry]')
+    if (cloudRetry) return loadCloudFiles()
+    const cloudLoad = e.target.closest('[data-cloud-load]')
+    if (cloudLoad) return loadCloudFiles()
+    const cloudBtn = e.target.closest('[data-cloud]')
+    if (cloudBtn) {
+      const x = cloudItems[Number(cloudBtn.dataset.cloud)]
+      const original = cloudBtn.textContent
+      cloudBtn.disabled = true
+      cloudBtn.textContent = '读取中…'
+      if (await addNotebookGenericSource({
+        kind: 'cloud',
+        name: x.name,
+        driveItemId: x.driveItemId,
+        fileId: x.fileId,
+        format: x.format,
+        sizeBytes: x.sizeBytes,
+        url: x.path,
+      })) {
+        toast('已引用云空间文件（不占个人容量）')
+        renderView()
+      } else {
+        cloudBtn.disabled = false
+        cloudBtn.textContent = original
+      }
+    }
+  })
+
+  listEl.addEventListener('change', (e) => {
+    const box = e.target.closest('[data-web-pick]')
+    if (!box) return
+    const index = Number(box.dataset.webPick)
+    if (box.checked) webSelected.add(index)
+    else webSelected.delete(index)
+    paintWebSelection()
+  })
+
+  el.querySelector('#nbsAdd')?.addEventListener('click', () => fileInput?.click())
+  el.querySelector('#nbsComposerAdd')?.addEventListener('click', () => fileInput?.click())
+  fileInput?.addEventListener('change', (e) => { addFiles(Array.from(e.target.files || [])); e.target.value = '' })
+  srcEl?.addEventListener('dragover', (e) => { if (!full) { e.preventDefault(); srcEl.classList.add('over') } })
+  srcEl?.addEventListener('dragleave', () => srcEl.classList.remove('over'))
+  srcEl?.addEventListener('drop', (e) => { e.preventDefault(); srcEl.classList.remove('over'); if (!full) addFiles(Array.from(e.dataTransfer?.files || [])) })
+
+  qEl.addEventListener('input', () => {
+    if (scope === 'web' && !webLoading) {
+      webResults = []
+      webError = ''
+      webSearched = false
+      webQuery = qEl.value.trim()
+    }
+    if (view === 'pick') renderList()
+  })
+  qEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); doSearch() } })
+  el.querySelector('#nbsGo')?.addEventListener('click', doSearch)
+  el.querySelectorAll('.nbs-scope').forEach((b) => b.addEventListener('click', () => setScope(b.dataset.scope)))
+
+  el.dataset.nbsScope = scope
+  el.querySelectorAll('.nbs-scope').forEach((x) => x.classList.toggle('on', x.dataset.scope === scope))
+  renderSaved()
 
   el.querySelector('#nbsNote')?.addEventListener('click', async () => {
     const { body: r } = await api('/api/notebook/note', { method: 'POST', body: JSON.stringify({ id: state.notebookId, note: { title: '新笔记', content: '' } }) })
@@ -8628,16 +9804,6 @@ function renderNotebookStart(el, nb, sources, detail) {
     q.focus()
   }))
 
-  el.querySelectorAll('[data-src]').forEach((b) => b.addEventListener('click', () => openResource(b.dataset.src)))
-  el.querySelectorAll('[data-ext]').forEach((b) => b.addEventListener('click', () => {
-    const sc = sources.find((x) => x.resourceId === b.dataset.ext)
-    if (sc?.kind === 'web' && sc.url) return openNotebookWebUrl(sc.url)
-    toast(sc?.url ? `外部来源：${sc.url}` : `外部来源：${sc?.name || ''}`)
-  }))
-  el.querySelectorAll('[data-rm]').forEach((b) => b.addEventListener('click', async () => {
-    const { body: r } = await api('/api/notebook/source', { method: 'POST', body: JSON.stringify({ id: state.notebookId, removeSource: b.dataset.rm }) })
-    if (r?.ok) { toast('已移除来源'); renderView() } else toast(r?.error || '操作失败')
-  }))
   bindNotebookStudio(el, { nb, notes, chat, sources })
 }
 
@@ -8649,7 +9815,7 @@ async function addNotebookGenericSource(source) {
 
 function openNotebookSourcePicker(detail, opts = {}) {
   const existing = new Set((detail?.notebook?.sources || []).map((x) => x.resourceId))
-  let baseCount = (detail?.notebook?.sources || []).length
+  let baseCount = (detail?.notebook?.sources || []).filter((x) => x.kind === 'file').length
   const limits = detail?.limits || {}
   const maxSources = limits.maxSources || NB_MAX_SOURCES
   const quotaMax = limits.quotaBytes || 15 * 1024 ** 3
@@ -8694,7 +9860,7 @@ function openNotebookSourcePicker(detail, opts = {}) {
       </div>
       <div class="nbsm-body" id="nbsmBody"></div>
       <div class="nbsm-foot">
-        <div class="nbsm-cap"><span id="nbsmCapCount">来源 ${baseCount} / ${maxSources}</span><span>个人容量 ${nbSize(quotaUsed)} / ${nbSize(quotaMax)}</span></div>
+        <div class="nbsm-cap"><span id="nbsmCapCount">本地文件 ${baseCount} / ${maxSources}</span><span>个人容量 ${nbSize(quotaUsed)} / ${nbSize(quotaMax)}</span></div>
         <div>本地上传占用个人容量；数据中心、云空间与官方网页来源只建立引用、不占容量。</div>
       </div>
     </div>`, { wide: true })
@@ -8704,28 +9870,26 @@ function openNotebookSourcePicker(detail, opts = {}) {
   const finish = () => { mask.remove(); renderView() }
 
   const paintWebSelection = () => {
-    const limit = Math.max(0, maxSources - baseCount)
     const picked = webSelected.size
     const boxes = [...body.querySelectorAll('[data-web-pick]')]
     boxes.forEach((box) => {
       const index = Number(box.dataset.webPick)
       const checked = webSelected.has(index)
       box.checked = checked
-      box.disabled = full || webAdding || (!checked && picked >= limit)
+      box.disabled = webAdding
       box.closest('.nbsm-web-row')?.classList.toggle('sel', checked)
     })
-    body.querySelectorAll('[data-web]').forEach((btn) => { btn.disabled = full || webAdding })
     const allBtn = body.querySelector('#nbsmWebAll')
     if (allBtn) {
-      const allCount = Math.min(limit, webResults.length)
-      allBtn.disabled = full || webAdding || allCount <= 0
+      const allCount = webResults.length
+      allBtn.disabled = webAdding || allCount <= 0
       allBtn.textContent = picked >= allCount ? '取消全选' : '全选'
     }
     const countEl = body.querySelector('#nbsmWebCount')
     if (countEl) countEl.textContent = picked ? `已选 ${picked} 条` : '已选 0 条'
     const addBtn = body.querySelector('#nbsmWebAdd')
     if (addBtn) {
-      addBtn.disabled = full || webAdding || picked === 0
+      addBtn.disabled = webAdding || picked === 0
       addBtn.textContent = webAdding ? '抓取并加入…' : (picked ? `加入选中（${picked}）` : '加入选中')
     }
   }
@@ -8779,10 +9943,9 @@ function openNotebookSourcePicker(detail, opts = {}) {
     ].filter(Boolean)
     const diagText = diagParts.join(' · ') || '官方站点垂直检索 + Bing RSS 兜底'
     body.innerHTML = `<div class="nbsm-sect"><span>官方网页</span><em>${webResults.length} 条 · 按相关度排序${diag.truncated ? ` · 仅展示前 ${webLimit} 条` : ''}</em></div>
-      ${full ? `<div class="nbsm-web-limit">本笔记本已有 ${baseCount}/${maxSources} 个来源，已达上限；先移除不用的来源再加入。</div>` : ''}
       <div class="nbsm-web-diag ${diag.failedQueries ? 'warn' : ''}">${diag.failedQueries ? '检索不完整：' : ''}${esc(diagText)}</div>
       ${webResults.map((x, i) => `<div class="nbsm-web-row ${webSelected.has(i) ? 'sel' : ''}">
-        <input class="nbsm-web-check" type="checkbox" data-web-pick="${i}" ${webSelected.has(i) ? 'checked' : ''} ${full ? 'disabled' : ''} aria-label="选择这条网页来源">
+        <input class="nbsm-web-check" type="checkbox" data-web-pick="${i}" ${webSelected.has(i) ? 'checked' : ''} aria-label="选择这条网页来源">
         <span class="nbsm-row-ico">${icon('globe')}</span>
         <div class="nbsm-web-main">
           <b>${esc(x.title || x.url)}</b>
@@ -8790,32 +9953,21 @@ function openNotebookSourcePicker(detail, opts = {}) {
           ${x.snippet ? `<p>${esc(x.snippet)}</p>` : ''}
         </div>
         <button class="nbsm-web-open" data-web-open="${i}" title="打开原网页">${icon('arrow')}</button>
-        <button class="btn sm" data-web="${i}" ${full ? 'disabled' : ''}>加入</button>
       </div>`).join('')}
       <div class="nbsm-web-note">结果来自中国政府网、生态环境部、江西省政府站群、九江市政务站群、央视网等官方站内搜索，以及 Bing RSS 兜底的真实链接；国务院部门、行业协会、高校站点已纳入权威源库，协会与高校以域名过滤和 Bing 兜底为主，命中数量取决于搜索引擎收录，加入时会抓取网页正文。</div>
       <div class="nbsm-web-batch">
-        <button class="nbsm-web-all" id="nbsmWebAll" ${full ? 'disabled' : ''}>全选</button>
+        <button class="nbsm-web-all" id="nbsmWebAll">全选</button>
         <span class="nbsm-web-count" id="nbsmWebCount">已选 0 条</span>
         <button class="btn sm" id="nbsmWebAdd" disabled>加入选中</button>
       </div>`
     body.querySelectorAll('[data-web-pick]').forEach((box) => box.addEventListener('change', () => {
       const index = Number(box.dataset.webPick)
-      const limit = Math.max(0, maxSources - baseCount)
-      if (box.checked) {
-        if (webSelected.size >= limit) {
-          box.checked = false
-          toast(`本次最多还能选择 ${limit} 条`, true)
-          return
-        }
-        webSelected.add(index)
-      } else {
-        webSelected.delete(index)
-      }
+      if (box.checked) webSelected.add(index)
+      else webSelected.delete(index)
       paintWebSelection()
     }))
     body.querySelector('#nbsmWebAll')?.addEventListener('click', () => {
-      const limit = Math.max(0, maxSources - baseCount)
-      const allCount = Math.min(limit, webResults.length)
+      const allCount = webResults.length
       if (webSelected.size >= allCount) {
         webSelected.clear()
       } else {
@@ -8826,37 +9978,6 @@ function openNotebookSourcePicker(detail, opts = {}) {
     })
     body.querySelector('#nbsmWebAdd')?.addEventListener('click', addSelectedWebSources)
     body.querySelectorAll('[data-web-open]').forEach((b) => b.addEventListener('click', () => openNotebookWebUrl(webResults[Number(b.dataset.webOpen)]?.url)))
-    body.querySelectorAll('[data-web]').forEach((b) => b.addEventListener('click', async () => {
-      if (webAdding || full) return
-      const x = webResults[Number(b.dataset.web)]
-      if (!x?.url) return toast('这条结果没有可用网址', true)
-      const original = b.textContent
-      webAdding = true
-      b.textContent = '抓取中…'
-      paintWebSelection()
-      try {
-        const { body: r } = await api('/api/notebook/source', {
-          method: 'POST',
-          body: JSON.stringify({ id: state.notebookId, source: {
-            kind: 'web', name: x.title || x.url, url: x.url, snippet: x.snippet || '', publishedAt: x.publishedAt || '',
-          } }),
-        })
-        if (r?.ok) {
-          toast('已加入官方网页来源')
-          finish()
-        } else {
-          toast(r?.error || '添加失败', true)
-        }
-      } catch (err) {
-        toast(String(err?.message || err || '添加失败'), true)
-      } finally {
-        webAdding = false
-        if (mask.isConnected) {
-          b.textContent = original
-          paintWebSelection()
-        }
-      }
-    }))
     paintWebSelection()
   }
 
@@ -8864,8 +9985,6 @@ function openNotebookSourcePicker(detail, opts = {}) {
     if (webAdding) return
     const picks = [...webSelected].map((i) => webResults[i]).filter(Boolean)
     if (!picks.length) return toast('请先选择要加入的网页', true)
-    const remaining = Math.max(0, maxSources - baseCount)
-    if (picks.length > remaining) return toast(`本次最多还能加入 ${remaining} 条`, true)
     webAdding = true
     paintWebSelection()
     try {
@@ -8881,13 +10000,11 @@ function openNotebookSourcePicker(detail, opts = {}) {
         toast(failed[0]?.error || r?.error || '没有加入任何网页来源', true)
         return
       }
-      baseCount += added.length
-      full = baseCount >= maxSources
       const addedUrls = new Set(added.flatMap((x) => [x.requestedUrl, x.url]).filter(Boolean))
       webResults = webResults.filter((x) => !addedUrls.has(x.url))
       webSelected.clear()
       const capEl = mask.querySelector('#nbsmCapCount')
-      if (capEl) capEl.textContent = `来源 ${baseCount} / ${maxSources}`
+      if (capEl) capEl.textContent = `本地文件 ${baseCount} / ${maxSources}`
       if (failed.length) {
         toast(`已加入 ${added.length} 条，${failed.length} 条失败：${failed[0]?.error || '请重试'}`, true)
         renderWebBody()
@@ -8992,10 +10109,9 @@ function openNotebookSourcePicker(detail, opts = {}) {
           <span class="nbsm-row-ico">${icon('database')}</span>
           <div class="nbsm-row-main"><b>${esc(x.name)}</b><span>${esc(x.format || '')} · ${esc(x.owner || '')} · ${esc(x.version || '')}</span></div>
           <span class="tag">${esc(x.security || '')}</span>
-          <button class="btn sm" data-data="${i}" ${full ? 'disabled' : ''}>加入</button>
+          <button class="btn sm" data-data="${i}">加入</button>
         </div>`).join('')}` : `<div class="nbsm-empty">没有匹配的数据中心资源。可先在数据中心登记，或调整网络与授权范围。</div>`
       body.querySelectorAll('[data-data]').forEach((b) => b.addEventListener('click', async () => {
-        if (full) return toast(`每本笔记本最多 ${maxSources} 个来源`)
         const x = items[Number(b.dataset.data)]
         const { body: r } = await api('/api/notebook/source', { method: 'POST', body: JSON.stringify({ id: state.notebookId, resourceId: x.id, versionMode: 'follow' }) })
         if (r?.ok) { toast('已加入数据中心引用（不占个人容量）'); finish() } else toast(r?.error || '添加失败')
@@ -9020,10 +10136,9 @@ function openNotebookSourcePicker(detail, opts = {}) {
         ${items.map((x, i) => `<div class="nbsm-row">
           <span class="nbsm-row-ico">${icon('cloud')}</span>
           <div class="nbsm-row-main"><b>${esc(x.name)}</b><span>${esc(x.path || '云空间')} · ${esc(x.format || '')}${x.size ? ' · ' + esc(x.size) : ''}</span></div>
-          <button class="btn sm" data-cloud="${i}" ${full ? 'disabled' : ''}>引用</button>
+          <button class="btn sm" data-cloud="${i}">引用</button>
         </div>`).join('')}` : `<div class="nbsm-empty">云空间中没有可读取的文件。请先在「云空间」上传文件，刷新后再引用。</div>`
       body.querySelectorAll('[data-cloud]').forEach((b) => b.addEventListener('click', async () => {
-        if (full) return toast(`每本笔记本最多 ${maxSources} 个来源`)
         const x = items[Number(b.dataset.cloud)]
         const original = b.textContent
         b.disabled = true
@@ -13164,8 +14279,8 @@ async function loadBrowserExts() {
 async function pushActiveExts() {
   if (!window.jgClient?.browser?.loadExtensions) return
   const { body } = await api('/api/browser-exts/active').catch(() => ({ body: { items: [] } }))
-  const paths = (body.items || []).map((x) => String(x.extPath || '')).filter(Boolean)
-  window.jgClient.browser.loadExtensions(paths)
+  const ids = (body.items || []).map((x) => String(x.id || '')).filter(Boolean)
+  window.jgClient.browser.loadExtensions(ids)
 }
 
 /* 本人操作历史采集：导航打开后异步上报 URL、标题与访问时正文快照；失败不阻断主流程。 */
@@ -13178,8 +14293,8 @@ async function collectHistory(entry) {
     if (entry.kind === 'app' && window.jgClient?.asApp?.pageText) {
       const pt = await window.jgClient.asApp.pageText(entry.appId)
       if (pt?.ok) payload.snapshotText = String(pt.text || '')
-    } else if (entry.kind === 'web' && window.jgClient?.browser?.pageText) {
-      const pt = await window.jgClient.browser.pageText()
+    } else if (['web', 'session'].includes(entry.kind) && window.jgClient?.browser?.pageText) {
+      const pt = await window.jgClient.browser.pageText(entry.id)
       if (pt?.ok) payload.snapshotText = String(pt.text || '')
     }
   } catch { /* 快照抽取失败忽略 */ }
@@ -13200,12 +14315,12 @@ function isUrlFallbackTitle(title, url) {
   return /^[a-z0-9.-]+(:\d+)?(\/[^\s]*)?$/i.test(t) && /\./.test(t)
 }
 
-async function openCloudWebTab(url, title = '') {
+async function openCloudWebTab(url, title = '', forceNew = false) {
   const target = String(url || '').trim()
-  if (!/^https?:\/\//i.test(target)) return toast('只能打开 http/https 网页', true)
-  if (!cloudAllowed()) return toast('自带浏览器只在首页或会话侧栏可用', true)
-  if (!window.jgClient?.browser) { window.open(target, '_blank'); return }
-  const existing = state.cloudTabs?.find((t) => t.kind === 'web' && t.url === target)
+  if (!/^https?:\/\//i.test(target)) { toast('只能打开 http/https 网页', true); return false }
+  if (!cloudAllowed()) { toast('自带浏览器只在首页或会话侧栏可用', true); return false }
+  if (!window.jgClient?.browser) { window.open(target, '_blank'); return true }
+  const existing = forceNew ? null : state.cloudTabs?.find((t) => t.kind === 'web' && t.url === target)
   if (existing) {
     state.cloudTab = existing.id
     asPaneAppId = ''
@@ -13213,11 +14328,11 @@ async function openCloudWebTab(url, title = '') {
     applyLayout()
     renderCloudPanel()
     renderTopbar()
-    return
+    return true
   }
-  try { await ensureCloud() } catch { return toast('自带浏览器初始化失败', true) }
+  try { await ensureCloud() } catch { toast('自带浏览器初始化失败', true); return false }
   const host = webHostOf(target) || '网页'
-  const id = `web-${Date.now()}`
+  const id = `web-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
   const name = String(title || host).trim().slice(0, 48) || host
   state.cloudTabs = (state.cloudTabs || []).filter((t) => t.kind !== 'new')
   state.cloudTabs.push({ id, kind: 'web', title: name, url: target })
@@ -13227,8 +14342,9 @@ async function openCloudWebTab(url, title = '') {
   applyLayout()
   renderCloudPanel()
   renderTopbar()
-  setTimeout(() => collectHistory({ kind: 'web', url: target, title: name }), 600)
+  setTimeout(() => collectHistory({ id, kind: 'web', url: target, title: name }), 600)
   toast('已在右侧自带浏览器打开')
+  return true
 }
 
 async function openAppCloudTab(tab) {
@@ -13260,14 +14376,31 @@ function toggleCloudPanel(force) {
   }
 }
 
+/* 关闭标签后若已无任何网页 / 会话 / 应用等实质内容，直接折叠云浏览器，不留空面板。 */
+function collapseCloudIfEmpty() {
+  const hasContent = state.cloudTabs.some((t) => t.kind !== 'new') || (asTabs || []).length > 0
+  if (hasContent) return false
+  state.cloudTabs = [{ id: 'new', kind: 'new', title: '新标签页' }]
+  state.cloudTab = 'new'
+  state.cloudOpen = false
+  renderCloudPanel()
+  renderTopbar()
+  renderMenubar()
+  return true
+}
+
 async function endAllCloudSessions() {
   const sessions = state.cloudTabs.filter((t) => t.kind === 'session')
+  const closed = new Set()
   for (const t of sessions) {
-    await api('/api/cloud/close', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: t.id }) })
+    const { ok } = await api('/api/cloud/close', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: t.id }) }).catch(() => ({ ok: false }))
+    if (!ok) continue
+    closed.add(t.id)
+    window.jgClient?.browser?.close?.(t.id)
   }
-  state.cloudTabs = state.cloudTabs.filter((t) => t.kind !== 'session')
-  /* 折叠浏览器只结束云会话，不改变当前应用标签；重新展开时仍回到原应用。 */
-  if (!asTabById(state.cloudTab)) state.cloudTab = 'new'
+  state.cloudTabs = state.cloudTabs.filter((t) => t.kind !== 'session' || !closed.has(t.id))
+  /* 折叠浏览器只结束已成功关闭的云会话，不改变当前应用与网页标签。 */
+  if (!asTabById(state.cloudTab) && !state.cloudTabs.some((t) => t.id === state.cloudTab)) state.cloudTab = state.cloudTabs[0]?.id || 'new'
 }
 
 /* 云浏览器主页推荐站点：点击在网页标签中打开；后续可在此追加常用网址。 */
@@ -13280,61 +14413,48 @@ function cloudHomeHTML() {
   return `
     <div class="cb-addr">
       <div class="cb-navgrp">
-        <button class="cb-nav cb-back-btn" title="后退" disabled>${icon('back')}</button>
+        <button class="cb-nav cb-back-btn" id="cbBack" title="后退" disabled>${icon('back')}</button>
         <span class="cb-nav-sep"></span>
-        <button class="cb-nav cb-nav-fwd cb-fwd-btn" title="前进" disabled>${icon('arrow')}</button>
+        <button class="cb-nav cb-nav-fwd cb-fwd-btn" id="cbFwd" title="前进" disabled>${icon('arrow')}</button>
       </div>
       <button class="cb-nav cb-reload" id="cbReload" title="刷新">${icon('refresh')}</button>
       <input id="cbAddr" placeholder="搜索或输入网址" autocomplete="off">
       <div class="cb-actgrp">
-        <button class="cb-nav cb-ext-btn" id="cbExt" title="扩展市场"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 5h3v2.5a1.5 1.5 0 1 0 3 0V5h3v4h2.5a1.5 1.5 0 1 0 0 3H18v4h-4v2.5a1.5 1.5 0 1 0-3 0V16H5v-4H7.5a1.5 1.5 0 1 0 0-3H5V5h4z"/></svg><span class="cb-ext-dot">${state.cloudExts?.filter((x) => x.status === 'listed' && x.active).length || 0}</span></button>
-        <button class="cb-nav" id="cbDownload" title="下载"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 4v10M8 11l4 4 4-4M5 19h14"/></svg></button>
-        <button class="cb-nav" id="cbMore" title="更多工具"><svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><circle cx="6" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="18" cy="12" r="1.6"/></svg></button>
-      </div>
+      <button class="cb-nav cb-ext-btn" id="cbExt" title="扩展市场（仅管理中心审核上架）"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 5h3v2.5a1.5 1.5 0 1 0 3 0V5h3v4h2.5a1.5 1.5 0 1 0 0 3H18v4h-4v2.5a1.5 1.5 0 1 0-3 0V16H5v-4H7.5a1.5 1.5 0 1 0 0-3H5V5h4z"/></svg><span class="cb-ext-dot">${state.cloudExts?.filter((x) => x.status === 'listed' && x.active).length || 0}</span></button>
+      <button class="cb-nav" id="cbDownload" title="下载与文件"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 4v10M8 11l4 4 4-4M5 19h14"/></svg></button>
+      <button class="cb-nav" id="cbMore" title="更多工具"><svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><circle cx="6" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="18" cy="12" r="1.6"/></svg></button>
     </div>
-    <div class="cb-h">工具</div>
-    <div class="cb-tool-row">
-      <button class="cb-tool" id="cbToolFile">${icon('folder')}<span>文件</span><em>Ctrl+P</em></button>
-      <button class="cb-tool" id="cbToolMore">${icon('grid')}<span>更多工具…</span><em>⌄</em></button>
-    </div>
-    ${CB_HOME_SITES.length ? `<div class="cb-h">常用网站</div><div class="cb-site-row">${CB_HOME_SITES.map((s) => `<button class="cb-site" data-web-site="${esc(s.url)}" data-site-title="${esc(s.title || s.host)}"><span class="cb-site-ico">${esc((s.title || s.host).slice(0, 1).toUpperCase())}</span><span class="cb-site-name">${esc(s.title || s.host)}</span></button>`).join('')}</div>` : ''}
-    <div class="cb-sec-row">
+  </div>
+  <div class="cb-h">工具</div>
+  <div class="cb-tool-row">
+    <button class="cb-tool" id="cbToolFile" title="下载与文件">${icon('folder')}<span>文件</span><em>下载记录</em></button>
+    <button class="cb-tool" id="cbToolMore" title="更多工具">${icon('grid')}<span>更多工具…</span><em>⌄</em></button>
+  </div>
+  ${CB_HOME_SITES.length ? `<div class="cb-h">常用网站</div><div class="cb-site-row">${CB_HOME_SITES.map((s) => `<button class="cb-site" data-web-site="${esc(s.url)}" data-site-title="${esc(s.title || s.host)}"><span class="cb-site-ico">${esc((s.title || s.host).slice(0, 1).toUpperCase())}</span><span class="cb-site-name">${esc(s.title || s.host)}</span></button>`).join('')}</div>` : ''}
+  <div class="cb-h">企业系统</div>
+  <div class="cb-system-list">${(state.cloud?.systems || []).map((s) => `<button class="cb-site" data-open="${esc(s.id)}" ${s.state === 'usable' ? '' : 'disabled'} title="${esc(s.reason || s.desc || s.name)}"><span class="cb-site-ico">${esc(s.name.slice(0, 1))}</span><span class="cb-site-name">${esc(s.name)}</span></button>`).join('')}</div>
+  <div class="cb-sec-row">
       ${(state.cloud?.policy || []).slice(0, 4).map((p) => `<span class="cb-sec">${esc(p.title)}</span>`).join('')}
     </div>`
 }
 
 function cloudSessionHTML(tab) {
   const s = state.cloud?.systems?.find((x) => x.id === tab.systemId) || {}
-  const sess = tab.session || {}
   return `
-    <div class="cb-frame">
+    <div class="cb-frame" style="padding:0;display:flex;flex-direction:column;height:100%;min-height:0">
       <div class="cb-frame-bar">
         <span class="cb-dots"><i></i><i></i><i></i></span>
-        <span class="mono cb-frame-url">https://${esc(tab.host || '')}</span>
+        <input id="cbWebAddr" class="cb-web-addr" value="${esc(tab.url)}" placeholder="输入网址" autocomplete="off" title="${esc(tab.url)}">
         <span class="spacer"></span>
-        <span class="tag ok">${esc(state.boot.network?.label || '')}实例</span>
+        <span class="tag ok">会话运行中</span>
+        <button class="btn sm subtle" data-web-reload title="刷新">刷新</button>
+        <button class="btn sm subtle" id="cbMore" title="更多工具">更多</button>
+        <button class="btn sm" data-end="${esc(tab.id)}">结束会话</button>
       </div>
-      <div class="cb-stage compact">
-        <div class="cb-portal">
-          <div class="cb-portal-title">${esc(s.name || tab.title)}</div>
-          <div class="cb-portal-sub">统一身份认证 · 企业凭据托管登录</div>
-          <div class="cb-field"><span>账号</span><b class="mono">${esc(s.credential?.account || 'SSO')}</b></div>
-          <div class="cb-field"><span>口令</span><b class="mono">••••••（服务端注入）</b></div>
-          <div class="cb-portal-note">${icon('shield')} 口令不经过客户端，画面已叠加水印并录屏</div>
-          <div class="cb-portal-btn" data-portal>进入系统</div>
-        </div>
-        <div class="cb-watermark">${esc(sess.watermark || '')}</div>
-        <div class="cb-watermark second">${esc(sess.watermark || '')}</div>
+      <div id="cbWebSlot" style="flex:1;width:100%;min-height:0;background:#fff;position:relative">
+        <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:var(--fs-sub)">正在打开 ${esc(s.name || tab.title)}…</div>
       </div>
-      <div class="cb-sess">
-        <div class="mono">票号 ${esc(tab.ticket?.token || '')} · ${tab.ticket?.ttlSec || 900}s</div>
-        <div class="mono" style="color:var(--muted)">绑定 ${esc(tab.ticket?.boundTo || '')}</div>
-      </div>
-      <div class="cb-sess-acts">
-        <span>${esc(sess.note || '写操作在会话内二次确认；剪贴板按网络策略禁用')}</span>
-        <span class="spacer"></span>
-        <button class="btn sm" data-end="${tab.id}">结束会话</button>
-      </div>
+      <div class="cb-sess"><span>会话 ${esc(tab.id)} · 不注入门户凭据，请在目标系统页面自行登录</span></div>
     </div>`
 }
 
@@ -13347,8 +14467,9 @@ function cloudWebHTML(tab) {
         <span class="spacer"></span>
         <span class="tag ok">网页</span>
         <button class="btn sm subtle" data-web-reload title="刷新">刷新</button>
-        <button class="btn sm subtle" data-web-handoff title="把当前网页交给 AI">转交 AI</button>
-        <button class="btn sm subtle" data-web-download title="下载 / 文件">文件</button>
+        <button class="btn sm subtle" data-web-handoff title="预览并转交当前网页给 AI">转交 AI</button>
+        <button class="btn sm subtle" data-web-download title="下载与文件">文件</button>
+        <button class="btn sm subtle" id="cbMore" title="更多工具">更多</button>
         <button class="btn sm subtle" data-web-external="${esc(tab.url)}" title="在系统浏览器打开">外部打开</button>
       </div>
       <div id="cbWebSlot" style="flex:1;width:100%;min-height:0;background:#fff;position:relative">
@@ -13436,12 +14557,12 @@ function renderCloudPanel() {
         : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>'}</button>
       <button class="cb-icon-btn" id="cbFold" title="折叠云浏览器"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M15 4v16"/></svg></button>
     </div>
-    <div class="cb-body${active.kind === 'app' ? ' cb-body-app' : active.kind === 'web' ? ' cb-body-web' : ''}">${active.kind === 'app' ? cloudAppHTML(active) : active.kind === 'session' ? cloudSessionHTML(active) : active.kind === 'web' ? cloudWebHTML(active) : cloudHomeHTML()}</div>
+    <div class="cb-body${active.kind === 'app' ? ' cb-body-app' : ['web', 'session'].includes(active.kind) ? ' cb-body-web' : ''}">${active.kind === 'app' ? cloudAppHTML(active) : active.kind === 'session' ? cloudSessionHTML(active) : active.kind === 'web' ? cloudWebHTML(active) : cloudHomeHTML()}</div>
     ${state.cbFull ? `<div class="cb-composer">
-      <button class="cbc-plus" title="附件">${icon('plus')}</button>
-      <input id="cbcInput" placeholder="询问 九规智能中枢" autocomplete="off">
-      <button class="cbc-mic" title="语音">${icon('mic')}</button>
-      <button class="cbc-send" id="cbcSend" title="发送">${icon('up')}</button>
+      <button class="cbc-plus" title="附件已禁用" disabled>${icon('plus')}</button>
+      <input id="cbcInput" placeholder="AI 转交已禁用" autocomplete="off" disabled>
+      <button class="cbc-mic" title="语音已禁用" disabled>${icon('mic')}</button>
+      <button class="cbc-send" id="cbcSend" title="AI 转交已禁用" disabled>${icon('up')}</button>
     </div>` : ''}`
 
   panel.querySelectorAll('[data-tab]').forEach((b) => b.addEventListener('click', (e) => {
@@ -13459,11 +14580,14 @@ function renderCloudPanel() {
       return
     }
     const tab = state.cloudTabs.find((t) => t.id === b.dataset.x)
-    if (tab?.kind === 'session') await api('/api/cloud/close', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: tab.id }) })
-    else if (tab?.kind === 'web') window.jgClient?.browser?.close?.()
+    if (tab?.kind === 'session') {
+      const { ok, body } = await api('/api/cloud/close', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: tab.id }) })
+      if (!ok) { toast(body.error || '结束会话失败', true); return }
+      window.jgClient?.browser?.close?.(tab.id)
+    } else if (tab?.kind === 'web') window.jgClient?.browser?.close?.(tab.id)
     state.cloudTabs = state.cloudTabs.filter((t) => t.id !== b.dataset.x)
     if (state.cloudTab === b.dataset.x) state.cloudTab = state.cloudTabs[0]?.id || 'new'
-    if (!state.cloudTabs.length) state.cloudTabs = [{ id: 'new', kind: 'new', title: '新标签页' }]
+    if (collapseCloudIfEmpty()) return
     renderCloudPanel()
   }))
   panel.querySelector('#cbNew').addEventListener('click', () => {
@@ -13483,6 +14607,10 @@ function renderCloudPanel() {
   panel.querySelector('#cbExt')?.addEventListener('click', (ev) => { ev.stopPropagation(); loadBrowserExts().catch(() => {}).then(() => openCloudExtensions(ev.currentTarget)) })
   panel.querySelector('#cbDownload')?.addEventListener('click', () => openCloudDownloads())
   panel.querySelector('#cbMore')?.addEventListener('click', (ev) => { ev.stopPropagation(); openCloudMore(ev.currentTarget) })
+  panel.querySelector('#cbToolFile')?.addEventListener('click', () => openCloudDownloads())
+  panel.querySelector('#cbToolMore')?.addEventListener('click', (ev) => openCloudMore(ev.currentTarget))
+  panel.querySelector('[data-web-handoff]')?.addEventListener('click', () => handoffWebPageToAI())
+  panel.querySelector('[data-web-download]')?.addEventListener('click', () => openCloudDownloads())
   const cbc = panel.querySelector('#cbcInput')
   if (cbc) {
     cbc.disabled = true
@@ -13524,25 +14652,19 @@ function renderCloudPanel() {
     if (window.jgClient?.browser) window.jgClient.browser.openExternal(url)
     else window.open(url, '_blank')
   })
-  panel.querySelector('[data-web-handoff]')?.addEventListener('click', () => handoffWebPageToAI())
-  panel.querySelector('[data-web-download]')?.addEventListener('click', () => openCloudDownloads())
-  panel.querySelector('#cbToolFile')?.addEventListener('click', () => openCloudDownloads())
-  panel.querySelector('#cbToolMore')?.addEventListener('click', () => toast('更多浏览器工具尚未接入', true))
-  const moreTool = panel.querySelector('#cbToolMore')
-  if (moreTool) { moreTool.disabled = true; moreTool.style.opacity = '.45'; moreTool.style.cursor = 'not-allowed' }
-  panel.querySelectorAll('[data-portal]').forEach((b) => {
-    b.disabled = true
-    b.style.opacity = '.45'
-    b.style.cursor = 'not-allowed'
-  })
   panel.querySelector('[data-end]')?.addEventListener('click', async (e) => {
-    await api('/api/cloud/close', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: e.currentTarget.dataset.end }) })
-    state.cloudTabs = state.cloudTabs.filter((t) => t.id !== e.currentTarget.dataset.end)
-    state.cloudTab = 'new'
-    renderCloudPanel()
-    toast('会话已结束，容器销毁')
+    const id = e.currentTarget.dataset.end
+    e.currentTarget.disabled = true
+    const { ok, body } = await api('/api/cloud/close', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id }) })
+    if (!ok) { e.currentTarget.disabled = false; toast(body.error || '结束会话失败', true); return }
+    window.jgClient?.browser?.close?.(id)
+    state.cloudTabs = state.cloudTabs.filter((t) => t.id !== id)
+    if (!collapseCloudIfEmpty()) {
+      state.cloudTab = state.cloudTabs.find((t) => t.kind === 'new')?.id || state.cloudTabs[0]?.id || 'new'
+      renderCloudPanel()
+    }
+    toast('会话已结束，网页视图已销毁')
   })
-  panel.querySelector('[data-portal]')?.addEventListener('click', () => toast('已在服务端注入凭据并进入系统（演示）'))
 
   const grip = panel.querySelector('#cbGrip')
   grip.addEventListener('pointerdown', (ev) => {
@@ -13571,7 +14693,7 @@ function renderCloudPanel() {
   syncNativeBrowser(active)
 }
 
-var nativeWebUrl = ''
+var nativeWebTabId = ''
 var nativeWebObserver = null
 var nativeAppObserver = null
 
@@ -13580,7 +14702,7 @@ function sendNativeBounds(slotId = 'cbWebSlot') {
   const slot = document.getElementById(slotId)
   if (!bridge || !slot || !slot.getClientRects().length) return
   const r = slot.getBoundingClientRect()
-  bridge.bounds({
+  bridge.bounds(state.cloudTab, {
     x: Math.round(r.left),
     y: Math.round(r.top),
     width: Math.round(r.width),
@@ -13717,9 +14839,9 @@ window.addEventListener('resize', () => {
 })
 
 function closeNativeWeb() {
-  nativeWebUrl = ''
+  nativeWebTabId = ''
   if (nativeWebObserver) { nativeWebObserver.disconnect(); nativeWebObserver = null }
-  window.jgClient?.browser?.close()
+  window.jgClient?.browser?.hide()
 }
 
 function syncNativeBrowser(active) {
@@ -13748,11 +14870,10 @@ function syncNativeBrowser(active) {
   }
   hideNativeApp()
   if (!bridge) return
-  if (!active || active.kind !== 'web' || !active.url) return closeNativeWeb()
-  if (nativeWebUrl !== active.url) {
-    nativeWebUrl = active.url
-    bridge.open(active.url)
-  }
+  if (!active || !['web', 'session'].includes(active.kind) || !active.url) return closeNativeWeb()
+  nativeWebTabId = active.id
+  bridge.open(active.id, active.url)
+  pushActiveExts().catch(() => {})
   /* 与应用槽位对齐：面板重建/完整视图切换后，栅格与滚动条可能在同一帧内再次变化；
      补一次延迟同步，避免原生网页视图停留在上一档窄栏尺寸。 */
   const syncWebBounds = () => sendNativeBounds()
@@ -13767,7 +14888,7 @@ function syncNativeBrowser(active) {
 }
 
 window.addEventListener('resize', () => {
-  if (nativeWebUrl) requestAnimationFrame(sendNativeBounds)
+  if (nativeWebTabId) requestAnimationFrame(sendNativeBounds)
   if (asPaneAppId) sendCloudAppBounds(asPaneAppId)
 })
 
@@ -13976,15 +15097,20 @@ async function stopAsApp(appId = asPaneAppId) {
 
 document.getElementById('asPaneStop')?.addEventListener('click', () => stopAsApp(asPaneAppId))
 
-var cloudDownloads = []
 var cloudDownloadsBound = false
+var cloudDownloads = []
 var cloudNav = { canGoBack: false, canGoForward: false, error: null }
 var cloudZoom = (() => {
-  const f = Number(localStorage.getItem('jg-cloud-zoom'))
-  return Number.isFinite(f) ? Math.max(0.5, Math.min(2, Math.round(f * 10) / 10)) : 1
+  const value = Number(localStorage.getItem('jg-cloud-zoom'))
+  return Number.isFinite(value) ? Math.max(0.5, Math.min(2, Math.round(value * 10) / 10)) : 1
 })()
-var zoomRestored = false
-var cloudViewport = 'desktop'
+var cloudZoomTabId = ''
+function isInternalCloudTabUrl(url) {
+  try {
+    const u = new URL(String(url || ''), location.href)
+    return u.origin === location.origin && (u.pathname === '/api/preview' || u.pathname.startsWith('/api/preview/') || u.pathname === '/api/office/editor' || u.pathname.startsWith('/api/office/editor/'))
+  } catch (_) { return false }
+}
 
 function syncCloudNavButtons() {
   const back = document.getElementById('cbBack')
@@ -13997,41 +15123,47 @@ function initCloudBrowserBridge() {
   const bridge = window.jgClient?.browser
   if (!bridge || cloudDownloadsBound) return
   cloudDownloadsBound = true
-  if (typeof bridge.onDownload === 'function') {
-    bridge.onDownload((entry) => {
-      if (!entry?.id) return
-      cloudDownloads = [entry, ...cloudDownloads.filter((x) => x.id !== entry.id)].slice(0, 40)
-      const list = document.getElementById('cbDlList')
-      if (list) list.innerHTML = cloudDownloadRows(cloudDownloads)
-      if (entry.state === 'completed') toast(`下载完成：${entry.name}`)
-      if (entry.state === 'failed') toast(`下载失败：${entry.name}`, true)
-    })
-  }
-  bridge.downloads?.().then((res) => { if (res?.items?.length) cloudDownloads = res.items }).catch(() => {})
+  bridge.onDownload?.((entry) => {
+    if (!entry?.id) return
+    cloudDownloads = [entry, ...cloudDownloads.filter((x) => x.id !== entry.id)].slice(0, 60)
+    const list = document.getElementById('cbDlList')
+    if (list) list.innerHTML = cloudDownloadRows(cloudDownloads)
+    if (['completed', 'failed', 'blocked', 'cancelled'].includes(entry.state)) {
+      api('/api/browser/download-audit', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ state: entry.state, name: entry.name, url: entry.url }) }).catch(() => {})
+    }
+    if (entry.state === 'completed') toast(`下载完成：${entry.name}`)
+    if (entry.state === 'failed') toast(`下载失败：${entry.name}`, true)
+    if (entry.state === 'blocked') toast(`已拦截：${entry.name}（${entry.error || '文件类型不允许'}）`, true)
+  })
+  bridge.downloads?.().then((res) => { if (Array.isArray(res?.items)) cloudDownloads = res.items }).catch(() => {})
+  bridge.onPasswordSaved?.((result) => {
+    if (result?.ok && result.item) toast(`已自动加密保存密码：${result.item.origin}${result.item.username ? `（${result.item.username}）` : ''}`)
+    else if (result && !result.ok) toast(result.error || '密码自动保存失败', true)
+  })
+  bridge.onFindResult?.((result) => {
+    if (result?.tabId !== state.cloudTab) return
+    const count = document.getElementById('cbFindCount')
+    if (count) count.textContent = result.matchCount ? `${result.activeMatchOrdinal}/${result.matchCount}` : '0/0'
+  })
   if (typeof bridge.onNavState === 'function') {
     bridge.onNavState((nav) => {
+      const tab = (state.cloudTabs || []).find((t) => t.id === nav.tabId && ['web', 'session'].includes(t.kind))
+      if (!tab) return
+      if (cloudZoomTabId !== tab.id) {
+        cloudZoomTabId = tab.id
+        if (!isInternalCloudTabUrl(tab.url)) bridge.setZoom?.(cloudZoom)
+      }
       cloudNav.canGoBack = !!nav.canGoBack
       cloudNav.canGoForward = !!nav.canGoForward
       cloudNav.error = null
-      if (!zoomRestored && cloudZoom !== 1 && typeof bridge.setZoom === 'function') { bridge.setZoom(cloudZoom); zoomRestored = true }
-      const tab = (state.cloudTabs || []).find((t) => t.id === state.cloudTab && t.kind === 'web')
-      if (tab) {
-        if (nav.url) tab.url = nav.url
-        // 真实页面标题才覆盖；浏览器用网址兜底的标题不采纳，标签保留干净域名便于区分。
-        if (nav.title && !isUrlFallbackTitle(nav.title, nav.url || tab.url)) {
-          tab.title = String(nav.title).slice(0, 48)
-        } else if (webHostOf(tab.url)) {
-          tab.title = webHostOf(tab.url)
-        }
-        // 导航完成后二次采集：刷新、站内跳转、后退/前进都覆盖更新快照；后端按账号+类型+URL 幂等去重。
-        if (nav.url) collectHistory({ kind: 'web', url: nav.url, title: tab.title || '' })
-      }
+      if (nav.url) tab.url = nav.url
+      if (nav.title && !isUrlFallbackTitle(nav.title, nav.url || tab.url)) tab.title = String(nav.title).slice(0, 48)
+      else if (tab.kind === 'web' && webHostOf(tab.url)) tab.title = webHostOf(tab.url)
+      if (nav.url) collectHistory({ id: tab.id, kind: tab.kind, systemId: tab.systemId || '', url: nav.url, title: tab.title || '' })
       syncCloudNavButtons()
-      const slot = document.getElementById('cbWebSlot')
-      slot?.querySelector('.cb-web-status')?.remove()
-      if (tab) {
+      document.getElementById('cbWebSlot')?.querySelector('.cb-web-status')?.remove()
+      if (state.cloudTab === tab.id) {
         renderCloudPanel()
-        /* 导航完成后面板重建，页面布局稳定后兜底再推一次视图尺寸 */
         requestAnimationFrame(sendNativeBounds)
         setTimeout(sendNativeBounds, 120)
       }
@@ -14039,6 +15171,7 @@ function initCloudBrowserBridge() {
   }
   if (typeof bridge.onNavError === 'function') {
     bridge.onNavError((err) => {
+      if (err?.tabId !== state.cloudTab) return
       cloudNav.error = err || null
       const slot = document.getElementById('cbWebSlot')
       if (!slot) return
@@ -14052,30 +15185,70 @@ function initCloudBrowserBridge() {
       })
     })
   }
-  if (typeof bridge.onFindResult === 'function') {
-    bridge.onFindResult((res) => {
-      const count = document.getElementById('cbFindCount')
-      if (count) count.textContent = res?.matchCount ? `${res.activeMatchOrdinal}/${res.matchCount}` : ''
-    })
-  }
   /* 页面内新窗口（target=_blank / window.open）：在云浏览器新开网页标签，而非交给系统默认浏览器。 */
   if (typeof bridge.onNewWindow === 'function') {
-    bridge.onNewWindow((url) => { if (url) openCloudWebTab(url) })
+    bridge.onNewWindow((url) => { if (url) openCloudWebTab(url, '', true) })
   }
 }
 
+async function openCloudPasswordManager() {
+  const bridge = window.jgClient?.browser
+  if (!bridge?.passwords) return toast('当前环境没有密码管理桥接', true)
+  const mask = openModal('云浏览器密码', `<div style="min-width:600px;max-width:80vw">
+    <div class="mc-dim" style="margin-bottom:10px">密码由 Windows 系统加密保存。不会自动填充；只有当前网站源完全匹配时才能手动填充。</div>
+    <div id="cbPwList"><div class="mc-dim">正在读取…</div></div>
+  </div>`, { wide: true })
+  const list = mask.querySelector('#cbPwList')
+  const tab = state.cloudTabs.find((item) => item.id === state.cloudTab)
+  let currentOrigin = ''
+  try { const url = new URL(tab?.url || ''); if (url.protocol === 'https:') currentOrigin = url.origin } catch (_) {}
+  const paint = (items) => {
+    list.innerHTML = items.length ? items.map((item) => {
+      const matched = item.origin === currentOrigin
+      return `<div class="mc-block" style="padding:10px;margin-bottom:8px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <div style="flex:1;min-width:230px"><div>${esc(item.origin)}</div><div class="mc-dim" style="margin-top:4px">${esc(item.username || '未填写账号')} · ${esc((item.updatedAt || '').slice(0, 10))}</div></div>
+        <button class="btn sm" data-pw-fill="${esc(item.id)}" ${matched ? '' : 'disabled title="仅可在相同 HTTPS 网站源填充"'}>填充</button>
+        <button class="btn sm subtle" data-pw-delete="${esc(item.id)}">删除</button>
+      </div>`
+    }).join('') : '<div class="mc-block" style="padding:12px"><div class="mc-dim">暂无保存的网站密码。提交 HTTPS 登录表单后会自动加密保存。</div></div>'
+  }
+  const load = async () => {
+    const result = await bridge.passwords().catch(() => null)
+    if (result?.ok) paint(result.items || [])
+    else list.innerHTML = `<div class="notice">${esc(result?.error || '读取密码记录失败')}</div>`
+  }
+  await load()
+  list.addEventListener('click', async (event) => {
+    const fill = event.target.closest('[data-pw-fill]')
+    const del = event.target.closest('[data-pw-delete]')
+    if (fill && !fill.disabled) {
+      fill.disabled = true
+      const result = await bridge.fillPassword(state.cloudTab, fill.dataset.pwFill).catch(() => null)
+      if (result?.ok) { mask.remove(); toast('已填充到当前网页，请核对后登录') }
+      else { fill.disabled = false; toast(result?.error || '填充失败', true) }
+    } else if (del) {
+      if (del.dataset.confirm !== '1') { del.dataset.confirm = '1'; del.textContent = '再次点击确认删除'; return }
+      del.disabled = true
+      const result = await bridge.deletePassword(del.dataset.pwDelete).catch(() => null)
+      if (result?.ok) { toast('密码记录已删除'); await load() }
+      else { del.disabled = false; toast(result?.error || '删除失败', true) }
+    }
+  })
+}
+
 function cloudDownloadRows(items) {
-  if (!items.length) return `<div class="mc-block" style="padding:12px"><div class="mc-dim">还没有下载记录。在右侧网页里点击下载链接后，文件会保存到本机“下载/九规智能中枢”目录。</div></div>`
+  if (!items.length) return '<div class="mc-block" style="padding:12px"><div class="mc-dim">暂无下载记录。下载时可选择保存位置；敏感文件会先提醒，由你决定是否继续。</div></div>'
   return items.map((item) => {
-    const stateLabel = item.state === 'completed' ? '已完成' : item.state === 'downloading' ? '下载中' : item.state === 'cancelled' ? '已取消' : '失败'
-    const pct = item.total ? Math.min(100, Math.round((item.received / item.total) * 100)) : 0
+    const labels = { completed: '已完成', downloading: '下载中', cancelled: '已取消', failed: '失败', interrupted: '已中断', blocked: '已拦截' }
+    const pct = item.total ? Math.min(100, Math.round((Number(item.received || 0) / item.total) * 100)) : 0
+    const done = item.state === 'completed' && item.path
     return `<div class="mc-block" style="padding:10px;margin-bottom:8px">
       <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-        <div style="flex:1;min-width:220px"><div style="font-size:12px">${esc(item.name)}</div>
-        <div class="mc-dim mono" style="margin-top:4px;word-break:break-all">${esc(item.path || '')}</div></div>
+        <div style="flex:1;min-width:200px"><div style="font-size:12px">${esc(item.name || '未命名文件')}</div>
+        <div class="mc-dim" style="margin-top:4px;word-break:break-all">${esc(item.error || item.url || item.path || '')}</div></div>
         <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
-          <span class="tag${item.state === 'completed' ? ' ok' : ''}">${stateLabel}${item.state === 'downloading' && item.total ? ` ${pct}%` : ''}</span>
-          ${item.state === 'completed' ? `<button class="btn sm" data-dl-open="${esc(item.path)}">打开</button><button class="btn sm" data-dl-reveal="${esc(item.path)}">定位</button>` : ''}
+          <span class="tag${done ? ' ok' : item.state === 'blocked' || item.state === 'failed' ? ' warn' : ''}">${esc(labels[item.state] || item.state || '未知')}${item.state === 'downloading' && item.total ? ` ${pct}%` : ''}</span>
+          ${done ? `<button class="btn sm" data-dl-open="${esc(item.path)}">打开</button><button class="btn sm" data-dl-reveal="${esc(item.path)}">定位</button>` : ''}
         </div>
       </div>
     </div>`
@@ -14085,20 +15258,17 @@ function cloudDownloadRows(items) {
 async function openCloudDownloads() {
   initCloudBrowserBridge()
   const bridge = window.jgClient?.browser
-  if (!bridge) return toast('当前环境没有 Electron 下载桥接', true)
-  const mask = openModal('浏览器下载与文件', `<div style="min-width:620px;max-width:80vw">
-    <div class="mc-dim" style="margin-bottom:10px">真实下载记录 · 保存位置：系统“下载/九规智能中枢”</div>
-    <div id="cbDlList"><div class="mc-dim">正在读取下载记录…</div></div>
-    <div class="mc-dim" style="margin-top:10px">下载完成后可打开文件或在资源管理器中定位；未完成的下载不会显示为成功。</div>
+  if (!bridge?.downloads) return toast('当前环境没有受控下载桥接', true)
+  const mask = openModal('下载与文件', `<div style="min-width:620px;max-width:80vw">
+    <div class="mc-dim" style="margin-bottom:10px">每次下载可选择保存位置，默认使用“系统下载/九规智能中枢”。敏感文件会先提醒；不会自动运行。</div>
+    <div id="cbDlList"><div class="mc-dim">正在读取…</div></div>
   </div>`, { wide: true })
   const list = mask.querySelector('#cbDlList')
   try {
     const res = await bridge.downloads()
-    cloudDownloads = res?.items || cloudDownloads
+    cloudDownloads = Array.isArray(res?.items) ? res.items : cloudDownloads
     list.innerHTML = cloudDownloadRows(cloudDownloads)
-  } catch (error) {
-    list.innerHTML = `<div class="mc-block" style="padding:12px">${esc(error?.message || '读取下载记录失败')}</div>`
-  }
+  } catch (error) { list.innerHTML = `<div class="mc-block" style="padding:12px">${esc(error?.message || '读取失败')}</div>` }
   list.addEventListener('click', (event) => {
     const open = event.target.closest('[data-dl-open]')
     const reveal = event.target.closest('[data-dl-reveal]')
@@ -14107,38 +15277,10 @@ async function openCloudDownloads() {
   })
 }
 
-async function handoffWebPageToAI() {
-  const bridge = window.jgClient?.browser
-  if (!bridge) return toast('当前环境没有网页桥接', true)
-  let info = {}
-  let pageText = ''
-  try { info = await bridge.pageInfo() } catch (_) {}
-  try { const res = await bridge.pageText(); pageText = String(res?.text || '') } catch (_) {}
-  const url = String(info?.url || nativeWebUrl || '').trim()
-  const title = String(info?.title || '').trim() || url
-  if (!url) return toast('当前没有可转交的网页', true)
-  const excerpt = pageText.replace(/\s+/g, ' ').trim().slice(0, 6000)
-  state.cloudOpen = false
-  closeNativeWeb()
-  state.view = state.view === 'chat' ? 'chat' : 'home'
-  state.taskMode = 'work'
-  state.draft = `请阅读以下网页，并基于它回答我的问题。\n标题：${title}\n链接：${url}\n${excerpt ? `\n网页正文（截取）：\n${excerpt}\n` : ''}\n我的问题：`
-  applyLayout()
-  render()
-  renderTopbar()
-  setTimeout(() => {
-    const input = document.getElementById('draft')
-    if (input) {
-      input.focus()
-      input.setSelectionRange(input.value.length, input.value.length)
-    }
-  }, 30)
-  toast('网页已转交到对话输入框，补充问题后发送')
-}
-
-
 function openCloudMore(anchor) {
   if (!beginPopover(anchor)) return
+  const tab = state.cloudTabs.find((item) => item.id === state.cloudTab)
+  const internal = isInternalCloudTabUrl(tab?.url)
   const pop = document.createElement('div')
   pop.className = 'cb-more-pop'
   pop.innerHTML = `
@@ -14147,121 +15289,135 @@ function openCloudMore(anchor) {
     <button class="cbm-item" data-cbm="find">在页面中查找</button>
     <button class="cbm-item" data-cbm="print">打印页面</button>
     <button class="cbm-item" data-cbm="shot">截取屏幕截图</button>
-    <button class="cbm-item" data-cbm="viewport">${cloudViewport === 'mobile' ? '切换为桌面视口' : '切换为移动视口'}</button>
     <div class="cbm-sep"></div>
     <button class="cbm-item" data-cbm="history">历史记录</button>
     <button class="cbm-item" data-cbm="download">下载与文件</button>
-    <button class="cbm-item" data-cbm="clear">清除浏览数据</button>
-    <button class="cbm-item" data-cbm="secure">凭据与 Cookie 说明</button>`
+    <button class="cbm-item" data-cbm="passwords">密码管理</button>
+    <button class="cbm-item" data-cbm="clear" ${internal ? 'disabled title="内部预览不能清除中枢会话"' : ''}>清除云浏览器数据</button>
+    <div class="cbm-item" style="cursor:default;color:var(--muted)">门户凭据注入：关闭</div>`
   document.body.appendChild(pop)
   finishPopover(pop, anchor)
   const r = anchor.getBoundingClientRect()
   const w = 236
   pop.style.left = Math.max(8, Math.min(window.innerWidth - w - 8, r.right - w)) + 'px'
-  const h = pop.offsetHeight
-  pop.style.top = Math.round(Math.max(8, Math.min(window.innerHeight - h - 8, r.bottom + 6))) + 'px'
+  pop.style.top = Math.round(Math.min(window.innerHeight - pop.offsetHeight - 8, r.bottom + 6)) + 'px'
   const close = () => pop.remove()
   setTimeout(() => document.addEventListener('click', close, { once: true }), 0)
   const applyZoom = (next) => {
+    if (internal) { toast('内部预览固定为 100%，避免影响中枢界面', true); return }
     cloudZoom = Math.max(0.5, Math.min(2, Math.round(next * 10) / 10))
     try { localStorage.setItem('jg-cloud-zoom', String(cloudZoom)) } catch (_) {}
-    if (window.jgClient?.browser?.setZoom) window.jgClient.browser.setZoom(cloudZoom)
-    const val = pop.querySelector('#cbmZoomVal')
-    if (val) val.textContent = Math.round(cloudZoom * 100) + '%'
+    window.jgClient?.browser?.setZoom?.(cloudZoom)
+    const value = pop.querySelector('#cbmZoomVal')
+    if (value) value.textContent = `${Math.round(cloudZoom * 100)}%`
   }
-  pop.querySelectorAll('[data-zoom]').forEach((b) => b.addEventListener('click', (e) => {
-    e.stopPropagation()
-    const k = b.dataset.zoom
-    if (k === 'in') applyZoom(cloudZoom + 0.1)
-    else if (k === 'out') applyZoom(cloudZoom - 0.1)
-    else applyZoom(1)
+  pop.querySelectorAll('[data-zoom]').forEach((button) => button.addEventListener('click', (event) => {
+    event.stopPropagation()
+    const kind = button.dataset.zoom
+    applyZoom(kind === 'in' ? cloudZoom + 0.1 : kind === 'out' ? cloudZoom - 0.1 : 1)
   }))
-  pop.querySelectorAll('[data-cbm]').forEach((b) => b.addEventListener('click', (e) => {
-    e.stopPropagation()
-    const k = b.dataset.cbm
+  pop.querySelectorAll('[data-cbm]').forEach((button) => button.addEventListener('click', (event) => {
+    event.stopPropagation()
+    if (button.disabled) return
+    const kind = button.dataset.cbm
     pop.remove()
-    if (k === 'history') openCloudHistory()
-    else if (k === 'download') openCloudDownloads()
-    else if (k === 'find') openCloudFindBar()
-    else if (k === 'print') {
-      if (window.jgClient?.browser?.print) window.jgClient.browser.print()
-      else toast('当前环境不支持打印', true)
-    } else if (k === 'shot') takeCloudScreenshot()
-    else if (k === 'viewport') {
-      cloudViewport = cloudViewport === 'mobile' ? 'desktop' : 'mobile'
-      window.jgClient?.browser?.viewport?.(cloudViewport)
-      toast(cloudViewport === 'mobile' ? '已切换移动视口（UA 模拟）' : '已切换桌面视口')
-    } else if (k === 'clear') confirmClearCloudData()
-    else if (k === 'secure') openCloudSecureNote()
+    if (kind === 'history') openCloudHistory()
+    else if (kind === 'download') openCloudDownloads()
+    else if (kind === 'passwords') openCloudPasswordManager()
+    else if (kind === 'find') openCloudFindBar()
+    else if (kind === 'print') window.jgClient?.browser?.print?.()
+    else if (kind === 'shot') takeCloudScreenshot()
+    else if (kind === 'clear') confirmClearCloudData()
   }))
 }
 
 async function takeCloudScreenshot() {
   const bridge = window.jgClient?.browser
   if (!bridge?.screenshot) return toast('当前环境不支持截图', true)
-  const res = await bridge.screenshot().catch(() => null)
-  if (res?.ok) { toast('截图已保存到下载目录'); openCloudDownloads() }
-  else toast(res?.error || '截图失败', true)
+  const result = await bridge.screenshot().catch(() => null)
+  if (result?.ok) toast('截图已保存到受控下载目录')
+  else toast(result?.error || '截图失败', true)
 }
 
 function confirmClearCloudData() {
-  const mask = openModal('清除浏览数据', `
-    <div class="notice">将清除当前浏览器分区的缓存、Cookie、localStorage 与站点数据；已登录的网页会话需要重新登录。此操作不影响中枢账号与应用生产数据。</div>
+  const tab = state.cloudTabs.find((item) => item.id === state.cloudTab)
+  if (isInternalCloudTabUrl(tab?.url)) return toast('内部预览不能清除中枢会话', true)
+  const mask = openModal('清除云浏览器数据', `
+    <div class="notice">只清除云浏览器独立分区的缓存、Cookie 和站点数据；不影响智能中枢登录态、应用数据、已加密保存的密码与下载文件。</div>
     <div class="form-foot" style="margin-top:14px"><span class="spacer"></span><button class="btn" data-mclose>取消</button><button class="btn primary" id="ccClear">确认清除</button></div>`, {})
   mask.querySelector('#ccClear')?.addEventListener('click', async () => {
-    const bridge = window.jgClient?.browser
-    if (!bridge?.clearData) { mask.remove(); return toast('当前环境不支持清除数据', true) }
-    const res = await bridge.clearData().catch(() => null)
+    const result = await window.jgClient?.browser?.clearData?.().catch(() => null)
     mask.remove()
-    if (res?.ok) toast('浏览数据已清除')
-    else toast(res?.error || '清除失败', true)
+    if (result?.ok) toast('云浏览器站点数据已清除；中枢登录态与已保存密码未受影响')
+    else toast(result?.error || '清除失败', true)
   })
 }
 
-function openCloudSecureNote() {
-  openModal('凭据与 Cookie 说明', `
-    <div class="mc-block" style="padding:12px">
-      <div style="font-weight:600;margin-bottom:8px">凭据与站点 Cookie 的处理边界</div>
-      <div class="mc-dim" style="line-height:1.7">
-        企业系统登录凭据由服务端凭据库统一注入，客户端不落盘、不可查看，也不提供 Cookie / 密码导入入口。<br>
-        浏览器分区内的站点 Cookie 仅用于维持当前会话，可通过“清除浏览数据”一并清空；中枢 AI 不读取 Cookie、localStorage 或输入框内容。
-      </div>
-    </div>`, {})
-}
-
 function closeFindBar() {
-  const slot = document.getElementById('cbWebSlot')
-  const bar = slot?.querySelector('.cb-find-bar')
-  if (bar) { bar.remove(); window.jgClient?.browser?.findStop?.() }
+  document.getElementById('cbFindBar')?.remove()
+}
+function openCloudFindBar() {
+  if (!state.cloudTabs.some((item) => item.id === state.cloudTab && ['web', 'session'].includes(item.kind))) return toast('请先打开一个网页标签', true)
+  closeFindBar()
+  const panel = document.getElementById('cbPanel')
+  if (!panel) return
+  const rect = panel.getBoundingClientRect()
+  const bar = document.createElement('div')
+  bar.id = 'cbFindBar'
+  bar.className = 'cb-find-bar'
+  bar.style.cssText = `position:fixed;z-index:10000;top:${Math.round(rect.top + 92)}px;left:${Math.round(rect.left + 16)}px;display:flex;gap:6px;align-items:center;background:var(--panel,#fff);padding:8px;border:1px solid var(--border);border-radius:8px;box-shadow:0 6px 20px #0002`
+  bar.innerHTML = `<input id="cbFindInput" placeholder="查找页面内容" autocomplete="off"><span class="cb-find-count" id="cbFindCount"></span><button class="btn sm" id="cbFindPrev" title="上一个">↑</button><button class="btn sm" id="cbFindNext" title="下一个">↓</button><button class="btn sm subtle" id="cbFindClose" title="关闭">×</button>`
+  document.body.appendChild(bar)
+  const input = bar.querySelector('#cbFindInput')
+  const find = (forward) => { const text = input.value.trim(); if (text) window.jgClient?.browser?.find?.(text, forward) }
+  input.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') { event.preventDefault(); find(!event.shiftKey) }
+    if (event.key === 'Escape') closeFindBar()
+  })
+  bar.querySelector('#cbFindNext').addEventListener('click', () => find(true))
+  bar.querySelector('#cbFindPrev').addEventListener('click', () => find(false))
+  bar.querySelector('#cbFindClose').addEventListener('click', closeFindBar)
+  input.focus()
 }
 
-function openCloudFindBar() {
-  const slot = document.getElementById('cbWebSlot')
-  if (!slot) return toast('请先打开一个网页标签', true)
-  let bar = slot.querySelector('.cb-find-bar')
-  if (!bar) {
-    bar = document.createElement('div')
-    bar.className = 'cb-find-bar'
-    bar.innerHTML = `
-      <input id="cbFindInput" placeholder="查找页面内容" autocomplete="off">
-      <span class="cb-find-count" id="cbFindCount"></span>
-      <button class="btn sm" id="cbFindPrev" title="上一个">↑</button>
-      <button class="btn sm" id="cbFindNext" title="下一个">↓</button>
-      <button class="btn sm subtle" id="cbFindClose" title="关闭">×</button>`
-    slot.appendChild(bar)
-    const input = bar.querySelector('#cbFindInput')
-    const find = (forward) => { const q = input.value.trim(); if (q) window.jgClient?.browser?.find?.(q, forward) }
-    input.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') { e.preventDefault(); find(!e.shiftKey) }
-      if (e.key === 'Escape') closeFindBar()
-    })
-    bar.querySelector('#cbFindNext').addEventListener('click', () => find(true))
-    bar.querySelector('#cbFindPrev').addEventListener('click', () => find(false))
-    bar.querySelector('#cbFindClose').addEventListener('click', closeFindBar)
-    input.focus()
-  } else {
-    bar.querySelector('#cbFindInput').focus()
-  }
+async function handoffWebPageToAI() {
+  const bridge = window.jgClient?.browser
+  const tabId = state.cloudTab
+  const tab = state.cloudTabs.find((item) => item.id === tabId && item.kind === 'web')
+  if (!bridge || !tab) return toast('请先打开一个网页标签', true)
+  toast('正在生成转交预览…')
+  const [infoResult, textResult] = await Promise.all([bridge.pageInfo(tabId).catch(() => null), bridge.pageText(tabId).catch(() => null)])
+  if (state.cloudTab !== tabId || !state.cloudTabs.some((item) => item.id === tabId)) return toast('标签已切换，请重新发起转交', true)
+  const url = String(infoResult?.url || tab.url || '').trim()
+  const title = String(infoResult?.title || tab.title || url).trim()
+  const excerpt = String(textResult?.text || '').replace(/\s+/g, ' ').trim().slice(0, 12000)
+  const readNote = textResult?.error ? '正文读取未完成，可在下方手动补充；' : ''
+  if (!url) return toast('当前网页没有可转交内容', true)
+  const mask = openModal('确认转交当前网页给 AI', `<div style="min-width:620px;max-width:80vw">
+    <div class="notice">${esc(readNote)}仅转交当前标签的标题、网址和下方正文；不会读取密码框、Cookie、本地存储、其他标签或中枢会话。</div>
+    <div class="form-note" style="margin:10px 0"><b>${esc(title)}</b><br><span class="mono">${esc(url)}</span></div>
+    <textarea id="cbAiExcerpt" class="input" style="width:100%;height:220px;resize:vertical" placeholder="网页正文为空时可自行补充">${esc(excerpt)}</textarea>
+    <input id="cbAiQuestion" class="input" style="width:100%;margin-top:10px" placeholder="希望 AI 基于网页回答什么问题？">
+    <div class="form-foot" style="margin-top:12px"><span class="spacer"></span><button class="btn" data-mclose>取消</button><button class="btn primary" id="cbAiConfirm">确认转交</button></div>
+  </div>`, { wide: true })
+  mask.querySelector('#cbAiConfirm')?.addEventListener('click', () => {
+    const edited = mask.querySelector('#cbAiExcerpt').value.trim()
+    const question = mask.querySelector('#cbAiQuestion').value.trim()
+    state.cloudOpen = false
+    closeNativeWeb()
+    mask.remove()
+    state.view = state.view === 'chat' ? 'chat' : 'home'
+    state.taskMode = 'work'
+    state.draft = `请阅读以下网页，并基于它回答我的问题。\n标题：${title}\n链接：${url}\n${edited ? `\n网页正文（用户确认）：\n${edited}\n` : ''}\n我的问题：${question}`
+    applyLayout()
+    render()
+    renderTopbar()
+    setTimeout(() => {
+      const input = document.getElementById('draft')
+      if (input) { input.focus(); input.setSelectionRange(input.value.length, input.value.length) }
+    }, 30)
+    toast('已按确认内容转交到对话输入框')
+  })
 }
 
 const HIST_KIND_LABEL = { web: '网页', app: '应用', session: '系统会话' }
@@ -14498,8 +15654,8 @@ function submitWebAddr(input) {
   const norm = normalizeCloudTarget(input?.value)
   if (!norm) return
   const target = norm.url || `https://www.baidu.com/s?wd=${encodeURIComponent(norm.search)}`
-  if (window.jgClient?.browser?.open) window.jgClient.browser.open(target)
-  const tab = (state.cloudTabs || []).find((t) => t.id === state.cloudTab && t.kind === 'web')
+  if (window.jgClient?.browser?.open) window.jgClient.browser.open(state.cloudTab, target)
+  const tab = (state.cloudTabs || []).find((t) => t.id === state.cloudTab && ['web', 'session'].includes(t.kind))
   if (tab) {
     tab.url = target
     if (norm.search) tab.title = norm.search
@@ -14519,12 +15675,16 @@ async function openCloudTab(systemId) {
     return
   }
   const sys = state.cloud.systems.find((x) => x.id === systemId) || {}
-  const tab = { id: body.session.id, kind: 'session', title: sys.name || systemId, systemId, host: sys.host, session: body.session, ticket: body.ticket }
-  state.cloudTabs = state.cloudTabs.filter((t) => t.id !== tab.id)
+  const tab = { id: body.session.id, kind: 'session', title: sys.name || systemId, systemId, host: sys.host, url: `https://${sys.host}/`, session: body.session }
+  state.cloudTabs = state.cloudTabs.filter((t) => t.id !== tab.id && t.kind !== 'new')
   state.cloudTabs.push(tab)
   state.cloudTab = tab.id
+  state.cloudOpen = true
+  asPaneAppId = ''
+  applyLayout()
   renderCloudPanel()
-  collectHistory({ kind: 'session', systemId, title: sys.name || systemId })
+  renderTopbar()
+  collectHistory({ id: tab.id, kind: 'session', systemId, title: sys.name || systemId })
 }
 
 /* ------------------------------ 地下管网 ----------------------------- */
@@ -14534,7 +15694,7 @@ async function openCloudTab(systemId) {
 let pipelineUiModule = null
 
 async function renderPipeline(el) {
-  if (!pipelineUiModule) pipelineUiModule = await import('./pipeline-ui.js?v=28')
+  if (!pipelineUiModule) pipelineUiModule = await import('./pipeline-ui.js?v=51')
   await pipelineUiModule.renderPipeline(el, { api, toast, icon, esc })
 }
 
@@ -14602,6 +15762,13 @@ function openModal(title, body, opts = {}) {
 }
 
 const closeModals = () => document.querySelectorAll('.jg-modal-mask').forEach((m) => m.remove())
+window.JGSettingsHost = {
+  openModal,
+  toast,
+  api,
+  state: () => state,
+  refresh: async () => { await loadBoot(); renderView() },
+}
 window.JGVisualHost = {
   openModal,
   toast,
@@ -14618,6 +15785,7 @@ async function switchNetwork() {
   state.conversation = null
   state.selectedResource = null
   state.cloud = null
+  window.jgClient?.browser?.closeAll?.()
   state.cloudTabs = [{ id: 'new', kind: 'new', title: '新标签页' }]
   state.cloudTab = 'new'
   if (state.cloudOpen) ensureCloud().then(renderCloudPanel)
@@ -15571,9 +16739,12 @@ function openAutomationForm(idea) {
   mask.querySelector('#auSubmit').addEventListener('click', async () => {
     const permission = mask.querySelector('#auPerm').value
     if (!permission) return toast('请先选择任务权限范围', true)
+    const prompt = mask.querySelector('#auPrompt').value.trim()
+    const payload = { name: mask.querySelector('#auName').value.trim() || '未命名定时任务', schedule: mask.querySelector('#auSch').value, permission, prompt }
+    if (pre.collector) payload.collector = pre.collector
     const { ok } = await api('/api/automations', {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ name: mask.querySelector('#auName').value.trim() || '未命名定时任务', schedule: mask.querySelector('#auSch').value, permission, prompt: mask.querySelector('#auPrompt').value.trim() }),
+      body: JSON.stringify(payload),
     })
     if (!ok) return toast('创建失败', true)
     mask.remove()
@@ -15671,7 +16842,10 @@ async function renderAuditDrawer() {
     drawer.classList.remove('open')
     mask.classList.remove('open')
   })
-  requestAnimationFrame(() => { drawer.classList.add('open'); mask.classList.add('open') })
+  requestAnimationFrame(() => {
+    drawer.style.top = slideTopOffset() + 'px'
+    drawer.classList.add('open'); mask.classList.add('open')
+  })
 }
 
 /* ------------------------------- render ----------------------------- */
@@ -15821,6 +16995,7 @@ async function main() {
     if (Array.isArray(mp)) state.morePinned = mp.filter((id) => typeof id === 'string')
   } catch { state.morePinned = [] }
   await loadBoot()
+  setupOfficeBridge()
   renderMenubar()
   render()
   consumeShareDeepLink()
@@ -16315,8 +17490,90 @@ function openDriveMove(it, spaces, el) {
   })
 }
 
+const ONLINE_OFFICE_EXT = /\.(doc|docx|docm|dot|dotx|odt|rtf|xls|xlsx|xlsm|xlt|xltx|ods|ppt|pptx|pptm|pot|potx|odp)$/i
+
+/* Word/Excel/PPT 优先直接进 OnlyOffice 在线文档；只有服务不可用时才回落到 PDF 只读预览。 */
+function prefersOnlineOffice({ path = '', name = '' } = {}) {
+  const probe = String(name || path || '')
+  return ONLINE_OFFICE_EXT.test(probe)
+}
+
+function unifiedPreviewUrl({ path = '', fileId = '', projectId = '', conversationId = '', name = '', bare = false } = {}) {
+  const online = prefersOnlineOffice({ path, name })
+  const url = new URL(online ? '/api/office/editor' : '/api/preview', location.href)
+  if (path) url.searchParams.set('path', path)
+  if (fileId) url.searchParams.set('fileId', fileId)
+  if (projectId) url.searchParams.set('projectId', projectId)
+  if (conversationId) url.searchParams.set('conversationId', conversationId)
+  if (name) url.searchParams.set('name', name)
+  if (bare) url.searchParams.set('bare', '1')
+  return url.href
+}
+
+/* Office 原生在线编辑入口：不再先转 PDF，直接进 OnlyOffice 编辑器。 */
+function officeEditorPreviewUrl({ path = '', fileId = '', projectId = '', conversationId = '', name = '' } = {}) {
+  const url = new URL('/api/office/editor', location.href)
+  if (path) url.searchParams.set('path', path)
+  if (fileId) url.searchParams.set('fileId', fileId)
+  if (projectId) url.searchParams.set('projectId', projectId)
+  if (conversationId) url.searchParams.set('conversationId', conversationId)
+  if (name) url.searchParams.set('name', name)
+  return url.href
+}
+
+function isOfficePreviewTarget({ path = '', name = '' } = {}) {
+  const ext = String(name || path || '').match(/\.([a-z0-9]{2,5})(?:$|[?#])/i)?.[1]?.toLowerCase() || ''
+  return ['doc', 'docx', 'docm', 'dot', 'dotx', 'odt', 'rtf', 'txt',
+    'xls', 'xlsx', 'xlsm', 'xlt', 'xltx', 'ods', 'csv',
+    'ppt', 'pptx', 'pptm', 'pot', 'potx', 'odp'].includes(ext)
+}
+
+function previewThumbUrl({ path = '', fileId = '', projectId = '', conversationId = '', name = '' } = {}) {
+  const url = new URL('/api/preview/thumb', location.href)
+  if (path) url.searchParams.set('path', path)
+  if (fileId) url.searchParams.set('fileId', fileId)
+  if (projectId) url.searchParams.set('projectId', projectId)
+  if (conversationId) url.searchParams.set('conversationId', conversationId)
+  if (name) url.searchParams.set('name', name)
+  return url.href
+}
+
+function openPreviewModal(target, name = '文件') {
+  const mask = openModal(`预览 · ${esc(name)}`, `
+    <div style="display:flex;flex-direction:column;gap:8px;min-width:min(86vw,1080px)">
+      <div class="mc-dim">只读预览 · 原始文件不会被修改；关闭弹窗不会中断已生成的文件。</div>
+      <iframe src="${esc(target)}" title="${esc(name)} 预览" style="width:100%;height:76vh;border:1px solid var(--line);border-radius:10px;background:#fff"></iframe>
+    </div>`, { wide: true })
+  return mask
+}
+
+/**
+ * 统一预览入口：Word/Excel/PPT 直接进 OnlyOffice，其余格式走 /api/preview。
+ * 有云浏览器时直接在右侧打开；没有时退回中枢内的大弹窗，避免交给系统默认应用下载。
+ */
+async function openUnifiedPreview(opts = {}) {
+  const office = isOfficePreviewTarget(opts)
+  const target = office ? officeEditorPreviewUrl(opts) : unifiedPreviewUrl(opts)
+  const name = String(opts.name || '文件')
+  const tabTitle = `${office ? '在线编辑' : '预览'} · ${name}`
+  if (window.jgClient?.browser && typeof cloudAllowed === 'function' && cloudAllowed()) {
+    try {
+      const opened = await openCloudWebTab(target, tabTitle)
+      if (opened !== false) return
+    } catch (error) {
+      // 云浏览器桥接失败时继续走页签或弹窗，不让预览入口整体失败。
+      console.warn('cloud preview fallback', error)
+    }
+  }
+  // 外部浏览器或未注入云浏览器桥接时，新开一个只读预览页签，避免被弹窗层级吞掉。
+  const popup = window.open(target, '_blank')
+  if (popup) return
+  openPreviewModal(target, name)
+}
+
 async function openImPreview(file) {
-  if (file.itemId) {
+  if (file?.fileId) return openUnifiedPreview({ fileId: file.fileId, name: file.name })
+  if (file?.itemId) {
     const { ok, body } = await api(`/api/drive/item?id=${encodeURIComponent(file.itemId)}`)
     if (ok && body.item) return openCloudPreview(file.itemId)
   }
@@ -16346,6 +17603,7 @@ async function openImPreview(file) {
 async function openCloudPreview(id) {
   const { body } = await api(`/api/drive/item?id=${encodeURIComponent(id)}`)
   const it = body.item || {}
+  if (it.fileId) return openUnifiedPreview({ fileId: it.fileId, name: it.name })
   const meta = DOC_META[it.type] || DOC_META.docx
   const base = String(it.name || '').replace(/\.[a-z]+$/i, '')
 
@@ -18158,7 +19416,8 @@ function renderChat(el) {
   el.__chatConvId = conv?.id || ''
   const showNav = navGroups.length >= CHAT_NAV_MIN_TURNS && !state.shareMode
   const hasStreaming = msgs.some((m) => m.streaming)
-  const thinking = state.chatBusy && !hasStreaming
+  const runHere = state.chatBusy && state.chatRunConvId === (conv?.id || '')
+  const thinking = runHere && !hasStreaming
   const project = currentProject()
   if (state.activeProjectId && !project) {
     state.activeProjectId = ''
@@ -18190,17 +19449,18 @@ function renderChat(el) {
             <div class="chat-empty-sub">${project ? `${esc(project.cwd)} · Agent 将直接读取该目录中的文件` : '普通问答不需要项目；需要操作本地文件时，再在输入框下方绑定项目或文件夹。'}</div>
           </div>`}
         ${thinking ? thinkingCardHTML() : ''}
-        ${stepsCardHTML()}
+        ${runHere ? stepsCardHTML() : ''}
         ${state.chatError ? `<div class="chat-error"><b>调用失败</b><span>${esc(state.chatError)}</span><button class="btn sm" id="retryMsg">重试</button></div>` : ''}
         ${state.pendingConfirm ? renderConfirm() : ''}
         ${state.pendingInteraction ? renderInteraction() : ''}
       </div>
-      ${(state.composerRefs || []).length ? `<div class="hh-refs" style="justify-content:center;align-self:center;width:100%;min-width:280px;max-width:920px;margin:0 auto 10px;box-sizing:border-box">
-        ${state.composerRefs.map((r) => `<span class="hh-ref" data-refdrop="${esc(r.id)}">
-          ${r.preview ? `<img class="hh-ref-thumb" src="${esc(r.preview)}" alt="图片附件" style="width:22px;height:22px;border-radius:5px;object-fit:cover;flex:none">` : `<span class="ico">${icon(r.kind === 'project' ? 'folder' : 'doc')}</span>`}${esc(composerRefLabel(r))}<span class="hh-ref-x">×</span>
-        </span>`).join('')}
-      </div>` : ''}
       <div class="hh-composer" style="align-self:center;width:100%;min-width:280px;max-width:920px;margin:0 auto;box-sizing:border-box">
+        <div data-doc-ctx-slot>${docContextChipHTML()}</div>
+        ${(state.composerRefs || []).length ? `<div class="hh-refs">
+          ${state.composerRefs.map((r) => composerRefChip(r)).join('')}
+        </div>` : ''}
+        ${composerToolChips()}
+        <div class="hh-composer-main">
         <div style="display:flex;align-items:center;gap:6px;flex:none">
           <button class="hc-plus" id="chatAttach" title="添加图片、文件或工具"><span class="ico">${icon('plus')}</span></button>
           ${state.pendingInteraction?.kind === 'approval' ? approvalControl() : ''}
@@ -18209,9 +19469,10 @@ function renderChat(el) {
         <textarea id="draft" rows="1" placeholder="继续追问…">${esc(state.draft)}</textarea>
         <div class="hc-right">
           <button class="hc-mic" id="chatMic" title="语音输入"><span class="ico">${icon('mic')}</span></button>
-          ${state.chatBusy
+          ${runHere
             ? `<button class="hc-send" id="chatStop" title="停止生成">${icon('stop')}</button>`
             : `<button class="hc-send" id="chatSend" title="发送">${icon('up')}</button>`}
+        </div>
         </div>
       </div>
       <div class="quick-row" style="align-self:center;justify-content:space-between;align-items:center;margin:8px auto 0;width:72%;min-width:280px;max-width:920px;box-sizing:border-box;flex-wrap:wrap;gap:6px">
@@ -18227,6 +19488,7 @@ function renderChat(el) {
   const draft = el.querySelector('#draft')
   draft?.addEventListener('input', (e) => { state.draft = e.target.value; updateSlashMenu(e.target); updateMentionMenu(e.target) })
   bindComposerPaste(draft)
+  bindComposerDrop(draft?.closest('.hh-composer, .chat-composer'))
   el.querySelector('#projectContext')?.addEventListener('click', openWorkspacePicker)
   el.querySelector('#taskModeBtn')?.addEventListener('click', (ev) => { ev.stopPropagation(); openTaskModeMenu(ev.currentTarget) })
   el.querySelector('#policyToggle')?.addEventListener('click', (ev) => { ev.stopPropagation(); openPolicyMenu(ev.currentTarget) })
@@ -18238,10 +19500,32 @@ function renderChat(el) {
   if (state.chatFocus) { draft?.focus(); state.chatFocus = false }
   el.querySelector('#chatSend')?.addEventListener('click', sendFromChat)
   el.querySelector('#chatStop')?.addEventListener('click', cancelChat)
+  el.querySelectorAll('[data-approval-card]').forEach((b) => b.addEventListener('click', (e) => {
+    e.stopPropagation()
+    decideApproval(b.dataset.approvalCard)
+  }))
   el.querySelector('#chatAttach')?.addEventListener('click', (ev) => openComposerPlus(ev.currentTarget))
-  el.querySelectorAll('[data-refdrop]').forEach((b) => b.addEventListener('click', () => {
-    removeComposerRef(b.dataset.refdrop)
+  el.querySelectorAll('[data-refdrop-x]').forEach((b) => b.addEventListener('click', (ev) => {
+    ev.stopPropagation()
+    removeComposerRef(b.dataset.refdropX)
     renderView()
+  }))
+  el.querySelectorAll('[data-toolchip-x]').forEach((b) => b.addEventListener('click', (ev) => {
+    ev.stopPropagation()
+    const id = b.dataset.toolchipX
+    state.composerTools = state.composerTools.filter((t) => t !== id)
+    renderView()
+  }))
+  el.querySelectorAll('[data-refpreview]').forEach((b) => b.addEventListener('click', (ev) => {
+    ev.stopPropagation()
+    const ref = (state.composerRefs || []).find((x) => x.id === b.dataset.refpreview)
+    if (!ref) return
+    if (isImageRef(ref)) openComposerImagePreview(ref)
+    else openUnifiedPreview({ fileId: ref.id, name: ref.label || '附件' })
+  }))
+  el.querySelectorAll('[data-msgpreview]').forEach((b) => b.addEventListener('click', (ev) => {
+    ev.stopPropagation()
+    openComposerImagePreview({ preview: b.dataset.msgSrc, label: b.dataset.msgLabel })
   }))
   el.querySelector('#chatModelBtn')?.addEventListener('click', (ev) => { ev.stopPropagation(); openModelReasoningMenu(ev.currentTarget) })
   el.querySelector('#chatMic')?.addEventListener('click', (ev) => startVoiceInput(ev.currentTarget))
@@ -18478,14 +19762,48 @@ function subagentBlock(subs) {
 }
 
 
-function deliverableBlock(files) {
+function dlvTypeMeta(name) {
+  const ext = (String(name || '').match(/\.([a-z0-9]+)$/i) || [])[1]?.toLowerCase() || ''
+  if (['doc', 'docx'].includes(ext)) return { letter: 'W', tone: 'blue' }
+  if (['xls', 'xlsx', 'csv'].includes(ext)) return { letter: 'X', tone: 'green' }
+  if (['ppt', 'pptx'].includes(ext)) return { letter: 'P', tone: 'violet' }
+  if (ext === 'pdf') return { letter: 'PDF', tone: 'red' }
+  return { letter: ext ? ext.slice(0, 1).toUpperCase() : 'F', tone: 'gray' }
+}
+
+function dlvShortStamp(iso) {
+  const d = new Date(iso || '')
+  if (Number.isNaN(d.getTime())) return ''
+  const mm = String(d.getMonth() + 1).padStart(2, '0')
+  const dd = String(d.getDate()).padStart(2, '0')
+  const hh = String(d.getHours()).padStart(2, '0')
+  const mi = String(d.getMinutes()).padStart(2, '0')
+  return `${mm}-${dd} ${hh}:${mi}`
+}
+
+function deliverableBlock(files, createdAt) {
   if (!files || !files.length) return ''
-  return `<div class="hh-refs">
+  const stamp = dlvShortStamp(createdAt)
+  return `<div class="dlv-cards">
     ${files.map((f) => {
       const name = String(f.path || '').split(/[\\/]/).pop() || '交付文件'
-      return `<a class="hh-ref" href="/api/harness/file?path=${encodeURIComponent(f.path)}" target="_blank" title="${esc(f.description || f.path)}">
-        <span class="ico">${icon('doc')}</span>${esc(name)}<span class="hh-ref-x">打开</span>
-      </a>`
+      const meta = dlvTypeMeta(name)
+      const thumb = previewThumbUrl({ path: f.path, fileId: f.fileId, projectId: f.projectId, conversationId: f.conversationId, name })
+      const openPath = f.path || ''
+      return `<div class="dlv-card" data-preview-path="${esc(f.path)}" data-preview-name="${esc(name)}" title="${esc(f.description || f.path)}">
+        <div class="dlv-card-head">
+          <span class="dlv-card-ico ${meta.tone}">${meta.letter}</span>
+          <span class="dlv-card-name">${esc(name)}</span>
+        </div>
+        <div class="dlv-card-preview">
+          <span class="dlv-card-fallback">${icon('doc')}</span>
+          <img class="dlv-card-thumb" src="${esc(thumb)}" alt="${esc(name)} 预览" onerror="this.style.display='none';this.closest('.dlv-card-preview')?.classList.add('is-empty')">
+        </div>
+        <div class="dlv-card-foot">
+          <span class="dlv-card-time">${stamp ? `创建时间：${esc(stamp)}` : ''}</span>
+          <button type="button" class="dlv-card-action" data-reveal-dlv="${esc(openPath)}" title="打开所在文件夹" aria-label="打开所在文件夹">${icon('folder')}</button>
+        </div>
+      </div>`
     }).join('')}
   </div>`
 }
@@ -18693,12 +20011,55 @@ function visualBlock(visuals) {
   }).join('')}</div>`
 }
 
+function automationReportHTML(rp) {
+  if (!rp) return ''
+  const metaHead = rp.baseline ? '首次采集基线' : `新增 ${rp.addedCount || 0} 条`
+  const srcLabel = rp.summarySource === 'collector' ? '采集器' : '模型基于采集数据'
+  return `<div class="tk-doc automation-report">
+    <div class="tk-doc-inner">
+      <h1 class="tk-doc-h1">${esc(rp.title || '')}${rp.date ? ` <span class="tk-doc-sep">|</span> ${esc(rp.date)}` : ''}</h1>
+      ${rp.period || rp.schedule ? `<div class="tk-doc-meta">${[rp.period ? esc(rp.period) : '', rp.schedule ? esc(rp.schedule) : '', rp.next ? `下次 ${esc(rp.next)}` : ''].filter(Boolean).join('　·　')}</div>` : ''}
+      <div class="tk-doc-meta">${metaHead}　·　栏目现有 ${rp.totalCount || 0} 条　·　批前 ${rp.columns?.pre || 0} / 批后 ${rp.columns?.post || 0}　·　摘要来源 ${srcLabel}</div>
+      ${rp.summary || rp.lead ? `<div class="tk-doc-lead">${esc(rp.summary || rp.lead)}</div>` : ''}
+      ${(rp.items || []).filter((it) => it.h !== '数据口径').map((it) => `<div class="tk-doc-sec">
+        <div class="tk-doc-h2">${esc(it.h || '')}</div>
+        ${it.p ? `<p style="white-space:pre-wrap">${esc(it.p)}</p>` : ''}
+        ${(it.links || []).length ? `<div class="tk-links"><span class="tk-links-k">消息源</span>${it.links.map((l) => `<a class="tk-link" href="${esc(l.url)}" data-weblink="${esc(l.url)}" title="${esc(l.url)}">${icon('globe')}${esc(l.name)}</a>`).join('')}</div>` : ''}
+        ${it.src ? `<span class="tk-src">${icon('doc')}<em>${esc(it.src)}</em></span>` : ''}
+      </div>`).join('')}
+    </div>
+  </div>`
+}
+
+function messageRefsHTML(refs) {
+  const list = (refs || []).filter((r) => r && r.id)
+  if (!list.length) return ''
+  return `<div class="hh-refs msg-refs">${list.map((r) => {
+    const meta = refTypeMeta(r)
+    const img = isImageRef(r)
+    const subParts = [r.size ? nbSize(r.size) : '', r.kind === 'file' ? meta.label : (r.type || meta.label)].filter(Boolean)
+    const sub = subParts.join(' · ')
+    const label = composerRefLabel(r)
+    const body = `<span class="hh-ref-body"><span class="hh-ref-text">${esc(label)}</span><span class="hh-ref-sub">${esc(sub)}</span></span>`
+    let ico
+    if (img && r.preview) {
+      ico = `<img class="hh-ref-thumb" src="${esc(r.preview)}" alt="${esc(label)}" data-msgpreview data-msg-src="${esc(r.preview)}" data-msg-label="${esc(label)}">`
+    } else {
+      ico = `<span class="hh-ref-ico">${icon(meta.icon)}</span>`
+    }
+    const dl = r.kind === 'file'
+      ? `<a class="hh-ref-x" href="/api/files/download?id=${encodeURIComponent(r.id)}" download="${esc(r.label || '')}" title="下载" aria-label="下载附件">${icon('download')}</a>`
+      : ''
+    return `<span class="hh-ref${img ? ' image' : ''}">${ico}${body}${dl}</span>`
+  }).join('')}</div>`
+}
+
 function renderMsg(m, idx = null) {
   const on = shareSelected(idx)
   const mi = idx != null ? ` data-mi="${idx}"` : ''
   if (m.role === 'user') {
     return `<div class="msg user${state.shareMode ? ' share-mode' : ''}${on ? ' share-on' : ''}"${mi}>
-      ${sharePickHTML(idx, on)}<div class="bubble">${esc(m.text)}</div>
+      ${sharePickHTML(idx, on)}<div class="bubble">${esc(m.text)}${messageRefsHTML(m.refs)}</div>
       ${idx != null ? `<div class="msg-actions user-actions">
         <span class="msg-time-inline" title="${esc(messageStamp(m))}">${esc(messageStamp(m))}</span>
         <button type="button" class="msg-act icon" title="复制" aria-label="复制" data-copymsg="${idx}">${icon('copy')}</button>
@@ -18712,13 +20073,14 @@ function renderMsg(m, idx = null) {
     ${sharePickHTML(idx, on)}
     <div class="ai-body">
       ${statusBadgeHTML(m)}
-      <div class="bubble">${m.text ? markdownHTML(m.text) : ''}${m.streaming && state.chatBusy ? ((m.text || '').trim()
+      <div class="bubble">${m.report ? automationReportHTML(m.report) : (m.text ? markdownHTML(m.text) : '')}${m.streaming && state.chatBusy ? ((m.text || '').trim()
         ? '<span class="caret"></span>'
         : '<span class="stream-wait">正在生成回答…</span>') : ''}</div>
       ${visualBlock(m.visuals)}
-      ${deliverableBlock(m.deliverables)}
+      ${deliverableBlock(m.deliverables, m.createdAt)}
       ${changeBlock(m.workspaceChanges)}
       ${m.citations?.length ? `<div class="cite-row">${m.citations.map((c) => `<span class="cite">${richTextHTML(c)}</span>`).join('')}</div>` : ''}
+      ${!m.report && m.sourceLinks?.length ? `<div class="src-row"><span class="src-row-k">消息源</span>${m.sourceLinks.map((s) => `<a class="src-chip" href="${esc(s.url)}" data-weblink="${esc(s.url)}" title="${esc(s.url)}">${icon('globe')}${esc(s.name)}</a>`).join('')}</div>` : ''}
       ${idx != null && !(m.streaming && state.chatBusy) ? `<div class="msg-actions">
         <button type="button" class="msg-act icon" title="复制" aria-label="复制" data-copymsg="${idx}">${icon('copy')}</button>
         <button type="button" class="msg-act icon ${state.speakingIndex === idx ? 'on' : ''}" title="${state.speakingIndex === idx ? (state.speechLoading ? '正在生成语音' : (state.speechPaused ? '继续朗读' : '暂停朗读')) : '朗读这条回复'}" aria-label="朗读" data-speak="${idx}">${icon('volume')}</button>
@@ -18754,6 +20116,43 @@ async function copyToClipboard(text) {
     }
   } catch {}
   return false
+}
+
+function dirNameOf(path) {
+  return String(path || '').replace(/[\\/]+$/, '').split(/[\\/]/).slice(0, -1).join('/')
+}
+
+/** 在系统资源管理器中定位产物文件：Electron 桥优先，浏览器环境回退后端兜底接口。 */
+async function revealInFolder(target) {
+  const path = String(target || '')
+  if (!path) return toast('缺少文件路径', true)
+  // 1) Electron 定位到具体文件（资源管理器中选中该文件）
+  if (window.jgClient?.revealFile) {
+    try {
+      const result = await window.jgClient.revealFile(path)
+      if (result && result.ok === false) return toast(result.error || '打开文件夹失败', true)
+      return
+    } catch (error) {
+      // 旧版主进程未注册 reveal-file 通道时，继续走下方兜底
+    }
+  }
+  // 2) Electron 打开文件所在目录
+  if (window.jgClient?.revealPath) {
+    try {
+      const result = await window.jgClient.revealPath(dirNameOf(path))
+      if (result && result.ok === false) return toast(result.error || '打开文件夹失败', true)
+      return
+    } catch (error) {
+      // 继续走后端兜底
+    }
+  }
+  // 3) 浏览器 / 无桥接环境：后端接口唤起系统文件管理器
+  try {
+    const r = await api(`/api/harness/open-folder?path=${encodeURIComponent(path)}`)
+    if (!r.ok) return toast(r.body?.error || '打开文件夹失败', true)
+  } catch (error) {
+    return toast(String(error?.message || error), true)
+  }
 }
 
 function messageShareText(m) {
@@ -19330,8 +20729,18 @@ function renderInteraction() {
   const p = state.pendingInteraction
   if (!p) return ''
   if (p.kind === 'approval') {
-    // 审批入口已收敛到输入框内的「请求批准」胶囊；点击后再弹出菜单让用户选择。
-    return ''
+    // 审批必须显式可见：只在输入框里放一个小胶囊，用户会以为任务自己暂停了。
+    const riskText = { low: '低', medium: '中', high: '高' }[p.risk] || p.risk || '未知'
+    const detail = [p.reason, p.summary].map((x) => String(x || '').trim()).filter(Boolean).join('\n\n')
+    return `<div class="confirm-card approval-card">
+    <div class="confirm-title">任务已暂停，等待你批准</div>
+    <div class="confirm-text">${esc(toolLabel(p.toolName))} 需要${esc(riskText)}风险授权，仅本次有效。</div>
+    ${detail ? `<div class="confirm-draft" style="white-space:pre-wrap;max-height:180px;overflow:auto">${esc(detail.slice(0, 900))}</div>` : ''}
+    <div class="confirm-foot">
+      <button class="btn sm" data-approval-card="rejected">拒绝本次</button>
+      <button class="btn sm primary" data-approval-card="allowed-once">允许本次执行</button>
+    </div>
+  </div>`
   }
   const qs = p.questions || []
   const planReview = qs.length === 1 && qs[0]?.intent?.kind === 'plan-review'
@@ -19561,16 +20970,22 @@ function renderChatMsgs() {
   const box = document.getElementById('chatMsgs')
   if (!box || !state.conversation) return
   const hasStreaming = state.conversation.messages.some((m) => m.streaming)
+  const runHere = state.chatBusy && state.chatRunConvId === state.conversation.id
   box.innerHTML = jobsPanel(state.conversation.messages) + state.conversation.messages.map((m, i) => renderMsg(m, i)).join('') +
-    (state.chatBusy && !hasStreaming ? thinkingCardHTML() : '') + stepsCardHTML()
+    (runHere && !hasStreaming ? thinkingCardHTML() : '') + (runHere ? stepsCardHTML() : '')
 }
 
 
 async function sendFromChat() {
-  if (state.chatBusy) return
+  if (state.chatBusy) {
+    const running = state.conversations.find((c) => c.id === state.chatRunConvId)
+    return toast(running ? `「${running.title || '另一会话'}」正在生成，请先到该会话停止或等待完成` : '当前有会话正在生成，请先停止或等待完成', true)
+  }
   if (state.pastingImages) return toast('图片还在上传，请稍候再发送', true)
-  const text = composerPrompt('')
-  if (!text) return toast('请输入内容，或粘贴图片附件', true)
+  const typed = composerPrompt('')
+  const refs = state.composerRefs || []
+  const text = typed || (refs.length ? attachmentOnlyPrompt(refs) : '')
+  if (!text) return toast('请输入内容，或添加附件后再发送', true)
   if (state.activeProjectId) {
     const p = currentProject()
     if (!p || p.status !== 'online') return toast('项目本地文件夹不可用，请重新连接或解除项目后再执行', true)
@@ -19666,13 +21081,17 @@ function openTaskRuns(a) {
         const [cls, label] = TASK_STATE_MAP[x.state] || ['', x.state]
         const resumable = x.kind === 'chat-run' && x.conversationId && ['interrupted', 'failed'].includes(x.state)
         return `<div class="tk-run"${resumable ? ` data-resume="${esc(x.id)}" style="cursor:pointer"` : ''}>
-          <span class="tk-run-name"><b>${esc(x.title)}</b><span>${esc(x.target)} · 启动 ${esc(x.started || '—')}${x.reason ? ` · ${esc(x.reason)}` : ''}${resumable ? ' · 点击回到原会话继续' : ''}</span></span>
+          <span class="tk-run-name"><b>${esc(x.title)}</b><span>${esc(x.target)} · 启动 ${esc(x.started || '—')}${x.reason ? ` · ${esc(x.reason)}` : ''}${resumable ? ' · 点击回到原会话继续' : ''}</span>${a && (Number(x.artifacts || 0) > 0 || (x.outputFiles || []).length) ? `<button class="tk-foot-link" data-open-task-files="${esc(x.id)}" style="width:max-content;padding:0;margin-top:5px">查看本次文件（${(x.outputFiles || []).length || Number(x.artifacts || 0)}）</button>` : ''}</span>
           <span class="tk-run-prog"><span class="prog"><span style="width:${x.progress || 0}%"></span></span><span class="mono">${x.progress || 0}%</span></span>
           <span class="tag ${cls}">${label}</span>
         </div>`
       }).join('') || '<div class="tk-doc-empty">暂无执行记录</div>'}
     </div>
     <div class="form-foot"><span class="mono">每次执行都是一次真实的 AI 运行，失败保留原因</span></div>`)
+  mask.querySelectorAll('[data-open-task-files]').forEach((button) => button.addEventListener('click', (event) => {
+    event.stopPropagation()
+    if (a) void openTaskFiles(a, button.dataset.openTaskFiles)
+  }))
   mask.querySelectorAll('[data-resume]').forEach((row) => row.addEventListener('click', async () => {
     const task = (state.tasks || []).find((x) => x.id === row.dataset.resume)
     if (!task?.conversationId) return
@@ -19682,7 +21101,7 @@ function openTaskRuns(a) {
         中断阶段：${esc(task.checkpoint?.phase || task.state)} · 原会话 ${esc(task.conversationId)}<br><br>
         恢复会沿用原会话与 DSH session，只继续未完成部分；但中断前已发出的工具动作可能已经产生副作用，系统不会自动重放，需要你确认后重新执行。
       </div>
-      <div class="form-foot"><span class="mono">确认后将回到原会话并发送恢复指令</span><span class="spacer"></span>
+      <div class="form-foot"><span class="mono">确认后由中枢在原会话发起恢复，浏览器关闭也会继续</span><span class="spacer"></span>
         <button class="btn" data-resume-cancel>取消</button>
         <button class="btn primary" data-resume-run>继续执行</button>
       </div>`)
@@ -19691,21 +21110,71 @@ function openTaskRuns(a) {
     run.addEventListener('click', async () => {
       if (run.disabled) return
       run.disabled = true
-      const text = `【恢复执行】原任务：${task.prompt || task.title}\n请先检查当前工作区与已有产出，只继续未完成的部分；不要重复已完成的写入、命令或外部操作。`
+      const { ok, body: res } = await api('/api/tasks/resume', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ id: task.id }),
+      })
+      if (!ok) { run.disabled = false; return toast(res.error || '恢复执行失败', true) }
       mask2.remove()
       mask.remove()
-      await openConversation(task.conversationId)
-      state.draft = text
-      renderView()
-      await sendMessage(text)
+      toast('已由中枢发起恢复执行；浏览器关闭也会继续')
+      await loadTasks().catch(() => {})
+      setTimeout(() => { if (state.view === 'automation') renderView() }, 1500)
     })
   }))
 }
 
-function openTaskFiles(a) {
-  openModal(`任务文件 · ${a.name}`, `
-    <div class="tk-doc-empty">任务文件入口尚未接入；当前没有可展示的真实任务产出文件。</div>
-    <div class="form-foot"><span class="mono">接入后将按任务归档产出与来源文件</span></div>`)
+async function openTaskFiles(a, taskId = '') {
+  const mask = openModal(`任务文件 · ${a.name}`, '<div class="tk-doc-empty">正在读取真实任务文件…</div>')
+  const query = new URLSearchParams()
+  if (a.id) query.set('automationId', a.id)
+  if (taskId) query.set('taskId', taskId)
+  const { ok, body } = await api(`/api/tasks/files?${query.toString()}`)
+  if (!mask.isConnected) return
+  if (!ok) {
+    mask.querySelector('.jg-modal-body').innerHTML = `<div class="tk-doc-empty">${esc(body.error || '任务文件读取失败')}</div><div class="form-foot"><button class="btn" data-files-retry>重试</button></div>`
+    mask.querySelector('[data-files-retry]')?.addEventListener('click', () => { mask.remove(); openTaskFiles(a, taskId) })
+    return
+  }
+  const items = body.items || []
+  const formatSize = (size) => {
+    const bytes = Number(size || 0)
+    if (bytes < 1024) return `${bytes} B`
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+    return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+  }
+  const runLabel = (file) => `${file.taskTitle || file.taskId} · ${file.runAt ? new Date(file.runAt).toLocaleString('zh-CN', { hour12: false }) : '历史执行'}`
+  const fileRow = (file, index) => `<div class="tk-run" style="grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:14px">
+    <span class="tk-run-name"><b>${icon('doc')} ${esc(file.name)}</b><span>${file.kind === 'output' ? '任务产出' : '来源附件'} · ${formatSize(file.size)} · ${esc(runLabel(file))}${file.path ? ` · ${esc(file.path)}` : ''}</span></span>
+    <span style="display:flex;gap:8px"><button class="btn" data-task-file-preview="${index}">预览</button><button class="btn" data-task-file-download="${index}">下载</button></span>
+  </div>`
+  const outputs = items.map((file, index) => ({ file, index })).filter((x) => x.file.kind === 'output')
+  const inputs = items.map((file, index) => ({ file, index })).filter((x) => x.file.kind === 'input')
+  mask.querySelector('.jg-modal-body').innerHTML = `<div class="tk-runs">
+    ${outputs.length ? `<div class="tk-group-label">任务产出（${outputs.length}）</div>${outputs.map((x) => fileRow(x.file, x.index)).join('')}` : ''}
+    ${inputs.length ? `<div class="tk-group-label" style="margin-top:16px">来源文件（${inputs.length}）</div>${inputs.map((x) => fileRow(x.file, x.index)).join('')}` : ''}
+    ${items.length ? '' : `<div class="tk-doc-empty">${taskId ? '这次执行没有仍可访问的产出或来源文件。' : '这个定时任务还没有可展示的文件；执行产生的文件会按每次运行归档在这里。'}</div>`}
+  </div><div class="form-foot"><span class="mono">共 ${items.length} 个真实文件 · 按执行记录归档，可在线预览或下载</span></div>`
+  const targetOf = (file) => file.kind === 'input'
+    ? { fileId: file.fileId, name: file.name }
+    : { conversationId: file.conversationId, path: file.path, name: file.name }
+  mask.querySelectorAll('[data-task-file-preview]').forEach((button) => button.addEventListener('click', () => {
+    const file = items[Number(button.dataset.taskFilePreview)]
+    if (file) void openUnifiedPreview(targetOf(file))
+  }))
+  mask.querySelectorAll('[data-task-file-download]').forEach((button) => button.addEventListener('click', () => {
+    const file = items[Number(button.dataset.taskFileDownload)]
+    if (!file) return
+    let url = ''
+    if (file.kind === 'input') url = `/api/files/download?id=${encodeURIComponent(file.fileId)}`
+    else url = `/api/preview/raw?${new URLSearchParams({ conversationId: file.conversationId, path: file.path, name: file.name, download: '1' }).toString()}`
+    const link = document.createElement('a')
+    link.href = url
+    link.download = file.name || ''
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+  }))
 }
 
 const TASK_STATE_MAP = {
@@ -19761,14 +21230,15 @@ async function renderTaskCenter(el) {
         <div class="tk-doc-inner">
           ${rp ? `
             <h1 class="tk-doc-h1">${esc(rp.title)} <span class="tk-doc-sep">|</span> ${esc(rp.date)}</h1>
-            <div class="tk-doc-meta">统计时间：${esc(rp.period)}　·　${esc(sel.schedule)}　·　下次 ${esc(sel.next)}</div>
-            <div class="tk-doc-lead">${esc(rp.lead)}</div>
-            ${rp.items.map((it) => `<div class="tk-doc-sec">
+            <div class="tk-doc-meta">${esc(rp.period)}　·　${esc(sel.schedule)}　·　下次 ${esc(sel.next)}</div>
+            <div class="tk-doc-meta">${rp.baseline ? '首次采集基线' : `新增 ${rp.addedCount || 0} 条`}　·　栏目现有 ${rp.totalCount || 0} 条　·　批前 ${rp.columns?.pre || 0} / 批后 ${rp.columns?.post || 0}　·　摘要来源 ${rp.summarySource === 'collector' ? '采集器' : '模型基于采集数据'}</div>
+            <div class="tk-doc-lead">${esc(rp.summary || rp.lead)}</div>
+            ${rp.items.filter((it) => it.h !== '数据口径').map((it) => `<div class="tk-doc-sec">
               <div class="tk-doc-h2">${esc(it.h)}</div>
-              <p>${esc(it.p)}</p>
+              <p style="white-space:pre-wrap">${esc(it.p)}</p>
+              ${(it.links || []).length ? `<div class="tk-links"><span class="tk-links-k">消息源</span>${it.links.map((l) => `<a class="tk-link" href="${esc(l.url)}" data-weblink="${esc(l.url)}" title="${esc(l.url)}">${icon('globe')}${esc(l.name)}</a>`).join('')}</div>` : ''}
               <span class="tk-src">${icon('doc')}<em>${esc(it.src)}</em></span>
             </div>`).join('')}
-            <div class="tk-doc-note">${esc(rp.note)}</div>
           ` : sel.lastResult ? `
             <h1 class="tk-doc-h1">${esc(sel.name)}</h1>
             <div class="tk-doc-meta">${esc(sel.schedule)}　·　${sel.status === 'active' ? '已开启' : '已暂停'}　·　下次 ${esc(sel.next || '—')}</div>
@@ -19780,21 +21250,15 @@ async function renderTaskCenter(el) {
             <div class="tk-doc-empty">这个定时任务还没有产出：${sel.status === 'active' ? '首次执行完成后，结果会直接呈现在这里。' : `已暂停，最近执行：${esc(sel.last)}`}</div>
           `}
           <div class="tk-doc-foot">
-            <div class="tk-foot-k">指令</div>
-            <div class="tk-foot-v">${esc(sel.prompt || '（未填写指令）')}</div>
-            <div class="tk-foot-k">投递</div>
-            <div class="tk-foot-v">${esc(sel.deliver || '工作台')}　·　模型 ${esc(sel.model || '系统默认模型')}</div>
-            <div class="tk-foot-k">权限</div>
-            <div class="tk-foot-v">${esc(automationPermissionLabel(sel))}　·　超出预设范围即停止</div>
             <button class="tk-foot-link" data-runs="1">执行记录（最近执行 ${esc(sel.last)}）</button>
           </div>
         </div>
       </div>
       <div class="tk-composer">
-        <button class="icon-btn" data-tkact="plus" title="追加要求尚未接入" disabled style="opacity:.45;cursor:not-allowed">${icon('plus')}</button>
-        <input id="tkAsk" placeholder="追加要求尚未接入" disabled style="opacity:.55">
+        <button class="icon-btn" data-tkact="plus" title="立即运行（不带追加要求）">${icon('plus')}</button>
+        <input id="tkAsk" placeholder="追加要求并立即执行，例如“只列近 7 天新增”">
         <span class="tk-when">即时</span>
-        <button class="tk-send" id="tkAskSend" disabled style="opacity:.45;cursor:not-allowed">${icon('up')}</button>
+        <button class="tk-send" id="tkAskSend" title="追加要求并立即执行">${icon('up')}</button>
       </div>
     </div>` : emptyPane
 
@@ -20061,7 +21525,7 @@ async function renderTaskCenter(el) {
         <div class="tk-menu-sep"></div>
         <button class="cm-item tk-menu-item" data-tk="move" disabled style="opacity:.45;cursor:not-allowed">
           <span class="tk-menu-ico">${icon('folder')}</span>
-          <span class="tk-menu-label">移至工作区</span>
+          <span class="tk-menu-label">移至分组</span>
           <span class="tk-menu-caret">${icon('chevron')}</span>
         </button>
         <div class="tk-more-sub" hidden>
@@ -20106,7 +21570,7 @@ async function renderTaskCenter(el) {
       })
       pop.querySelectorAll('[data-tk-project]').forEach((item) => item.addEventListener('click', () => {
         pop.remove()
-        toast(`已移至工作区「${item.dataset.tkProject}」（演示）`)
+        toast(`已移至分组「${item.dataset.tkProject}」（演示）`)
       }))
       pop.querySelector('[data-tk="pause"]').addEventListener('click', async () => {
         const { ok, body } = await api('/api/automations/pause', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: sel.id }) })
@@ -20144,9 +21608,34 @@ async function renderTaskCenter(el) {
   const runsLink = el.querySelector('[data-runs]')
   if (runsLink) runsLink.addEventListener('click', () => openTaskRuns(state.automations.find((x) => x.id === state.taskSel)))
   const askSend = el.querySelector('#tkAskSend')
-  if (askSend) {
-    askSend.addEventListener('click', () => {})
+  const askInput = el.querySelector('#tkAsk')
+  const runNow = async (extra = '') => {
+    const selNow = state.automations.find((x) => x.id === state.taskSel)
+    if (!selNow) return toast('先选择一个定时任务', true)
+    if (askSend) { if (askSend.dataset.busy === '1') return; askSend.dataset.busy = '1'; askSend.disabled = true }
+    try {
+      const text = String(extra || '').trim().slice(0, 500)
+      if (text) {
+        const appended = await api('/api/automations/append', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: selNow.id, text, scope: 'now' }) })
+        if (!appended.ok) return toast(appended.body.error || '追加要求失败', true)
+        if (appended.body.item) Object.assign(selNow, appended.body.item)
+      }
+      const { ok, body: res } = await api('/api/automations/run', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: selNow.id, extra: text }) })
+      if (!ok) return toast(res.error || '执行失败', true)
+      if (res.item) Object.assign(selNow, res.item)
+      if (askInput) askInput.value = ''
+      await loadTasks()
+      toast(text ? `已追加要求并执行「${selNow.name}」` : `已触发执行「${selNow.name}」`)
+      // 执行完留在定时任务页，不要被其他视图抢走。
+      state.view = 'automation'
+      renderView()
+    } finally {
+      if (askSend) { askSend.dataset.busy = ''; askSend.disabled = false }
+    }
   }
+  if (askSend) askSend.addEventListener('click', () => runNow(askInput ? askInput.value : ''))
+  if (askInput) askInput.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' && !ev.shiftKey && !ev.isComposing) { ev.preventDefault(); runNow(askInput.value) } })
+  el.querySelector('[data-tkact="plus"]')?.addEventListener('click', () => runNow(''))
   el.querySelectorAll('[data-task]').forEach((r) => r.addEventListener('click', (ev) => {
     if (ev.target.closest('[data-retry]') || ev.target.closest('[data-result]')) return
     openTaskDetail(r.dataset.task)
@@ -20880,7 +22369,7 @@ async function renderAdminApps(blocks) {
   blocks.appendChild(adminModuleBlock('业务应用', `${biz.length} 个`, `<div class="mc-table" style="--mc-cols:minmax(180px,1.9fr) minmax(60px,.6fr) minmax(80px,.75fr) minmax(70px,.65fr) minmax(100px,.9fr)">
     <div class="mc-thead"><span>应用</span><span>版本</span><span>网络</span><span>状态</span><span>操作</span></div>
     ${bizRows.join('') || '<div class="mc-row">当前没有业务应用注册记录</div>'}
-  </div>`, '业务应用接入审核走 /api/apps/action；AS 应用与业务应用分开管理。'))
+  </div>`, '应用台账按来源统一展示：业务应用保留 /api/apps/action 接入审核；AS 应用由应用市场安装，运行态与安装记录按 appId 关联。'))
   const permissionRows = asApps.map((x) => {
     const cap = caps.get(x.appId) || {}
     const grant = myGrant(x.appId)
@@ -21033,8 +22522,8 @@ async function renderAdminSecurityExtras(blocks) {
   </div>`, '拒绝记录与权限复核来自安全后台；高敏动作进入审计，不在这里直接放行。'))
   const auditRows = auditItems.map((a) => `<div class="mc-trow"><span class="mono" style="font-size:10px">${esc(a.time || '')}</span><span>${esc(a.actor || '')}</span><span>${esc(a.action || '')}</span><span style="word-break:break-all">${esc(a.object || '')}</span><span>${adminTag(a.result || '—', /deny|拒绝|失败/.test(a.result || '') ? 'bad' : 'ok')}</span></div>`)
   blocks.appendChild(adminModuleBlock('审计日志', `${auditItems.length} 条`, `<div class="mc-table" style="--mc-cols:minmax(52px,.5fr) minmax(70px,.65fr) minmax(110px,1.1fr) minmax(160px,1.8fr) minmax(54px,.5fr)"><div class="mc-thead"><span>时间</span><span>操作人</span><span>动作</span><span>对象</span><span>结果</span></div>${auditRows.join('') || '<div class="mc-row">暂无审计记录</div>'}</div>`, '管理角色可见全量审计；普通角色只可见本人当前网络记录。'))
-  const toolRows = tools.map((t) => `<div class="mc-trow"><span class="mc-first"><b>${esc(t.name)}</b><span class="mc-dim mono" style="display:block;font-size:10px;font-weight:400;margin-top:2px">${esc(t.id)} · ${esc(t.endpoint || '')}</span></span><span>${esc(t.risk || '—')}</span><span>${adminTag(t.confirm ? '强制确认' : '无需确认', t.confirm ? 'warn' : 'ok')}</span><span class="mc-acts"><button class="btn sm" data-tool-confirm="${esc(t.id)}" data-next="${t.confirm ? 'false' : 'true'}">${t.confirm ? '取消确认' : '设为确认'}</button></span></div>`)
-  blocks.appendChild(adminModuleBlock('工具台账', `${tools.length} 个工具`, `<div class="mc-table" style="--mc-cols:minmax(170px,1.7fr) minmax(48px,.45fr) minmax(75px,.7fr) minmax(80px,.75fr)"><div class="mc-thead"><span>工具</span><span>风险</span><span>确认策略</span><span>操作</span></div>${toolRows.join('') || '<div class="mc-row">当前没有工具台账</div>'}</div>`, '高风险工具必须保留二次确认；策略变更写入审计。'))
+  const toolRows = tools.map((t) => `<div class="mc-trow"><span class="mc-first"><b>${esc(t.name)}</b><span class="mc-dim mono" style="display:block;font-size:10px;font-weight:400;margin-top:2px">${esc(t.id)} · ${esc(t.endpoint || '')}</span></span><span>${esc(t.risk || '—')}</span><span class="mono">${Number(t.calls || 0).toLocaleString('zh-CN')}</span><span>${adminTag(t.confirm ? '强制确认' : '无需确认', t.confirm ? 'warn' : 'ok')}</span><span class="mc-acts"><button class="btn sm" data-tool-confirm="${esc(t.id)}" data-next="${t.confirm ? 'false' : 'true'}">${t.confirm ? '取消确认' : '设为确认'}</button></span></div>`)
+  blocks.appendChild(adminModuleBlock('工具台账', `${tools.length} 个工具 · ${tools.reduce((sum, t) => sum + Number(t.calls || 0), 0).toLocaleString('zh-CN')} 次真实调用`, `<div class="mc-table" style="--mc-cols:minmax(170px,1.7fr) minmax(48px,.45fr) minmax(52px,.5fr) minmax(75px,.7fr) minmax(80px,.75fr)"><div class="mc-thead"><span>工具</span><span>风险</span><span>调用</span><span>确认策略</span><span>操作</span></div>${toolRows.join('') || '<div class="mc-row">当前没有工具台账</div>'}</div>`, '调用次数由 AI 调用与应用调用实时累加，不是演示数字；高风险工具必须保留二次确认，策略变更写入审计。'))
   const asApps = [...new Set((asStatus.items || []).map((x) => x.appId || x.id))]
   const activeGrants = (adgBody.items || []).filter((g) => g.status === 'active' && !g.expired)
   blocks.appendChild(adminModuleBlock('凭据与令牌', `${asApps.length} 个 AS 应用 · ${activeGrants.length} 条数据授权`, `<div style="padding:11px 12px;line-height:1.7;font-size:12px;color:#4b5056">
@@ -21252,10 +22741,9 @@ async function renderAdmin(el) {
     'Agent、MCP 与技能运行时': 'agents',
     'DSH 运行时诊断': 'agents',
     '插件运行管理 · DSH 运行时诊断': 'agents',
-    '插件审核': 'plugins',
     '插件 / 技能审核': 'plugins',
-    '插件市场已上架管理': 'plugins',
-    '插件 / 技能上架管理': 'plugins',
+    '应用 / 插件 / 技能上架管理': 'plugins',
+    '浏览器扩展审核': 'exts',
     '图像模板管理': 'templates',
   }
   const sec = body.sections[tab]
@@ -21387,11 +22875,10 @@ async function renderAdmin(el) {
   }
 
   if (tab === 'ai') {
-    const [{ body: sub }, { body: runtimeInfo }, { body: modelCfg }, { body: tplBody }, sharedRes, extRes, appRes] = await Promise.all([
+    const [{ body: sub }, { body: runtimeInfo }, { body: modelCfg }, sharedRes, extRes, appRes] = await Promise.all([
       api('/api/plugin-subs'),
       api('/api/runtime/plugins'),
       api('/api/model/config'),
-      api('/api/images/template-applications'),
       api('/api/admin/shared-models').catch(() => ({ ok: false, body: { presets: [], custom: [] } })),
       api('/api/browser-exts').catch(() => ({ ok: false, body: { items: [], canManage: false } })),
       api('/api/apps').catch(() => ({ ok: false, body: { items: [] } })),
@@ -21404,17 +22891,6 @@ async function renderAdmin(el) {
     const pending = (sub.items || []).filter((x) => x.status === 'pending')
     const pendingPlugins = pending.filter((x) => x.kind !== 'skill')
     const pendingSkills = pending.filter((x) => x.kind === 'skill')
-    const templates = tplBody.applications || []
-    const pendingTemplates = templates.filter((x) => x.status === 'pending')
-    const tplFilter = ['all', 'pending', 'approved', 'offline', 'rejected'].includes(state.templateFilter) ? state.templateFilter : 'all'
-    const shownTemplates = tplFilter === 'all' ? templates : templates.filter((x) => x.status === tplFilter)
-    const tplStatus = {
-      pending: ['warn', '待审核'],
-      approved: ['ok', '已上线'],
-      rejected: ['bad', '已退回'],
-      offline: ['', '已下架'],
-    }
-    const tplFilterLabel = { all: '全部', pending: '待审核', approved: '已上线', offline: '已下架', rejected: '已退回' }
     const runtimePlugins = runtimeInfo.plugins || []
     if (blocks) {
       const reviewRows = (items, emptyText, type) => items.map((x) => {
@@ -21425,7 +22901,7 @@ async function renderAdmin(el) {
       }).join('') || `<div class="mc-row">${emptyText}</div>`
       const wrap = document.createElement('div')
       wrap.className = 'mc-block mc-span-2'
-      wrap.innerHTML = `<div class="mc-block-head"><b>插件 / 技能 / 图像模板审核</b><span class="spacer"></span><span class="mc-count">${pending.length + pendingTemplates.length} 项待处理</span></div>
+      wrap.innerHTML = `<div class="mc-block-head"><b>插件 / 技能审核</b><span class="spacer"></span><span class="mc-count">${pending.length} 项待处理</span></div>
         <div style="display:flex;align-items:center;gap:8px;padding:8px 10px 4px"><b style="font-size:12px">插件审核</b><span class="mc-count">${pendingPlugins.length} 项待处理</span></div>
         <div class="mc-table" style="--mc-cols:1.4fr 1fr 1.2fr 1fr">
           <div class="mc-thead"><span>插件</span><span>提交人</span><span>自动检测</span><span>操作</span></div>
@@ -21435,34 +22911,8 @@ async function renderAdmin(el) {
         <div class="mc-table" style="--mc-cols:1.4fr 1fr 1.2fr 1fr">
           <div class="mc-thead"><span>技能</span><span>提交人</span><span>自动检测</span><span>操作</span></div>
           ${reviewRows(pendingSkills, '当前没有待审核技能', '技能')}
-        </div>
-        <div style="display:flex;align-items:center;gap:8px;padding:12px 10px 4px;flex-wrap:wrap"><b style="font-size:12px">图像模板管理</b><span class="mc-count">${templates.length} 个 · ${templates.filter((x) => x.status === 'approved').length} 个上线 · ${pendingTemplates.length} 个待审</span><span class="spacer"></span>${Object.entries(tplFilterLabel).map(([key, label]) => `<button class="btn sm${tplFilter === key ? ' primary' : ''}" data-tplfilter="${key}">${label}</button>`).join('')}</div>
-        <div class="mc-table" style="--mc-cols:1.45fr .72fr .8fr .75fr 1.35fr">
-          <div class="mc-thead"><span>模板与提示词</span><span>状态</span><span>申请人</span><span>规格</span><span>操作</span></div>
-          ${shownTemplates.map((item) => {
-            const [tone, label] = tplStatus[item.status] || ['', item.status || '—']
-            const acts = item.status === 'pending'
-              ? `<button class="btn sm" data-tplpreview="${esc(item.id)}">预览</button><button class="btn sm" data-tplreview="reject" data-tplid="${esc(item.id)}">退回</button><button class="btn sm primary" data-tplreview="approve" data-tplid="${esc(item.id)}">通过上线</button>`
-              : item.status === 'approved'
-                ? `<button class="btn sm" data-tplpreview="${esc(item.id)}">预览</button><button class="btn sm" data-tplreview="offline" data-tplid="${esc(item.id)}">下架</button>`
-                : item.status === 'offline'
-                  ? `<button class="btn sm" data-tplpreview="${esc(item.id)}">预览</button><button class="btn sm primary" data-tplreview="publish" data-tplid="${esc(item.id)}">重新上线</button>`
-                  : `<button class="btn sm" data-tplpreview="${esc(item.id)}">预览</button>`
-            return `<div class="mc-trow">
-              <span class="mc-first mc-tpl-first"><img class="mc-thumb" src="${esc(item.previewUrl)}" alt=""><span><b>${esc(item.title)}</b><span class="mc-dim mc-tpl-prompt">${esc(item.prompt || '')}${item.reviewNote ? ` · 审核备注：${esc(item.reviewNote)}` : ''}</span></span></span>
-              <span><span class="mc-tag ${tone}">${label}</span></span>
-              <span>${esc(item.applicant)}</span>
-              <span>${esc(item.category)} · ${esc(item.ratio)}</span>
-              <span class="mc-acts">${acts}<button class="btn sm danger" data-tpldelete="${esc(item.id)}">删除</button></span>
-            </div>`
-          }).join('') || `<div class="mc-row">${tplFilter === 'all' ? '当前没有图像模板' : `当前没有${tplFilterLabel[tplFilter]}模板`}</div>`}
-        </div>
-        <div class="mc-block-note">模板审核由运维人员判定：通过后立即上线；下架后图像页不再展示，可随时重新上线。申请人可在 设置 · 审核进度 查看退回原因。</div>`
+        </div>`
       blocks.appendChild(wrap)
-      wrap.querySelectorAll('[data-tplfilter]').forEach((b) => b.addEventListener('click', () => {
-        state.templateFilter = b.dataset.tplfilter
-        renderView()
-      }))
       wrap.querySelectorAll('[data-review]').forEach((b) => b.addEventListener('click', async () => {
         const id = b.dataset.subid
         if (b.dataset.review === 'approve') {
@@ -21486,75 +22936,6 @@ async function renderAdmin(el) {
           if (!ok) return toast(body.error || '退回失败', true)
           state.reviewProgressLoaded = false
           toast('已退回，提交人会收到检测报告与原因')
-          renderView()
-        })
-      }))
-      wrap.querySelectorAll('[data-tplpreview]').forEach((b) => b.addEventListener('click', () => {
-        const item = templates.find((x) => x.id === b.dataset.tplpreview)
-        if (!item) return
-        const [, statusLabel] = tplStatus[item.status] || ['', item.status || '—']
-        openModal(`模板预览：${item.title}`, `<div class="form-note">申请人 ${esc(item.applicant)} · ${esc(item.category)} · ${esc(item.ratio)} · ${esc(statusLabel)}${item.reviewer ? ` · 审核人 ${esc(item.reviewer)}` : ''}${item.reviewNote ? ` · 备注：${esc(item.reviewNote)}` : ''}</div><img src="${esc(item.previewUrl)}" alt="" style="display:block;width:100%;max-height:62vh;object-fit:contain;border-radius:12px;background:#f3f4f6"><div class="form-note" style="margin-top:10px">${esc(item.prompt || '')}</div>`, { wide: true })
-      }))
-      wrap.querySelectorAll('[data-tplreview]').forEach((b) => b.addEventListener('click', async () => {
-        const id = b.dataset.tplid
-        const item = templates.find((x) => x.id === id)
-        if (!item) return
-        const action = b.dataset.tplreview
-        if (action === 'approve') {
-          b.disabled = true
-          const { ok, body } = await api('/api/images/template-review', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id, decision: 'approve' }) })
-          if (!ok) { b.disabled = false; return toast(body.error || '模板审核失败', true) }
-          state.imagegen.templatesLoaded = false
-          state.reviewProgressLoaded = false
-          toast(`模板「${item.title}」已通过并上线`)
-          renderView()
-          return
-        }
-        if (action === 'publish') {
-          b.disabled = true
-          const { ok, body } = await api('/api/images/template-review', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id, decision: 'publish' }) })
-          if (!ok) { b.disabled = false; return toast(body.error || '重新上线失败', true) }
-          state.imagegen.templatesLoaded = false
-          toast(`模板「${item.title}」已重新上线`)
-          renderView()
-          return
-        }
-        const isOffline = action === 'offline'
-        const m2 = openModal(isOffline ? '下架图像模板' : '退回图像模板', `
-          <div class="form-note">${isOffline ? '下架后图像页不再展示该模板，历史生成记录不受影响；之后可随时重新上线。' : '退回后申请人可在 设置 · 审核进度 查看原因，并重新从本人图像发起申请。'}</div>
-          <div class="form-label">${isOffline ? '下架原因（可选）' : '退回原因'}</div>
-          <textarea class="form-area" id="tplReviewReason" rows="3" placeholder="${isOffline ? '例如：模板效果不稳定，先下线调整' : '例如：来源图像与模板用途不一致，请调整提示词或更换图像'}"></textarea>
-          <div class="form-foot"><span class="spacer"></span><button class="btn" data-mclose>取消</button><button class="btn primary" id="tplReviewReject">${isOffline ? '确认下架' : '确认退回'}</button></div>`)
-        m2.querySelector('[data-mclose]').addEventListener('click', () => m2.remove())
-        m2.querySelector('#tplReviewReject').addEventListener('click', async () => {
-          const note = m2.querySelector('#tplReviewReason').value.trim()
-          const { ok, body } = await api('/api/images/template-review', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id, decision: isOffline ? 'offline' : 'reject', note }) })
-          m2.remove()
-          if (!ok) return toast(body.error || (isOffline ? '下架失败' : '退回失败'), true)
-          state.imagegen.templatesLoaded = false
-          state.reviewProgressLoaded = false
-          toast(isOffline ? `模板「${item.title}」已下架` : '已退回该模板申请')
-          renderView()
-        })
-      }))
-      wrap.querySelectorAll('[data-tpldelete]').forEach((b) => b.addEventListener('click', () => {
-        const id = b.dataset.tpldelete
-        const item = templates.find((x) => x.id === id)
-        if (!item) return
-        const mask = openModal('删除图像模板', `
-          <div class="form-note">删除后该模板从模板库移除，申请人与员工都不再可见；历史生成记录不受影响。此操作不可恢复。</div>
-          <div class="form-foot"><span class="spacer"></span><button class="btn" data-mclose>取消</button><button class="btn danger" data-del>删除</button></div>`)
-        mask.querySelector('[data-mclose]').addEventListener('click', () => mask.remove())
-        const del = mask.querySelector('[data-del]')
-        del.addEventListener('click', async () => {
-          if (del.disabled) return
-          del.disabled = true
-          const { ok, body } = await api('/api/images/template-delete', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id }) })
-          if (!ok) { del.disabled = false; return toast(body.error || '删除模板失败', true) }
-          mask.remove()
-          state.imagegen.templatesLoaded = false
-          state.reviewProgressLoaded = false
-          toast(`已删除模板「${item.title}」`)
           renderView()
         })
       }))
@@ -21930,7 +23311,7 @@ async function renderAdmin(el) {
       const marketRows = (rows, len) => rows.map((x, i) => `<div class="mc-trow">
             <span class="mc-first">${esc(x.name)} <span class="mc-dim mono">${esc(x.id)}</span>${x.kind === 'app' && x.runtime?.running ? `<span class="mc-dim mono"> · PID ${esc(x.runtime.pid || '—')} · 租约 ${esc(x.runtime.leaseCount ?? 0)}</span>` : ''}</span>
             <span>${esc(x.publisher || '')}</span>
-            <span><span class="mc-tag ${x.listed === false ? 'warn' : 'ok'}">${x.listed === false ? '已下架' : '已上架'}</span>${x.installed ? ` <span class="mc-tag ok">${(x.installUsers || []).length && x.installUsers[0]?.scope === 'baseline' ? '基线' : '已安装'}</span>` : ''}${x.kind === 'app' && x.installed ? (x.runtime?.running ? ` <span class="mc-tag ok">运行中 · ${esc(x.runtime.port || '')}</span>` : ` <span class="mc-tag${x.runtime?.lastError ? ' warn' : ''}">${x.runtime?.lastError ? '运行异常' : '未运行'}</span>`) : ''}</span>
+            <span><span class="mc-tag ${x.listed === false ? 'warn' : 'ok'}">${x.listed === false ? '已下架' : '已上架'}</span>${x.installed ? ` <span class="mc-tag ok">${(x.installUsers || []).length && x.installUsers[0]?.scope === 'baseline' ? '基线' : '已安装'}</span>` : ''}${x.kind === 'app' && x.installed ? (x.runtime?.running ? ` <span class="mc-tag ok">运行中 · 中枢入口</span>` : ` <span class="mc-tag${x.runtime?.lastError ? ' warn' : ''}">${x.runtime?.lastError ? '运行异常' : '未运行'}</span>`) : ''}</span>
             <span class="mc-acts" style="grid-column:1/-1;flex-wrap:wrap">
               <button class="btn sm" data-mkt-sort="${esc(x.id)}" data-dir="up" ${i === 0 ? 'disabled' : ''}>↑</button>
               <button class="btn sm" data-mkt-sort="${esc(x.id)}" data-dir="down" ${i === len - 1 ? 'disabled' : ''}>↓</button>
@@ -22069,13 +23450,14 @@ async function renderAdmin(el) {
       }
       const tplRows = tplItems.map((x) => {
         const [cls, label] = STATUS_TPL[x.status] || ['', x.status || '—']
-        const acts = x.status === 'pending'
+        const delBtn = `<button class="btn sm danger" data-tpl-del="${esc(x.id)}">删除</button>`
+        const acts = (x.status === 'pending'
           ? `<button class="btn sm primary" data-tpl-review="${esc(x.id)}" data-decision="approve">通过</button><button class="btn sm" data-tpl-review="${esc(x.id)}" data-decision="reject">驳回</button>`
           : x.status === 'approved'
             ? `<button class="btn sm" data-tpl-review="${esc(x.id)}" data-decision="offline">下架</button>`
             : x.status === 'offline'
               ? `<button class="btn sm primary" data-tpl-review="${esc(x.id)}" data-decision="publish">重新上线</button>`
-              : '<span class="mc-dim">—</span>'
+              : '') + delBtn
         return `<div class="mc-trow" style="display:flex;flex-direction:column;align-items:stretch;gap:4px;padding:9px 10px;border-bottom:1px solid var(--line)">
           <div style="display:flex;align-items:center;gap:8px;min-width:0">
             <span style="font-size:12px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(x.title)}</span>
@@ -22118,6 +23500,27 @@ async function renderAdmin(el) {
           ev.currentTarget.disabled = true
           await run(m.querySelector('#tplRejectNote').value.trim())
           m.remove()
+        })
+      }))
+      wrap.querySelectorAll('[data-tpl-del]').forEach((b) => b.addEventListener('click', () => {
+        const id = b.dataset.tplDel
+        const item = tplItems.find((x) => x.id === id)
+        if (!item) return
+        const mask = openModal('删除图像模板', `
+          <div class="form-note">删除后该模板从模板库移除，申请人与员工都不再可见；历史生成记录不受影响。此操作不可恢复。</div>
+          <div class="form-foot"><span class="spacer"></span><button class="btn" data-mclose>取消</button><button class="btn danger" data-del>删除</button></div>`)
+        mask.querySelector('[data-mclose]').addEventListener('click', () => mask.remove())
+        const del = mask.querySelector('[data-del]')
+        del.addEventListener('click', async () => {
+          if (del.disabled) return
+          del.disabled = true
+          const { ok, body } = await api('/api/images/template-delete', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id }) })
+          if (!ok) { del.disabled = false; return toast(body?.error || '删除模板失败', true) }
+          mask.remove()
+          state.imagegen.templatesLoaded = false
+          state.reviewProgressLoaded = false
+          toast(`已删除模板「${item.title}」`)
+          renderView()
         })
       }))
     }
@@ -22546,15 +23949,6 @@ function renderSettings(el) {
 
   el.querySelector('[data-act="changePassword"]')?.addEventListener('click', openChangePassword)
 
-  const unavailableSettings = new Set(['workspace', 'workspaceReset', 'reauth', 'devices', 'diag', 'applyAccess', 'export', 'archive', 'clearCache', 'testMcp', 'update', 'help'])
-  el.querySelectorAll('[data-act]').forEach((b) => {
-    if (!unavailableSettings.has(b.dataset.act)) return
-    b.disabled = true
-    b.style.opacity = '.45'
-    b.style.cursor = 'not-allowed'
-    b.title = '功能尚未接入'
-  })
-
   const search = el.querySelector('#setSearch')
   search.addEventListener('input', (e) => {
     state.settingsQuery = e.target.value
@@ -22694,6 +24088,14 @@ function renderSettings(el) {
   el.querySelectorAll('[data-act]').forEach((b) => {
     b.addEventListener('click', async () => {
       const act = b.dataset.act
+      if (window.JGSettingsCenter?.handles(act)) {
+        await window.JGSettingsCenter.open(act)
+        return
+      }
+      if (['workspace', 'workspaceReset', 'reauth', 'devices', 'diag', 'applyAccess', 'export', 'archive', 'clearCache', 'testMcp', 'update', 'help'].includes(act)) {
+        toast('设置功能模块未加载，请刷新客户端后重试', true)
+        return
+      }
       if (act === 'refreshReviews') {
         state.reviewProgressLoaded = false
         loadReviewProgress()
@@ -22740,20 +24142,8 @@ function renderSettings(el) {
         return
       }
       const map = {
-        workspace: '工作区变更需在客户端选择目录，并由数据中心记录归属（演示）',
-        workspaceReset: '已恢复为默认工作区（演示）',
-        reauth: '已发起二次认证（演示）：认证结果写入审计',
-        devices: '当前仅 1 台受信设备：Windows 10 · 受信设备（演示）',
-        diag: '诊断完成：模型连通 72 ms；数据中心接口 200；证书有效期至 2027-05（演示）',
         saveKey: '个人密钥已写入操作系统凭证库，界面仅保留掩码（演示）',
         clearKey: '已清除本机保存的个人密钥（演示）',
-        applyAccess: '已提交授权申请：数据管理员审批，审批链与结果进审计（演示）',
-        export: '导出需二次确认；涉密内容导出须审批并留痕（演示）',
-        archive: '归档会话：按保留期自动迁移，可申请调阅（演示）',
-        clearCache: '已清理本机缓存，业务数据不在客户端留存（演示）',
-        testMcp: 'MCP 连接正常，工具 12 项；写操作需二次确认（演示）',
-        update: '当前为最新版本；新版本随安装包发布（演示）',
-        help: '文档站与工单由本域运维受理（演示）',
       }
       if (act === 'moreConfig') {
         openMoreConfig()
@@ -22868,6 +24258,7 @@ function initMemorySettings(el) {
 
 function settingsBody(tab) {
   const { user, counts, models } = state.boot
+  const center = state.boot.settingsCenter || {}
   const p = 'set-'
 
   if (tab === 'memory') {
@@ -22906,7 +24297,7 @@ function settingsBody(tab) {
         ]),
         sgroup('常规', [
           srow('默认工作区', '会话与任务的默认落盘位置，仍受数据中心授权约束',
-            `<span class="mono set-value">D:\\JGWorkspace\\${esc(user.unit)}</span><span class="set-btn-gap"></span>${sbtn('workspace', '更改')}${sbtn('workspaceReset', '重置')}`),
+            `<span class="mono set-value">${esc(center.workspace?.path || `D:\\JGWorkspace\\${user.unit}`)}</span><span class="set-btn-gap"></span>${sbtn('workspace', '更改')}${sbtn('workspaceReset', '重置')}`),
           srow('默认模型', '逻辑模型标识稳定，展示名与版本由平台统一维护',
             sel(`${p}model`, models.map((m) => m.label), (models.find((m) => m.id === state.composerModel) || models[0] || {}).label || 'DeepSeek')),
           srow('界面语言', '界面文案语言，不改变数据内容的语言', sel(`${p}lang`, ['简体中文', '自动检测'], '简体中文')),
@@ -22969,8 +24360,8 @@ function settingsBody(tab) {
         ]),
         sgroup('安全', [
           srow('登录密码', '用于账号密码登录；首次登录必须修改初始密码', '<span class="tag ok">已设置</span><span class="set-btn-gap"></span>' + sbtn('changePassword', '修改密码')),
-          srow('二次认证', '登录与高危操作需二次认证，认证记录进审计', '<span class="tag ok">已启用</span><span class="set-btn-gap"></span>' + sbtn('reauth', '重新认证')),
-          srow('当前设备', 'Windows 10 · 客户端 1.0.0-mvp · 受信设备', sbtn('devices', '查看全部设备')),
+          srow('二次认证', '工作区、导出、归档、设备注销与授权审批需当前设备限时认证，记录进审计', `<span class="tag ${center.mfa?.enabled ? 'ok' : ''}">${center.mfa?.enabled ? '已绑定动态口令' : '未绑定'}</span><span class="set-btn-gap"></span>` + sbtn('reauth', center.mfa?.enabled ? '重新认证' : '绑定并认证')),
+          srow('当前设备', `有效登录会话 ${Number(center.counts?.devices || 0)} 个 · 查看客户端、最近活动与到期时间`, sbtn('devices', '查看全部设备')),
         ]),
       ],
     }
@@ -23048,7 +24439,7 @@ function settingsBody(tab) {
         sgroup('范围', [
           srow('授权范围', '', `<div class="scope-chips">${user.scopes.map((s) => `<span class="scope">${esc(s)}</span>`).join('')}</div>`),
           srow('说明', '', `<span class="set-desc" style="display:block;max-width:420px">${esc(user.note)}</span>`),
-          srow('申请额外授权', '提交后由数据管理员审批，审批链与结果进审计', sbtn('applyAccess', '发起申请')),
+          srow('申请额外授权', `提交后由其他数据管理员审批；批准后生效，撤销或到期即失效${center.counts?.pendingAccessReviews ? ` · 待我审批 ${center.counts.pendingAccessReviews} 项` : ''}`, sbtn('applyAccess', '申请与审批')),
         ]),
       ],
     }
@@ -23061,7 +24452,7 @@ function settingsBody(tab) {
         sgroup('会话与任务', [
           srow('会话保留期', '服务端保留会话与结果的期限，到期归档', sel(`${p}retain`, ['180 天', '90 天', '30 天', '长期保留（需审批）'], '180 天')),
           srow('导出会话', '导出为 Markdown 或 JSON；涉密内容导出需审批并留痕', sbtn('export', '导出')),
-          srow('归档会话', '查看已归档会话与任务记录', sbtn('archive', '查看归档')),
+          srow('归档会话', `已归档 ${Number(center.counts?.archived || 0)} 个；可恢复，不删除消息与原始日志`, sbtn('archive', '管理归档')),
         ]),
         sgroup('本机', [
           srow('本地缓存', '仅缓存界面资源与会话索引；业务数据不在客户端留存', sbtn('clearCache', '清理缓存')),
@@ -23395,7 +24786,7 @@ function settingsBody(tab) {
     title: '关于',
     groups: [
       sgroup('版本', [
-        srow('客户端版本', 'Windows 客户端，随安装包分发', '<span class="set-value mono">1.0.0-mvp</span>'),
+        srow('客户端版本', 'Windows 客户端，随安装包分发', `<span class="set-value mono">${esc(center.version?.current || '1.0.0')}</span>`),
         srow('运行时基线', 'DeepSeek Harness，锁定版本并按季度吸收上游补丁', '<span class="set-value mono">0.2.2-rc.1</span>'),
         srow('更新通道', '安装包更新，发布前完成回归与签名校验', sbtn('update', '检查更新')),
       ]),
@@ -23503,6 +24894,10 @@ function setLoginChrome(on) {
       view.style.removeProperty('overflow')
     }
   }
+  // 原生标题栏覆盖层按主题配色：登录态白，主界面态跟随菜单栏浅蓝灰。
+  if (window.jgClient && typeof window.jgClient.setTitleBarTheme === 'function') {
+    window.jgClient.setTitleBarTheme(on ? 'login' : 'app')
+  }
 }
 
 async function loadLoginCaptcha(el, clearAnswer = true) {
@@ -23592,7 +24987,7 @@ function renderLogin(el) {
     <div class="login-page">
       <aside class="login-brandpane">
         <div class="login-brandinner">
-          <img src="./logo.png?v=3" alt="" class="login-mark">
+          <img src="./logo.svg?v=3" alt="" class="login-mark">
           <div class="login-brand">九规智能中枢</div>
           <div class="login-sub">九江市规划设计集团 · 企业级 AI 中枢</div>
           <div class="login-section">安全域</div>
@@ -23892,9 +25287,9 @@ function openGrantDialog(r, grants) {
 
 const TASK_IDEAS = [
   {
-    name: '规划公示项目摘要', sch: '每天 08:30', permission: 'read-only',
-    desc: '每天 08:30 查询九江市自然资源局官网规划公示栏目，比昨日快照，摘要投递到对应项目组消息',
-    prompt: '通过云浏览器打开九江市自然资源局门户网站（bnr.jiujiang.gov.cn）「规划编制、实施批前公示」栏目，采集新增、变更与即将到期的公示事项（项目名称、位置、公示期限、反馈渠道），与昨日快照比对，按项目归并成 5 行以内摘要，投递到对应项目组消息；仅查询公开公示信息，不登录账号、不提交意见、不下载图纸。',
+    name: '规划公示项目摘要', sch: '每天 08:30', permission: 'read-only', collector: 'plan-publicity',
+    desc: '每天 08:30 采集九江市自然资源局官网「批前公示 / 批后公布」栏目，与上次快照比对后输出 5 行内摘要',
+    prompt: '采集九江市自然资源局门户网站（bnr.jiujiang.gov.cn）「规划编制、实施批前公示」与「规划编制、实施审批公布」栏目，按发布日期取最近条目（标题、发布日期、发布部门、原文链接），与上次快照比对，输出 5 行以内摘要：新增条数、近期在公示项目、最新一条与来源；仅采集公开的栏目列表，不登录账号、不提交意见、不下载图纸，公示期限与反馈渠道以原文为准。',
   },
 ]
 
@@ -24049,13 +25444,14 @@ const settingsTabs = [
   { id: 'network', label: '网络与凭证', group: '安全与数据', scope: 'personal', kw: '网络 政务 互联网 令牌 凭证 诊断' },
   { id: 'models', label: '模型与密钥', group: '安全与数据', scope: 'personal', kw: '模型 密钥 外发 个人 Key' },
   { id: 'usage', label: '用量与配额', group: '安全与数据', scope: 'personal', kw: 'token 用量 配额 账单 超额 模型' },
+  { id: 'access', label: '授权范围', group: '安全与数据', scope: 'personal', kw: '授权 申请 审批 数据 资源' },
   { id: 'memory', label: '长期记忆', group: '安全与数据', scope: 'personal', kw: '记忆 长期 偏好 事实 语义 记住 忘掉' },
   { id: 'data', label: '数据管理', group: '安全与数据', scope: 'personal', kw: '保留 导出 缓存 归档' },
   { id: 'integrations', label: '插件与工具', group: '集成', scope: 'personal', kw: '插件 技能 MCP 工具 地址' },
   { id: 'reviews', label: '审核进度', group: '集成', scope: 'personal', kw: '审核 进度 图像模板 插件 技能 通过 驳回 待审核' },
   { id: 'runtime', label: 'Agent 运行时', group: '集成', scope: 'personal', kw: '设置中心 运行时 Agent loop 模型路由 shell subagent 会话日志 配置 执行策略 推理强度' },
   { id: 'mcp', label: 'MCP 资源', group: '集成', scope: 'personal', kw: 'MCP 资源 数据中心 通知 服务器 工具 健康 订阅' },
-  { id: 'about', label: '关于', group: '其他', scope: 'personal', kw: '版本 基线 更新 帮助' },
+  { id: 'about', label: '关于', group: '关于', scope: 'personal', kw: '版本 基线 更新 帮助' },
   // 管理类：仅持有 admin 入口的角色可见，普通员工在设置里完全看不到这一段
   { id: 'adm-org', label: '组织与身份', group: '管理（仅管理员）', scope: 'admin', kw: '部门 员工 任职 角色 跨网 身份' },
   { id: 'adm-access', label: '授权与策略', group: '管理（仅管理员）', scope: 'admin', kw: '角色 权限 数据授权 审批 模型 工具' },
@@ -24106,6 +25502,24 @@ const kn = (id, on, disabled = false) => `
 /* v28ab 强调色：启动时套用上次选择 */
 applyAccent()
 
+/* 成果卡片与统一文件预览：点击卡片进入云浏览器/中枢预览页；文件夹按钮定位所在目录 */
+document.addEventListener('click', (e) => {
+  const revealBtn = e.target.closest?.('[data-reveal-dlv]')
+  if (revealBtn) {
+    e.stopPropagation()
+    revealInFolder(revealBtn.dataset.revealDlv)
+    return
+  }
+  const link = e.target.closest?.('[data-preview-path], [data-preview-file]')
+  if (!link) return
+  e.preventDefault()
+  e.stopPropagation()
+  const path = link.dataset.previewPath || ''
+  const fileId = link.dataset.previewFile || ''
+  const name = link.dataset.previewName || '文件'
+  openUnifiedPreview({ path, fileId, name }).catch((error) => toast(String(error?.message || error), true))
+}, true)
+
 /* v28t 省略号悬浮全文：被截断的文字悬停时用系统提示显示完整内容 */
 document.addEventListener('mouseover', (e) => {
   const t = e.target
@@ -24124,6 +25538,7 @@ document.addEventListener('mouseover', (e) => {
     }
   }
 }, true)
+
 
 
 

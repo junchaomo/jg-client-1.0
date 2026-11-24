@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>待办提醒 · 九规智能中枢</title>
+<style>
+:root{--ink:#1d2321;--muted:#6b746f;--line:#dfe4df;--paper:#f5f6f2;--card:#ffffff;--accent:#2e6b58;--accent-soft:#e5efea;--warn:#a45f27;--danger:#9b3a35}
+*{box-sizing:border-box}
+body{margin:0;background:linear-gradient(180deg,#eef2ec 0,#f7f8f5 240px);color:var(--ink);font:14px/1.55 "Microsoft YaHei","PingFang SC",system-ui,sans-serif}
+.shell{max-width:860px;margin:0 auto;padding:34px 20px 60px}
+.head{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;margin-bottom:18px}
+.kicker{font-size:12px;letter-spacing:.12em;color:var(--accent);font-weight:700}
+h1{font-size:28px;line-height:1.2;margin:6px 0 6px;font-weight:700;letter-spacing:.02em}
+.sub{color:var(--muted);font-size:13px;margin:0}
+.stat{min-width:130px;padding:12px 14px;border:1px solid var(--line);background:#fbfcf9;border-radius:12px;text-align:right}
+.stat b{display:block;font-size:24px;line-height:1.1;color:var(--accent)}
+.stat span{font-size:12px;color:var(--muted)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:0 12px 28px rgba(29,35,33,.05)}
+.form{padding:20px}
+.form h2{font-size:15px;margin:0 0 14px}
+.row{display:grid;grid-template-columns:1fr 220px;gap:12px}
+label{display:block;font-size:12px;color:var(--muted);margin:0 0 6px}
+input,textarea{width:100%;border:1px solid var(--line);background:#fff;border-radius:9px;padding:10px 11px;font:inherit;color:var(--ink)}
+input:focus,textarea:focus{outline:2px solid var(--accent-soft);border-color:var(--accent)}
+textarea{min-height:62px;resize:vertical;margin-top:12px}
+.actions{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:12px;flex-wrap:wrap}
+.hint{font-size:12px;color:var(--muted)}
+button{border:0;border-radius:9px;padding:9px 14px;font:inherit;font-weight:700;cursor:pointer;background:var(--accent);color:#fff}
+button.secondary{background:#eef1ed;color:var(--ink);font-weight:600}
+button.danger{background:#f7ecea;color:var(--danger);font-weight:600}
+button:disabled{opacity:.55;cursor:not-allowed}
+.list{padding:6px 20px 20px;margin-top:16px}
+.list-head{display:flex;align-items:center;justify-content:space-between;padding:12px 0 8px;border-bottom:1px solid var(--line)}
+.list-head h2{font-size:15px;margin:0}
+.list-head span{font-size:12px;color:var(--muted)}
+.item{display:flex;gap:12px;padding:15px 0;border-bottom:1px solid #edf0ec}
+.item:last-child{border-bottom:0}
+.check{width:22px;height:22px;border-radius:7px;border:1px solid #bfc8c1;background:#fff;flex:0 0 auto;margin-top:2px;display:grid;place-items:center;color:#fff;font-size:13px}
+.check.done{background:var(--accent);border-color:var(--accent)}
+.main{min-width:0;flex:1}
+.title{font-weight:700;word-break:break-word}
+.item.done .title{text-decoration:line-through;color:#8b938d;font-weight:600}
+.meta{display:flex;gap:9px;flex-wrap:wrap;font-size:12px;color:var(--muted);margin-top:4px}
+.pill{padding:2px 8px;border-radius:999px;background:#f1f3ef}
+.pill.soon{background:#fbf0e2;color:var(--warn)}
+.pill.over{background:#f8e7e5;color:var(--danger)}
+.note{font-size:13px;color:#55605a;margin-top:6px;white-space:pre-wrap}
+.item-actions{display:flex;gap:8px;align-items:center;flex:0 0 auto}
+.item-actions button{padding:7px 10px;font-size:12px}
+.empty{padding:42px 0 34px;text-align:center;color:var(--muted)}
+.empty b{display:block;color:var(--ink);margin-bottom:5px}
+.foot{margin-top:12px;text-align:center;font-size:12px;color:#8a938c}
+.toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%) translateY(20px);background:#1f2a25;color:#fff;padding:10px 14px;border-radius:9px;font-size:13px;opacity:0;pointer-events:none;transition:.2s;max-width:calc(100% - 32px)}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+@media (max-width:640px){.row{grid-template-columns:1fr}.head{align-items:flex-start}.stat{min-width:100px}.shell{padding:22px 14px 40px}h1{font-size:24px}}
+</style>
+</head>
+<body>
+<div class="shell">
+  <header class="head">
+    <div>
+      <div class="kicker">九规智能中枢 · 应用</div>
+      <h1>待办提醒</h1>
+      <p class="sub">把要做的事写下来，到点由中枢铃铛提醒你。关掉这个页面也会响。</p>
+    </div>
+    <div class="stat"><b id="pendingCount">0</b><span>条未完成</span></div>
+  </header>
+
+  <section class="card form">
+    <h2>新建待办</h2>
+    <div class="row">
+      <div>
+        <label for="title">做什么</label>
+        <input id="title" maxlength="75" placeholder="例如：下午 3 点前把交通流量报告发出去" autocomplete="off">
+      </div>
+      <div>
+        <label for="due">截止时间</label>
+        <input id="due" type="datetime-local">
+      </div>
+    </div>
+    <textarea id="note" maxlength="200" placeholder="备注（可选）"></textarea>
+    <div class="actions">
+      <div class="hint">提醒由中枢调度器投递，不依赖本页面是否打开。</div>
+      <div>
+        <button class="secondary" id="quickMinute" type="button">1 分钟后</button>
+        <button id="add" type="button">添加待办</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="list">
+    <div class="list-head"><h2>全部待办</h2><span id="syncHint">正在读取…</span></div>
+    <div id="items"></div>
+  </section>
+  <div class="foot">数据保存在当前中枢账号的应用目录；提醒只在九规智能中枢内有效。</div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const APP = '__APP_ID__';
+const api = (path, options = {}) => fetch(path, {
+  ...options,
+  headers: {
+    'content-type': 'application/json',
+    'x-as-app-id': APP,
+    ...(options.headers || {}),
+  },
+  credentials: 'same-origin',
+});
+const state = { items: [], busy: false };
+const $ = (id) => document.getElementById(id);
+let toastTimer = 0;
+
+function toast(text) {
+  const el = $('toast');
+  el.textContent = text;
+  el.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('show'), 2600);
+}
+
+function escapeHtml(value) {
+  return String(value == null ? '' : value).replace(/[&<>"']/g, (ch) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[ch]));
+}
+
+function pad(value) { return String(value).padStart(2, '0'); }
+
+function toLocalInput(ms) {
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function dueText(ms) {
+  const delta = Number(ms) - Date.now();
+  if (delta <= 0) return '已到期';
+  const minutes = Math.ceil(delta / 60000);
+  if (minutes < 60) return `还有 ${minutes} 分钟`;
+  const hours = Math.ceil(minutes / 60);
+  if (hours < 24) return `还有 ${hours} 小时`;
+  return `还有 ${Math.ceil(hours / 24)} 天`;
+}
+
+function exactText(ms) {
+  const d = new Date(Number(ms));
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function render() {
+  const items = state.items;
+  const pending = items.filter((item) => !item.done);
+  $('pendingCount').textContent = String(pending.length);
+  const host = $('items');
+  if (!items.length) {
+    host.innerHTML = '<div class="empty"><b>还没有待办</b>写一条，然后把截止时间交给中枢。</div>';
+    return;
+  }
+  host.innerHTML = items.map((item) => {
+    const due = Number(item.dueAt);
+    const cls = item.done ? 'done' : (due <= Date.now() ? 'over' : (due - Date.now() < 3600000 ? 'soon' : ''));
+    return `<article class="item ${item.done ? 'done' : ''}" data-id="${escapeHtml(item.id)}">
+      <button class="check ${item.done ? 'done' : ''}" data-action="toggle" data-id="${escapeHtml(item.id)}" title="${item.done ? '标记未完成' : '标记完成'}">${item.done ? '✓' : ''}</button>
+      <div class="main">
+        <div class="title">${escapeHtml(item.title)}</div>
+        <div class="meta">
+          <span class="pill ${cls}">${item.done ? '已完成' : dueText(due)}</span>
+          <span>${escapeHtml(exactText(due))}</span>
+        </div>
+        ${item.note ? `<div class="note">${escapeHtml(item.note)}</div>` : ''}
+      </div>
+      <div class="item-actions">
+        <button class="danger" data-action="delete" data-id="${escapeHtml(item.id)}">删除</button>
+      </div>
+    </article>`;
+  }).join('');
+}
+
+async function readJson(response) {
+  const text = await response.text();
+  let data = null;
+  try { data = text ? JSON.parse(text) : null } catch {}
+  if (!response.ok || (data && data.ok === false)) {
+    throw new Error((data && (data.error || data.code)) || '请求失败');
+  }
+  return data || {};
+}
+
+async function refresh() {
+  const data = await readJson(await api('/api/todos'));
+  state.items = Array.isArray(data.items) ? data.items : [];
+  render();
+}
+
+async function syncReminders() {
+  try {
+    const data = await readJson(await api('/api/todos/sync', { method: 'POST', body: '{}' }));
+    $('syncHint').textContent = `已登记 ${data.registered || 0} 条提醒`;
+  } catch (error) {
+    $('syncHint').textContent = '提醒登记失败，稍后重试';
+  }
+}
+
+async function addTodo() {
+  if (state.busy) return;
+  const title = $('title').value.trim();
+  const dueTextValue = $('due').value;
+  if (!title) return toast('先写一条待办');
+  if (!dueTextValue) return toast('选一个截止时间');
+  const dueAt = new Date(dueTextValue).getTime();
+  if (!Number.isFinite(dueAt)) return toast('截止时间格式不正确');
+  state.busy = true;
+  $('add').disabled = true;
+  try {
+    const data = await readJson(await api('/api/todos', {
+      method: 'POST',
+      body: JSON.stringify({ title, note: $('note').value, dueAt }),
+    }));
+    state.items.push(data.todo);
+    $('title').value = '';
+    $('note').value = '';
+    $('due').value = toLocalInput(Date.now() + 3600000);
+    render();
+    toast('待办已添加，提醒已交给中枢');
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    state.busy = false;
+    $('add').disabled = false;
+  }
+}
+
+async function mutate(action, id) {
+  if (state.busy) return;
+  const item = state.items.find((x) => x.id === id);
+  if (!item) return;
+  state.busy = true;
+  try {
+    if (action === 'toggle') {
+      const data = await readJson(await api('/api/todos/complete', {
+        method: 'POST',
+        body: JSON.stringify({ id, done: !item.done }),
+      }));
+      Object.assign(item, data.todo);
+      toast(item.done ? '已完成，提醒已撤销' : '已恢复为未完成');
+    } else if (action === 'delete') {
+      await readJson(await api('/api/todos/delete', {
+        method: 'POST',
+        body: JSON.stringify({ id }),
+      }));
+      state.items = state.items.filter((x) => x.id !== id);
+      toast('待办已删除，提醒已撤销');
+    }
+    render();
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    state.busy = false;
+  }
+}
+
+$('due').value = toLocalInput(Date.now() + 3600000);
+$('quickMinute').addEventListener('click', () => {
+  $('due').value = toLocalInput(Date.now() + 60000);
+  toast('已设为 1 分钟后');
+});
+$('add').addEventListener('click', addTodo);
+$('items').addEventListener('click', (event) => {
+  const button = event.target.closest('button[data-action]');
+  if (!button) return;
+  mutate(button.dataset.action, button.dataset.id);
+});
+$('title').addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') { event.preventDefault(); addTodo(); }
+});
+
+refresh().then(syncReminders).catch((error) => {
+  $('syncHint').textContent = '读取失败';
+  toast(error.message);
+});
+/* 只刷新界面上的剩余时间，不承担任何提醒调度。 */
+setInterval(() => { if (!state.busy) render(); }, 30000);
+</script>
+</body>
+</html>

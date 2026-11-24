@@ -15,6 +15,8 @@ export const CHAT_CORE_TOOLS = [
   'session_search',
   'web_fetch',
   'mcp__jg__memory_write', 'mcp__jg__memory_search', 'mcp__jg__memory_list', 'mcp__jg__memory_forget',
+  'mcp__jg__app_list', 'mcp__jg__app_call',
+  'mcp__jg__office_get_selection', 'mcp__jg__office_replace_selection',
   'mcp__jg__app_data_list', 'mcp__jg__app_data_read', 'mcp__jg__app_data_query', 'mcp__jg__capability_list',
   'mcp__jg__drive_read', 'mcp__jg__drive_search',
   'mcp__jg__format_capabilities', 'mcp__jg__format_export', 'mcp__jg__format_extract', 'mcp__jg__format_inspect',
@@ -36,10 +38,13 @@ export const WORK_CORE_TOOLS = [
   'present', 'ask_user_question', 'todo_write', 'skill', 'working_directory', 'pwsh',
   'session_search', 'web_fetch', 'workflow', 'create_goal', 'update_goal',
   'mcp__jg__memory_write', 'mcp__jg__memory_search', 'mcp__jg__memory_list', 'mcp__jg__memory_forget',
+  'mcp__jg__app_list', 'mcp__jg__app_call',
+  'mcp__jg__office_get_selection', 'mcp__jg__office_replace_selection',
   'mcp__jg__app_data_list', 'mcp__jg__app_data_read', 'mcp__jg__app_data_query', 'mcp__jg__capability_list',
   'mcp__jg__drive_read', 'mcp__jg__drive_search',
   'mcp__jg__format_capabilities', 'mcp__jg__format_export', 'mcp__jg__format_extract', 'mcp__jg__format_inspect',
   'mcp__jg__resource_query', 'mcp__jg__task_create',
+  'mcp__jg__skill_publish', 'mcp__jg__plugin_publish', 'mcp__jg__app_publish',
 ]
 
 export const WORK_CODE_TOOLS = [
@@ -154,7 +159,9 @@ export function toolPolicyForTurn({ taskMode, mode, projectId, text, webSearch, 
   if (activePreset || deepThink) return ''
   const visual = wantsVisualTools(text) || (Array.isArray(images) && images.length > 0)
   const schedule = wantsScheduleTools(text)
-  if (taskMode === 'chat' || mode === 'chat') {
+  // 只有用户显式选择的对话模式才收窄工具面；Auto 自己路由出的轻量会话
+  // 仍保留工作核心工具，防止新场景被判成 chat 后连读写和命令都调不到。
+  if (taskMode === 'chat') {
     const allow = [...CHAT_CORE_TOOLS]
     if (webSearch) allow.push('web_search')
     if (visual) allow.push(...CHAT_VISUAL_TOOLS)

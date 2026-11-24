@@ -201,5 +201,16 @@ test('run_code hard budget applies only to read-only Work code inspection', () =
   }), 0, 'preset 保持全量工具面')
 })
 
+test('Work 默认可见发布工具，Chat 不暴露发布写操作', () => {
+  const work = allowed(toolPolicyForTurn({ taskMode: 'work', mode: 'work', text: '把这个技能发布到插件市场' }))
+  for (const tool of ['mcp__jg__skill_publish', 'mcp__jg__plugin_publish', 'mcp__jg__app_publish']) {
+    assert.ok(work.has(tool), `Work 缺少 ${tool}`)
+  }
+  const chat = allowed(toolPolicyForTurn({ taskMode: 'chat', mode: 'chat', text: '发布是什么' }))
+  for (const tool of ['mcp__jg__skill_publish', 'mcp__jg__plugin_publish', 'mcp__jg__app_publish']) {
+    assert.ok(!chat.has(tool), `Chat 不应暴露 ${tool}`)
+  }
+})
+
 
 

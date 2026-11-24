@@ -22,7 +22,7 @@ import {
   getPipelineDataset, insertPipeAnalysisRun, insertPipeIssue, insertPipeLine, insertPipeNode,
   listPipeAnalysisRuns, listPipeIssues, listPipeLines, listPipeNodes, listPipeTopology, listPipelineDatasets,
   replacePipeTopology, resolvePipeIssue, softDeletePipeAnalysisRun, softDeletePipelineDataset,
-  updatePipelineDatasetCounts, updatePipelineDatasetMeta,
+  updatePipelineDatasetCounts, updatePipelineDatasetMeta, withPipeWriteTransaction,
 } from './db.mjs'
 
 const ROOT = dirname(fileURLToPath(import.meta.url))
@@ -35,25 +35,32 @@ const Z_TOLERANCE = 0.05
 /* ------------------------------ 常量 ------------------------------ */
 
 export const PIPE_MAJOR = {
-  water: { label: '供水', color: '#2f7dd1', rule: '有压', depth: 'cover' },
-  sewer: { label: '排水', color: '#5a8f4a', rule: '重力', depth: 'invert' },
-  gas: { label: '燃气', color: '#c88a1e', rule: '有压', depth: 'cover' },
-  heat: { label: '热力', color: '#b4472f', rule: '有压', depth: 'cover' },
+  supply: { label: '供水', color: '#2f7dd1', rule: '有压', depth: 'cover' },
+  distribution: { label: '配水', color: '#5fa8dd', rule: '有压', depth: 'cover' },
+  rain: { label: '雨水', color: '#3f86a8', rule: '重力', depth: 'invert' },
+  intercept: { label: '截污', color: '#7f9440', rule: '重力', depth: 'invert' },
+  sewage: { label: '污水', color: '#5a8f4a', rule: '重力', depth: 'invert' },
+  combined: { label: '合流', color: '#8f8a4a', rule: '重力', depth: 'invert' },
   power: { label: '电力', color: '#7a4fb5', rule: '无压', depth: 'cover' },
   telecom: { label: '通信', color: '#2f9c94', rule: '无压', depth: 'cover' },
-  industrial: { label: '工业', color: '#8a6b4a', rule: '有压', depth: 'cover' },
-  gallery: { label: '综合管廊', color: '#6b6f76', rule: '无压', depth: 'invert' },
+  gas: { label: '燃气', color: '#c88a1e', rule: '有压', depth: 'cover' },
+  heat: { label: '热力', color: '#b4472f', rule: '有压', depth: 'cover' },
+  gallery: { label: '管廊', color: '#6b6f76', rule: '无压', depth: 'invert' },
   other: { label: '其他', color: '#9aa0a6', rule: '未知', depth: 'cover' },
 }
 
+// 细分在前，避免"配水"被"供水"、"截污/雨水"被"排水"先命中
 const MAJOR_KEYWORDS = [
-  ['water', ['给水', '供水', '自来水', 'water', 'ws', 'js', '给水管']],
-  ['sewer', ['排水', '污水', '雨水', '合流', 'sewer', 'waste', 'storm', 'ps', 'ys']],
+  ['distribution', ['配水', 'distribution', 'pswater']],
+  ['supply', ['给水', '供水', '自来水', 'water', 'ws', 'js', '给水管']],
+  ['rain', ['雨水', 'rain', 'storm', 'ys']],
+  ['intercept', ['截污', 'intercept']],
+  ['sewage', ['污水', 'sewage', 'waste', 'ps', '排水']],
+  ['combined', ['合流', 'combined', '合流制']],
   ['gas', ['燃气', '天然气', '煤气', 'gas', 'rq']],
   ['heat', ['热力', '供热', '蒸汽', 'heat', 'rl']],
   ['power', ['电力', '供电', '路灯', 'power', 'electric', 'dl']],
   ['telecom', ['通信', '通讯', '电信', '移动', '联通', '广电', 'telecom', 'comm', 'tx']],
-  ['industrial', ['工业', '工艺', 'industrial']],
   ['gallery', ['管廊', '综合管沟', '共同沟', 'gallery', 'trench']],
 ]
 
@@ -103,8 +110,12 @@ const FIELD_ALIASES = {
  *  实际项目应按现行规范与地方标准在规则表中替换；分析结果里会带上 rule 字段。 */
 const CLEARANCE_RULES = {
   default: { horizontal: 1.0, vertical: 0.5, source: '企业内控默认值', note: '需按现行规范与地方标准复核' },
-  water: { horizontal: 0.8, vertical: 0.3, source: '企业内控默认值' },
-  sewer: { horizontal: 1.0, vertical: 0.4, source: '企业内控默认值' },
+  supply: { horizontal: 0.8, vertical: 0.3, source: '企业内控默认值' },
+  distribution: { horizontal: 0.8, vertical: 0.3, source: '企业内控默认值' },
+  rain: { horizontal: 1.0, vertical: 0.4, source: '企业内控默认值' },
+  intercept: { horizontal: 1.0, vertical: 0.4, source: '企业内控默认值' },
+  sewage: { horizontal: 1.0, vertical: 0.4, source: '企业内控默认值' },
+  combined: { horizontal: 1.0, vertical: 0.4, source: '企业内控默认值' },
   gas: { horizontal: 1.2, vertical: 0.5, source: '企业内控默认值' },
   power: { horizontal: 0.8, vertical: 0.5, source: '企业内控默认值' },
   telecom: { horizontal: 0.6, vertical: 0.3, source: '企业内控默认值' },
@@ -239,20 +250,20 @@ function isGeographic(points, lines, crs, sourceType) {
 
 function buildProjector(points, lines, crs, sourceType) {
   const geographic = isGeographic(points, lines, crs, sourceType)
-  const xs = []
-  const ys = []
-  for (const item of points) {
-    xs.push(item.coords[0]); ys.push(item.coords[1])
+  // 逐点累加边界：大图纸坐标点可达数十万，用 Math.min(...arr) 展开会把调用栈打爆
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity
+  let count = 0
+  const take = (x, y) => {
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return
+    if (x < minX) minX = x
+    if (x > maxX) maxX = x
+    if (y < minY) minY = y
+    if (y > maxY) maxY = y
+    count += 1
   }
-  for (const item of lines) {
-    for (const coordinate of item.coords) { xs.push(coordinate[0]); ys.push(coordinate[1]) }
-  }
-  const validX = xs.filter(Number.isFinite)
-  const validY = ys.filter(Number.isFinite)
-  const minX = validX.length ? Math.min(...validX) : 0
-  const maxX = validX.length ? Math.max(...validX) : 0
-  const minY = validY.length ? Math.min(...validY) : 0
-  const maxY = validY.length ? Math.max(...validY) : 0
+  for (const item of points) take(item.coords[0], item.coords[1])
+  for (const item of lines) for (const coordinate of item.coords) take(coordinate[0], coordinate[1])
+  if (!count) { minX = 0; maxX = 0; minY = 0; maxY = 0 }
   const cx = (minX + maxX) / 2
   const cy = (minY + maxY) / 2
   if (geographic) {
@@ -345,42 +356,65 @@ function runBridge(command, manifest) {
 
 /* ------------------------------ DXF 解析 ------------------------------ */
 
-/** 极简 DXF 文本解析：只取 ENTITIES 段中的 LINE / LWPOLYLINE / CIRCLE / TEXT / MTEXT。 */
+/**
+ * 极简 DXF 文本解析：只取 ENTITIES 段中的 LINE / LWPOLYLINE / CIRCLE / TEXT / MTEXT。
+ *
+ * 性能要点（2026-11-23 优化）：75 MB 级图纸有近千万行组码对，旧实现给每个图元都建 codes 数组，
+ * 连 INSERT / POLYLINE / VERTEX 这些不参与建模的图元也全量收下，既吃内存又拖时间。
+ * 现在只保留建模真正用到的组码，其余图元在读到组码 0 时直接跳过。
+ */
+const DXF_KEEP = {
+  LINE: ['10', '20', '30', '11', '21', '31'],
+  LWPOLYLINE: ['38'],
+  CIRCLE: ['10', '20', '30', '40'],
+  TEXT: ['1', '3', '10', '20', '30', '40'],
+  MTEXT: ['1', '3', '10', '20', '30', '40'],
+}
+
 export function parseDxf(textContent) {
-  const lines = String(textContent || '').split(/\r?\n/)
+  const text = String(textContent || '')
   const entities = []
+  const len = text.length
+  const endOfLine = (from) => {
+    const index = text.indexOf('\n', from)
+    return index < 0 ? len : index
+  }
   let inEntities = false
   let current = null
-  let pendingPolyline = null
-  for (let i = 0; i + 1 < lines.length; i += 2) {
-    const code = lines[i].trim()
-    const value = lines[i + 1] === undefined ? '' : lines[i + 1].trim()
+  let pos = 0
+  while (pos < len) {
+    let stop = endOfLine(pos)
+    const code = text.slice(pos, stop).trim()
+    pos = stop + 1
+    if (pos >= len) break
+    stop = endOfLine(pos)
+    const value = text.slice(pos, stop).trim()
+    pos = stop + 1
     if (code === '0') {
-      if (value === 'SECTION') { inEntities = false; current = null; continue }
-      if (value === 'ENDSEC') { inEntities = false; current = null; continue }
       if (current) { entities.push(current); current = null }
-      if (inEntities && ['LINE', 'LWPOLYLINE', 'CIRCLE', 'TEXT', 'MTEXT', 'POLYLINE', 'VERTEX', 'INSERT'].includes(value)) {
-        current = { type: value, layer: '0', codes: {} , points: [] }
+      if (value === 'SECTION') { inEntities = false; continue }
+      if (value === 'ENDSEC') { inEntities = false; continue }
+      if (inEntities && Object.hasOwn(DXF_KEEP, value)) {
+        current = { type: value, layer: '0', vals: {}, points: [] }
       }
       continue
     }
     if (code === '2' && value === 'ENTITIES') { inEntities = true; continue }
     if (!current) continue
     if (code === '8') { current.layer = value || '0'; continue }
-    if (!current.codes[code]) current.codes[code] = []
-    current.codes[code].push(value)
     if (current.type === 'LWPOLYLINE' && (code === '10' || code === '20')) {
-      const key = code === '10' ? 'x' : 'y'
-      const index = current.codes[code].length - 1
-      current.points[index] = current.points[index] || {}
-      current.points[index][key] = Number(value)
+      if (code === '10') current.points.push({ x: Number(value), y: NaN })
+      else if (current.points.length) current.points[current.points.length - 1].y = Number(value)
+      continue
     }
+    const keep = DXF_KEEP[current.type]
+    if (keep.indexOf(code) !== -1 && current.vals[code] === undefined) current.vals[code] = value
   }
   if (current) entities.push(current)
 
   const parsed = []
   for (const entity of entities) {
-    const first = (code) => (entity.codes[code] && entity.codes[code][0]) || ''
+    const first = (code) => entity.vals[code] || ''
     const layer = entity.layer || '0'
     if (entity.type === 'LINE') {
       parsed.push({
@@ -412,14 +446,6 @@ export function parseDxf(textContent) {
           height: num(first('40')),
         })
       }
-    } else if (entity.type === 'INSERT') {
-      parsed.push({
-        type: 'insert', layer,
-        block: first('2'),
-        at: [Number(first('10')), Number(first('20')), num(first('30'))],
-        angle: num(first('50')),
-        scale: num(first('41')) || 1,
-      })
     }
   }
   return parsed
@@ -432,16 +458,21 @@ function distance2d(a, b) {
 function nearestSegmentDistance(point, coords) {
   let best = Infinity
   for (let i = 0; i + 1 < coords.length; i += 1) {
-    const [x1, y1] = coords[i]
-    const [x2, y2] = coords[i + 1]
-    const dx = x2 - x1
-    const dy = y2 - y1
-    const len2 = dx * dx + dy * dy
-    let t = len2 ? ((point[0] - x1) * dx + (point[1] - y1) * dy) / len2 : 0
-    t = Math.max(0, Math.min(1, t))
-    best = Math.min(best, Math.hypot(point[0] - (x1 + t * dx), point[1] - (y1 + t * dy)))
+    best = Math.min(best, pointSegmentDistance(point[0], point[1], coords[i], coords[i + 1]))
   }
   return best
+}
+
+/** 点到单段线段的三维无关二维距离（注记吸附与空间索引用） */
+function pointSegmentDistance(px, py, a, b) {
+  const [x1, y1] = a
+  const [x2, y2] = b
+  const dx = x2 - x1
+  const dy = y2 - y1
+  const len2 = dx * dx + dy * dy
+  let t = len2 ? ((px - x1) * dx + (py - y1) * dy) / len2 : 0
+  t = Math.max(0, Math.min(1, t))
+  return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy))
 }
 
 /** CAD 接入：图层识别 + 注记关联 + 端点构管点。平面图纸明确标记为推算三维。 */
@@ -462,12 +493,55 @@ export function cadToFeatures(entities, options = {}) {
   }
 
   // 注记 → 最近管段（按 2D 距离；限制吸附半径）
+  // 管段按吸附半径分格：旧实现是 注记×管段 全量比对，75 MB 图纸（5 万注记 × 8 万段）要跑成小时级
+  const snapCell = Math.max(textSnapDistance, 1)
+  const segBuckets = new Map()
+  const segments = []
+  const bucketPush = (cx, cy, index) => {
+    const key = `${cx}|${cy}`
+    let bucket = segBuckets.get(key)
+    if (!bucket) { bucket = []; segBuckets.set(key, bucket) }
+    bucket.push(index)
+  }
+  for (const entity of lineEntities) {
+    const coords = entity.coords
+    for (let i = 0; i + 1 < coords.length; i += 1) {
+      const a = coords[i]
+      const b = coords[i + 1]
+      if (!Number.isFinite(a[0]) || !Number.isFinite(a[1]) || !Number.isFinite(b[0]) || !Number.isFinite(b[1])) continue
+      const index = segments.push({ entity, a, b }) - 1
+      const cx0 = Math.floor(Math.min(a[0], b[0]) / snapCell)
+      const cx1 = Math.floor(Math.max(a[0], b[0]) / snapCell)
+      const cy0 = Math.floor(Math.min(a[1], b[1]) / snapCell)
+      const cy1 = Math.floor(Math.max(a[1], b[1]) / snapCell)
+      const span = (cx1 - cx0 + 1) * (cy1 - cy0 + 1)
+      if (span <= 1024) {
+        for (let cx = cx0; cx <= cx1; cx += 1) for (let cy = cy0; cy <= cy1; cy += 1) bucketPush(cx, cy, index)
+      } else {
+        // 图框、道路中心线这类超长线段：沿线段取样落格并向邻格扩一圈，避免单格塞进上千索引
+        const steps = Math.ceil(Math.hypot(b[0] - a[0], b[1] - a[1]) / snapCell) || 1
+        for (let s = 0; s <= steps; s += 1) {
+          const x = Math.floor((a[0] + (b[0] - a[0]) * (s / steps)) / snapCell)
+          const y = Math.floor((a[1] + (b[1] - a[1]) * (s / steps)) / snapCell)
+          for (let dx = -1; dx <= 1; dx += 1) for (let dy = -1; dy <= 1; dy += 1) bucketPush(x + dx, y + dy, index)
+        }
+      }
+    }
+  }
+
   for (const item of texts) {
     let target = null
     let best = Infinity
-    for (const entity of lineEntities) {
-      const distance = nearestSegmentDistance(item.at, entity.coords)
-      if (distance < best) { best = distance; target = entity }
+    const cx = Math.floor(item.at[0] / snapCell)
+    const cy = Math.floor(item.at[1] / snapCell)
+    for (let dx = -1; dx <= 1; dx += 1) for (let dy = -1; dy <= 1; dy += 1) {
+      const bucket = segBuckets.get(`${cx + dx}|${cy + dy}`)
+      if (!bucket) continue
+      for (const index of bucket) {
+        const segment = segments[index]
+        const distance = pointSegmentDistance(item.at[0], item.at[1], segment.a, segment.b)
+        if (distance < best) { best = distance; target = segment.entity }
+      }
     }
     if (target && best <= textSnapDistance) {
       target.annotations.push({ content: item.content, distance: round(best, 2) })
@@ -481,16 +555,44 @@ export function cadToFeatures(entities, options = {}) {
   }
 
   // 端点聚类成管点（1m 容差），井图元就近绑定
+  // 管点同样用 1m 网格分桶：旧实现每来一个端点就把已有管点全扫一遍，20 万端点时是平方级
   const nodes = []
   const nodeIndex = new Map()
+  const nodeBuckets = new Map()
   const keyOf = (coordinate) => `${Math.round(coordinate[0] * 10)}:${Math.round(coordinate[1] * 10)}`
   const findNear = (coordinate) => {
     const k = keyOf(coordinate)
     if (nodeIndex.has(k)) return nodeIndex.get(k)
-    for (const node of nodes) {
-      if (distance2d([node.x, node.y], coordinate) <= 1.0) return node
+    const cx = Math.floor(coordinate[0])
+    const cy = Math.floor(coordinate[1])
+    let best = null
+    let bestDistance = Infinity
+    for (let dx = -1; dx <= 1; dx += 1) for (let dy = -1; dy <= 1; dy += 1) {
+      const bucket = nodeBuckets.get(`${cx + dx}|${cy + dy}`)
+      if (!bucket) continue
+      for (const node of bucket) {
+        const distance = Math.hypot(node.x - coordinate[0], node.y - coordinate[1])
+        if (distance <= 1.0 && distance < bestDistance) { bestDistance = distance; best = node }
+      }
     }
-    return null
+    return best
+  }
+  const nearestNodeWithin = (x, y, radius) => {
+    const cx0 = Math.floor((x - radius) / 1.0)
+    const cx1 = Math.floor((x + radius) / 1.0)
+    const cy0 = Math.floor((y - radius) / 1.0)
+    const cy1 = Math.floor((y + radius) / 1.0)
+    let best = null
+    let bestDistance = Infinity
+    for (let cx = cx0; cx <= cx1; cx += 1) for (let cy = cy0; cy <= cy1; cy += 1) {
+      const bucket = nodeBuckets.get(`${cx}|${cy}`)
+      if (!bucket) continue
+      for (const node of bucket) {
+        const distance = Math.hypot(node.x - x, node.y - y)
+        if (distance <= radius && distance < bestDistance) { bestDistance = distance; best = node }
+      }
+    }
+    return best
   }
   const ensureNode = (coordinate, major) => {
     const near = findNear(coordinate)
@@ -508,6 +610,10 @@ export function cadToFeatures(entities, options = {}) {
     }
     nodes.push(node)
     nodeIndex.set(keyOf(coordinate), node)
+    const cellKey = `${Math.floor(coordinate[0])}|${Math.floor(coordinate[1])}`
+    let bucket = nodeBuckets.get(cellKey)
+    if (!bucket) { bucket = []; nodeBuckets.set(cellKey, bucket) }
+    bucket.push(node)
     return node
   }
 
@@ -517,14 +623,14 @@ export function cadToFeatures(entities, options = {}) {
   }
 
   for (const circle of circles) {
-    const near = nodes
-      .map((node) => ({ node, d: distance2d([node.x, node.y], circle.center) }))
-      .sort((a, b) => a.d - b.d)[0]
-    if (near && near.d <= Math.max(1.5, (circle.radius || 0) * 2)) {
-      near.node.category = '井'
-      near.node.attrs.chamber = `R${round(circle.radius || 0, 2)}`
-      near.node.hasZ = near.node.hasZ || Number.isFinite(circle.center[2])
-      if (!near.node.hasZ && Number.isFinite(circle.center[2])) near.node.z = circle.center[2]
+    if (!Number.isFinite(circle.center?.[0]) || !Number.isFinite(circle.center?.[1])) continue
+    const radius = Math.max(1.5, (circle.radius || 0) * 2)
+    const near = nearestNodeWithin(circle.center[0], circle.center[1], radius)
+    if (near) {
+      near.category = '井'
+      near.attrs.chamber = `R${round(circle.radius || 0, 2)}`
+      near.hasZ = near.hasZ || Number.isFinite(circle.center[2])
+      if (!near.hasZ && Number.isFinite(circle.center[2])) near.z = circle.center[2]
     }
   }
 
@@ -810,7 +916,7 @@ export function inspectQuality(nodes, lines) {
     if (!line.material) push('缺材质', '低', `管段 ${line.lineCode} 未填写材质`, { lineId: line.id })
     if (line.thicknessGrade === 'none') push('缺高程', '高', `管段 ${line.lineCode} 无可用高程，不能参与精确空间分析`, { lineId: line.id })
     else if (line.thicknessGrade === 'partial') push('部分缺高程', '中', `管段 ${line.lineCode} 部分顶点缺高程，按线性插值生成示意位置`, { lineId: line.id })
-    if (line.pipeMajor === 'sewer' && line.flowDir !== '-1' && line.startElev !== null && line.endElev !== null) {
+    if (PIPE_MAJOR[line.pipeMajor]?.depth === 'invert' && line.flowDir !== '-1' && line.startElev !== null && line.endElev !== null) {
       const downhill = line.flowDir === '0' ? line.startElev >= line.endElev : line.endElev >= line.startElev
       if (!downhill) push('流向与高程矛盾', '中', `管段 ${line.lineCode} 流向与两端高程关系不一致，请复核`, { lineId: line.id })
     }
@@ -844,6 +950,14 @@ function detectSourceType(name, kind) {
  */
 export async function importPipeline(options = {}) {
   const { user, net, files = [], name = '', mapping = {}, layerMapping = {}, datum = '1985 国家高程基准' } = options
+  // 导入进度回调：百分数 + 阶段说明，供服务端登记后由前端轮询
+  const onProgress = typeof options.onProgress === 'function' ? options.onProgress : null
+  const report = (percent, message, stage = '') => {
+    if (!onProgress) return
+    try { onProgress({ percent: Math.max(0, Math.min(100, Math.round(percent))), message, stage }) } catch { /* 进度上报不应影响导入 */ }
+  }
+  // Node 单线程：同步解析/建模期间事件循环被占住，进度轮询排不进来；在阶段边界让出一次
+  const yieldEventLoop = () => new Promise((resolve) => setImmediate(resolve))
   const stage = options.stage === 'planned' ? 'planned' : options.stage === 'history' ? 'history' : options.stage === 'built' ? 'built' : 'existing'
   const ownerName = typeof user === 'object' && user ? String(user.name || '') : String(user || '')
   if (!Array.isArray(files) || !files.length) throw Object.assign(new Error('请选择要导入的管网数据文件'), { status: 400 })
@@ -863,8 +977,14 @@ export async function importPipeline(options = {}) {
   try {
     if (sourceType === 'cad-dxf') {
       const dxfFile = files.find((file) => /\.dxf$/i.test(file.name)) || first
+      report(8, '正在解析 DXF 组码…', 'parse')
+      await yieldEventLoop()
       const parsed = parseDxf(Buffer.from(dxfFile.buffer).toString('utf8'))
+      report(26, `DXF 解析完成，正在识别图层与注记（${parsed.length} 个图元）…`, 'model')
+      await yieldEventLoop()
       const cad = cadToFeatures(parsed, { layerMapping })
+      report(46, 'CAD 建模完成，正在整理管点与管段…', 'model')
+      await yieldEventLoop()
       warnings.push(...cad.warnings)
       rawPoints = cad.points.map((point) => ({ raw: point.attrs || {}, coords: point.coords, layer: 'CAD', pre: point }))
       rawLines = cad.lines.map((line) => ({ raw: line.attrs?.cad || {}, coords: line.coords, layer: line.attrs?.cad?.layer || '0', pre: line }))
@@ -911,6 +1031,7 @@ export async function importPipeline(options = {}) {
       warnings.push('CSV 接入：按表头自动识别管点表 / 管段表；管段几何由起终点号在管点表中匹配生成')
     } else {
       // 普查成果：按相对路径落盘（支持 SHP 同名文件组、GDB 文件夹、ZIP 包）
+      report(15, '正在读取普查成果文件…', 'parse')
       for (const file of files) {
         const relative = String(file.path || file.name || 'data.shp').replace(/\\/g, '/')
           .split('/').filter((part) => part && part !== '.' && part !== '..').join('/')
@@ -944,6 +1065,7 @@ export async function importPipeline(options = {}) {
   if (!rawPoints.length && !rawLines.length) {
     throw Object.assign(new Error('文件中没有识别到管点或管段要素'), { status: 422 })
   }
+  report(58, `要素已就绪：${rawPoints.length} 个管点、${rawLines.length} 条管段，正在计算坐标与长度…`, 'normalize')
 
   const projector = buildProjector(rawPoints, rawLines, crs, sourceType)
   const pointMap = new Map()
@@ -1110,53 +1232,84 @@ export async function importPipeline(options = {}) {
       majors,
       warnings,
       importedAt: new Date().toISOString(),
-      semantics: '埋深按类别解释：有压/电力/通信为覆土深度；排水与方沟为内底埋深',
+      semantics: '埋深按类别解释：供水/配水/燃气/热力/电力/通信为覆土深度；雨水/截污/污水/合流与方沟为内底埋深',
     },
     owner: ownerName,
     net: net || 'inet',
   })
 
   clearPipelineFeatures(dataset.id)
-  for (const node of nodes) {
-    insertPipeNode(dataset.id, {
-      nodeCode: node.nodeCode,
-      category: node.category,
-      x: node.x, y: node.y,
-      groundElev: node.groundElev, z: node.z, coverDepth: node.coverDepth,
-      coverMaterial: node.coverMaterial, coverSize: node.coverSize,
-      chamberShape: node.chamberShape, chamberSize: node.chamberSize,
-      road: node.road, address: node.address, owner: node.owner,
-      buildYear: node.buildYear, surveyDate: node.surveyDate, surveyUnit: node.surveyUnit,
-      angle: node.angle, status: node.status,
-      attrs: { ...(node.raw || {}), srcX: node.srcX, srcY: node.srcY, zQuality: node.zQuality, major: node.major, layer: node.layer },
+  report(64, `正在写入管点（共 ${nodes.length} 个）…`, 'write')
+  // 大图纸逐条提交会让 WAL 每次刷盘，实测能把导入拖到分钟级；按 2 万条一批事务写入，
+  // 批次之间让出事件循环，前端才能在这几秒里拿到真实进度（Node 是单线程，不让出就没法响应轮询）
+  const CHUNK = 20000
+  const savedNodes = []
+  const savedLines = []
+  const nodeChunk = 18
+  for (let start = 0; start < nodes.length; start += CHUNK) {
+    const end = Math.min(nodes.length, start + CHUNK)
+    withPipeWriteTransaction(() => {
+      for (let index = start; index < end; index += 1) {
+        const node = nodes[index]
+        savedNodes.push(insertPipeNode(dataset.id, {
+          nodeCode: node.nodeCode,
+          category: node.category,
+          x: node.x, y: node.y,
+          groundElev: node.groundElev, z: node.z, coverDepth: node.coverDepth,
+          coverMaterial: node.coverMaterial, coverSize: node.coverSize,
+          chamberShape: node.chamberShape, chamberSize: node.chamberSize,
+          road: node.road, address: node.address, owner: node.owner,
+          buildYear: node.buildYear, surveyDate: node.surveyDate, surveyUnit: node.surveyUnit,
+          angle: node.angle, status: node.status,
+          attrs: { ...(node.raw || {}), srcX: node.srcX, srcY: node.srcY, zQuality: node.zQuality, major: node.major, layer: node.layer },
+        }, { readBack: false }))
+      }
     })
+    report(64 + nodeChunk * (end / nodes.length), `正在写入管点（${end}/${nodes.length}）…`, 'write')
+    await yieldEventLoop()
   }
-  for (const line of lines) {
-    insertPipeLine(dataset.id, {
-      lineCode: line.lineCode, nodeStart: line.nodeStart, nodeEnd: line.nodeEnd,
-      pipeMajor: line.pipeMajor, material: line.material,
-      profileType: line.profileType, profileSize: line.profileSize,
-      wallThickness: line.wallThickness, buryType: line.buryType,
-      startDepth: line.startDepth, endDepth: line.endDepth,
-      startElev: line.startElev, endElev: line.endElev,
-      flowDir: line.flowDir, length: line.length,
-      holeCount: line.holeCount, cabCount: line.cabCount,
-      pressure: line.pressure, voltage: line.voltage,
-      owner: line.owner, road: line.road, buildYear: line.buildYear,
-      status: line.status, lineStyle: line.lineStyle,
-      geom: { type: 'LineString', coordinates: line.coords },
-      attrs: {
-        ...(line.raw || {}), sizeMm: line.sizeMm, widthM: line.width, heightM: line.height,
-        zGrade: line.thicknessGrade, annotations: line.annotations || [], layer: line.layer,
-      },
+  report(82, `正在写入管段（共 ${lines.length} 条）…`, 'write')
+  for (let start = 0; start < lines.length; start += CHUNK) {
+    const end = Math.min(lines.length, start + CHUNK)
+    withPipeWriteTransaction(() => {
+      for (let index = start; index < end; index += 1) {
+        const line = lines[index]
+        savedLines.push(insertPipeLine(dataset.id, {
+          lineCode: line.lineCode, nodeStart: line.nodeStart, nodeEnd: line.nodeEnd,
+          pipeMajor: line.pipeMajor, material: line.material,
+          profileType: line.profileType, profileSize: line.profileSize,
+          wallThickness: line.wallThickness, buryType: line.buryType,
+          startDepth: line.startDepth, endDepth: line.endDepth,
+          startElev: line.startElev, endElev: line.endElev,
+          flowDir: line.flowDir, length: line.length,
+          holeCount: line.holeCount, cabCount: line.cabCount,
+          pressure: line.pressure, voltage: line.voltage,
+          owner: line.owner, road: line.road, buildYear: line.buildYear,
+          status: line.status, lineStyle: line.lineStyle,
+          geom: { type: 'LineString', coordinates: line.coords },
+          attrs: {
+            ...(line.raw || {}), sizeMm: line.sizeMm, widthM: line.width, heightM: line.height,
+            zGrade: line.thicknessGrade, annotations: line.annotations || [], layer: line.layer,
+          },
+        }, { readBack: false }))
+      }
     })
+    report(82 + 10 * (end / lines.length), `正在写入管段（${end}/${lines.length}）…`, 'write')
+    await yieldEventLoop()
   }
-
-  const insertedNodes = listPipeNodes(dataset.id, { limit: Math.max(nodes.length, 1) })
-  const insertedLines = listPipeLines(dataset.id, { limit: Math.max(lines.length, 1) })
+  report(93, '正在做数据质检…', 'quality')
+  await yieldEventLoop()
+  const savedIssues = withPipeWriteTransaction(() => {
+    const issues = inspectQuality(savedNodes, savedLines)
+    for (const issue of issues) insertPipeIssue(dataset.id, issue)
+    return issues
+  })
+  report(96, '正在建立管网拓扑…', 'topology')
+  await yieldEventLoop()
+  const insertedNodes = savedNodes
+  const insertedLines = savedLines
   replacePipeTopology(dataset.id, buildTopology(insertedNodes, insertedLines))
-  const issues = inspectQuality(insertedNodes, insertedLines)
-  for (const issue of issues) insertPipeIssue(dataset.id, issue)
+  const issues = savedIssues
   updatePipelineDatasetCounts(dataset.id, insertedNodes.length, insertedLines.length)
   const penalty = issues.filter((issue) => issue.severity === '高').length
   updatePipelineDatasetMeta(dataset.id, {
@@ -1172,6 +1325,7 @@ export async function importPipeline(options = {}) {
       nodeWithZ: insertedNodes.filter((node) => node.z !== null).length,
     } },
   })
+  report(99, `导入收尾：${insertedNodes.length} 个管点、${insertedLines.length} 条管段`, 'finalize')
 
   return {
     dataset: getPipelineDataset(dataset.id),
@@ -1231,8 +1385,8 @@ export function setDatasetRegistration(id, { dx = 0, dy = 0, note = '' } = {}) {
 function scenePartOf(datasetId, limit) {
   const dataset = getPipelineDataset(datasetId)
   if (!dataset) throw Object.assign(new Error('数据集不存在'), { status: 404 })
-  const nodes = listPipeNodes(datasetId, { limit })
-  const lines = listPipeLines(datasetId, { limit })
+  const nodes = listPipeNodes(datasetId, { limit, sample: true })
+  const lines = listPipeLines(datasetId, { limit, sample: true })
   const nodeById = new Map(nodes.map((node) => [node.nodeCode, node]))
   const sceneNodes = nodes.map((node) => ({
     id: node.id, code: node.nodeCode, category: node.category,
@@ -1387,14 +1541,17 @@ const CATEGORY_LABEL = (key) => PIPE_MAJOR[key]?.label || key || '其他'
 
 /** 检索用：把标准类别与常见地方叫法都算作命中词。 */
 const CATEGORY_SEARCH_TEXT = {
-  water: '给水 供水 自来水',
-  sewer: '排水 污水 雨水 合流',
+  supply: '供水 给水 自来水',
+  distribution: '配水',
+  rain: '雨水',
+  intercept: '截污',
+  sewage: '污水 排水',
+  combined: '合流',
   gas: '燃气 天然气 煤气',
   heat: '热力 供热 蒸汽',
   power: '电力 供电 路灯',
   telecom: '通信 通讯 电信',
-  industrial: '工业 工艺',
-  gallery: '综合管廊 管沟',
+  gallery: '管廊 综合管沟 管沟',
   other: '其他',
 }
 

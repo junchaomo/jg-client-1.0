@@ -4,6 +4,7 @@ contextBridge.exposeInMainWorld('jgClient', {
   minimize: () => ipcRenderer.send('window:minimize'),
   toggleMaximize: () => ipcRenderer.send('window:toggle-maximize'),
   close: () => ipcRenderer.send('window:close'),
+  setTitleBarTheme: (mode) => ipcRenderer.send('window:titlebar-theme', { mode }),
   getWindowState: () => ipcRenderer.invoke('window:get-state'),
   onWindowState: (callback) => {
     if (typeof callback !== 'function') return () => {}
@@ -12,10 +13,14 @@ contextBridge.exposeInMainWorld('jgClient', {
     return () => ipcRenderer.removeListener('window:state', handler)
   },
   chooseFolder: (options = {}) => ipcRenderer.invoke('dialog:choose-folder', options),
+  clearCache: () => ipcRenderer.invoke('settings:clear-cache'),
   revealPath: (target) => ipcRenderer.invoke('shell:reveal-path', target),
+  revealFile: (target) => ipcRenderer.invoke('shell:reveal-file', target),
   browser: {
-    open: (url) => ipcRenderer.send('browser:open', url),
-    bounds: (rect) => ipcRenderer.send('browser:bounds', rect),
+    open: (tabId, url) => ipcRenderer.send('browser:open', { tabId, url }),
+    activate: (tabId) => ipcRenderer.send('browser:activate', tabId),
+    hide: () => ipcRenderer.send('browser:hide'),
+    bounds: (tabId, rect) => ipcRenderer.send('browser:bounds', { tabId, rect }),
     reload: () => ipcRenderer.send('browser:reload'),
     goBack: () => ipcRenderer.send('browser:go-back'),
     goForward: () => ipcRenderer.send('browser:go-forward'),
@@ -25,21 +30,35 @@ contextBridge.exposeInMainWorld('jgClient', {
     screenshot: () => ipcRenderer.invoke('browser:screenshot'),
     clearData: () => ipcRenderer.invoke('browser:clear-data'),
     find: (text, forward = true) => ipcRenderer.send('browser:find', { text, forward }),
-    findStop: () => ipcRenderer.send('browser:find-stop'),
-    viewport: (preset) => ipcRenderer.send('browser:viewport', preset),
-    close: () => ipcRenderer.send('browser:close'),
-    loadExtensions: (paths) => ipcRenderer.send('browser:load-extensions', Array.isArray(paths) ? paths : []),
-    openExternal: (url) => ipcRenderer.send('browser:open-external', url),
-    pageInfo: () => ipcRenderer.invoke('browser:page-info'),
-    pageText: () => ipcRenderer.invoke('browser:page-text'),
     downloads: () => ipcRenderer.invoke('browser:downloads'),
     openDownload: (path) => ipcRenderer.send('browser:download-open', path),
     revealDownload: (path) => ipcRenderer.send('browser:download-reveal', path),
+    passwords: () => ipcRenderer.invoke('browser:password-list'),
+    fillPassword: (tabId, id) => ipcRenderer.invoke('browser:password-fill', { tabId, id }),
+    deletePassword: (id) => ipcRenderer.invoke('browser:password-delete', id),
+    close: (tabId) => ipcRenderer.send('browser:close', tabId),
+    closeAll: () => ipcRenderer.send('browser:close-all'),
+    loadExtensions: (ids) => ipcRenderer.invoke('browser:load-extensions', Array.isArray(ids) ? ids : []),
+    openExternal: (url) => ipcRenderer.send('browser:open-external', url),
+    pageInfo: (tabId) => ipcRenderer.invoke('browser:page-info', tabId),
+    pageText: (tabId) => ipcRenderer.invoke('browser:page-text', tabId),
     onDownload: (callback) => {
       if (typeof callback !== 'function') return () => {}
       const handler = (_event, entry) => callback(entry)
       ipcRenderer.on('browser:download-state', handler)
       return () => ipcRenderer.removeListener('browser:download-state', handler)
+    },
+    onFindResult: (callback) => {
+      if (typeof callback !== 'function') return () => {}
+      const handler = (_event, result) => callback(result)
+      ipcRenderer.on('browser:find-result', handler)
+      return () => ipcRenderer.removeListener('browser:find-result', handler)
+    },
+    onPasswordSaved: (callback) => {
+      if (typeof callback !== 'function') return () => {}
+      const handler = (_event, result) => callback(result)
+      ipcRenderer.on('browser:password-saved', handler)
+      return () => ipcRenderer.removeListener('browser:password-saved', handler)
     },
     onNavState: (callback) => {
       if (typeof callback !== 'function') return () => {}
@@ -52,12 +71,6 @@ contextBridge.exposeInMainWorld('jgClient', {
       const handler = (_event, err) => callback(err)
       ipcRenderer.on('browser:nav-error', handler)
       return () => ipcRenderer.removeListener('browser:nav-error', handler)
-    },
-    onFindResult: (callback) => {
-      if (typeof callback !== 'function') return () => {}
-      const handler = (_event, result) => callback(result)
-      ipcRenderer.on('browser:find-result', handler)
-      return () => ipcRenderer.removeListener('browser:find-result', handler)
     },
     onNewWindow: (callback) => {
       if (typeof callback !== 'function') return () => {}

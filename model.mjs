@@ -54,6 +54,8 @@ const WORK_INTENT_PATTERNS = [
   /(长期记忆|记忆库|记住|记一下|记入|忘掉这?条?记忆|memory_(?:write|search|list|forget))/i,
   // 应用输出/应用数据必须进 Harness：quick-direct 没有工具面，读不到应用自己的结果文件。
   /(应用|app)[^。\n]{0,18}(输出|数据|结果|产物)|(输出|数据|结果|产物)[^。\n]{0,12}(应用|app)|app_data_(?:list|read)/i,
+  // 明确要求产出/改造技能时必须进工作模式：对话模式只读，无法把规则写成 SKILL.md。
+  /(做成|生成|创建|新建|编写|整理成|保存为|写入)[^。\n]{0,16}(技能|skill|SKILL)/i,
   // 明确要求读文件/目录/README 或查看当前工作区，直连模型看不到本机文件。
   /(读取|读一下|查看|打开|列出)[^。\n]{0,20}(文件|目录|文件夹|README|代码|行)/i,
   /(当前目录|工作目录|仓库根目录)/i,
@@ -96,16 +98,32 @@ export function classifyTask(text, { mode = 'chat', projectId = '', images = [] 
   if (Array.isArray(images) && images.length) return 'vision'
   if (projectId || mode === 'work') return 'work'
   if (RETRIEVAL_INTENT_PATTERNS.some((pattern) => pattern.test(input))) return 'retrieval'
-  if (hasWorkIntent(input)) return 'work'
-  if (needsWorkspaceContext(input)) return 'work'
-  if (input.length <= 48 && !/[?？]/i.test(input)) return 'quick'
-  return 'chat'
+  if (isDirectAnswerable(input, { mode: 'chat' })) {
+    return input.length <= 24 && !/[?？]/i.test(input) ? 'quick' : 'chat'
+  }
+  // 判定资源耗尽时向 Work 倒：把“问知识”误判成任务只是多花一点算力，
+  // 把“要执行的任务”误判成只读对话会直接卡死，代价不对称。
+  return 'work'
 }
 
 /**
  * 轻量直连资格：对话模式、无项目、无附件/引用、长度有限，且不含工具、实时数据或工作区上下文。
  * 这是“这句话能否不启 Harness 直接答”的唯一判定，服务端不再自建词表。
  */
+/** 明确是“问知识/要解释”的开头，才允许走无工具的轻量问答。 */
+const INFORMATIONAL_START_PATTERNS = [
+  /^(?:请|麻烦)?(?:说明|解释|介绍|简述|概括|分析|比较|评价|推荐|总结|讲讲|说说|谈谈)/,
+  /^(?:用一句话|简单|简要|一句话)/,
+  /^(?:什么|什么是|为什么|为何|怎么|如何|怎样|哪|哪个|哪些|谁|多少|多久|多大|是否|能否|可不可以|有没有)/,
+  /^(?:你好|您好|hi|hello|嗨|在吗)/i,
+]
+
+/** 命令式开头一律不当作轻量问答；即使短，也可能是要落盘、跑命令或调工具的任务。 */
+const IMPERATIVE_START_PATTERNS = [
+  /^(?:帮|请(?!问|说明|解释|介绍|简述|概括|分析|比较|评价|推荐|总结)|给我|替我|把|将|用(?!一句话))/,
+  /^(?:创建|新建|生成|写入|保存|修改|编辑|删除|移动|复制|重命名|导出|转换|运行|执行|跑|编译|构建|安装|部署|测试|处理|整理|统计|汇总|清洗|合并|拆分|压缩|打包|上传|下载|发送|搜索|检索|查询|查找|打开|读取|列出|做个|做一下)/,
+]
+
 export function isDirectAnswerable(text, { mode = 'chat', projectId = '' } = {}) {
   const input = String(text || '').trim()
   if (mode !== 'chat' || projectId) return false
@@ -113,7 +131,11 @@ export function isDirectAnswerable(text, { mode = 'chat', projectId = '' } = {})
   if (hasWorkIntent(input)) return false
   if (needsLiveData(input)) return false
   if (needsWorkspaceContext(input)) return false
-  return true
+  if (/[?？]/.test(input)) return true
+  if (INFORMATIONAL_START_PATTERNS.some((pattern) => pattern.test(input))) return true
+  // 短名词短语可以直答；但“帮我把…”“创建…”这类命令式短句仍是任务。
+  if (input.length <= 20 && !IMPERATIVE_START_PATTERNS.some((pattern) => pattern.test(input))) return true
+  return false
 }
 
 export function routeModel({ baseModel = 'deepseek-flash', text = '', mode = 'chat', projectId = '', images = [], deepThink = false } = {}) {

@@ -100,6 +100,13 @@
   letter-spacing: 0;
 }
 
+/* 分组、最近标题与置顶标题统一字号/颜色/字距；子分区标题 sb-sec-head 不在本次统一范围 */
+.sidebar:not(.tk-sidebar) .sb-label.sb-label-row:not(.sb-sec-head) {
+  color: #8b8f96;
+  font-size: 13px;
+  letter-spacing: 0;
+}
+
 .sidebar:not(.tk-sidebar) .sb-row,
 .sidebar:not(.tk-sidebar) .sb-projrow .sb-row {
   border-radius: 8px;

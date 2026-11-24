@@ -7,13 +7,15 @@
  */
 
 const PIPE_LABELS = {
-  water: '给水', sewer: '排水', gas: '燃气', heat: '热力',
-  power: '电力', telecom: '通信', industrial: '工业', gallery: '综合管廊', other: '其他',
+  supply: '供水', distribution: '配水', rain: '雨水', intercept: '截污', sewage: '污水', combined: '合流',
+  power: '电力', telecom: '通信', gas: '燃气', heat: '热力', gallery: '管廊', other: '其他',
 }
 const PIPE_COLORS = {
-  water: '#2f7dd1', sewer: '#5a8f4a', gas: '#c88a1e', heat: '#b4472f',
-  power: '#7a4fb5', telecom: '#2f9c94', industrial: '#8a6b4a', gallery: '#6b6f76', other: '#9aa0a6',
+  supply: '#2f7dd1', distribution: '#5fa8dd', rain: '#3f86a8', intercept: '#7f9440',
+  sewage: '#5a8f4a', combined: '#8f8a4a', power: '#7a4fb5', telecom: '#2f9c94',
+  gas: '#c88a1e', heat: '#b4472f', gallery: '#6b6f76', other: '#9aa0a6',
 }
+const MAJOR_ORDER = ['supply', 'distribution', 'rain', 'intercept', 'sewage', 'combined', 'power', 'telecom', 'gas', 'heat', 'gallery', 'other']
 const ANALYSIS_LABELS = { section: '断面分析', clearance: '净距分析', collision: '碰撞检查', excavation: '开挖影响分析', conflict: '跨数据集冲突检查' }
 const ACCEPT = '.dxf,.shp,.dbf,.shx,.prj,.cpg,.gdb,.csv,.txt,.geojson,.json,.zip'
 
@@ -30,10 +32,13 @@ const state = {
   sceneApi: null,
   sceneInfo: null,
   stageEl: null,
-  visible: { water: true, sewer: true, gas: true, heat: true, power: true, telecom: true, industrial: true, gallery: true, other: true },
+  visible: { supply: true, distribution: true, rain: true, intercept: true, sewage: true, combined: true, power: true, telecom: true, gas: true, heat: true, gallery: true, other: true },
   groundAlpha: 0.14,
   picked: null,
   tool: '',
+  menu: '',
+  panMode: false,
+  identify: true,
   lastAnalysis: null,
   sectionLine: null,
   excavation: null,
@@ -46,6 +51,7 @@ const state = {
   stageFilter: 'all',
   busy: '',
   progress: '',
+  progressPercent: null,
   progressError: false,
 }
 
@@ -55,6 +61,9 @@ let loadedOnce = false
 
 const fmt = (value, digits = 2) => (Number.isFinite(Number(value)) ? Number(value).toFixed(digits).replace(/\.0+$/, '') : '—')
 const num = (value) => (Number.isFinite(Number(value)) ? Number(value) : null)
+const clampPercent = (value) => Math.max(0, Math.min(100, Number(value) || 0))
+const progressWidth = (value) => String(clampPercent(value))
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 function boundsText(bounds) {
   if (!bounds) return '—'
@@ -73,9 +82,24 @@ async function loadDatasets() {
   const { ok, body } = await ctx.api('/api/pipeline/datasets').catch(() => ({ ok: false, body: {} }))
   state.datasets = ok ? (body.items || []) : []
   state.loaded = true
-  if (!state.activeId && state.datasets.length) state.activeId = state.datasets[0].id
-  if (state.activeId && !datasetById(state.activeId)) state.activeId = state.datasets[0]?.id || ''
+  if (!state.activeId && state.datasets.length) state.activeId = preferDefaultDataset().id
+  if (state.activeId && !datasetById(state.activeId)) state.activeId = preferDefaultDataset()?.id || ''
   return state.datasets
+}
+
+/** 默认进场景时优先选高程完整度最高的数据集，避免一进来看到的是无高程的示意线 */
+function preferDefaultDataset() {
+  const items = state.datasets.filter(Boolean)
+  if (!items.length) return null
+  const score = (item) => {
+    const hasZ = item.bounds?.minZ !== null && item.bounds?.minZ !== undefined ? 1 : 0
+    const stage = item.meta?.stage === 'planned' ? 0 : 1
+    const source = item.meta?.sourceType === 'cad-dxf' ? 0 : 1
+    return hasZ * 1000 + stage * 100 + source * 10 + (item.lineCount || 0)
+  }
+  let best = items[0]
+  for (const item of items) if (score(item) > score(best)) best = item
+  return best
 }
 
 async function loadDetail() {
@@ -104,7 +128,7 @@ function fileRows() {
 }
 
 const SOURCE_LABELS = { survey: '普查成果', cad: 'CAD 图纸', 'cad-dxf': 'CAD 图纸', csv: 'CSV 台账', geojson: 'GeoJSON' }
-const STAGE_LABELS = { existing: '现状', planned: '拟建', built: '竣工', history: '历史' }
+const STAGE_LABELS = { existing: '现状', planned: '规划', built: '在建', history: '历史' }
 const stageOf = (item) => STAGE_LABELS[item?.meta?.stage] || '现状'
 const crsShort = (crs) => {
   const text = String(crs || '')
@@ -116,7 +140,7 @@ const crsShort = (crs) => {
 }
 
 const SOURCE_FILTERS = [['all', '全部来源'], ['cad', 'CAD 图纸'], ['survey', '普查成果']]
-const STAGE_FILTERS = [['all', '全部'], ['existing', '现状'], ['planned', '拟建'], ['built', '竣工'], ['history', '历史']]
+const STAGE_FILTERS = [['all', '全部'], ['existing', '现状'], ['planned', '规划'], ['built', '在建']]
 
 function sourceFiltered() {
   const filter = state.sourceFilter || 'all'
@@ -184,15 +208,18 @@ function dataPanel() {
           <label>数据状态</label>
           <select id="pipe2Stage">
             <option value="existing"${state.upload.stage === 'existing' ? ' selected' : ''}>现状管线</option>
-            <option value="planned"${state.upload.stage === 'planned' ? ' selected' : ''}>拟建方案</option>
-            <option value="built"${state.upload.stage === 'built' ? ' selected' : ''}>竣工成果</option>
+            <option value="planned"${state.upload.stage === 'planned' ? ' selected' : ''}>规划方案</option>
+            <option value="built"${state.upload.stage === 'built' ? ' selected' : ''}>在建成果</option>
             <option value="history"${state.upload.stage === 'history' ? ' selected' : ''}>历史数据</option>
           </select>
         </div>
         <div class="pipe2-actions">
           <button class="btn primary" id="pipe2Import"${state.busy ? ' disabled' : ''}>${state.busy === 'import' ? '正在导入…' : '上传并导入'}</button>
         </div>
-        ${state.progress ? `<div class="pipe2-progress${state.progressError ? ' err' : ''}">${ctx.esc(state.progress).replace(/\n/g, '<br/>')}</div>` : ''}
+        ${state.progress ? `<div class="pipe2-progress${state.progressError ? ' err' : ''}">
+          <div class="pipe2-progress-text">${ctx.esc(state.progress).replace(/\n/g, '<br/>')}</div>
+          ${Number.isFinite(state.progressPercent) ? `<div class="pipe2-progress-bar"><div class="pipe2-progress-track"><i style="width:${progressWidth(state.progressPercent)}%"></i></div><span class="pipe2-progress-pct">${Math.round(state.progressPercent)}%</span></div>` : ''}
+        </div>` : ''}
       </div>
       <div class="pipe2-card">
         <div class="pipe2-card-title"><strong>接入规则</strong><span>一期口径</span></div>
@@ -258,12 +285,19 @@ function dataPanel() {
 /* ------------------------------ 三维场景 ------------------------------ */
 
 function legendHtml() {
-  const short = { gallery: '管廊' }
-  return `<div class="pipe2-legend">${Object.keys(PIPE_LABELS).map((key) => `
-    <label class="pipe2-legend-item" data-major="${key}">
+  const counts = {}
+  for (const line of state.scene?.lines || []) {
+    const key = line.major || 'other'
+    counts[key] = (counts[key] || 0) + 1
+  }
+  return `<div class="pipe2-legend">${MAJOR_ORDER.map((key) => {
+    const count = counts[key] || 0
+    return `
+    <label class="pipe2-legend-item${count ? '' : ' is-empty'}" data-major="${key}" title="${PIPE_LABELS[key]}：${count} 条管段">
       <input type="checkbox" data-visible="${key}"${state.visible[key] ? ' checked' : ''} />
-      <span class="pipe2-swatch" style="background:${PIPE_COLORS[key]}"></span>${short[key] || PIPE_LABELS[key]}
-    </label>`).join('')}</div>`
+      <span class="pipe2-swatch" style="background:${PIPE_COLORS[key]}"></span>${PIPE_LABELS[key]}
+    </label>`
+  }).join('')}</div>`
 }
 
 function overlayList() {
@@ -273,21 +307,21 @@ function overlayList() {
     .filter(Boolean)
 }
 
-function toolButtonsHtml() {
-  const tool = state.tool
+/** 分析类功能细分放在下拉里，顶层工具条上每个可见词都是可点的按钮 */
+function analysisMenuHtml() {
   const overlays = overlayList()
   const items = [
-    ['section', '断面', '断面分析：沿指定断面线切取管线剖面'],
-    ['clearance', '净距', '净距分析：逐对计算管线的水平、垂直与三维最小净距'],
-    ['collision', '碰撞', '碰撞检查：识别实体交叉、空间碰撞与净距不足'],
-    ['excavation', '开挖', '开挖影响分析：识别开挖范围内的受影响管线'],
-    ['conflict', '冲突检查', '现状与拟建跨数据集冲突检查'],
+    ['section', '断面分析', '沿指定断面线切取管线剖面'],
+    ['clearance', '净距分析', '逐对计算管线的水平、垂直与三维最小净距'],
+    ['collision', '碰撞检查', '识别实体交叉、空间碰撞与净距不足'],
+    ['excavation', '开挖影响分析', '识别开挖范围内的受影响管线'],
+    ['conflict', '跨数据集冲突检查', '现状与规划数据之间的跨集冲突检查'],
   ]
-  return items.map(([key, label, title]) => {
+  return `<div class="pipe2-menu">${items.map(([key, label, title]) => {
     const disabled = key === 'conflict' && !overlays.length
-    const tip = disabled ? '先在左侧数据集点「叠加」，加入其他数据集后再检查' : title
-    return `<button class="pipe2-bar-btn${tool === key ? ' active' : ''}" data-tool="${key}" title="${tip}"${disabled ? ' disabled' : ''}>${label}</button>`
-  }).join('')
+    const tip = disabled ? '先在左侧数据集点「叠加显示」，加入其他数据集后再检查' : title
+    return `<button class="pipe2-menu-item${state.tool === key ? ' active' : ''}" data-tool="${key}" title="${ctx.esc(tip)}"${disabled ? ' disabled' : ''}>${label}</button>`
+  }).join('')}</div>`
 }
 
 function toolFormHtml() {
@@ -460,27 +494,39 @@ function scenePanel() {
   return `
   <div class="pipe2-stage">
     <div class="pipe2-bar">
-      <div class="pipe2-bar-row">
-        <select class="pipe2-bar-select" id="pipe2DsSelect"${state.datasets.length ? '' : ' disabled'} title="切换数据集">
-          ${state.datasets.length
-            ? state.datasets.map((item) => `<option value="${ctx.esc(item.id)}"${item.id === state.activeId ? ' selected' : ''}>${ctx.esc(item.name)}（${ctx.esc(stageOf(item))}）</option>`).join('')
-            : '<option>暂无数据集</option>'}
-        </select>
-        <span class="pipe2-bar-sep"></span>
-        <div class="pipe2-bar-group">
-          <button class="pipe2-bar-btn" id="pipe2Reset" title="恢复到初始视角">复位</button>
-          <button class="pipe2-bar-btn" id="pipe2Top" title="切换到俯视（二维）视角">俯视</button>
-          <button class="pipe2-bar-btn pipe2-bar-icon" id="pipe2ZoomIn" title="放大">＋</button>
-          <button class="pipe2-bar-btn pipe2-bar-icon" id="pipe2ZoomOut" title="缩小">－</button>
-          <button class="pipe2-bar-btn${state.measure ? ' active' : ''}" id="pipe2Measure" title="量测：在场景中点击两点读取三维距离">量测</button>
+      <select class="pipe2-bar-select" id="pipe2DsSelect"${state.datasets.length ? '' : ' disabled'} title="切换数据集">
+        ${state.datasets.length
+          ? state.datasets.map((item) => `<option value="${ctx.esc(item.id)}"${item.id === state.activeId ? ' selected' : ''}>${ctx.esc(item.name)}（${ctx.esc(stageOf(item))}）</option>`).join('')
+          : '<option>暂无数据集</option>'}
+      </select>
+      <span class="pipe2-bar-sep"></span>
+      <div class="pipe2-bar-group">
+        <button class="pipe2-bar-btn" id="pipe2Reset" title="恢复到初始视角">复位</button>
+        <button class="pipe2-bar-btn" id="pipe2Top" title="切换到俯视（二维）视角">俯视</button>
+        <button class="pipe2-bar-btn pipe2-bar-icon" id="pipe2ZoomOut" title="缩小">－</button>
+        <button class="pipe2-bar-btn pipe2-bar-icon" id="pipe2ZoomIn" title="放大">＋</button>
+        <div class="pipe2-pop">
+          <button class="pipe2-bar-btn${state.menu === 'rotate' ? ' active' : ''}" data-menu="rotate" title="水平旋转场景">旋转 ▾</button>
+          ${state.menu === 'rotate' ? `<div class="pipe2-menu">
+            <button class="pipe2-menu-item" data-rotate="-45">左转 45°</button>
+            <button class="pipe2-menu-item" data-rotate="45">右转 45°</button>
+            <button class="pipe2-menu-item" data-north="1">正北朝上</button>
+          </div>` : ''}
         </div>
-      </div>
-      <div class="pipe2-bar-row pipe2-bar-row2">
-        <span class="pipe2-bar-label">分析</span>
-        <div class="pipe2-bar-group">
-          ${toolButtonsHtml()}
+        <button class="pipe2-bar-btn${state.panMode ? ' active' : ''}" id="pipe2Pan" title="平移模式：左键拖动平移场景">平移</button>
+        <button class="pipe2-bar-btn" id="pipe2ZoomLayer" title="缩放到当前数据集范围">缩放到图层</button>
+        <button class="pipe2-bar-btn${state.identify ? ' active' : ''}" id="pipe2Identify" title="识别模式：单击管段/管点查看属性">识别</button>
+        <div class="pipe2-pop">
+          <button class="pipe2-bar-btn${state.measure || state.menu === 'measure' ? ' active' : ''}" data-menu="measure" title="量测">量测 ▾</button>
+          ${state.menu === 'measure' ? `<div class="pipe2-menu">
+            <button class="pipe2-menu-item${state.measure ? ' active' : ''}" id="pipe2Measure">三维距离（点两点）</button>
+            <button class="pipe2-menu-item" id="pipe2MeasureClear"${state.measure ? '' : ' disabled'}>清除量测</button>
+          </div>` : ''}
         </div>
-        <span class="pipe2-bar-hint">几何计算在服务端执行，结果与参数随记录归档</span>
+        <div class="pipe2-pop">
+          <button class="pipe2-bar-btn${state.tool || state.menu === 'analysis' ? ' active' : ''}" data-menu="analysis" title="空间分析">分析 ▾</button>
+          ${state.menu === 'analysis' ? analysisMenuHtml() : ''}
+        </div>
       </div>
     </div>
     <div class="pipe2-map" id="pipe2Viewport">
@@ -506,14 +552,14 @@ function scenePanel() {
         <div class="pipe2-slider"><input type="range" id="pipe2Ground" min="0" max="100" value="${Math.round(state.groundAlpha * 100)}" /><span id="pipe2GroundVal">${Math.round(state.groundAlpha * 100)}%</span></div>
       </div>` : ''}
     </div>
-    <div class="pipe2-float pipe2-right${state.rightOpen ? '' : ' closed'}">
+    ${((state.picked || state.lastAnalysis) && state.rightOpen) ? `<div class="pipe2-float pipe2-right">
       <div class="pipe2-float-head">
         <strong>${state.lastAnalysis ? '分析结果' : '属性'}</strong>
-        <span>${state.lastAnalysis ? ctx.esc(ANALYSIS_LABELS[state.lastAnalysis.type] || '') : state.picked ? '已拾取' : '点击管线拾取'}</span>
-        <button class="link-btn" data-toggle="right">${state.rightOpen ? '收起' : '展开'}</button>
+        <span>${state.lastAnalysis ? ctx.esc(ANALYSIS_LABELS[state.lastAnalysis.type] || '') : ctx.esc(state.picked?.kind === 'node' ? (state.picked.node?.code || '已拾取') : (state.picked?.line?.code || '已拾取'))}</span>
+        <button class="link-btn" data-toggle="right">收起</button>
       </div>
-      ${state.rightOpen ? `<div class="pipe2-float-body">${state.lastAnalysis ? analysisSummaryHtml() : propertyHtml()}</div>` : ''}
-    </div>
+      <div class="pipe2-float-body">${state.lastAnalysis ? analysisSummaryHtml() : propertyHtml()}</div>
+    </div>` : ''}
     <div class="pipe2-status">
       <span class="pipe2-status-main">${ds ? `${ctx.esc(ds.name)} · ${ctx.esc(sceneStatus())}` : '选择数据集后加载三维场景'}</span>
       ${state.scene?.bounds ? `<span>${ctx.esc(boundsText(state.scene.bounds))}${state.scene.bounds.minZ != null ? ` · 高程 ${fmt(state.scene.bounds.minZ)}–${fmt(state.scene.bounds.maxZ)}` : ''}</span>` : ''}
@@ -747,10 +793,33 @@ async function onClick(event) {
     return
   }
 
+  const menuBtn = event.target.closest('[data-menu]')
+  if (menuBtn) {
+    const key = menuBtn.dataset.menu
+    state.menu = state.menu === key ? '' : key
+    render(currentEl)
+    return
+  }
+
+  const rotateBtn = event.target.closest('[data-rotate]')
+  if (rotateBtn) {
+    state.sceneApi?.rotateBy(Number(rotateBtn.dataset.rotate))
+    state.menu = ''
+    render(currentEl)
+    return
+  }
+  if (event.target.closest('[data-north]')) {
+    state.sceneApi?.resetNorth()
+    state.menu = ''
+    render(currentEl)
+    return
+  }
+
   const tool = event.target.closest('[data-tool]')
   if (tool) {
     state.tool = state.tool === tool.dataset.tool ? '' : tool.dataset.tool
     state.lastAnalysis = null
+    state.menu = ''
     render(currentEl)
     return
   }
@@ -798,9 +867,31 @@ async function onClick(event) {
   if (id === 'pipe2Top') { state.sceneApi?.topView(); return }
   if (id === 'pipe2ZoomIn') { state.sceneApi?.zoomBy(0.78); return }
   if (id === 'pipe2ZoomOut') { state.sceneApi?.zoomBy(1.28); return }
+  if (id === 'pipe2ZoomLayer') { state.sceneApi?.zoomToLayer(); return }
+  if (id === 'pipe2Pan') {
+    state.panMode = !state.panMode
+    state.sceneApi?.setPanMode(state.panMode)
+    render(currentEl)
+    return
+  }
+  if (id === 'pipe2Identify') {
+    state.identify = !state.identify
+    state.sceneApi?.setIdentify(state.identify)
+    if (!state.identify) { state.picked = null }
+    render(currentEl)
+    return
+  }
   if (id === 'pipe2Measure') {
-    state.measure = state.measure ? null : { distance: null, points: 0 }
-    state.sceneApi?.setMeasure(Boolean(state.measure))
+    state.measure = { distance: null, points: 0 }
+    state.menu = ''
+    state.sceneApi?.setMeasure(true)
+    render(currentEl)
+    return
+  }
+  if (id === 'pipe2MeasureClear') {
+    state.measure = null
+    state.menu = ''
+    state.sceneApi?.setMeasure(false)
     render(currentEl)
     return
   }
@@ -880,13 +971,67 @@ function addFiles(files) {
   render(currentEl)
 }
 
-function setProgress(text, isError = false) {
+function setProgress(text, isError = false, percent) {
   state.progress = text
   state.progressError = isError
+  state.progressPercent = Number.isFinite(Number(percent)) && percent !== null && percent !== undefined
+    ? clampPercent(percent)
+    : null
+  applyProgressDom()
+}
+
+/** 只更新进度区 DOM，避免每次进度回调都整页重渲染 */
+function applyProgressDom() {
   const el = currentEl?.querySelector('.pipe2-progress')
-  if (el) {
-    el.className = `pipe2-progress${isError ? ' err' : ''}`
-    el.textContent = text
+  if (!el) return
+  el.classList.toggle('err', Boolean(state.progressError))
+  const textEl = el.querySelector('.pipe2-progress-text')
+  if (textEl) textEl.innerHTML = ctx.esc(String(state.progress || '')).replace(/\n/g, '<br/>')
+  const bar = el.querySelector('.pipe2-progress-bar')
+  if (!bar) return
+  if (Number.isFinite(state.progressPercent)) {
+    bar.removeAttribute('hidden')
+    const fill = bar.querySelector('.pipe2-progress-track i')
+    const pct = bar.querySelector('.pipe2-progress-pct')
+    if (fill) fill.style.width = `${clampPercent(state.progressPercent)}%`
+    if (pct) pct.textContent = `${Math.round(clampPercent(state.progressPercent))}%`
+  } else {
+    bar.setAttribute('hidden', 'hidden')
+  }
+}
+
+/** 带真实上传进度的文件上传（大文件用 XHR 才能拿到 upload.progress） */
+function uploadFileWithProgress(file, onPercent) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    xhr.open('POST', `/api/files/upload?kind=resource&name=${encodeURIComponent(file.name)}`)
+    xhr.setRequestHeader('content-type', 'application/octet-stream')
+    xhr.withCredentials = true
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable && typeof onPercent === 'function') onPercent(event.loaded / event.total)
+    }
+    xhr.onload = () => {
+      let body = {}
+      try { body = JSON.parse(xhr.responseText || '{}') } catch { body = {} }
+      resolve({ ok: xhr.status >= 200 && xhr.status < 300, body })
+    }
+    xhr.onerror = () => reject(new Error('上传失败：网络中断'))
+    xhr.onabort = () => reject(new Error('上传已取消'))
+    xhr.send(file)
+  })
+}
+
+/** 轮询服务端导入进度；上传阶段固定占前 15% */
+async function pollImportProgress(jobId, control) {
+  while (!control.stop) {
+    await sleep(500)
+    if (control.stop) break
+    const { ok, body } = await ctx.api(`/api/pipeline/import/progress?job=${encodeURIComponent(jobId)}`)
+      .catch(() => ({ ok: false, body: {} }))
+    if (!ok || !body) continue
+    if (body.done) { control.stop = true; return }
+    const percent = Number(body.percent) || 0
+    setProgress(body.message || '正在解析并入库…', false, 15 + percent * 0.85)
   }
 }
 
@@ -895,23 +1040,24 @@ async function importFiles() {
   const files = state.upload.files
   if (!files.length) return ctx.toast('请先选择文件', true)
   state.busy = 'import'
+  state.progressPercent = 0
   render(currentEl)
-  setProgress('正在上传文件…')
+  setProgress('正在上传文件…', false, 0)
+  const jobId = `imp-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+  const control = { stop: false }
   try {
     const refs = []
     for (const file of files) {
-      setProgress(`正在上传 ${file.name}（${refs.length + 1}/${files.length}）`)
-      const response = await fetch(`/api/files/upload?kind=resource&name=${encodeURIComponent(file.name)}`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/octet-stream' },
-        body: file,
-        credentials: 'same-origin',
+      const basePercent = (refs.length / files.length) * 15
+      setProgress(`正在上传 ${file.name}（${refs.length + 1}/${files.length}）`, false, basePercent)
+      const { ok, body } = await uploadFileWithProgress(file, (ratio) => {
+        setProgress(`正在上传 ${file.name}（${Math.round(ratio * 100)}%，第 ${refs.length + 1}/${files.length} 个）`, false, basePercent + ratio * (15 / files.length))
       })
-      const body = await response.json().catch(() => ({}))
-      if (!response.ok || !body.file) throw new Error(body.error || `上传失败：${file.name}`)
+      if (!ok || !body.file) throw new Error(body.error || `上传失败：${file.name}`)
       refs.push({ id: body.file.id, name: body.file.name, path: file.name })
     }
-    setProgress('正在解析并入库…')
+    setProgress('正在解析并入库…', false, 15)
+    pollImportProgress(jobId, control)
     const { ok, body } = await ctx.api('/api/pipeline/import', {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
@@ -919,8 +1065,10 @@ async function importFiles() {
         sourceType: state.upload.sourceType === 'auto' ? '' : state.upload.sourceType,
         stage: state.upload.stage,
         files: refs,
+        jobId,
       }),
     })
+    control.stop = true
     if (!ok) throw new Error(body.error || '导入失败')
     const summary = body.summary || {}
     const warnings = (body.warnings || []).slice(0, 3)
@@ -936,12 +1084,14 @@ async function importFiles() {
       (body.issues || []).length ? `质检发现 ${body.issues.length} 项问题，已在数据详情中列出。` : '质检未发现问题。',
       ...warnings,
     ].join('\n')
+    state.progressPercent = null
     state.progressError = false
     render(currentEl)
     ctx.toast('管网数据导入完成')
   } catch (error) {
     state.busy = ''
-    setProgress(String(error.message || error), true)
+    control.stop = true
+    setProgress(String(error.message || error), true, null)
     render(currentEl)
   }
 }
@@ -1001,11 +1151,11 @@ async function openScene() {
   state.scene = body
   state.picked = null
   if (!state.sceneApi) {
-    const mod = await import('./pipeline-scene.js?v=18')
+    const mod = await import('./pipeline-scene.js?v=38')
     state.stageEl = document.createElement('div')
     state.stageEl.className = 'pipe2-canvas'
     state.sceneApi = mod.createPipeScene(state.stageEl, {
-      onPick: (pick) => { state.picked = pick; state.lastAnalysis = null; render(currentEl) },
+      onPick: (pick) => { state.picked = pick; state.lastAnalysis = null; if (pick) state.rightOpen = true; render(currentEl) },
       onMeasure: (result) => {
         state.measure = { distance: result.distance, points: result.count }
         render(currentEl)
@@ -1016,6 +1166,8 @@ async function openScene() {
   state.sceneApi.setVisibleMajors(Object.keys(state.visible).filter((key) => state.visible[key]))
   state.sceneApi.setGroundOpacity(state.groundAlpha)
   state.sceneApi.setMeasure(Boolean(state.measure))
+  state.sceneApi.setPanMode(state.panMode)
+  state.sceneApi.setIdentify(state.identify)
   window.__pipelineSceneApi = state.sceneApi
 }
 
@@ -1063,6 +1215,7 @@ async function runAnalysis() {
   state.busy = ''
   if (!ok) { render(currentEl); return ctx.toast(body.error || '分析失败', true) }
   state.lastAnalysis = body
+  state.rightOpen = true
   if (type === 'section') { state.sceneApi?.setSection({ sectionLine: payload.line.map((p) => p), width: 0.4, hits: body.result.hits, ...body.result }) }
   if (type === 'excavation') { state.sceneApi?.setExcavation({ polygon: payload.polygon, depth: payload.depth, ...body.result }) }
   if (type === 'clearance' || type === 'collision' || type === 'conflict') { state.sceneApi?.setSection(null); state.sceneApi?.setExcavation(null) }

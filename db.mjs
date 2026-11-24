@@ -122,6 +122,8 @@ db.exec(`
     confidence REAL NOT NULL DEFAULT 0.8,
     pinned INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'active',
+    superseded_by TEXT NOT NULL DEFAULT '',
+    superseded_at INTEGER NOT NULL DEFAULT 0,
     embedding TEXT NOT NULL DEFAULT '',
     embedding_model TEXT NOT NULL DEFAULT '',
     created_at INTEGER NOT NULL,
@@ -488,11 +490,17 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_pipe_analysis_dataset ON pipe_analysis_runs(dataset_id, analysis_type, created_at DESC);
 `)
 
-// 兼容 P0-2 之前已经建好的 sessions 表：补 account_id 列。
-try {
-  db.exec('ALTER TABLE sessions ADD COLUMN account_id TEXT')
-} catch (error) {
-  if (!/duplicate column name/i.test(String(error && error.message))) throw error
+// 兼容 P0-2 之前已经建好的 sessions 表：补账号与设备审计字段。
+for (const sql of [
+  'ALTER TABLE sessions ADD COLUMN account_id TEXT',
+  "ALTER TABLE sessions ADD COLUMN user_agent TEXT NOT NULL DEFAULT ''",
+  "ALTER TABLE sessions ADD COLUMN ip_address TEXT NOT NULL DEFAULT ''",
+]) {
+  try {
+    db.exec(sql)
+  } catch (error) {
+    if (!/duplicate column name/i.test(String(error && error.message))) throw error
+  }
 }
 
 // 账号密码登录：给旧库补字段；空哈希由服务启动时的默认密码迁移补齐。
@@ -524,15 +532,29 @@ for (const sql of [
   }
 }
 
+// 长期记忆更替：旧库补充替代链字段，历史记录保留但不参与 active 召回。
+for (const sql of [
+  "ALTER TABLE memories ADD COLUMN superseded_by TEXT NOT NULL DEFAULT ''",
+  'ALTER TABLE memories ADD COLUMN superseded_at INTEGER NOT NULL DEFAULT 0',
+]) {
+  try {
+    db.exec(sql)
+  } catch (error) {
+    if (!/duplicate column name/i.test(String(error && error.message))) throw error
+  }
+}
+
 export const SESSION_TTL_MS = 8 * 60 * 60 * 1000
 
 const stmt = {
   createSession: db.prepare(`
-    INSERT INTO sessions (id, role, net, account_id, created_at, last_seen, expires_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO sessions (id, role, net, account_id, created_at, last_seen, expires_at, user_agent, ip_address)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `),
   getSession: db.prepare('SELECT * FROM sessions WHERE id = ?'),
+  listAccountSessions: db.prepare('SELECT * FROM sessions WHERE account_id = ? ORDER BY last_seen DESC'),
   touchSession: db.prepare('UPDATE sessions SET last_seen = ? WHERE id = ?'),
+  extendSession: db.prepare('UPDATE sessions SET last_seen = ?, expires_at = ? WHERE id = ?'),
   deleteSession: db.prepare('DELETE FROM sessions WHERE id = ?'),
   expireSession: db.prepare('DELETE FROM sessions WHERE expires_at <= ?'),
   clearSessions: db.prepare('DELETE FROM sessions'),
@@ -771,6 +793,11 @@ const stmt = {
     ORDER BY rowid LIMIT ?
   `),
   countPipeNodes: db.prepare('SELECT COUNT(*) AS n FROM pipe_nodes WHERE dataset_id = ? AND deleted_at IS NULL'),
+  listPipeNodesSampled: db.prepare(`
+    SELECT * FROM pipe_nodes
+    WHERE dataset_id = ? AND deleted_at IS NULL AND (rowid % ?) = 0
+    ORDER BY rowid LIMIT ?
+  `),
   deletePipeNodesByDataset: db.prepare('DELETE FROM pipe_nodes WHERE dataset_id = ?'),
 
   insertPipeLine: db.prepare(`
@@ -788,6 +815,11 @@ const stmt = {
     ORDER BY rowid LIMIT ?
   `),
   countPipeLines: db.prepare('SELECT COUNT(*) AS n FROM pipe_lines WHERE dataset_id = ? AND deleted_at IS NULL'),
+  listPipeLinesSampled: db.prepare(`
+    SELECT * FROM pipe_lines
+    WHERE dataset_id = ? AND deleted_at IS NULL AND (rowid % ?) = 0
+    ORDER BY rowid LIMIT ?
+  `),
   deletePipeLinesByDataset: db.prepare('DELETE FROM pipe_lines WHERE dataset_id = ?'),
 
   deletePipeTopologyByDataset: db.prepare('DELETE FROM pipe_topology WHERE dataset_id = ?'),
@@ -857,10 +889,10 @@ const stmt = {
 
 /* ------------------------------- sessions ------------------------------- */
 
-export function createSession(role, net = 'inet', ttlMs = SESSION_TTL_MS, accountId = null) {
+export function createSession(role, net = 'inet', ttlMs = SESSION_TTL_MS, accountId = null, device = {}) {
   const id = randomBytes(32).toString('hex')
   const now = Date.now()
-  stmt.createSession.run(id, role, net, accountId || null, now, now, now + ttlMs)
+  stmt.createSession.run(id, role, net, accountId || null, now, now, now + ttlMs, String(device.userAgent || '').slice(0, 300), String(device.ipAddress || '').slice(0, 80))
   return id
 }
 
@@ -872,12 +904,29 @@ export function getSession(id) {
     stmt.deleteSession.run(id)
     return null
   }
-  return { id: row.id, role: row.role, net: row.net, accountId: row.account_id || null, createdAt: row.created_at, lastSeen: row.last_seen, expiresAt: row.expires_at }
+  return { id: row.id, role: row.role, net: row.net, accountId: row.account_id || null, createdAt: row.created_at, lastSeen: row.last_seen, expiresAt: row.expires_at, userAgent: row.user_agent || '', ipAddress: row.ip_address || '' }
+}
+
+export function listAccountSessions(accountId) {
+  if (!accountId) return []
+  return stmt.listAccountSessions.all(String(accountId)).map((row) => ({
+    id: row.id, role: row.role, net: row.net, accountId: row.account_id || null,
+    createdAt: row.created_at, lastSeen: row.last_seen, expiresAt: row.expires_at,
+    userAgent: row.user_agent || '', ipAddress: row.ip_address || '',
+  }))
 }
 
 export function touchSession(id) {
   if (!id) return
   stmt.touchSession.run(Date.now(), id)
+}
+
+/** 活跃请求续期：同时后移 expires_at 和 last_seen，配合响应重发 cookie 实现滑动会话。 */
+export function extendSession(id, ttlMs = SESSION_TTL_MS) {
+  if (!id) return 0
+  const now = Date.now()
+  stmt.extendSession.run(now, now + Math.max(60 * 1000, Number(ttlMs) || SESSION_TTL_MS), id)
+  return now + Math.max(60 * 1000, Number(ttlMs) || SESSION_TTL_MS)
 }
 
 export function updateSessionNet(id, net) {
@@ -1152,6 +1201,8 @@ function memoryMeta(row) {
     confidence: Number(row.confidence),
     pinned: Boolean(row.pinned),
     status: row.status,
+    supersededBy: row.superseded_by || '',
+    supersededAt: Number(row.superseded_at || 0),
     hasEmbedding: Boolean(row.embedding),
     embeddingModel: row.embedding_model || '',
     createdAt: Number(row.created_at),
@@ -1170,11 +1221,12 @@ const memorySql = {
     ON CONFLICT(user_id, normalized) DO UPDATE SET
       text = excluded.text, kind = excluded.kind, scope = excluded.scope, scope_ref = excluded.scope_ref,
       tags = excluded.tags, confidence = excluded.confidence, pinned = MAX(memories.pinned, excluded.pinned),
-      status = 'active', updated_at = excluded.updated_at
+      status = 'active', superseded_by = '', superseded_at = 0, updated_at = excluded.updated_at
   `),
   listByUser: db.prepare("SELECT * FROM memories WHERE user_id = ? AND status = 'active' ORDER BY pinned DESC, updated_at DESC LIMIT ?"),
   search: db.prepare("SELECT * FROM memories WHERE user_id = ? AND status = 'active' AND (text LIKE ? OR tags LIKE ?) ORDER BY pinned DESC, updated_at DESC LIMIT ?"),
   archive: db.prepare("UPDATE memories SET status = 'archived', updated_at = ? WHERE id = ? AND user_id = ?"),
+  supersede: db.prepare("UPDATE memories SET status = 'superseded', superseded_by = ?, superseded_at = ?, updated_at = ? WHERE id = ? AND user_id = ? AND status = 'active'"),
   remove: db.prepare('DELETE FROM memories WHERE id = ? AND user_id = ?'),
   touch: db.prepare('UPDATE memories SET last_used_at = ?, use_count = use_count + 1 WHERE id = ?'),
   setEmbedding: db.prepare('UPDATE memories SET embedding = ?, embedding_model = ? WHERE id = ? AND user_id = ?'),
@@ -1214,7 +1266,7 @@ export function upsertMemory(input = {}) {
 }
 
 export function getMemory(userId, id) {
-  return memoryMeta(memorySql.getById.get(String(userId || ''), String(id || '')))
+  return memoryMeta(memorySql.getById.get(String(id || ''), String(userId || '')))
 }
 
 export function listMemories({ userId = '', q = '', limit = 100 } = {}) {
@@ -1238,6 +1290,13 @@ export function touchMemories(ids = []) {
 
 export function archiveMemory(userId, id) {
   const info = memorySql.archive.run(Date.now(), String(id || ''), String(userId || ''))
+  return info.changes > 0
+}
+
+export function supersedeMemory(userId, oldId, newId) {
+  if (!oldId || !newId || oldId === newId) return false
+  const now = Date.now()
+  const info = memorySql.supersede.run(String(newId), now, now, String(oldId), String(userId || ''))
   return info.changes > 0
 }
 
@@ -2542,7 +2601,23 @@ function pipeIssueOf(row) {
   }
 }
 
-export function insertPipeNode(datasetId, input = {}) {
+/**
+ * 批量写入事务：导入大图纸时逐条提交会把 WAL 刷盘放大到分钟级，
+ * 这里把一批 insert 收进同一个事务，异常时整体回滚。
+ */
+export function withPipeWriteTransaction(fn) {
+  db.exec('BEGIN IMMEDIATE')
+  try {
+    const result = fn()
+    db.exec('COMMIT')
+    return result
+  } catch (error) {
+    try { db.exec('ROLLBACK') } catch { /* 回滚失败不覆盖原始异常 */ }
+    throw error
+  }
+}
+
+export function insertPipeNode(datasetId, input = {}, { readBack = true } = {}) {
   const now = Number(input.createdAt || Date.now())
   const id = String(input.id || `NODE-${randomBytes(6).toString('hex')}`)
   stmt.insertPipeNode.run(
@@ -2558,6 +2633,21 @@ export function insertPipeNode(datasetId, input = {}) {
     pipeNum(input.angle), String(input.status || ''),
     JSON.stringify(input.attrs || {}), now, now
   )
+  // 批量导入时跳过回读：每行多一次 SELECT 会把十万级导入翻倍
+  if (!readBack) {
+    return {
+      id, datasetId: String(datasetId || ''),
+      nodeCode: String(input.nodeCode || ''), category: String(input.category || ''),
+      x: pipeNum(input.x), y: pipeNum(input.y),
+      groundElev: pipeNum(input.groundElev), z: pipeNum(input.z), coverDepth: pipeNum(input.coverDepth),
+      coverMaterial: String(input.coverMaterial || ''), coverSize: String(input.coverSize || ''),
+      chamberShape: String(input.chamberShape || ''), chamberSize: String(input.chamberSize || ''),
+      road: String(input.road || ''), address: String(input.address || ''), owner: String(input.owner || ''),
+      buildYear: String(input.buildYear || ''), surveyDate: String(input.surveyDate || ''), surveyUnit: String(input.surveyUnit || ''),
+      angle: pipeNum(input.angle), status: String(input.status || ''),
+      attrs: input.attrs || {}, createdAt: now, updatedAt: now,
+    }
+  }
   return pipeNodeOf(stmt.getPipeNode.get(id))
 }
 
@@ -2565,16 +2655,25 @@ export function getPipeNode(id) {
   return pipeNodeOf(stmt.getPipeNode.get(String(id || '')))
 }
 
-export function listPipeNodes(datasetId, { limit = 1000 } = {}) {
-  const safeLimit = Math.max(1, Math.min(Number(limit) || 1000, 5000))
-  return stmt.listPipeNodes.all(String(datasetId || ''), safeLimit).map(pipeNodeOf)
+export function listPipeNodes(datasetId, { limit = 1000, sample = false } = {}) {
+  const ds = String(datasetId || '')
+  const safeLimit = Math.max(1, Math.min(Number(limit) || 1000, 20000))
+  // 大图展示：要素超过上限时按 rowid 等步长抽样，避免只取到图纸开头的一小片
+  if (sample) {
+    const total = countPipeNodes(ds)
+    if (total > safeLimit) {
+      const step = Math.ceil(total / safeLimit)
+      return stmt.listPipeNodesSampled.all(ds, step, safeLimit).map(pipeNodeOf)
+    }
+  }
+  return stmt.listPipeNodes.all(ds, safeLimit).map(pipeNodeOf)
 }
 
 export function countPipeNodes(datasetId) {
   return Number(stmt.countPipeNodes.get(String(datasetId || '')).n)
 }
 
-export function insertPipeLine(datasetId, input = {}) {
+export function insertPipeLine(datasetId, input = {}, { readBack = true } = {}) {
   const now = Number(input.createdAt || Date.now())
   const id = String(input.id || `LINE-${randomBytes(6).toString('hex')}`)
   stmt.insertPipeLine.run(
@@ -2599,6 +2698,23 @@ export function insertPipeLine(datasetId, input = {}) {
     typeof input.geom === 'string' ? input.geom : JSON.stringify(input.geom || null),
     JSON.stringify(input.attrs || {}), now, now
   )
+  if (!readBack) {
+    return {
+      id, datasetId: String(datasetId || ''),
+      lineCode: String(input.lineCode || ''), nodeStart: String(input.nodeStart || ''), nodeEnd: String(input.nodeEnd || ''),
+      pipeMajor: String(input.pipeMajor || ''), material: String(input.material || ''),
+      profileType: String(input.profileType || ''), profileSize: String(input.profileSize || ''),
+      wallThickness: String(input.wallThickness || ''), buryType: String(input.buryType || ''),
+      startDepth: pipeNum(input.startDepth), endDepth: pipeNum(input.endDepth),
+      startElev: pipeNum(input.startElev), endElev: pipeNum(input.endElev),
+      flowDir: String(input.flowDir ?? '-1'), length: pipeNum(input.length),
+      holeCount: Number(input.holeCount || 0), cabCount: Number(input.cabCount || 0),
+      pressure: String(input.pressure || ''), voltage: String(input.voltage || ''),
+      owner: String(input.owner || ''), road: String(input.road || ''), buildYear: String(input.buildYear || ''),
+      status: String(input.status || ''), lineStyle: String(input.lineStyle || ''),
+      geom: input.geom || null, attrs: input.attrs || {}, createdAt: now, updatedAt: now,
+    }
+  }
   return pipeLineOf(stmt.getPipeLine.get(id))
 }
 
@@ -2606,9 +2722,17 @@ export function getPipeLine(id) {
   return pipeLineOf(stmt.getPipeLine.get(String(id || '')))
 }
 
-export function listPipeLines(datasetId, { limit = 1000 } = {}) {
-  const safeLimit = Math.max(1, Math.min(Number(limit) || 1000, 5000))
-  return stmt.listPipeLines.all(String(datasetId || ''), safeLimit).map(pipeLineOf)
+export function listPipeLines(datasetId, { limit = 1000, sample = false } = {}) {
+  const ds = String(datasetId || '')
+  const safeLimit = Math.max(1, Math.min(Number(limit) || 1000, 20000))
+  if (sample) {
+    const total = countPipeLines(ds)
+    if (total > safeLimit) {
+      const step = Math.ceil(total / safeLimit)
+      return stmt.listPipeLinesSampled.all(ds, step, safeLimit).map(pipeLineOf)
+    }
+  }
+  return stmt.listPipeLines.all(ds, safeLimit).map(pipeLineOf)
 }
 
 export function countPipeLines(datasetId) {
@@ -2617,18 +2741,22 @@ export function countPipeLines(datasetId) {
 
 export function replacePipeTopology(datasetId, edges = []) {
   const ds = String(datasetId || '')
-  stmt.deletePipeTopologyByDataset.run(ds)
-  for (const edge of edges) {
-    stmt.insertPipeTopology.run(
-      String(edge.id || `TOPO-${randomBytes(6).toString('hex')}`),
-      ds,
-      String(edge.nodeId || ''),
-      String(edge.neighborNodeId || ''),
-      String(edge.lineId || ''),
-      String(edge.pipeMajor || ''),
-      Number(edge.directed || 0)
-    )
-  }
+  withPipeWriteTransaction(() => {
+    stmt.deletePipeTopologyByDataset.run(ds)
+    let index = 0
+    for (const edge of edges) {
+      index += 1
+      stmt.insertPipeTopology.run(
+        String(edge.id || `TOPO-${ds.slice(-8)}-${index}`),
+        ds,
+        String(edge.nodeId || ''),
+        String(edge.neighborNodeId || ''),
+        String(edge.lineId || ''),
+        String(edge.pipeMajor || ''),
+        Number(edge.directed || 0)
+      )
+    }
+  })
   return stmt.listPipeTopology.all(ds)
 }
 

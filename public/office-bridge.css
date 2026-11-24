@@ -1,0 +1,50 @@
+/* 左侧对话里的 Office 选区上下文条：对应右侧文档的当前选区，不新增 AI 面板。 */
+.hh-doc-ctx {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: max-content;
+  max-width: 100%;
+  box-sizing: border-box;
+  margin: 0 0 4px;
+  padding: 6px 9px;
+  border: 1px solid #bfdbfe;
+  border-radius: 9px;
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-size: 11px;
+  line-height: 1.4;
+  overflow: hidden;
+}
+.hh-doc-ctx[hidden] { display: none !important; }
+.hh-doc-ctx-label {
+  flex: none;
+  font-weight: 700;
+  letter-spacing: .02em;
+}
+.hh-doc-ctx-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #1e3a8a;
+}
+.hh-doc-ctx-name b { font-weight: 600; }
+.hh-doc-ctx-meta {
+  flex: none;
+  color: #3b82f6;
+  font-variant-numeric: tabular-nums;
+}
+.hh-doc-ctx-x {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: #3b82f6;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+}
+.hh-doc-ctx-x:hover { background: #dbeafe; color: #1e40af; }

@@ -188,6 +188,30 @@ const tools = [
     },
   },
   {
+    name: 'office_get_selection',
+    description: '读取用户在右侧 OnlyOffice 文档中当前选中的文本。左侧对话已自动携带选区时通常不需要调用；需要确认选区是否变化、或选区被截断时再调用。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        docKey: { type: 'string', description: '文档 key；不传则读取当前用户最近一次选区' },
+      },
+    },
+  },
+  {
+    name: 'office_replace_selection',
+    description: '把当前 Office 文档选区原位替换为给定段落。用于用户明确要求“把选中的这段改成/润色/校对/缩写/扩写/调整公文语气”。按段落数组传入，保留原段落格式；不要只回复建议，也不要新建文件。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        paragraphs: { type: 'array', items: { type: 'string' }, description: '替换后的段落；每个元素对应一个自然段，不要传 Markdown 代码块' },
+        text: { type: 'string', description: '单段替换时的纯文本；多段请用 paragraphs' },
+        expectedHash: { type: 'string', description: '选区的 hash，通常由当前对话上下文提供；不传时使用本轮绑定的选区 hash' },
+        docKey: { type: 'string', description: '文档 key；不传时使用本轮对话绑定的文档' },
+      },
+      required: ['paragraphs'],
+    },
+  },
+  {
     name: 'app_data_list',
     description: '只读列出当前账号在已安装应用中的数据文件（outputs/ 与 data/），用于查看某应用最近一次输出、历史记录或结果文件。可只查一个应用，也可不传 appId 列出全部已安装应用。',
     inputSchema: {
@@ -237,6 +261,7 @@ const tools = [
         projectId: { type: 'string', description: 'scope=project 时的项目 ID' },
         tags: { type: 'array', items: { type: 'string' }, description: '可选标签，最多 8 个' },
         pinned: { type: 'boolean', description: '是否每轮固定注入（谨慎使用，最多几条）' },
+        replace: { type: 'boolean', description: '用户明确表示改为/换成/不再使用时设为 true；仅替代同用户、同作用域、同主题旧记忆' },
       },
       required: ['content'],
     },
@@ -256,6 +281,57 @@ const tools = [
     description: '长期记忆：归档一条记忆。仅当用户明确要求“忘掉/删除这条记忆”时调用，优先用 memory_search 找到 id 再传 id；不要自行清理无关记忆。',
     inputSchema: { type: 'object', properties: { id: { type: 'string', description: '记忆 ID' }, query: { type: 'string', description: '没有 id 时按最匹配的一条归档' } } },
   },
+  {
+    name: 'skill_publish',
+    description: '发布技能到插件市场：把一个技能目录打包、检测、提交并上架到「技能」分类。目录根必须有 SKILL.md；技能包只允许文档与静态资源，含 .py/.js/.sh 等脚本会被拒绝，带代码的扩展请改用 plugin_publish。发布是写操作，会先请求用户审批。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        dir: { type: 'string', description: '技能目录绝对路径；目录根必须有 SKILL.md' },
+        name: { type: 'string', description: '市场展示名称；不填则用 SKILL.md 的 name 或目录名' },
+        version: { type: 'string', description: '版本号，默认 1.0.0' },
+        desc: { type: 'string', description: '市场简介' },
+        scope: { type: 'string', description: '可见范围，默认全集团' },
+        dryRun: { type: 'boolean', description: 'true 时只打包检测，不上传、不提交' },
+        live: { type: 'boolean', description: '默认 true；false 时只提交待审核，不自动上架' },
+      },
+      required: ['dir'],
+    },
+  },
+  {
+    name: 'plugin_publish',
+    description: '发布 DSH Bundle 插件到插件市场：把插件目录打包、检测 package.json/dsh.bundle、提交并上架。适用于带代码的插件或技能扩展。发布是写操作，会先请求用户审批。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        dir: { type: 'string', description: '插件目录绝对路径；根目录必须有 package.json 和 dsh.bundle 声明的入口' },
+        name: { type: 'string', description: '市场展示名称；不填则用 package.json 的 name' },
+        version: { type: 'string', description: '版本号，默认取 package.json' },
+        desc: { type: 'string', description: '市场简介' },
+        scope: { type: 'string', description: '可见范围，默认全集团' },
+        dryRun: { type: 'boolean', description: 'true 时只打包检测，不上传、不提交' },
+        live: { type: 'boolean', description: '默认 true；false 时只提交待审核，不自动上架' },
+      },
+      required: ['dir'],
+    },
+  },
+  {
+    name: 'app_publish',
+    description: '发布 AS 应用到应用市场：把应用目录打包、检测 app.json、提交并入库。目录根必须有 app.json，runtime 只支持 node 或 python，entry 必须存在。发布是写操作，会先请求用户审批。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        dir: { type: 'string', description: '应用目录绝对路径；根目录必须有 app.json' },
+        name: { type: 'string', description: '市场展示名称；不填则用 app.json 的 name' },
+        version: { type: 'string', description: '版本号；不填则用 app.json 的 version' },
+        desc: { type: 'string', description: '市场简介' },
+        scope: { type: 'string', description: '可见范围，默认全集团' },
+        dryRun: { type: 'boolean', description: 'true 时只打包检测，不上传、不提交' },
+        live: { type: 'boolean', description: '默认 true；false 时只提交待审核，不自动上架' },
+      },
+      required: ['dir'],
+    },
+  },
 ]
 
 function reply(id, result) {
@@ -266,7 +342,7 @@ function fail(id, code, message) {
   stdout.write(JSON.stringify({ jsonrpc: '2.0', id, error: { code, message } }) + '\n')
 }
 
-const EXTERNAL_WRITE_TOOLS = new Set(['im_send', 'task_create'])
+const EXTERNAL_WRITE_TOOLS = new Set(['im_send', 'task_create', 'skill_publish', 'plugin_publish', 'app_publish'])
 
 async function requestApproval(name, args) {
   const res = await fetch(`${baseUrl}/api/mcp/approval`, {

@@ -56,7 +56,7 @@ export function formatMeta(id) {
   return FORMAT_REGISTRY.find((item) => item.id === id) || null
 }
 
-export async function inspectDataFormat(buffer, name = '', mime = '') {
+export async function inspectDataFormat(buffer, name = '', mime = '', options = {}) {
   if (isGeoArchive(name)) return inspectGeoArchive(buffer, name)
   const id = detectDataFormat(name, mime, buffer)
   if (!id) throw Object.assign(new Error(`无法识别数据格式：${name || '未命名文件'}；当前基座支持 PDF、GeoJSON 与 ASCII DXF。`), { status: 415 })
@@ -65,7 +65,7 @@ export async function inspectDataFormat(buffer, name = '', mime = '') {
     const info = await inspectPdf(buffer)
     return { format: 'pdf', formatLabel: 'PDF', kind: 'pdf', ...info }
   }
-  const spatial = inspectSpatial(buffer, name)
+  const spatial = inspectSpatial(buffer, name, options)
   return { format: id, formatLabel: formatMeta(id)?.label || id.toUpperCase(), ...spatial }
 }
 

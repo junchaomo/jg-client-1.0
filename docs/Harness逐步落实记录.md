@@ -1528,3 +1528,109 @@
 - 正式验收（2026-11-14）：新建空会话默认关闭；从“＋”第二项开启后显示“✓ 深度思索 已开启 · 当前会话使用推理模型”；发送后立即观察到“深度思索中 / 正在调用 DeepSeek 推理模型…”；验收会话 `C-1794625048826270` 返回 `deepThink=true`、`model=deepseek-reasoner`、`reasoningEffort=high`，回答同时给出推理要点和结论；刷新并重新打开该会话后入口仍为开启。关闭后同一会话继续发送普通问题，返回 `deepThink=false`、`model=deepseek-chat`，并提示“已关闭深度思索：恢复普通对话模型”；“推理强度”低/中/高三档仍可用。
 - 截图：`C:\Users\46198\AppData\Local\Temp\jg-deepthink-plus-561.png`（718×763 下 + 菜单中的深度思索入口）。
 - 未验证：非 DeepSeek 端点的 409 分支未切换账号实测；`reasoning_content` 不展示为逐字思考过程；本轮会话统计的 `reasoningTokens` 为 0，未把 token 数作为深度思索的验收依据。
+
+## 78. 新增技能、Bundle、应用三个发布工具（2026-11-23）
+
+- 目标：Agent 不再用 `pwsh` 翻 `/api/files/upload`、`/api/plugin-subs` 和 `sessions` 表，而是输入一个目录即可完成打包、扫描、提交和上架。
+- 新工具：`skill_publish`、`plugin_publish`、`app_publish`。三者都进入 `data.mjs` 的 `aiTools`、`mcp-jg.mjs` 的 MCP 工具清单与 `EXTERNAL_WRITE_TOOLS`、`tool-policy.mjs` 的 `WORK_CORE_TOOLS`，只在 Work 轮次可见；Chat 不暴露发布写操作。
+- 打包：新增 `publish.mjs` 的 `packDirectoryToZip()`，store 模式 ZIP，UTF-8 文件名，跳过符号链接、`.git`、`node_modules`、`.env*`、数据库/日志/备份；技能根必须有 `SKILL.md`，Bundle 根必须有 `package.json`，应用根必须有 `app.json`。
+- 服务端：`server.mjs` 新增 `publishPackageToMarket()` 与 `approvePluginSubmission()`。`POST /api/plugin-subs/review` 改为复用同一段入库逻辑，网页审核与 Agent 发布不再有两套行为；扫描类型必须与工具类型一致，否则 422 `PUBLISH_KIND_MISMATCH`。
+- 发布语义：默认 `live=true`。管理员账号提交后自动审核入库并写入 `liveMarket`；非管理员或 `live=false` 只创建 `pending` 记录，等管理员审核。`dryRun=true` 只打包检测，不上传、不提交。
+- 审批：三个工具加入 `AUTO_APPROVAL_EXTERNAL_TOOL` 与 `/api/mcp/approval` 的外部副作用匹配，MCP 调用前先走人工审批；无唯一活动会话时 fail closed。
+- 技能包边界：仍只允许文档与静态资源；含 `.py/.js/.sh` 等可执行脚本的技能包会被判“不通过”。`gongwen-format` 的 `scripts/gongwen_docx.py` 就属于这一类，`skill_publish` 会返回 `PUBLISH_SCAN_FAILED` 并提示封装成 Bundle 后用 `plugin_publish`，不会静默删脚本。
+- 验证：`tests/publish.test.mjs` 5/5 通过；`tests/tool-policy.test.mjs` 16/16、`tests/classify-intent.test.mjs` 8/8 通过；在隔离数据目录启动 4175 测试服务，技能、Bundle、应用三条链路均完成真实上传、审核、入库，并确认 `market-packages/PLG-*`、`bundle-packages/M-*`、`apps/<appId>/versions/<ver>` 落盘；MCP `tools/list` 已返回三个新工具。
+
+## 79. 技能、插件、应用准入统一改为“只认市场安装”（2026-11-23）
+
+- 标准：平台只展示通过插件市场安装的技能、插件与应用；直接复制到账号 `dsh-home/skills`、仓库 `plugins/` 或数据目录 `data/apps` 的手工内容不进入平台可见清单。技能准入凭证是安装时写入的 `.jg-market.json` 中的 `marketId`，不再用 `SKILL.md` frontmatter 兜底。
+- 已安装列表：`installedUserSkillPlugins(userId)` 遍历账号技能目录时先读 `.jg-market.json`，没有 `marketId` 直接跳过；名称、版本、发布者优先取市场条目，其次取安装清单，不再把英文目录名当展示名。
+- 能力目录：`skillCatalogForUser(user)` 使用同一准入条件，只把市场安装技能放进 `capability_list`；返回 `source=market` 和 `marketId`，不再标成 `agent`。
+- 设置页：`runtimeOverview()` 的 `native.skills` 与上述两处保持同一口径，只列市场安装技能或平台官方基线；手工目录不再出现在“技能目录（只读）”。
+- 应用：`appToolCatalog(user)` 删除了 `localAppCatalog` 这个第二来源，只保留 `liveMarket` 中可访问的市场应用；`data/apps` 下手工放入的包不再进入 `capability_list`、`app_list` 与应用数据工具。
+- 插件：`pluginCatalogForUser(user)` 删除了仓库 `plugins/` 目录的枚举，只保留产品内置插件与市场插件；`jg-spill-age`、`jg-tool-router` 这类手工运行时插件不再出现在能力目录。
+- 根因：原实现把“本机文件存在”当成“平台已安装”，三个模块各自还有第二来源——技能读 frontmatter、应用读 `data/apps`、插件读仓库 `plugins/`；而卸载与市场安装台账原本只认市场记录，列表与安装判据不一致。
+- 实测：重启主服务后，用 `A-7788-01` 的真实会话调用 `GET /api/plugins`、`GET /api/bootstrap`、`POST /api/ai/invoke {tool:"capability_list"}`，技能只剩 `agent-experience` 与 `cordis-plugin-development`，应用只剩市场条目 `jg-material-studio`、`traffic-flow`，插件只剩产品内置 `M-CODEREVIEW`；`gongwen-format`、`as-python-sample`、`jg-spill-age`、`jg-tool-router` 均不再返回。
+- 回归测试：新增 `tests/skill-market-access.test.mjs`，在独立临时数据目录和独立端口启动真实服务，预置无标记的 `manual-lookalike` 技能、`manual-app` 应用包与市场技能 `market-D-TEST`，技能、设置页、应用、插件四处查询都只返回市场/产品内置项；5/5 通过，不读写真实账号目录。
+- 边界：本次改的是平台列表与能力目录的准入，不删除账号目录、应用目录和仓库插件文件；DSH 运行时仍会扫描 `dsh-home/skills` 与本机 `plugins/`，若要连模型侧技能目录和运行时插件清单也隔离，需要单独控制运行时扫描根目录，不能只靠列表过滤。
+
+## 80. 打通 Harness 增量文本并改为同账号同模型共享运行时（2026-11-23）
+
+- 对比结论：平台与官方客户端是同一套 DSH 内核（平台 `sdk` profile，官方 `web/tui/headless`），官方单次冷启动实测 4.247/5.054/4.651 秒，平台 trace 5.276 秒，模型和端点不是慢的主因；真正的差异是平台每个新会话重新冷启动 DSH 子进程，并且 Harness 主链路等整轮结束才返回文本。
+- 协议补丁：`dsh-sdk-jsonrpc-server/lib/index.js` 新增 `agent/assistant-stream` 监听，只对已登记 agent 转发 `start`、`text-delta`、`reasoning-delta`，通过 `transport.notify('assistant.stream', { sessionId, frame })` 暴露给 SDK；工具参数增量仍走持久 `session.event`。同一文件新增 `session/cancel` 请求，把取消落到目标 Agent。两处都是对 vendored SDK 的直接补丁，升级 `dsh-runtime` 时会被覆盖，需同步迁移。
+- 运行时复用：Chat 的 `sandboxRootFor()` 统一返回 `data/dsh-workspaces/chat`，`runtimeScope` 在 Chat 下传空串，同一账号同一模型共享一个运行时；Work 仍按 `conv.id` 隔离。每个会话用 `session.setWorkingDirectory(cwd)` 保留独立工作目录。
+- 死进程自愈：`getHarnessInternal()` 复用前检查 `client.exitCode` 与子进程 `exitCode/signalCode`；运行时被外部结束或崩溃后，旧条目立即从 `active` 移除并重建，不再把死实例分配给新会话。
+- 单会话取消：SDK 协议原本没有 `session/cancel`，`dsh-sdk-jsonrpc-server` 新增该方法，只在目标 Agent 处于 `running` 时调用 `agent.cancel({ kind: 'user' })`，返回 `{ cancelled }`；`harness.cancelRun()` 走此方法，不再关闭共享运行时。
+- 按会话路由：`handlersBySession` 以 SDK `sessionId` 精确路由审批、提问和文本增量；`toolCalls` 缓存带 `sessionId`，`turn/end` 只清当前会话。新增 `harnessGates` 串行化同一 runtime key 的创建，避免两个新会话同时各起一个 DSH 子进程。
+- 并发与取消：`runAgent()` 去掉按运行时全局串行锁，不同 Session 可并发；`cancelRun()` 只取消目标 `sessionId`，初始化阶段只置 `cancelPending`，不再关闭共享运行时；`stopBackgroundRuntime()` 在运行时还有其他 run 时返回 `JOB_RUNTIME_BUSY`。
+- 服务端流式：`POST /api/chat` 在 `body.stream === true` 时先回 `meta`，Harness `onDelta` 逐段发送 `delta`，结束发 `done`，失败发 `error`；所有早退和异常统一走 `sendChatResult()`，SSE 打开后不再混用 JSON。前端 `public/app.js` 已有 `streamDraft`，本次未改。
+- 实测（独立进程直调 `runAgent`）：全新会话 6056 ms、首 delta 6036 ms；同会话热复用 1221 ms、首 delta 1153 ms；新会话复用同运行时 1281 ms、首 delta 1264 ms；双会话并发回复分别为 `OK`/`OK2`，未串台；长回答收到 95 个 text delta，正文完整。
+- 实测（HTTP SSE，主服务 PID 30052）：同一会话热请求首个 `meta` 147 ms、首个 `delta` 1297 ms、`delta` 数量 175、`done` 2929 ms；新建会话带工具调用时首个 `delta` 8494 ms、`delta` 数量 248、`done` 10434 ms。两轮之间 DSH 运行时进程 PID 32340 未变化，确认是同一运行时内的不同 Session。
+- 实测（冷启动与恢复）：结束 DSH 运行时后，新建 Chat 的 Harness 请求先返回 `meta` 199 ms，带工具调用时首个 `delta` 16943 ms、`done` 18275 ms、`delta` 192 个；死实例被识别并重建，未把旧进程继续分配给会话。
+- 实测（取消与隔离，主服务 PID 42464、运行时 PID 25872）：长任务执行 5 秒后调用 `POST /api/chat/cancel`，18 ms 返回 200，SSE 在 5064 ms 以 `done.cancelled=true` 结束，`delta` 为 0；随后新建会话继续走同一运行时，首个 `delta` 12650 ms、`delta` 111 个、`done` 13354 ms。取消没有杀掉共享运行时，也没有影响后续会话。
+- 未闭环：控制面 `runtimeRequest()` 也会带 `approvalRequests: true`，无处理器时审批按 `cancelled` 返回；共享运行时下 `JG_MCP_CONVERSATION` 仍写入首个会话的 `runKey`，后续会话的产品 MCP 工具会话语义需单独处理；前端真实点击渲染尚未做浏览器级回归。
+
+## 81. 修复 SSE 未结束导致的“一直正在思考”（2026-11-23）
+
+- 现象：界面上新对话发送带 `SKILL.md` 附件的消息后，卡片停在“正在思考 · 已用时 0.0 秒 · 正在读取项目上下文与工具状态”，等待数分钟无正文；服务端 `/api/chat/task`、`/api/bootstrap` 中没有任何运行中的会话，也没有新的 trace。
+- 根因：`/api/chat` 在 SSE 已打开后，`conv.cancelRequested` 分支仍执行 `return json(res, 200, …)`。响应既不写 `done/error`，也不调用 `res.end()`，而 `openSse()` 的 10 秒心跳会持续保活，浏览器把这条连接一直算在同源 6 条连接限额内。后续发送的新请求在客户端排队，根本没有到达服务端，所以表现为“服务器空闲、界面永远在思考”；旧服务进程上可同时看到 5 条这样的残留连接。
+- 修复：该分支改为 `return sendChatResult(200, { ok:true, cancelled:true, conversation: conv })`，保证写 `done` 后 `res.end()`；`openSse()` 增加 10 分钟兜底关闭，任何漏掉结束事件的路径都会发 `error(SSE_TIMEOUT)` 并断开，避免心跳把死连接永久保活。
+- 验证：重启服务后调用真实 `/api/chat`，4 秒时取消，取消接口 200，SSE 在 5199 ms 收到 `done.cancelled=true` 并结束，连接数回到正常；Electron 客户端重新启动后只连接 `127.0.0.1:54269`，旧的 4195 重复服务已停止。
+- 说明：卡住的那一轮请求并未到达服务端，因此没有实际执行“上传 SKILL.md 到插件市场”；重启后需要在界面上重新发送一次。
+
+## 82. 收口“服务在跑、界面不显示”和重复 4195 实例（2026-11-23）
+
+- 现象：重启后 Electron 主进程、GPU、渲染进程都在，但桌面上看不到窗口；`MainWindowTitle` 为“九规智能中枢 · 企业级 AI 中枢”，`MainWindowHandle` 也有值。同时 `data/run/server.pid` 反复被一个 `origin=manual`、监听 `4195` 的 `server.mjs` 覆盖，而客户端探活固定走 `PREFERRED_PORT=54269`。
+- 根因一（端口判定）：`electron/main.cjs` 只在 `PREFERRED_PORT` 上 `probeHealth`。当健康服务实际在 `server.pid` 记录的其他端口（4195）时，探活必然失败；随后 `holderAlive` 为真，代码仍把 `serverPort` 设为 `54269` 并等 30 秒，窗口创建被整体推迟，用户看到的就是“进程在跑、没有界面”。
+- 修复一：启动顺序改为“先探首选端口 → 再探 `server.pid` 里的端口 → 进程存活则等待该端口恢复 → 都不成立才新起服务”；`server.pid` 的 `port` 不再只是记录，而是参与复用判定。同步清理了残留的 `server.pid` 与 4195 实例，当前只保留 `54269`。
+- 根因二（窗口显示）：`createWindow()` 使用 `show: false`，只依赖 `ready-to-show` 触发 `window.show()`。在 GPU 合成异常或首帧未提交时该事件可能不触发，窗口会永久隐藏；`second-instance` 的 `focus()` 对隐藏窗口也不会把它显示出来。
+- 修复二：新增 `showWindow()`，在 `ready-to-show`、`did-finish-load`、`did-fail-load` 和 3 秒兜底计时四处调用；内部依次执行 `restore()`（最小化时）、`show()`、`focus()`、`moveTop()`，保证窗口一定出现在当前桌面。
+- 验证：从桌面 `Win+R` 启动 `launch-jg.bat`（等价于桌面快捷方式的 `electron.exe .`）后，窗口正常显示且已登录；主服务 `PID 2816` 监听 `54269`，Electron 复用它，`4195` 已无监听。
+- 端到端验证：在“新对话”中发送“只回复OK”，界面 1.4 秒完成并显示正文 `OK`，不再停在“正在思考 0.0 秒”；SSE 增量、`done` 收尾和前端计时器均正常。
+- 发布入口说明：`skill_publish`、`plugin_publish`、`app_publish` 只在 Work 轮次暴露，Chat 不提供发布写操作；`gongwen-format` 带 `scripts/gongwen_docx.py`，技能包只允许文档与静态资源，直接走 `skill_publish` 会被 `PUBLISH_SCAN_FAILED` 拒绝，应封装为 Bundle 后用 `plugin_publish`，或在“管理中心 → 插件市场”上传 Bundle。
+
+## 83. 公文格式标准 Bundle 打包与上架（2026-11-23）
+
+- 目标：把用户现有 `gongwen-format` 技能以“公文格式标准”名称上架插件市场，版本 `1.0`，可见范围全集团。
+- 打包方式：技能本身含 `scripts/gongwen_format.py`，不能走技能包。改造成 DSH Bundle `@jg/gongwen-format-standard`，根目录 `package.json` 声明 `dsh.bundle.patch=./cordis.patch.yml`，`index.js` 通过 `ctx.skills.registerProvider()` 挂载技能，并用 `resourceBase` 把 `references/` 与 `scripts/` 暴露给运行时。
+- 结构约束：ZIP 内不能存在任何名为 `SKILL.md` 的文件，否则 `inspectPluginZip` 会把包判成 skill。技能正文放在 `skill/gongwen-format.md`，提供者读取后再返回给技能注册表。
+- 实测扫描：`DSH Bundle 格式` 通过；`依赖与版本` 通过；`静态安全扫描` 通过；`权限声明` 待复核（不阻断）；包体 29 KB，6 个文件。
+- 上架结果：上传得到 `PKG-MWT1T4U3-AB15EF87`，提交 `SUB-MWT1TD36`，审核通过并生成市场条目 `M-1795425222694`；`GET /api/plugin-market` 返回 `name=公文格式标准`、`version=1.0`、`scope=全集团`、`kind=bundle`、`available=true`、`installed=false`。
+- 包文件：`D:\project-test3\公文格式标准-1.0.zip`；构建目录 `D:\project-test3\market-build\gongwen-format`。Bundle 安装按账号生效，未自动替当前账号安装。
+
+
+
+## 84. 应用、插件、技能的安装进度环（2026-11-23）
+
+- 需求：市场里的应用、插件（Bundle）、技能在安装过程中都要有类似 App Store 的圆形进度，而不是点击后一直等待、只会在结束时弹 toast。
+- 原链路：卡片加号和详情抽屉按钮都是同步 `POST /api/plugin-market/install`，请求返回后才 `toast + renderView()`；服务端 `installMarketBundle()` 用 `spawnSync` 跑 `dsh plugin add`，最长 180 秒。同步子进程会锁住整个 HTTP 事件循环，安装期间连进度查询、健康检查都无法响应，这是“没有进度”的根因，不只是前端缺 UI。
+- 服务端：新增进程内 `installJobs`（按 `jobId`、`userId`、kind、name、percent/ceiling/label、done/ok 记录真实阶段，10 分钟 TTL）；`POST /api/plugin-market/install` 接受客户端生成的 `jobId`，在 `installMarketBundle`、`installMarketSkill`、`installMarketApp` 的真实边界写入阶段；新增 `GET /api/plugin-market/install/progress?jobId=`，只允许同一账号读取。
+- 异步化：新增 `runDshPluginAsync()`，市场 Bundle 安装改用 `spawn + await`，服务端在 pnpm 安装依赖期间仍能响应进度轮询；首次 `pnpmAvailable()` 也加了 `pnpmAvailableAsync()`，避免 30 秒同步探针再次锁住事件循环。超时会终止子进程并回写失败，不改变其他启停路径的同步调用。
+- 前端：新增 `startInstallProgress(button, { kind, name })`。卡片加号原位变成 24px 圆环；详情主按钮变成圆环 + “安装中 38%”文案。客户端每 650ms 轮询真实阶段，在服务端给出的阶段区间内平滑上涨，只有 POST 成功才画 100% 和绿色勾；失败画红色感叹号并恢复按钮，不会把失败画成完成。快速完成的技能/应用保留 380ms 最小可见时长，让圆环真实扫过一次再显示完成勾。同一窗口同一时间只允许一个安装任务，避免 Bundle 并发写 profile。
+- 实测（无头 Chrome，真实登录 Cookie）：Bundle「公文格式标准」安装时 `220ms=7%（准备安装）`、`380ms=38%（安装运行时依赖）`、`520ms=100%（安装完成）`，详情抽屉按钮同步显示“安装中 38%”；应用「交通流量分析」安装后卡片变为已安装菜单；技能「Agent 预设编辑」同样完成并正确落库。
+- 状态回滚：测试后已卸下 Bundle 与技能，`D-04=false`、`M-1795425222694=false`；应用「交通流量分析」恢复为安装状态 `true`。测试只验证安装，不改变额外账号数据。
+- 说明：应用安装本身是写安装台账，通常几十毫秒完成，圆环会很快到 100%；Bundle 依赖已缓存时约 0.5 秒，冷缓存时才会长时间停在“安装运行时依赖”阶段，进度条在这类长操作上最有价值。
+
+## 85. 中枢主服务双端口：客户端入口与云测试入口（2026-11-23）
+
+- 需求：主服务同时提供两个端口，一个只给本机电脑客户端，另一个给豆包云服务器或外部联调使用，不能再用同一个端口兼顾两种访问来源。
+- 实现：`server.mjs` 仍以 `PORT` 作为客户端入口并监听 `127.0.0.1`；新增 `JG_CLOUD_PORT`（默认 `PORT+1`，即客户端 `54269` 时云入口 `54270`）与 `JG_CLOUD_HOST`（默认 `0.0.0.0`）。两个监听复用同一个 `requestHandler`，会话、SQLite、应用运行时和 API 全部共享，不复制数据目录。
+- 配置：`JG_CLOUD_PORT=0` 可关闭云入口；`JG_CLOUD_HOST=127.0.0.1` 时只允许本机/内网穿透访问；默认 `0.0.0.0` 便于豆包云侧直接联调，但不建议把明文 HTTP 长期暴露到公网。
+- 失败隔离：客户端端口被占用仍按原逻辑退出；云端口被占用只打印告警，客户端入口继续运行。`data/run/server.pid` 新增 `cloudPort`、`cloudHost` 字段，Electron 仍只读取 `port` 做复用判定。
+- 实测：主服务 `PID 42384`，`127.0.0.1:54269` 为客户端入口，`0.0.0.0:54270` 为云入口；`/api/health` 在两端均返回 `jg-server`，通过局域网地址 `http://192.168.0.104:54270/api/health` 也返回 200；带真实会话访问 `54270/api/plugin-market` 返回 8 个条目，未登录访问返回 401；Electron `PID 37472` 正常复用 `54269` 并显示窗口。
+- 边界：云入口没有新增独立账号体系，仍使用中枢现有登录会话；豆包云若从公网访问，需要自行做端口映射或内网穿透，并在前面加 HTTPS/反向代理；当前只完成本机双监听与局域网验证，未改防火墙和公网映射。
+
+## 86. 应用统一走中枢子域名入口，动态端口退到内部实现（2026-11-23）
+
+- 需求：应用不再把各自的 `127.0.0.1:<动态端口>` 暴露给客户端标签页，统一从智能中枢入口进入；应用原有登录绑定继续沿用；云端口只承担 API 联调，不生成应用入口。
+- 方案：采用 Host 子域名反向代理，入口为 `http://<appId>.localhost:54269/...`，不用 `/apps/<id>/` 路径前缀。原因是 Next.js 的 `/_next/...`、Flask 的 `/static/...`、`Path=/` Cookie 和根路径重定向在路径前缀下会逃逸到中枢根路径，改成前缀必须逐个改应用；子域名下应用仍位于自己的根路径，静态资源、前端路由、Cookie 和重定向保持原语义。
+- 服务端：`server.mjs` 新增 `JG_APP_GATEWAY`（默认开启）、`JG_APP_GATEWAY_DOMAIN`（默认 `localhost`）、`requestHostname()`、`appGatewayIdFromHost()`、`appEntryPoint()`、`rewriteAppLocation()`、`proxyAppRequest()`。`requestHandler` 最前面按 Host 识别 `<appId>.<domain>`，命中后直接流式转发到 `runtimeState(appId)` 记录的 loopback 动态端口，不再经过中枢 API/静态页。`Location` 重写回子域名，`Set-Cookie` 去掉 `Domain`，并转发 `x-forwarded-*`。
+- 启动接口：`POST /api/as/start` 保留原 `url`（内部调试地址）并新增 `entryUrl`；只有请求 Host 是 `127.0.0.1`/`localhost` 时才生成子域名入口，云入口请求不生成。应用未启动返回 503 `AS_APP_NOT_RUNNING`；应用不存在或入口无效返回 502。
+- 前端：`public/app.js` 的 `startAsApp` 改用 `body.entryUrl || body.url`，租约、应用标签、历史、弹窗和心跳重连统一使用 `openUrl`；Electron `WebContentsView` 不需要改代码，只接收前端传入的 URL。应用市场卡片、应用详情和管理中心的应用运行态统一显示「中枢入口」，不再把动态端口展示给用户。
+- 登录与隔离：应用原有 `asContext` 门禁不变，网关只做转发；应用进程仍监听 `127.0.0.1:<动态端口>`，该端口不再出现在客户端应用标签页里。应用数据仍由 `AS_DATA_DIR` 按账号隔离。
+- 实测（HTTP）：材质提取 `M-1794734735216` 启动后内部端口 `61065`，返回 `entryUrl=http://jg-material-studio.localhost:54269/?asUser=A-7788-01&asContext=...`；入口页 200、标题「AI材质提取」，`jg_as_gate` Cookie 正常下发；CSS `/_next/static/chunks/0nh_7qy3gmfok.css` 经网关返回 200（112,195 字节），JS 资源 200；直接访问内部 `127.0.0.1:61065` 无令牌为 401。交通流量分析 `M-1794726898157` 启动后内部端口 `61257`，入口页 200、标题「交通流量分析工作台」。
+- 实测（双端口边界）：从 `127.0.0.1:54270` 调 `POST /api/as/start`，返回 `port=57226` 但无 `entryUrl`；同一应用从 `127.0.0.1:54269` 启动，返回 `entryUrl=http://jg-material-studio.localhost:54269/...`，入口页 200。带 `Host: jg-material-studio.localhost:54270` 访问云端口，返回中枢首页「九规智能中枢 · 企业级 AI 中枢」，没有进入应用网关。实现上 `appEntryPoint()` 按 `req.socket.localPort === port` 判定，`requestHandler` 也只在客户端端口识别应用子域名，避免本机访问云端口时被 Host 误判。
+- 实测（Electron）：以 `--remote-debugging-port=9333` 启动客户端，在主页面执行 `window.jgClient.asApp.open({appId:'traffic-flow', url: entryUrl})`，12 秒后 `window.jgClient.asApp.pageText('traffic-flow')` 返回「交通流量分析工作台」正文、断面流量/交叉口转向模块和最近分析记录，证明应用视图实际通过子域名入口加载并完成登录，而不是只测到 HTTP 层。
+- 附带修复：材质提取首次通过网关打开时页面无样式，根因是 `127.0.0.1:4173` 的旧 `next start` 进程 `PID 24064` 仍在服务旧构建清单，HTML 引用 `38bsd-h1xj5x1.css`，磁盘只有 `0nh_7qy3gmfok.css`；直接访问该内部端口同样 500，与网关无关。只重启 4173 前端（`PID 35232`）后，HTML 改为引用 `0nh_7qy3gmfok.css`，经网关返回 200，截图页面完整有样式。
+- 测试收尾：材质、交通两个应用已停止，`runtime.running=false`；Electron 已去掉调试端口并重新以正常模式启动；主服务 `PID 41548` 继续监听 `127.0.0.1:54269` 与 `0.0.0.0:54270`。
+- 边界：当前网关只处理 HTTP/SSE，没有实现 WebSocket `upgrade` 转发；`Location` 重写与 `Set-Cookie` Domain 清洗已有代码，但未补专门回归用例；应用内部动态端口仍存在，属于 AS 独立进程契约，不是对外入口。
+

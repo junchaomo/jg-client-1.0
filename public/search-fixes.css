@@ -631,6 +631,10 @@ body.resizing { cursor: col-resize; user-select: none; }
 .nbs-scope { height: 26px; display: inline-flex; align-items: center; gap: 4px; padding: 0 9px; border: 1px solid #e8ebef; border-radius: 999px; background: #fff; color: #5f6368; font-size: 11px; cursor: pointer; white-space: nowrap; }
 .nbs-scope svg { width: 12px; height: 12px; }
 .nbs-scope:hover { border-color: #d7dce3; color: #30343a; }
+.nbs-scope.on { background: #f0f2f5; border-color: #dfe3e8; color: #30343a; }
+.nbs-pick-back { display: inline-flex; align-items: center; gap: 4px; margin: 0 2px 6px; border: 0; background: transparent; color: #5f6368; font-size: 11px; cursor: pointer; padding: 2px 0; }
+.nbs-pick-back:hover { color: #30343a; }
+.nbs-src.over { border-color: #9db8e8; background: #f4f8ff; }
 .nbs-go { margin-left: auto; width: 26px; height: 26px; flex: none; display: grid; place-items: center; border: 0; border-radius: 50%; background: transparent; color: #9aa1ab; cursor: pointer; }
 .nbs-go svg { width: 15px; height: 15px; }
 .nbs-go:hover { background: #e9ecf0; color: #4a4f57; }
@@ -884,6 +888,14 @@ body.resizing { cursor: col-resize; user-select: none; }
 .nbsm-web-open { width: 24px; height: 24px; flex: none; display: grid; place-items: center; margin-top: 3px; border: 0; border-radius: 6px; background: transparent; color: #9aa1ab; cursor: pointer; }
 .nbsm-web-open svg { width: 13px; height: 13px; }
 .nbsm-web-open:hover { background: #f1f3f6; color: #4a4f57; }
+/* 侧栏内联结果紧凑布局（作用域仅限主面板侧栏，不影响添加来源弹窗） */
+.nbs-src .nbsm-web-row { gap: 6px; padding: 9px 2px; }
+.nbs-src .nbsm-web-row .nbsm-row-ico { width: 24px; height: 24px; }
+.nbs-src .nbsm-web-open { display: none; }
+.nbs-src .nbsm-row { gap: 6px; padding: 9px 2px; }
+.nbs-src .nbsm-row .nbsm-row-ico { width: 24px; height: 24px; }
+.nbs-src .nbsm-row-main b { font-size: 12px; }
+.nbs-src .nbsm-sect { padding: 8px 2px 4px; }
 .nbsm-web-diag { margin: 1px 2px 5px; padding: 6px 8px; border-radius: 7px; background: #f7f8fa; color: #8b919a; font-size: 10px; line-height: 1.5; }
 .nbsm-web-diag.warn { background: #fff8e8; color: #8a6418; }
 .nbsm-web-batch { position: sticky; bottom: 0; z-index: 2; display: flex; align-items: center; gap: 8px; padding: 8px 4px 6px; border-top: 1px solid #eceef2; background: #fff; }
@@ -2531,3 +2543,62 @@ body.resizing { cursor: col-resize; user-select: none; }
 
 /* 论文式参考文献：列表编号与正文 [N] 对齐 */
 /* 左栏来源条目不带编号；编号只出现在正文引用处。 */
+
+/* 市场安装进度：卡片图标位与详情主按钮共用同一套圆环，视觉沿用现有 --accent / 中性灰。 */
+.jg-install-ring{
+  --p:0;
+  --sz:24px;
+  width:var(--sz);
+  height:var(--sz);
+  flex:none;
+  position:relative;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  border-radius:50%;
+  background:conic-gradient(var(--accent,#2f6fe4) calc(var(--p) * 1%), #d5dade 0);
+  transition:background .16s linear;
+}
+.jg-install-ring::before{
+  content:"";
+  position:absolute;
+  inset:3px;
+  border-radius:50%;
+  background:var(--panel,#fff);
+}
+.jg-install-ring.big{--sz:22px}
+.jg-install-ring>i{
+  position:relative;
+  z-index:1;
+  font-style:normal;
+  font-size:10px;
+  line-height:1;
+  color:var(--accent,#2f6fe4);
+}
+.jg-install-ring.done{background:#2f9a67}
+.jg-install-ring.done>i{color:#2f9a67}
+.jg-install-ring.fail{background:#c34b4b}
+.jg-install-ring.fail>i{color:#c34b4b}
+.jg-install-ring.is-idle{background:#d5dade}
+.jg-install-label{
+  font-size:12.5px;
+  color:#6b7280;
+  font-variant-numeric:tabular-nums;
+  white-space:nowrap;
+}
+.jg-install-btn.is-installing{
+  gap:9px;
+  cursor:default;
+}
+.pl-act.is-installing{
+  width:28px;
+  padding:0;
+  cursor:default;
+  background:transparent!important;
+}
+.pl-act.is-installing:hover{background:transparent!important}
+@media (prefers-reduced-motion: reduce){
+  .jg-install-ring{transition:none}
+}
+
+

@@ -12,6 +12,7 @@ import { appendFileSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSyn
 import { inflateRawSync } from 'node:zlib'
 import { execFileSync } from 'node:child_process'
 import { readFile } from 'node:fs/promises'
+import { networkInterfaces } from 'node:os'
 import { basename, dirname, extname, isAbsolute, join, normalize, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
@@ -19,7 +20,7 @@ import {
   SESSION_TTL_MS, appendAudit, appendApprovalDecision, auditCount, backupNow, cleanupSessions, clearAudit, clearSessions, closeStore, createSession,
   createImageAsset, createImageComment, createImageJob, createImageLayer, createImageRevision, createImageTemplate, deleteFile, deleteImageLayersByAsset, getImageAsset, getImageLayer, getImageTemplate, imageRevisionCount, listImageAssets, listImageComments, listImageLayers, listImageRevisions, listImageRevisionCosts, listApprovedImageTemplates, listAllImageTemplates, listImageTemplatesByApplicant, reviewImageTemplate, offlineImageTemplate, publishImageTemplate, deleteImageTemplate, softDeleteImageLayer, updateImageLayer,
   dataDirPath, deleteSession, expirePendingApprovalDecisions, backfillActorUserIds, getAccount, getAccountByRole, getAccountByUsername, getFile, getSession, latestApprovalDecisions, latestAudit,
-  listAccounts, listFiles, loadState, putFile, readFileBuffer, saveState, touchSession,
+  listAccounts, listFiles, loadState, putFile, readFileBuffer, saveState, touchSession, extendSession, listAccountSessions,
   archiveMemory,
   softDeleteImageAsset, updateImageAssetLatest, updateImageJob,
   createPipelineDataset, getPipelineDataset, listPipelineDatasets, softDeletePipelineDataset, updatePipelineDatasetCounts,
@@ -36,7 +37,7 @@ import { describeToolCall, summarizeToolCall } from './approval-rules.mjs'
 import { mergeToolPolicies, runCodeLimitForTurn, toolPolicyForTurn } from './tool-policy.mjs'
 import {
   academy, academyStats, accessAnomalies, aiTools,
-  apps, auditSeed, automations, cloudCredentials, cloudPolicy, cloudSessions,
+  apps, auditSeed, automations, cloudPolicy, cloudSessions,
   cloudSpaces, cloudSystems, contacts, dataServices, driveItems, driveQuota, feedback, imageryCompare, imThreads,
   knowledgeDocs, messagesSeed, modelPolicy, modules,
   monitor, networks, networkOrder, notices, notifications, orgMembers, orgUnits, projects,
@@ -46,6 +47,9 @@ import {
 } from './data.mjs'
 import { buildDocument, supportedFormats } from './docs.mjs'
 import { extractText as extractPdfText, extractTextAsync as extractPdfTextAsync, inspectPdf, mergePdfs, splitPdf } from './pdf.mjs'
+import { previewKind, officePdfFor, officePdfForBuffer, officeViewer, pdfViewer, imageViewer, textViewer, unsupportedViewer, errorViewer, spatialViewer, mimeFor, renderPdfFirstPagePng } from './preview.mjs'
+import { onlyOfficeConfig, onlyOfficeType, onlyOfficeReachable, createOnlyOfficeToken, readOnlyOfficeToken, buildOnlyOfficeConfig, onlyOfficeEditorPage, downloadOnlyOfficeSave, verifyOnlyOfficeJwt, forceOnlyOfficeSave } from './onlyoffice.mjs'
+import { ackOfficeCommand, applyOfficeSelectionReplace, officeBridgeEvents, officePluginConfig, officePluginIcon, officePluginPage, officePluginScript, officePluginSdk, officeSelectionForUser, recordOfficeSelection } from './office-bridge.mjs'
 import { inspectSpatial } from './geo.mjs'
 import { FORMAT_REGISTRY, detectDataFormat, exportDataFormat, extractDataFormat, inspectDataFormat } from './formats.mjs'
 import { checkProjectDeliverables } from './deliverable-check.mjs'
@@ -58,15 +62,17 @@ import {
 } from './pipeline.mjs'
 import { HARNESS_BASE_SERVICES, runHarnessService } from './harness-services.mjs'
 import { ModelError, chatCompletion, chatCompletionStream, hasWorkIntent, isDirectAnswerable, resolveModelConfig, routeModel } from './model.mjs'
-import { autoCaptureMemory, backfillMemoryEmbeddings, distillTurnMemory, forgetMemory, listMemoryItems, memoryContextForTurn, memoryStats, searchMemory, writeMemory } from './memory.mjs'
+import { autoCaptureMemory, backfillMemoryEmbeddings, distillModelMemory, distillTurnMemory, forgetMemory, listMemoryItems, memoryContextForTurn, memoryStats, searchMemory, shouldAttemptMemoryDistill, writeMemory } from './memory.mjs'
 import { ImageProviderError, decomposeImage, editImage, editImageInRegion, expandImage, generateImage, imageModelStatus, upscaleImage, visualStatus } from './image-providers.mjs'
 import { prepareSpeech, modelStatus, transcribeSpeech } from './speech.mjs'
 import { pinyin } from 'pinyin-pro'
 import { HarnessError, cancelRun, closeHarness, closeHarnessForHome, dshBin, runAgent, stopBackgroundRuntime } from './harness.mjs'
 import { extractAppPackage, extractBundlePackage, extractSkillPackage, inspectPluginZip } from './plugin-scan.mjs'
+import { packDirectoryToZip } from './publish.mjs'
+import { createSettingsCenter } from './settings-center.mjs'
 import {
   AS_APPS_ROOT, appAvailable, appCapabilities, appManifest, appRoot, appVersionDir, appVersionList, callAppTool, currentAppInfo, dataDirFor,
-  heartbeatApp, reconcileAppsOnBoot, releaseApp, runtimeState, setCurrentAppVersion, switchAppVersion,
+  heartbeatApp, reconcileAppsOnBoot, releaseApp, runtimeState, setAppAutoStart, setCurrentAppVersion, switchAppVersion,
   shutdownApps, startApp, sweepApps, uninstallApp, verifyAppContext, mintAppModelToken, verifyAppModelToken,
 } from './as-runtime.mjs'
 import { activeGrantFor, createGrant, grantView, listGrants, mintDataToken, revokeGrant, verifyDataToken } from './app-data-grants.mjs'
@@ -76,6 +82,9 @@ import { priceImage, pricingSummary } from './pricing.mjs'
 import { createPricingWatch } from './price-watch.mjs'
 import { execTerminal, resetTerminal, terminalStatus } from './terminal.mjs'
 import { consoleRoles, consoleNav, consoleModules, consoleSections, consoleScopeOptions } from './console.mjs'
+import {
+  buildDeterministicSummary, buildReport, collectPlanningPublicity, diffAgainstSnapshot, extraWindowDays, itemKey, nextSnapshot,
+} from './portal-notice.mjs'
 
 const root = fileURLToPath(new URL('./', import.meta.url))
 // 本地私密配置不进仓库；.env.local 已在 .gitignore 中排除。
@@ -118,6 +127,23 @@ const frontendVersion = (() => {
 if (!process.env.JG_MCP_TOKEN) process.env.JG_MCP_TOKEN = randomBytes(24).toString('hex')
 if (!process.env.JG_MCP_ACCOUNT) process.env.JG_MCP_ACCOUNT = 'A-7788-01'
 const port = Number(process.env.PORT || 4173)
+/* 双入口：PORT 只给本机电脑客户端，JG_CLOUD_PORT 给豆包云服务器/外部测试。
+   默认取 PORT+1；显式 JG_CLOUD_PORT=0 可关闭第二入口。 */
+const cloudPort = (() => {
+  const raw = process.env.JG_CLOUD_PORT
+  if (String(raw || '').trim() === '0') return 0
+  if (String(raw || '').trim() !== '') {
+    const n = Number(raw)
+    return Number.isInteger(n) && n > 0 && n <= 65535 ? n : 0
+  }
+  return port > 0 && port < 65535 ? port + 1 : 0
+})()
+const cloudHost = String(process.env.JG_CLOUD_HOST || '0.0.0.0')
+/* 应用统一入口：客户端不再直接打开应用的内部端口，而是走
+   http://<appId>.localhost:<PORT>/，由中枢按 Host 反代到 127.0.0.1:<动态端口>。
+   JG_APP_GATEWAY=0 可关闭；JG_APP_GATEWAY_DOMAIN 供后续泛域名部署使用。 */
+const appGatewayEnabled = String(process.env.JG_APP_GATEWAY || '1') !== '0'
+const appGatewayDomain = String(process.env.JG_APP_GATEWAY_DOMAIN || 'localhost').replace(/^\.+/, '').toLowerCase()
 // 运维/回归可用一个统一上限覆盖默认预算；不设置时按会话类型分配。
 const forcedMaxToolCalls = Number(process.env.JG_MAX_TOOL_CALLS || 0) > 0 ? Number(process.env.JG_MAX_TOOL_CALLS) : 0
 const downloadSecret = process.env.JG_DOWNLOAD_SECRET || randomBytes(32).toString('hex')
@@ -415,6 +441,7 @@ function visualsFromReply(reply, user, sessionId) {
 
 const audit = [...auditSeed]
 const readNotifications = new Map()  // 各账号分别记录已读，避免串号
+const clearedNotifications = new Map()  // 各账号已被「清空已读」隐藏的通知 id，避免串号
 const liveResources = [...resources]
 const liveDataServices = [...dataServices]
 
@@ -519,6 +546,11 @@ const PRODUCT_MARKET_PLUGINS = [
   },
 ]
 
+/* 应用提醒注册表：应用只登记“何时提醒谁”，真正到点写铃铛由中枢调度器完成。
+   这样应用进程重启、窗口关闭、账号切换都不会把定时器一起带走。 */
+const appReminders = []
+const APP_REMINDER_MAX = 500
+
 /* 市场安装台账：按市场条目记录“哪个账号、装到哪个范围”，用于隔离与后台查看。 */
 const liveMarketInstalls = new Map()
 function marketInstallRecords(id) {
@@ -535,6 +567,44 @@ function removeMarketInstallRecord(id, record) {
   if (list.length) liveMarketInstalls.set(String(id), list)
   else liveMarketInstalls.delete(String(id))
 }
+/**
+ * 中枢启动后自动拉起已安装应用。
+ * 只恢复“上次运行且没有被用户手动停止”的应用；旧数据没有 autoStart 字段时按已安装处理一次，
+ * 之后用户点「停止应用」会写 autoStart=false，重启不再自行拉起。
+ */
+async function autoStartInstalledApps() {
+  const started = []
+  const failed = []
+  for (const item of liveMarket.filter((x) => x.kind === 'app')) {
+    const appId = String(item.appId || item.id)
+    const records = marketInstallRecords(item.id)
+    if (!records.length) continue
+    const rs = runtimeState(appId)
+    if (rs.running) continue
+    if (rs.autoStart === false) continue
+    if (!appAvailable(appId)) continue
+    const userId = rs.activeUser && records.some((r) => String(r.userId) === String(rs.activeUser))
+      ? rs.activeUser
+      : String(records[0]?.userId || '')
+    if (!userId) continue
+    try {
+      const result = await startApp({ id: appId, userId })
+      started.push({ appId, userId, pid: result.pid, port: result.port })
+      console.log(`[as-runtime] auto-started ${appId} for ${userId} pid=${result.pid} port=${result.port}`)
+    } catch (error) {
+      const message = String(error?.message || error)
+      failed.push({ appId, userId, error: message })
+      /* 启动失败不进入每次开机重试死循环；用户重新打开应用会再次置 autoStart=true。 */
+      try { setAppAutoStart({ id: appId, autoStart: false }) } catch {}
+      console.error(`[as-runtime] auto-start failed ${appId}:`, message)
+    }
+  }
+  if (started.length || failed.length) {
+    console.log(`[as-runtime] auto-start summary: ${started.length} started, ${failed.length} failed`)
+  }
+  return { started, failed }
+}
+
 /* 插件安装与启停按用户独立保存，避免一个账号的操作影响其他人。 */
 const livePluginInstalls = new Map()
 const livePluginToggles = new Map()
@@ -911,9 +981,7 @@ const liveSharedModels = new Map()
 /* 浏览器扩展白名单注册表：平台（hub）审核收录后，登录用户可在会话内启用 / 停用；
    管理员可上架、下架与远程移除。扩展脚本只在浏览器隔离分区运行，不接触中枢会话与密钥。 */
 const BROWSER_EXT_SEED = [
-  { id: 'ext-audit', name: '企业审计水印', desc: '对企业站点自动叠加水印并留痕', version: '1.0.0', permissions: ['tabs', 'storage'], hostAccess: 'https://*/*', status: 'listed' },
-  { id: 'ext-json', name: 'JSON 格式化', desc: '格式化接口返回与调试数据', version: '1.0.0', permissions: ['storage'], hostAccess: 'https://*/*', status: 'listed' },
-  { id: 'ext-ad', name: '广告拦截', desc: '拦截弹窗与追踪脚本（网络请求权限，需管理员评估）', version: '1.0.0', permissions: ['declarativeNetRequest', 'storage'], hostAccess: 'https://*/*', status: 'disabled' },
+  { id: 'ext-ubol', name: 'uBlock Origin Lite', desc: '官方 MV3 广告与跟踪请求拦截 · uBlockOrigin/uBOL-home', version: '2026.1122.1948', permissions: ['declarativeNetRequest', 'scripting', 'storage'], hostAccess: '<all_urls>', status: 'listed', extPath: 'ublock-origin-lite' },
 ]
 const liveBrowserExts = new Map(BROWSER_EXT_SEED.map((x) => [x.id, {
   owner: 'hub', requestedBy: 'hub', reviewedBy: 'hub', reviewedAt: new Date().toISOString(),
@@ -1120,6 +1188,8 @@ function runtimeOverview(home = join(dataDirPath(), 'dsh-home')) {
     skills = readdirSync(skillsDir, { withFileTypes: true })
       .filter((entry) => entry.isDirectory())
       .map((entry) => entry.name)
+      /* 与已安装列表同一准入：市场安装（有 .jg-market.json）或平台官方基线；手工目录不进入平台可见清单。 */
+      .filter((dir) => OFFICIAL_SKILL_DIRS.includes(dir) || Boolean(marketSkillManifestAt(join(skillsDir, dir))?.marketId))
   } catch {}
   return {
     dshVersion,
@@ -1218,7 +1288,7 @@ function officialBaselineBundles() {
     status: bundles.includes(b.name) ? 'enabled' : 'missing',
   }))
 }
-/* 账号技能目录里由市场安装的技能；官方基线不复制到这里，因此不会混入“已安装”。 */
+/* 账号技能目录里由市场安装的技能；没有 .jg-market.json 的手工目录不进入平台可见清单。 */
 function installedUserSkillPlugins(userId) {
   const skillsDir = join(userDshHome(userId), 'skills')
   let dirs = []
@@ -1229,23 +1299,24 @@ function installedUserSkillPlugins(userId) {
   for (const dir of dirs) {
     const target = join(skillsDir, dir)
     const manifest = marketSkillManifestAt(target)
-    const item = manifest?.marketId ? liveMarket.find((m) => m.id === manifest.marketId) : null
-    let name = item?.name || dir
+    if (!manifest?.marketId) continue
+    const item = liveMarket.find((m) => m.id === manifest.marketId) || null
+    let name = item?.name || manifest.name || dir
     let desc = item?.desc || '当前账号安装的技能'
     try {
       const text = readFileSync(join(target, 'SKILL.md'), 'utf8')
       const fm = text.match(/^---\s*\n([\s\S]*?)\n---/)
-      if (fm && !item) {
-        name = (fm[1].match(/^name:\s*(.+)$/m) || [])[1]?.trim() || name
-        desc = (fm[1].match(/^description:\s*(.+)$/m) || [])[1]?.trim() || desc
+      if (fm) {
+        name = item?.name || manifest.name || (fm[1].match(/^name:\s*(.+)$/m) || [])[1]?.trim() || name
+        desc = item?.desc || (fm[1].match(/^description:\s*(.+)$/m) || [])[1]?.trim() || desc
       }
     } catch {}
     list.push({
       id: `S-user-${dir}`,
       name,
       kind: 'personal',
-      publisher: item?.publisher || '当前账号安装',
-      version: item?.version || '',
+      publisher: item?.publisher || '插件市场',
+      version: item?.version || manifest.version || '',
       status: 'enabled',
       nets: ['inet', 'gov', 'secret'],
       deps: '账号技能目录',
@@ -1254,7 +1325,7 @@ function installedUserSkillPlugins(userId) {
       desc,
       source: 'dsh-skill',
       dir,
-      marketId: manifest?.marketId || '',
+      marketId: manifest.marketId,
     })
   }
   return list
@@ -1467,7 +1538,94 @@ function accountRuntimeHome(user) {
   return ensureUserDshHome(user.id)
 }
 
-const liveToolLedger = toolLedger.map((t) => ({ ...t }))
+/* 工具台账是"能调什么 + 调了多少次"的权威口径：seed 只给名称/风险/权限，
+   调用次数一律从 0 起算，由真实请求累加，避免把演示数字当成生产统计。 */
+const liveToolLedger = toolLedger.map((t) => ({ ...t, calls: 0, lastCallAt: 0, source: 'platform' }))
+
+function mergeToolLedgerWithSeed(persisted) {
+  const byId = new Map(toolLedger.map((t) => [t.id, { ...t, calls: 0, lastCallAt: 0, source: 'platform' }]))
+  for (const item of Array.isArray(persisted) ? persisted : []) {
+    if (!item || !item.id) continue
+    const base = byId.get(item.id) || {
+      id: String(item.id), name: String(item.name || item.id), version: String(item.version || '—'),
+      endpoint: String(item.endpoint || 'AI 调用'), env: String(item.env || '中枢 / Harness'),
+      perm: String(item.perm || '自动记录'), risk: String(item.risk || '中'),
+      confirm: Boolean(item.confirm), calls: 0, lastCallAt: 0, source: String(item.source || 'platform'),
+    }
+    byId.set(item.id, {
+      ...base, ...item,
+      calls: Math.max(0, Number(item.calls) || 0),
+      lastCallAt: Number(item.lastCallAt) || 0,
+    })
+  }
+  return [...byId.values()]
+}
+
+function recordToolLedgerCall(id, meta = {}) {
+  const key = String(id || '').trim()
+  if (!key) return
+  let entry = liveToolLedger.find((t) => t.id === key)
+  if (!entry) {
+    entry = {
+      id: key, name: key, version: '—', endpoint: 'AI 动态调用', env: '中枢 / Harness',
+      perm: '自动记录', risk: '中', confirm: false, calls: 0, lastCallAt: 0, source: 'runtime',
+    }
+    liveToolLedger.push(entry)
+  }
+  entry.calls = Math.max(0, Number(entry.calls) || 0) + 1
+  entry.lastCallAt = Date.now()
+  if (meta.actor) entry.lastActor = String(meta.actor)
+  if (meta.action) entry.lastAction = String(meta.action)
+}
+
+/* 应用工具不是 seed 里的静态十条：每装一个应用，它的只读/写操作工具都要进台账，
+   写操作沿用 source=schema 的 sideEffect 作为高风险 + 强制确认。 */
+function syncToolLedgerForUser(user) {
+  let changed = false
+  const add = (entry) => {
+    const existing = liveToolLedger.find((t) => t.id === entry.id)
+    if (!existing) {
+      liveToolLedger.push(entry)
+      return true
+    }
+    /* 先发生真实调用、后打开台账时，runtime 自动建出的条目只有 id；
+       这里补全名称/风险/权限/确认策略，但绝不能把已累计的次数清零。 */
+    if (!existing.source || existing.source === 'runtime') {
+      const calls = Math.max(0, Number(existing.calls) || 0)
+      const lastCallAt = Number(existing.lastCallAt) || 0
+      Object.assign(existing, entry, { calls, lastCallAt })
+      return true
+    }
+    return false
+  }
+  for (const tool of APP_AI_GENERIC_TOOLS) {
+    const isAppCall = tool.name === 'app_call'
+    changed = add({
+      id: tool.name, name: tool.label, version: '1.0.0', endpoint: `AI ${tool.name}`,
+      env: '中枢 / Harness', perm: isAppCall ? '应用调用' : '平台只读',
+      risk: isAppCall ? '高' : '低', confirm: isAppCall, calls: 0, lastCallAt: 0,
+      source: 'platform',
+    }) || changed
+  }
+  for (const app of appToolCatalog(user)) {
+    for (const tool of [...(app.tools || []), ...(app.resources || [])]) {
+      changed = add({
+        id: appAiToolName(app.appId, tool.name),
+        name: `${app.name} · ${tool.description || tool.name}`,
+        version: app.version || '—',
+        endpoint: `CALL ${tool.method || 'CALL'} ${tool.path || ''}`.trim(),
+        env: 'AS 应用运行时',
+        perm: '应用调用',
+        risk: tool.sideEffect ? '高' : '低',
+        confirm: Boolean(tool.sideEffect),
+        calls: 0, lastCallAt: 0,
+        source: 'app', appId: app.appId, appTool: tool.name,
+      }) || changed
+    }
+  }
+  return changed
+}
+
 const liveVersions = Object.fromEntries(Object.entries(resourceVersionSeed).map(([k, v]) => [k, v.map((x) => ({ ...x }))]))
 const liveGrants = Object.fromEntries(Object.entries(resourceGrantSeed).map(([k, v]) => [k, v.map((x) => ({ ...x }))]))
 const liveEditRequests = new Map()
@@ -3227,8 +3385,11 @@ function buildNotebookContext(items, question) {
 function notebookCitationClaimText(text, markerStart) {
   const from = Math.max(0, markerStart - 320)
   const chunk = String(text || '').slice(from, markerStart)
-  const lines = chunk.split('\n').filter((line) => line.trim())
-  let tail = lines.length ? lines[lines.length - 1] : chunk
+  /* 同一行里用分号或逗号连续引多个来源时，只取当前编号前的那一小句，不能把前一个编号的论据累计进来。 */
+  const prior = [...chunk.matchAll(/\[[0-9]{1,3}\]/g)].pop()
+  const segment = prior ? chunk.slice((prior.index || 0) + prior[0].length) : chunk
+  const lines = segment.split('\n').filter((line) => line.trim())
+  let tail = lines.length ? lines[lines.length - 1] : segment
   const sentences = tail.split(/(?<=[。！？!?])\s*/u).filter((sentence) => sentence.trim())
   if (sentences.length > 1) tail = sentences[sentences.length - 1]
   if (tail.replace(/\[[0-9]{1,3}\]/g, '').trim().length < 8 && lines.length > 1) {
@@ -3237,7 +3398,7 @@ function notebookCitationClaimText(text, markerStart) {
   return tail
     .replace(/\[[0-9]{1,3}\]/g, '')
     .replace(/\*\*/g, '')
-    .replace(/^[\s>*#\-•\d.、一二三四五六七八九十]+/u, '')
+    .replace(/^[\s>*#\-•\d.、一二三四五六七八九十；，,：:]+/u, '')
     .trim()
     .slice(-240)
 }
@@ -3250,7 +3411,7 @@ function notebookEvidenceWindows(text) {
     .split(/\n+/)
     .flatMap((block) => block.replace(/\s+/g, ' ').trim().split(/(?<=[。！？!?])\s*/u))
     .map((sentence) => sentence.trim())
-    .filter((sentence) => sentence.length >= 10)
+    .filter((sentence) => sentence.length >= 3)
   if (!sentences.length) return [source.replace(/\s+/g, ' ').slice(0, 200)]
   const windows = []
   for (let i = 0; i < sentences.length; i += 1) {
@@ -3295,13 +3456,20 @@ function notebookClaimEvidenceScore(claim, quote) {
 }
 
 function bestNotebookEvidence(claim, sourceText, fallbackQuote) {
+  const source = cleanNotebookText(sourceText)
+  const exists = (quote) => {
+    const needle = compactNotebookQuote(quote).replace(/\s+/g, '')
+    return !!needle && !!source && source.replace(/\s+/g, '').includes(needle)
+  }
   const candidates = [String(fallbackQuote || ''), ...notebookEvidenceWindows(sourceText)]
-  let bestQuote = String(fallbackQuote || '')
+    .filter((quote) => !!quote && (!source || exists(quote)))
+  if (!candidates.length && fallbackQuote) candidates.push(String(fallbackQuote))
+  let bestQuote = ''
   let bestScore = -999
   for (const quote of candidates) {
     if (!quote) continue
     const score = notebookClaimEvidenceScore(claim, quote)
-    if (score > bestScore || (score === bestScore && quote.length < bestQuote.length)) {
+    if (!bestQuote || score > bestScore || (score === bestScore && quote.length < bestQuote.length)) {
       bestQuote = quote
       bestScore = score
     }
@@ -3435,7 +3603,7 @@ function notebookComplementFragment(claim, citation, sourceText, primaryQuote) {
   }
 }
 
-/* 每一处引用生成一个唯一编号和一个唯一片段；同一来源在不同位置引用时也不复用编号。 */
+/* 同一来源的同一原文片段全篇只分配一个编号；不同位置引用同一句时复用该编号，避免多个序号指向完全相同的原文。 */
 function refineNotebookCitations(answer, citations, sourceTexts = []) {
   const text = String(answer || '')
   const matches = [...text.matchAll(/\[(\d{1,3})\]/g)]
@@ -3458,6 +3626,7 @@ function refineNotebookCitations(answer, citations, sourceTexts = []) {
   const nextCitations = []
   const nextAnchors = []
   const edits = []
+  const fragmentNumbers = new Map()
   let nextNo = 1
 
   for (const cluster of clusters) {
@@ -3505,16 +3674,19 @@ function refineNotebookCitations(answer, citations, sourceTexts = []) {
     if (!selected.length) continue
 
     const numbers = []
-    const seenFragments = new Set()
     const addFragment = (sourceIndex, fragment) => {
       if (!fragment?.quote) return
       const sourceCitation = citations[sourceIndex]
       if (!sourceCitation) return
       const key = `${sourceCitation.resourceId}|${fragment.quote.replace(/\s+/g, '')}`
-      if (seenFragments.has(key)) return
-      seenFragments.add(key)
+      const reusedNo = fragmentNumbers.get(key)
+      if (reusedNo) {
+        if (!numbers.includes(reusedNo)) numbers.push(reusedNo)
+        return
+      }
       const no = nextNo
       nextNo += 1
+      fragmentNumbers.set(key, no)
       numbers.push(no)
       const citation = {
         resourceId: sourceCitation.resourceId,
@@ -3560,7 +3732,7 @@ function refineNotebookCitations(answer, citations, sourceTexts = []) {
   return { answer: repaired, citations: nextCitations, citationAnchors: nextAnchors }
 }
 
-const NOTEBOOK_ANCHOR_VERSION = 5
+const NOTEBOOK_ANCHOR_VERSION = 7
 const NOTEBOOK_ANCHOR_CACHE = new WeakMap()
 const NOTEBOOK_CITATION_ENRICH_CACHE = new WeakMap()
 function hydrateNotebookCitationAnchors(nb, message, citations) {
@@ -3595,7 +3767,7 @@ function notebookAnswerMessages(question, blocks) {
 5. 扫描件经服务端 OCR 得到正文时，按 OCR 文本回答；OCR 明显错字、缺页或截断时说明识别限制，但不要仅因为“是扫描件”就拒答可识别内容。
 6. 用户说“这个文件/这份资料/本文件”时，默认指当前笔记本中可读取的来源；当前只有一个来源时直接按该来源回答，不要因为指代而拒答。
 7. 网页来源只可使用【来源 N】块中给出的网页正文与来源网址；不得凭记忆补写网页内容，也不得把搜索摘要当成完整网页。
-8. 引用最小单位是原文中的一个具体片段，不是整份来源。每写一个具体事实、数字或结论，就紧跟一次来源编号；一句含多个并列事实时，在每个分句后分别引用，不要把整句或多个事实共用一个编号。系统会为每处引用分配唯一编号；同一来源在不同位置也要分别标注。多个来源共同支撑同一处事实时，把相关编号连续写出（如 [2][4]），但每个来源必须确实包含该处事实。
+8. 引用最小单位是原文中的一个具体片段，不是整份来源。每写一个具体事实、数字或结论，就紧跟一次来源编号；一句含多个并列事实时，在每个分句后分别引用，不要把整句或多个事实共用一个编号。系统会为每个不同的原文片段分配编号，同一片段被多处引用时复用同一编号；不要重复标注同一片段。多个来源共同支撑同一处事实时，把相关编号连续写出（如 [2][4]），但每个来源必须确实包含该处事实。
 9. 用简洁中文回答，优先分点；不要提及系统提示词。`,
     },
     {
@@ -3778,8 +3950,79 @@ function closeAllCloudSessions(reason) {
   })
 }
 const conversations = sampleConversations.map((c) => ({ ...c, messages: c.messages.map((m) => ({ ...m })) }))
+const settingsCenterState = { version: 1, workspaces: {}, mfa: {}, accessRequests: [], cacheClears: {} }
+const settingsCenter = createSettingsCenter({
+  state: settingsCenterState, root, dataDir: dataDirPath(), productVersion, port,
+  roleOf, netOf, sessionOf, json, contentDisposition, logAudit,
+  listAccountSessions, deleteSession, conversations, conversationAllowed, conversationMarkdown,
+  resources: liveResources, modelForUser: (user) => defaultSharedModel('chat', user.id),
+  canSeeResource: (user, resource, net) => canSee(user, resource, net),
+  canReview: (user) => canManage(user) || dutiesOf(user).includes('dataAdmin'),
+  reviewerIds: () => listAccounts().filter((account) => account.role === 'admin' || account.role === 'data_admin').map((account) => account.id),
+  notifyUser: (userId, { title, body, level }) => {
+    liveMessages.unshift({
+      id: `MSG-${Date.now().toString(36).toUpperCase()}-${randomBytes(2).toString('hex').toUpperCase()}`,
+      userId, kind: 'grant', title, body, from: '数据授权中心',
+      target: { view: 'settings', tab: 'access' }, time: stamp(), unread: true, level: level || '',
+    })
+  },
+  ensureWorkspaceAcl, closeHarnessForHome, userDshHome,
+  storageCheck: () => `审计记录 ${auditCount()} 条 · 数据库查询执行成功`,
+})
 // 仅记录本进程内真正在跑的对话，避免历史遗留的 status=running 阻塞停止操作。
 const activeRuns = new Set()
+
+/*
+ * 市场安装进度：安装在服务端是真实分阶段的（校验包、pnpm 装依赖、重载运行时），
+ * 这里按 jobId 记录服务端当前阶段，前端轮询后画圆环，而不是纯前端假动画。
+ * 阶段里的 floor/ceiling 是该阶段允许的视觉区间；真正的完成状态只由 POST 返回决定。
+ */
+const installJobs = new Map()
+const INSTALL_JOB_TTL_MS = 10 * 60 * 1000
+function installJobStart(jobId, user, kind, name) {
+  const id = String(jobId || '')
+  if (!/^[A-Za-z0-9_-]{8,80}$/.test(id)) return ''
+  installJobs.set(id, {
+    id,
+    userId: String(user?.id || ''),
+    kind,
+    name: String(name || ''),
+    percent: 8,
+    ceiling: 18,
+    label: '准备安装',
+    done: false,
+    ok: false,
+    error: '',
+    startedAt: Date.now(),
+    updatedAt: Date.now(),
+  })
+  return id
+}
+function installJobPhase(jobId, label, percent, ceiling) {
+  const job = installJobs.get(String(jobId || ''))
+  if (!job) return
+  job.label = String(label || job.label)
+  job.percent = Math.max(job.percent, Math.min(99, Number(percent) || job.percent))
+  job.ceiling = Math.max(job.percent, Math.min(99, Number(ceiling) || job.percent))
+  job.updatedAt = Date.now()
+}
+function installJobEnd(jobId, ok, error = '') {
+  const job = installJobs.get(String(jobId || ''))
+  if (!job) return
+  job.percent = ok ? 100 : job.percent
+  job.ceiling = ok ? 100 : job.ceiling
+  job.label = ok ? '安装完成' : '安装失败'
+  job.done = true
+  job.ok = Boolean(ok)
+  job.error = String(error || '')
+  job.updatedAt = Date.now()
+}
+setInterval(() => {
+  const now = Date.now()
+  for (const [id, job] of installJobs) {
+    if (now - job.updatedAt > INSTALL_JOB_TTL_MS) installJobs.delete(id)
+  }
+}, 60 * 1000).unref()
 
 // 模型在工具调用前发起的审批/提问，等前端卡片回填。只保留本轮，进程重启即丢弃。
 const pendingInteractions = new Map()
@@ -3943,6 +4186,24 @@ for (const account of listAccounts()) {
   try { ensureUserDshHome(account.id) } catch {}
 }
 clearDemoData()
+loadConfiguredCloudSystems()
+function loadConfiguredCloudSystems() {
+  const file = join(dataDirPath(), 'cloud-systems.json')
+  if (!existsSync(file)) return
+  try {
+    const body = JSON.parse(readFileSync(file, 'utf8'))
+    const items = (Array.isArray(body) ? body : body.items || []).filter((item) => item && item.id && item.name && item.host)
+      .map((item) => ({
+        id: String(item.id), name: String(item.name), host: String(item.host).replace(/^https?:\/\//, '').replace(/\/.*$/, ''),
+        net: item.net === 'gov' ? 'gov' : 'inet', level: item.level === 'secret' ? 'secret' : 'public',
+        scopes: Array.isArray(item.scopes) && item.scopes.length ? item.scopes.map(String) : ['public'],
+        status: item.status === '维护中' ? '维护中' : '正常', approval: String(item.approval || 'none'), desc: String(item.desc || ''),
+      }))
+    replaceArray(liveCloud, items)
+  } catch (error) {
+    console.error('[cloud] 企业系统目录读取失败：', error?.message || error)
+  }
+}
 // 重启会丢弃内存里的待审批交互；将上一进程遗留的 pending 记录收口为 expired，
 // 避免审计列表长期显示“待审批”。
 expirePendingApprovalDecisions('system-restart')
@@ -3952,6 +4213,8 @@ recoverPersistedConversations()
 setTimeout(() => resumeDriveIndexBackfill(), 1500).unref()
 for (const a of liveAutomations) if (a && a.status === 'active' && !a.nextRunAt) scheduleAutomationNext(a, Date.now())
 setInterval(automationTick, 30_000).unref()
+setInterval(appReminderTick, 15_000).unref()
+setTimeout(() => { try { appReminderTick() } catch (error) { console.error('[jg-server] app reminder boot tick failed:', error?.message || error) } }, 0).unref()
 
 // 2026-11-11：按用户要求清空所有演示业务数据，仅保留真实账号与模型配置。
 // 演示数组已在 data.mjs 模块加载时置空；这里只做一次旧快照清理，避免重启后又回来。
@@ -4101,6 +4364,31 @@ function pnpmAvailable() {
   }
   return pnpmProbe
 }
+/*
+ * 安装路由不能再用同步探针：首次 pnpm --version 最长会等 30 秒，
+ * 这段时间同样会锁住事件循环，让进度轮询无法返回。
+ */
+function pnpmAvailableAsync() {
+  if (pnpmProbe !== null) return Promise.resolve(pnpmProbe)
+  return new Promise((resolve) => {
+    let settled = false
+    let timer = null
+    const child = spawn(process.execPath, [PNPM_CJS, '--version'], { windowsHide: true, stdio: 'ignore' })
+    const finish = (value) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      pnpmProbe = Boolean(value)
+      resolve(pnpmProbe)
+    }
+    timer = setTimeout(() => {
+      try { child.kill() } catch { /* 进程可能已退出 */ }
+      finish(false)
+    }, 30000)
+    child.on('error', () => finish(false))
+    child.on('close', (code) => finish(code === 0))
+  })
+}
 function dshPluginEnv(home = process.env.JG_DSH_HOME || join(dataDirPath(), 'dsh-home')) {
   const path = process.env.PATH || process.env.Path || ''
   const extra = [PNPM_RUNTIME_DIR, dirname(process.execPath)].filter(Boolean).join(';')
@@ -4117,6 +4405,44 @@ function runDshPlugin(args, timeout = 180000, home = process.env.JG_DSH_HOME || 
     timeout,
     encoding: 'utf8',
     env: dshPluginEnv(home),
+  })
+}
+/*
+ * 安装会走 pnpm，同步 spawn 会把整个 HTTP 服务的事件循环锁住最久 180 秒：
+ * 安装进度轮询、日志、健康检查全部停摆。市场安装改用异步子进程，服务端才能持续响应进度查询。
+ */
+function runDshPluginAsync(args, timeout = 180000, home = process.env.JG_DSH_HOME || join(dataDirPath(), 'dsh-home')) {
+  return new Promise((resolve) => {
+    let stdout = ''
+    let stderr = ''
+    let settled = false
+    let timedOut = false
+    const child = spawn(process.execPath, [dshBin, 'plugin', '--profile', RUNTIME_PROFILE, ...args], {
+      cwd: runtimeProfileDir(home),
+      env: dshPluginEnv(home),
+      windowsHide: true,
+    })
+    const append = (target, chunk) => `${target}${chunk}`.slice(-200000)
+    child.stdout?.on('data', (chunk) => { stdout = append(stdout, chunk.toString('utf8')) })
+    child.stderr?.on('data', (chunk) => { stderr = append(stderr, chunk.toString('utf8')) })
+    const finish = (status, signal, error) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      if (error) stderr = append(stderr, String(error?.message || error))
+      if (timedOut) stderr = append(stderr, `\n安装子进程超过 ${Math.round(timeout / 1000)} 秒未完成，已终止`)
+      resolve({ status: timedOut ? 1 : (Number.isInteger(status) ? status : 1), signal: signal || '', stdout, stderr })
+    }
+    const timer = setTimeout(() => {
+      timedOut = true
+      try { child.kill() } catch { /* 进程可能已自行退出 */ }
+      // Windows 上 pnpm 会再拉起子进程，只杀父进程可能留下孤儿安装进程。
+      if (process.platform === 'win32' && child.pid) {
+        try { spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true }) } catch { /* 尽力回收 */ }
+      }
+    }, timeout)
+    child.on('error', (error) => finish(1, '', error))
+    child.on('close', (status, signal) => finish(status, signal))
   })
 }
 const PROTECTED_PLUGIN_IDS = new Set([
@@ -4286,6 +4612,7 @@ function snapshotPersistentState() {
     version: 1,
     savedAt: new Date().toISOString(),
     readNotifications: [...readNotifications.entries()].map(([name, value]) => [name, value instanceof Set ? [...value] : Array.isArray(value) ? value : []]),
+    clearedNotifications: [...clearedNotifications.entries()].map(([name, value]) => [name, value instanceof Set ? [...value] : Array.isArray(value) ? value : []]),
     resources: liveResources,
     dataServices: liveDataServices,
     apps: liveApps,
@@ -4309,6 +4636,8 @@ function snapshotPersistentState() {
     clouds: liveClouds,
     im: liveIm,
     notices: liveNotices,
+    notifications: Array.isArray(notifications) ? notifications.slice(0, 200) : [],
+    appReminders: appReminders.slice(0, APP_REMINDER_MAX),
     academy: liveAcademy,
     messages: liveMessages,
     modelConfig: [...liveModelConfig.entries()],
@@ -4334,6 +4663,7 @@ function snapshotPersistentState() {
     notebookCollections: NOTEBOOK_COLLECTIONS,
     collabDocs: [...collabDocs.entries()],
     conversations,
+    settingsCenter: settingsCenterState,
     generatedDocs: [...generatedDocs.entries()].map(([id, doc]) => ({
       id,
       filename: doc.filename,
@@ -4433,16 +4763,38 @@ function hydratePersistentState() {
   ensureDefaultCloudSpaces()
   replaceArray(liveIm, snap.im)
   replaceArray(liveNotices, snap.notices)
+  /* 应用推来的完成提醒要能跨重启：否则跑完半小时再开客户端，铃铛里什么都没有。 */
+  if (Array.isArray(snap.notifications)) replaceArray(notifications, snap.notifications.slice(0, 200))
+  /* 应用提醒是中枢自己的待办，不依赖应用进程是否还活着；重启后必须原样恢复。 */
+  replaceArray(appReminders, Array.isArray(snap.appReminders)
+    ? snap.appReminders
+      .filter((r) => r && r.appId && r.userId && r.key && Number.isFinite(Number(r.dueAt)))
+      .slice(0, APP_REMINDER_MAX)
+    : [])
   replaceArray(liveAcademy, snap.academy)
   replaceArray(liveMessages, snap.messages)
-  replaceArray(liveToolLedger, snap.toolLedger)
+  /* 早期快照没有 toolLedger 字段时，replaceArray 会把 seed 清空成 []，之后每次保存都把空数组固化。
+     台账是静态目录 + 真实策略/计数，必须按 id 合并，不能在缺字段时丢掉基线。 */
+  replaceArray(liveToolLedger, mergeToolLedgerWithSeed(snap.toolLedger))
   replaceArray(liveMembers, snap.members)
   replaceArray(LIVE_NOTEBOOKS, snap.notebooks)
   replaceArray(NOTEBOOK_COLLECTIONS, snap.notebookCollections)
   replaceArray(conversations, snap.conversations)
+  if (snap.settingsCenter && typeof snap.settingsCenter === 'object') {
+    replaceObject(settingsCenterState.workspaces, snap.settingsCenter.workspaces)
+    replaceObject(settingsCenterState.mfa, snap.settingsCenter.mfa)
+    replaceObject(settingsCenterState.cacheClears, snap.settingsCenter.cacheClears)
+    replaceArray(settingsCenterState.accessRequests, Array.isArray(snap.settingsCenter.accessRequests) ? snap.settingsCenter.accessRequests : [])
+  }
+  /* 旧任务没有 projectId；只能从原会话继承，补不回来的保持未归属，不能按标题猜。 */
+  backfillTaskProjects({ persist: false })
 
   replaceMap(readNotifications, Object.fromEntries(
     (Array.isArray(snap.readNotifications) ? snap.readNotifications : [])
+      .map(([name, value]) => [name, new Set(Array.isArray(value) ? value : value && typeof value === 'object' ? Object.keys(value) : [])])
+  ))
+  replaceMap(clearedNotifications, Object.fromEntries(
+    (Array.isArray(snap.clearedNotifications) ? snap.clearedNotifications : [])
       .map(([name, value]) => [name, new Set(Array.isArray(value) ? value : value && typeof value === 'object' ? Object.keys(value) : [])])
   ))
   replaceMap(liveModelConfig, Object.fromEntries(snap.modelConfig || []))
@@ -4498,8 +4850,13 @@ function persistPersistentState() {
 function canSee(user, resource, net) {
   if (resource.nets && !resource.nets.includes(net)) return false
   if (resource.security === 'secret' && !(net === 'secret' && user.scopes.includes('secret'))) return false
+  if (settingsCenter.hasActiveAccess(user.id, resource.id)) return true
   if (user.scopes.includes('all-org')) return true
   return resource.scope.some((scope) => user.scopes.includes(scope))
+}
+
+function messagesFor(user) {
+  return liveMessages.filter((message) => !message.userId || message.userId === user.id)
 }
 
 function canManage(user) {
@@ -4727,6 +5084,18 @@ function listBrowserExts(user) {
 function activeBrowserExts(userId) {
   return [...liveBrowserExts.values()].filter((rec) => rec.status === 'listed' && rec.userOn?.[userId] !== false)
 }
+/* Electron 只消费这份由管理中心审核动作生成的注册表；普通用户申请和启停不会写入。 */
+function persistBrowserExtensionReviewRegistry() {
+  const file = join(dataDirPath(), 'browser-extension-review.json')
+  const items = [...liveBrowserExts.values()]
+    .filter((rec) => rec.status === 'listed' && rec.reviewedBy && rec.reviewedAt && rec.extPath)
+    .map((rec) => ({ id: rec.id, extPath: rec.extPath, status: rec.status, reviewedBy: rec.reviewedBy, reviewedAt: rec.reviewedAt }))
+  mkdirSync(dirname(file), { recursive: true })
+  const tmp = `${file}.${process.pid}.tmp`
+  writeFileSync(tmp, JSON.stringify({ version: 1, items }, null, 2), { encoding: 'utf8', mode: 0o600 })
+  renameSync(tmp, file)
+}
+persistBrowserExtensionReviewRegistry()
 /** 代理取模型：指定 modelId 时校验用途、启用与归属可见性；否则按用途取用户级优先、平台共享兜底。 */
 function resolveSharedModel(purpose, modelId, userId) {
   const personal = liveModelConfig.get(userId) || {}
@@ -4819,6 +5188,16 @@ function businessCategoryOf(resource) {
 }
 
 /** 管网空间分析：统一入参校验、结果落库与分析审计 */
+/** 管网导入进度登记表：jobId -> { percent, message, stage, done, error, datasetId, summary, startedAt } */
+const PIPELINE_IMPORT_JOBS = new Map()
+
+function pruneImportJobs() {
+  const alive = Date.now() - 15 * 60 * 1000
+  for (const [key, job] of PIPELINE_IMPORT_JOBS) {
+    if (Number(job.updatedAt || job.startedAt || 0) < alive) PIPELINE_IMPORT_JOBS.delete(key)
+  }
+}
+
 function pipelineRunAnalysis(req, res, type) {
   const user = roleOf(req)
   const net = netOf(req)
@@ -4876,6 +5255,7 @@ const GUEST_GUARD = {
   'GET /api/pipeline/datasets': 'datacenter',
   'GET /api/pipeline/dataset': 'datacenter',
   'POST /api/pipeline/import': 'datacenter',
+  'GET /api/pipeline/import/progress': 'datacenter',
   'POST /api/pipeline/model/build': 'datacenter',
   'GET /api/pipeline/scene': 'datacenter',
   'GET /api/pipeline/search': 'datacenter',
@@ -4950,6 +5330,10 @@ const GUEST_GUARD = {
   'GET /api/academy': 'academy',
   'POST /api/academy/progress': 'academy',
   'GET /api/tasks': 'tasks',
+  'GET /api/tasks/files': 'tasks',
+  'GET /api/task-center': 'tasks',
+  'POST /api/task-center/read': 'tasks',
+  'POST /api/task-center/archive': 'tasks',
   'POST /api/tasks/create': 'tasks',
   'POST /api/tasks/retry': 'tasks',
   'GET /api/projects': 'projects',
@@ -5046,6 +5430,7 @@ const GUEST_GUARD = {
 'GET /api/as/datacenter/file': 'skills',
 'POST /api/as/v1/chat/completions': 'skills',
 'POST /api/as/v1/images/edit': 'skills',
+'POST /api/as/v1/notify': 'skills',
   'GET /api/as/approvals': 'skills',
   'POST /api/as/approvals': 'skills',
   'POST /api/as/approvals/decide': 'skills',
@@ -5213,6 +5598,33 @@ function projectAgentsInfo(cwd) {
   return { files: chain.files, truncated: chain.truncated, root }
 }
 
+function taskProjectId(task) {
+  if (!task) return ''
+  if (task.projectId) return String(task.projectId)
+  const conv = task.conversationId ? conversations.find((c) => c.id === task.conversationId) : null
+  return conv?.projectId ? String(conv.projectId) : ''
+}
+
+function taskProjectName(task) {
+  const id = taskProjectId(task)
+  return id ? String((liveProjects.find((p) => p.id === id) || {}).name || '') : ''
+}
+
+/** 启动时补齐旧任务的项目归属：只能从原会话继承，不能凭标题猜项目。 */
+function backfillTaskProjects({ persist = true } = {}) {
+  let changed = 0
+  for (const task of liveTasks) {
+    if (!task || task.projectId) continue
+    const conv = task.conversationId ? conversations.find((c) => c.id === task.conversationId) : null
+    if (!conv?.projectId) continue
+    task.projectId = String(conv.projectId)
+    task.projectName = String((liveProjects.find((p) => p.id === conv.projectId) || {}).name || '')
+    changed += 1
+  }
+  if (changed && persist) persistPersistentState()
+  return changed
+}
+
 function decorateProject(item) {
   const status = projectStatus(item)
   let rootFiles = 0
@@ -5221,11 +5633,17 @@ function decorateProject(item) {
       rootFiles = readdirSync(item.cwd, { withFileTypes: true }).filter((entry) => entry.isFile()).length
     } catch {}
   }
+  const projectTasks = liveTasks.filter((t) => t.kind === 'chat-run' && taskProjectId(t) === item.id)
+  const artifacts = projectTasks.reduce((sum, t) => sum + Number(t.artifacts || 0), 0)
   return {
     ...item,
     status,
     folderName: item.folderName || (item.cwd ? basename(item.cwd) : ''),
     convs: conversations.filter((conv) => conv.projectId === item.id).length,
+    runs: projectTasks.length,
+    runningRuns: projectTasks.filter((t) => ['queued', 'running', 'resuming'].includes(t.state)).length,
+    artifacts,
+    lastRunAt: projectTasks.reduce((max, t) => Math.max(max, Number(t.createdAt || 0)), 0),
     files: rootFiles,
     agents: projectAgentsInfo(item.cwd),
   }
@@ -5237,7 +5655,7 @@ function findProjectByDir(user, dir, excludeId = '') {
 }
 
 function chatWorkspaceDir(user, convId) {
-  const dir = join(dataDirPath(), 'dsh-workspaces', 'chat', String(user.id || 'user'), String(convId))
+  const dir = join(settingsCenter.workspaceFor(user), String(convId))
   mkdirSync(dir, { recursive: true })
   ensureWorkspaceAcl(dir)
   return dir
@@ -5249,17 +5667,24 @@ function chatWorkspaceDir(user, convId) {
  * 会让 run_code / pwsh 以 Win32 5 启动失败并被迫申请 danger-full-access。
  * 这里只给当前登录用户本人补显式完全控制，目录仍只对本人开放。
  */
+const aclEnsuredDirs = new Set()
 function ensureWorkspaceAcl(dir) {
-  if (process.platform !== 'win32') return
+  if (process.platform !== 'win32') return true
+  const key = normalize(String(dir || '')).toLowerCase()
+  if (!key || aclEnsuredDirs.has(key)) return true
   const account = process.env.USERNAME || ''
-  if (!account) return
+  if (!account) return false
   try {
-    spawnSync('icacls', [dir, '/grant', `${account}:(OI)(CI)F`], {
+    const result = spawnSync('icacls', [dir, '/grant', `${account}:(OI)(CI)F`], {
       windowsHide: true,
       timeout: 15000,
       stdio: 'ignore',
     })
-  } catch {}
+    if (result.status === 0) aclEnsuredDirs.add(key)
+    return result.status === 0
+  } catch {
+    return false
+  }
 }
 
 
@@ -5325,6 +5750,181 @@ function safeFilePath(root, rel) {
   try { real = realpathSync(target) } catch { return { error: '文件或目录不可访问', status: 404 } }
   if (!isInsidePath(root, real)) return { error: '路径越界', status: 403 }
   return { path: real, rel: relative(root, real).split(sep).join('/') }
+}
+
+/** 预览统一入口的源文件解析：绝对路径（成果/项目文件）、项目/会话相对路径、附件 fileId 三种授权方式。 */
+function resolvePreviewSource(user, url, net = 'inet') {
+  const fileId = String(url.searchParams.get('fileId') || '').trim()
+  if (fileId) {
+    if (!fileVisibleToUser(user, net, fileId)) return { error: '该附件不在当前用户授权范围内', status: 403 }
+    const meta = getFile(fileId)
+    const buffer = readFileBuffer(fileId)
+    if (!meta || !buffer) return { error: '附件不存在或已清理', status: 404 }
+    let diskPath = null
+    try {
+      const candidate = meta.path ? (isAbsolute(meta.path) ? meta.path : join(dataDirPath(), ...String(meta.path).split('/'))) : ''
+      if (candidate && existsSync(candidate)) diskPath = realpathSync(candidate)
+    } catch (_) {}
+    return { name: String(meta.name || '附件'), size: buffer.length, buffer, fileId, path: diskPath, isDirectory: false }
+  }
+  const requested = String(url.searchParams.get('path') || '').trim()
+  if (requested && isAbsolute(requested)) {
+    const full = normalize(requested)
+    if (!existsSync(full)) return { error: '文件不存在或已被移动', status: 404 }
+    let real
+    try { real = realpathSync(full) } catch { return { error: '文件不可访问', status: 404 } }
+    const roots = [join(dataDirPath(), 'dsh-workspace')]
+    for (const project of liveProjects) {
+      if (project.removed || !project.cwd || !projectVisibleTo(user, project)) continue
+      roots.push(project.cwd)
+    }
+    const allowed = roots.some((rootDir) => {
+      try { return isInsidePath(realpathSync(rootDir), real) } catch { return false }
+    })
+    if (!allowed) return { error: '该文件不在当前用户授权的工作区或项目目录内', status: 403 }
+    const stat = statSync(real)
+    return { name: basename(real), size: stat.isDirectory() ? 0 : stat.size, path: real, isDirectory: stat.isDirectory(), buffer: null }
+  }
+  const rootInfo = resolveFileRoot(user, url)
+  if (rootInfo.error) return rootInfo
+  const safe = safeFilePath(rootInfo.root, requested)
+  if (safe.error) return { error: safe.error, status: safe.status || 400 }
+  const stat = statSync(safe.path)
+  return { name: basename(safe.path), size: stat.isDirectory() ? 0 : stat.size, path: safe.path, isDirectory: stat.isDirectory(), buffer: null, rel: safe.rel }
+}
+
+function escapePreviewText(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+function previewQueryOf(url) {  const params = new URLSearchParams()
+  for (const key of ['fileId', 'path', 'projectId', 'conversationId', 'name']) {
+    const value = url.searchParams.get(key)
+    if (value) params.set(key, value)
+  }
+  return params
+}
+
+/** OnlyOffice 通过签名 token 读取源文件，不依赖浏览器 Cookie。 */
+function officeSourceFromToken(payload) {
+  if (!payload || (!payload.fid && !payload.path)) throw new Error('OnlyOffice 文件令牌缺少源文件')
+  if (payload.fid) {
+    const meta = getFile(payload.fid)
+    const buffer = readFileBuffer(payload.fid)
+    if (!meta || !buffer || meta.deletedAt != null) throw new Error('附件不存在或已被清理')
+    return { fileId: payload.fid, path: null, name: meta.name, size: buffer.length, buffer, meta }
+  }
+  const requested = String(payload.path || '')
+  if (!requested || !existsSync(requested)) throw new Error('源文件不存在或已被移动')
+  let real
+  try { real = realpathSync(requested) } catch { throw new Error('源文件不可访问') }
+  const stat = statSync(real)
+  if (!stat.isFile()) throw new Error('源文件不是普通文件')
+  return { fileId: '', path: real, name: basename(real), size: stat.size, buffer: null, meta: null }
+}
+
+function officeKeyForSource(source, user) {
+  const meta = source.meta || (source.fileId ? getFile(source.fileId) : null)
+  const marker = source.fileId
+    ? `${source.fileId}|${meta?.version || 0}|${source.size}`
+    : `${source.path}|${statSync(source.path).mtimeMs}|${source.size}`
+  return createHash('sha256').update(`${marker}|${user?.id || ''}`).digest('hex').slice(0, 32)
+}
+
+function officePathBackup(real) {
+  const dir = join(dataDirPath(), 'office-saves')
+  mkdirSync(dir, { recursive: true })
+  const name = basename(real).slice(-80)
+  const backup = join(dir, `${createHash('sha256').update(real).digest('hex').slice(0, 12)}-${Date.now()}-${name}`)
+  cpSync(real, backup)
+  return backup
+}
+
+function writeOfficePath(real, buffer) {
+  const backup = officePathBackup(real)
+  const tmp = join(dirname(real), `.jg-oo-${process.pid}-${Date.now()}.tmp`)
+  writeFileSync(tmp, buffer)
+  try {
+    renameSync(tmp, real)
+  } catch {
+    writeFileSync(real, buffer)
+    rmSync(tmp, { force: true })
+  }
+  return backup
+}
+
+async function saveOnlyOfficePayload(payload, body) {
+  const source = officeSourceFromToken(payload)
+  const displayName = String(payload.name || source.name || 'document')
+  if (!String(body.url || '').trim()) throw new Error('OnlyOffice 回调缺少保存文件地址')
+  const downloaded = await downloadOnlyOfficeSave(String(body.url))
+  if (!downloaded.buffer.length) throw new Error('OnlyOffice 保存文件为空')
+  if (payload.fid) {
+    const meta = putFile({
+      id: payload.fid,
+      name: source.meta?.name || displayName,
+      mime: source.meta?.mime || mimeFor(displayName),
+      buffer: downloaded.buffer,
+      owner: payload.uname || source.meta?.owner || '',
+      net: payload.net || source.meta?.net || '',
+      note: 'OnlyOffice 在线编辑保存',
+    })
+    return { kind: 'file-version', meta, bytes: downloaded.buffer.length }
+  }
+  const backup = writeOfficePath(source.path, downloaded.buffer)
+  return { kind: 'path-backup', path: source.path, backup, bytes: downloaded.buffer.length }
+}
+
+
+function readGisFolder(dir) {
+  const rootName = basename(dir)
+  const files = []
+  let total = 0
+  const walk = (current, rel) => {
+    for (const entry of readdirSync(current, { withFileTypes: true })) {
+      const full = join(current, entry.name)
+      const nextRel = rel ? `${rel}/${entry.name}` : entry.name
+      if (entry.isDirectory()) { walk(full, nextRel); continue }
+      const stat = statSync(full)
+      total += stat.size
+      if (files.length >= 500 || total > 200 * 1024 * 1024) throw Object.assign(new Error('GDB 目录过大，暂不在线预览'), { status: 413 })
+      files.push({ path: `${rootName}/${nextRel}`, name: entry.name, buffer: readFileSync(full) })
+    }
+  }
+  walk(dir, '')
+  return files
+}
+
+function spatialPreviewResult(source) {
+  const name = source.name
+  const ext = extname(name).toLowerCase()
+  if (ext === '.dxf') {
+    if (!source.buffer) throw new Error('DXF 文件没有可读内容')
+    return inspectDataFormat(source.buffer, name, '', { maxEntities: 30000 })
+  }
+  if (ext === '.shp') {
+    const base = source.path.replace(/\.shp$/i, '')
+    const files = []
+    for (const suffix of ['.shp', '.dbf', '.shx', '.prj', '.cpg']) {
+      const full = `${base}${suffix}`
+      if (!existsSync(full)) continue
+      files.push({ path: basename(full), name: basename(full), buffer: readFileSync(full) })
+    }
+    return inspectGeoFiles(files, name.replace(/\.shp$/i, ''))
+  }
+  if (ext === '.gdb' && source.isDirectory) {
+    return inspectGeoFiles(readGisFolder(source.path), name.replace(/\.gdb$/i, ''))
+  }
+  if (ext === '.zip' || ext === '.geojson' || ext === '.json') {
+    if (!source.buffer) throw new Error('空间数据文件没有可读内容')
+    return inspectDataFormat(source.buffer, name, '')
+  }
+  throw new Error(`暂不支持 ${ext || '该格式'} 的空间预览`)
 }
 
 function gitAt(cwd, args, timeout = 15000) {
@@ -6213,7 +6813,7 @@ function commitDirectReply({ conv, direct, text, user, mode, taskMode, project, 
     conv.status = 'done'
     conv.model = direct.model
     conv.deepThink = false
-    const chatRun = startChatRunTask({ conv, user, text, mode, taskMode, target: direct.place || project?.name || '' })
+    const chatRun = startChatRunTask({ conv, user, text, mode, taskMode, target: direct.place || project?.name || '', project })
     markChatRunStarted(chatRun, 'direct')
     finishChatRunTask(chatRun, { steps: direct.steps.length, reply: direct.reply })
     activeRuns.delete(conv.id)
@@ -6337,24 +6937,26 @@ function resolveTaskMode(text, requested, projectId) {
   // 项目会话本身绑定了一个真实工作区；Auto 不应把它降格为只读问答，
   // 否则打包、构建、写文件会在执行中被只读沙箱静默拒绝。
   if (projectId) return { requested: 'auto', mode: 'work', reason: '已绑定项目工作区，按工作模式执行' }
-  const hits = hasWorkIntent(text) ? 1 : 0
-  if (hits > 0) {
-    return {
-      requested: 'auto',
-      mode: 'work',
-      reason: projectId ? '检测到文件、命令或数据处理意图，已绑定项目' : '检测到文件、命令或数据处理意图',
-    }
+  // Auto 的白名单只放“明确是问知识、要解释”的轻量问答；其余一律进 Work。
+  // 新场景的默认安全方向必须是 Work：误判成 Work 只是多花算力，
+  // 误判成 Chat 会让文件、命令和工具在只读会话里停住。
+  if (isDirectAnswerable(text, { mode: 'chat' })) {
+    return { requested: 'auto', mode: 'chat', reason: '明确是轻量问答，直接回答' }
   }
-  return { requested: 'auto', mode: 'chat', reason: '未检测到文件、命令或多步骤执行意图' }
+  return { requested: 'auto', mode: 'work', reason: '未命中轻量问答白名单，按工作模式执行' }
 }
 
 /** 外部副作用工具：即使没有命令或路径参数，也不能在 Auto 模式自动放行。 */
 const AUTO_APPROVAL_EXTERNAL_TOOL = [
   /mcp__[a-z0-9_-]+__im_send/i,
   /mcp__[a-z0-9_-]+__task_create/i,
+  /mcp__[a-z0-9_-]+__(?:skill|plugin|app)_publish/i,
   /mcp__[a-z0-9_-]+__(?:send|publish|upload|create|update|delete|remove|invoke|write)[a-z0-9_-]*/i,
   /^im_send$/i,
   /^task_create$/i,
+  /^skill_publish$/i,
+  /^plugin_publish$/i,
+  /^app_publish$/i,
 ]
 function isExternalSideEffectTool(tool) {
   const name = String(tool || '')
@@ -6559,13 +7161,6 @@ function snapshotTree(rootDir) {
     }
   }
   return snap
-}
-
-function formatBytes(n) {
-  const size = Math.max(0, Number(n) || 0)
-  if (size < 1024) return `${size} B`
-  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`
-  return `${(size / 1024 / 1024).toFixed(1)} MB`
 }
 
 /** 对比前后快照，返回最多 30 条新增/修改/删除，供每轮回复展示。 */
@@ -6893,18 +7488,35 @@ function openSse(res) {
     'x-accel-buffering': 'no',
   })
   if (typeof res.flushHeaders === 'function') res.flushHeaders()
+  // 客户端中途刷新/关闭页面或响应已 end 时，socket 仍可能异步发出 error；
+  // 不吸收会变成进程级 uncaughtException，连带影响同一进程里的其他任务。
+  res.on('error', () => {})
   // 心跳：长工具链运行期间前端可能几十秒收不到正文，没有心跳会被判成“断流”。
   const heartbeat = setInterval(() => {
+    if (res.writableEnded || res.destroyed || !res.writable) return
     try { res.write(': ping\n\n') } catch { /* 连接已关闭 */ }
   }, 10000)
   if (typeof heartbeat.unref === 'function') heartbeat.unref()
-  res.on('close', () => clearInterval(heartbeat))
+  // 兜底：任何漏掉 done/error 的异常路径都不能让 SSE 永久挂着。心跳会让浏览器
+  // 保持连接，同源 6 条被占满后新请求会在客户端排队，表现为“一直正在思考”。
+  const maxLife = setTimeout(() => {
+    if (res.writableEnded) return
+    try { sseSend(res, 'error', { error: '流式响应超时，请重试', code: 'SSE_TIMEOUT' }) } catch {}
+    try { res.end() } catch {}
+  }, 10 * 60 * 1000)
+  if (typeof maxLife.unref === 'function') maxLife.unref()
+  res.on('close', () => { clearInterval(heartbeat); clearTimeout(maxLife) })
 }
 
 function sseSend(res, event, data) {
+  // `res.write()` 在响应已经 end 时不会同步抛错，而是异步 emit error；
+  // 必须先判断可写状态，否则会触发 ERR_STREAM_WRITE_AFTER_END 的进程级异常。
+  if (res.writableEnded || res.destroyed || !res.writable) return false
   try {
     res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
+    return true
   } catch { /* 客户端断开时不再抛错 */ }
+  return false
 }
 
 function newFileId(prefix = 'F') {
@@ -7330,31 +7942,142 @@ function bboxHit(a, b) {
 const MAX_CHAT_RUNS = Math.max(1, Number(process.env.JG_MAX_CHAT_RUNS || 2))
 let chatRunSlots = 0
 const chatRunWaiters = []
+// 同一项目的多个 Work 线程共享一个 cwd。只做全局并发限流时，两个线程可能同时
+// 读改写同一个文件，造成 lost update。这里按 projectId 做读写锁：只读任务可共享，
+// 写任务独占；跨项目仍可并行。默认仍按写任务处理，避免未标记的请求绕过互斥。
+const chatRunProjectLocks = new Map()
 
-function acquireChatRunSlot() {
-  if (chatRunSlots < MAX_CHAT_RUNS) {
-    chatRunSlots += 1
-    return Promise.resolve()
+function chatTaskProjectKey(task) {
+  return String(task?.projectId || '')
+}
+
+function chatTaskAccessMode(task) {
+  return task?.accessMode === 'read' ? 'read' : 'write'
+}
+
+function queuedWriterForProject(projectKey) {
+  if (!projectKey) return false
+  return chatRunWaiters.some((waiter) => waiter.task
+    && chatTaskProjectKey(waiter.task) === projectKey
+    && chatTaskAccessMode(waiter.task) === 'write')
+}
+
+function refreshChatRunQueuePositions() {
+  chatRunWaiters.forEach((waiter, index) => {
+    if (waiter.task && waiter.task.state === 'queued') {
+      waiter.task.queuePosition = index + 1
+      waiter.task.progressText = `排队第 ${index + 1} 位`
+    }
+  })
+}
+
+function canGrantChatRunSlot(task) {
+  if (chatRunSlots >= MAX_CHAT_RUNS) return false
+  const projectKey = chatTaskProjectKey(task)
+  if (!projectKey) return true
+  const lock = chatRunProjectLocks.get(projectKey)
+  if (!lock) return true
+  if (chatTaskAccessMode(task) === 'read') {
+    // 写任务已持有锁，或已有写任务在排队时必须让路，避免只读任务持续插队造成写饥饿。
+    return !lock.writer && !queuedWriterForProject(projectKey)
   }
-  return new Promise((resolve) => chatRunWaiters.push(resolve))
+  return !lock.writer && lock.readers.size === 0
 }
 
-function releaseChatRunSlot() {
-  const next = chatRunWaiters.shift()
-  if (next) next()
-  else chatRunSlots = Math.max(0, chatRunSlots - 1)
+function grantChatRunSlot(task) {
+  chatRunSlots += 1
+  const projectKey = chatTaskProjectKey(task)
+  if (projectKey) {
+    const lock = chatRunProjectLocks.get(projectKey) || { writer: '', readers: new Set() }
+    if (chatTaskAccessMode(task) === 'read') lock.readers.add(String(task?.id || ''))
+    else lock.writer = String(task?.id || '')
+    chatRunProjectLocks.set(projectKey, lock)
+  }
+  // 槽位一旦分配，任务就不再是“排队中”。启动上下文可能耗时数秒，状态必须及时前移，
+  // 否则前端会把已经占用并发槽位的任务显示成 queued，后续排队位置也会跟着算错。
+  if (task && task.state === 'queued') {
+    task.state = 'running'
+    task.queuePosition = 0
+    task.progress = 15
+    task.progressText = '已分配执行槽位，正在启动'
+    task.activityDetail = '执行槽位已分配，正在建立会话上下文'
+    persistPersistentState()
+  }
 }
 
-function startChatRunTask({ conv, user, text, mode, taskMode, target, idempotencyKey = '' }) {
+function drainChatRunWaiters() {
+  let moved = true
+  while (moved) {
+    moved = false
+    for (let index = 0; index < chatRunWaiters.length; index += 1) {
+      const waiter = chatRunWaiters[index]
+      if (!canGrantChatRunSlot(waiter.task)) continue
+      chatRunWaiters.splice(index, 1)
+      grantChatRunSlot(waiter.task)
+      refreshChatRunQueuePositions()
+      waiter.resolve(true)
+      moved = true
+      break
+    }
+  }
+}
+
+function acquireChatRunSlot(task = null) {
+  if (canGrantChatRunSlot(task)) {
+    grantChatRunSlot(task)
+    return Promise.resolve(true)
+  }
+  return new Promise((resolve) => {
+    chatRunWaiters.push({ task, resolve })
+    refreshChatRunQueuePositions()
+  })
+}
+
+/** 排队中的任务被用户取消：从等待队列移除并让调用方立即结束，不能占着位置等前一个任务跑完。 */
+function dropChatRunWaiter(task) {
+  const index = chatRunWaiters.findIndex((waiter) => waiter.task === task)
+  if (index < 0) return false
+  const waiter = chatRunWaiters[index]
+  chatRunWaiters.splice(index, 1)
+  if (task) task.queuePosition = 0
+  refreshChatRunQueuePositions()
+  waiter.resolve(false)
+  return true
+}
+
+function releaseChatRunSlot(task = null) {
+  const projectKey = chatTaskProjectKey(task)
+  const lock = projectKey ? chatRunProjectLocks.get(projectKey) : null
+  if (lock) {
+    const taskId = String(task?.id || '')
+    if (chatTaskAccessMode(task) === 'read') lock.readers.delete(taskId)
+    else if (lock.writer === taskId) lock.writer = ''
+    if (!lock.writer && lock.readers.size === 0) chatRunProjectLocks.delete(projectKey)
+  }
+  chatRunSlots = Math.max(0, chatRunSlots - 1)
+  drainChatRunWaiters()
+}
+
+function startChatRunTask({ conv, user, text, mode, taskMode, target, project = null, idempotencyKey = '', resumedFromTaskId = '', accessMode = '' }) {
+  const parentTask = resumedFromTaskId ? liveTasks.find((t) => t.id === resumedFromTaskId) : null
+  const parentCheckpoint = parentTask?.checkpoint && typeof parentTask.checkpoint === 'object' ? parentTask.checkpoint : {}
+  const resolvedAccessMode = accessMode === 'read' || accessMode === 'write'
+    ? accessMode
+    : (parentTask?.accessMode === 'read' ? 'read' : 'write')
   const task = {
     id: `TR-${Date.now()}-${Math.floor(Math.random() * 900 + 100)}`,
     kind: 'chat-run',
     title: text.length > 40 ? `${text.slice(0, 40)}…` : text,
     state: 'queued',
+    accessMode: resolvedAccessMode,
     progress: 0,
     progressText: '正在建立任务上下文',
     activityDetail: '准备读取项目与工具状态',
     target: `${mode === 'work' ? '工作' : mode === 'chat' ? '对话' : '自动'} · ${target || '对话工作区'}`,
+    projectId: String(project?.id || ''),
+    projectName: String(project?.name || ''),
+    worktreePath: String(conv.worktreePath || ''),
+    worktreeBranch: String(conv.worktreeBranch || ''),
     started: '',
     createdAt: Date.now(),
     finishedAt: null,
@@ -7366,15 +8089,27 @@ function startChatRunTask({ conv, user, text, mode, taskMode, target, idempotenc
     steps: 0,
     artifacts: 0,
     reason: '',
-    queuePosition: chatRunWaiters.length + 1,
+    queuePosition: 0,
     idempotencyKey: idempotencyKey || '',
+    resumedFromTaskId: String(resumedFromTaskId || ''),
+    toolResultsSeen: 0,
+    checkpointBaseSteps: Number(parentCheckpoint.stepsCompleted || 0),
     checkpoint: {
       conversationId: conv.id,
       prompt: text,
+      originalPrompt: parentCheckpoint.originalPrompt || text.slice(0, 2000),
       mode,
       taskMode,
+      accessMode: resolvedAccessMode,
+      projectId: String(project?.id || ''),
+      worktreePath: String(parentCheckpoint.worktreePath || conv.worktreePath || ''),
       phase: 'queued',
-      dshSessionId: conv.dshSessionId || '',
+      dshSessionId: parentCheckpoint.dshSessionId || conv.dshSessionId || '',
+      stepsCompleted: Number(parentCheckpoint.stepsCompleted || 0),
+      filesWritten: Array.isArray(parentCheckpoint.filesWritten) ? parentCheckpoint.filesWritten.slice(-20) : [],
+      lastTool: parentCheckpoint.lastTool || null,
+      partialReply: String(parentCheckpoint.partialReply || '').slice(-3000),
+      resumedFromTaskId: String(resumedFromTaskId || ''),
       updatedAt: Date.now(),
     },
   }
@@ -7421,6 +8156,76 @@ function chatToolLabel(name) {
 }
 
 /** 把 DSH 的真实 session.event 映射成聊天中的“最近动态”，仅供前端展示。 */
+/** 更新任务检查点；只保留最近状态，避免把整段执行历史塞进任务记录。 */
+function updateChatCheckpoint(task, patch = {}) {
+  if (!task) return
+  task.checkpoint = { ...(task.checkpoint || {}), ...patch, updatedAt: Date.now() }
+}
+
+/** 已完成的工具步骤只按“收到 tool/result”计数，并叠加恢复任务从父检查点继承的基数。 */
+function completedCheckpointSteps(task, fallback = 0) {
+  const own = Number(task?.toolResultsSeen)
+  if (task?.toolResultsSeen !== undefined && Number.isFinite(own)) return Number(task.checkpointBaseSteps || 0) + own
+  return Number(task?.checkpoint?.stepsCompleted ?? fallback ?? 0)
+}
+
+/** 从工具调用的原始参数里提取真正写入的文件，供中断后“已写入文件”续写提示使用。 */
+function checkpointPathsFromToolCall(toolName, rawArguments) {
+  const tool = String(toolName || '').replace(/^mcp__[^_]+__/, '')
+  if (!['write', 'edit', 'apply_patch'].includes(tool)) return []
+  let args = rawArguments
+  if (typeof rawArguments === 'string') {
+    try { args = JSON.parse(rawArguments) } catch { args = null }
+  }
+  const paths = []
+  if (args && typeof args === 'object') {
+    for (const key of ['file_path', 'filePath', 'path']) {
+      if (args[key]) paths.push(String(args[key]))
+    }
+  }
+  const raw = typeof rawArguments === 'string' ? rawArguments : JSON.stringify(rawArguments || {})
+  for (const match of raw.matchAll(/\*\*\* (?:Add|Update|Delete) File:\s*([^\s]+)/g)) {
+    paths.push(String(match[1]))
+  }
+  return [...new Set(paths.map((p) => p.replace(/\\/g, '/')).filter(Boolean))].slice(0, 10)
+}
+
+/** 流式输出只留尾部，续写提示能接上一句话，又不会把一条任务撑爆。 */
+function appendChatCheckpointReply(task, payload) {
+  if (!task) return
+  if (payload?.reset) {
+    updateChatCheckpoint(task, { partialReply: '' })
+    return
+  }
+  const text = String(payload?.text || '')
+  if (!text) return
+  const current = String(task.checkpoint?.partialReply || '')
+  updateChatCheckpoint(task, { partialReply: `${current}${text}`.slice(-3000) })
+}
+
+function formatCheckpointResumePrompt(task) {
+  const checkpoint = task?.checkpoint || {}
+  const files = Array.isArray(checkpoint.filesWritten) ? checkpoint.filesWritten.filter(Boolean) : []
+  const steps = completedCheckpointSteps(task, checkpoint.stepsCompleted ?? 0)
+  const last = checkpoint.lastTool && typeof checkpoint.lastTool === 'object' ? checkpoint.lastTool : null
+  const lastSummary = String(last?.summary || chatToolLabel(last?.name) || last?.name || '').slice(0, 220)
+  const waitOnly = /^命令：(?:Start-Sleep|sleep)\b[^;&|]*$/i.test(lastSummary)
+  const partial = String(checkpoint.partialReply || '').trim().slice(-1200)
+  const original = String(checkpoint.originalPrompt || task?.prompt || task?.title || '').trim().slice(0, 1200)
+  const parts = [
+    '【从检查点续写】',
+    original ? `原任务：${original}` : '',
+    task?.reason ? `中断原因：${String(task.reason).slice(0, 200)}` : '',
+    `已完成：${steps} 个工具步骤`,
+    files.length ? `已写入文件：${files.join('、')}` : '尚未记录已写入文件',
+    last ? `最后动作：${lastSummary}` : '',
+    waitOnly ? '最后动作是纯等待命令；中断已经消耗的时间视为等待结束，不要再重复等待，直接继续后续步骤。' : '',
+    partial ? `上一轮输出结尾（只用于衔接，不要重复）：\n${partial}` : '',
+    '请基于当前 DSH 会话历史与工作区实际情况继续：先确认上述文件内容，只补齐未完成的部分；不要重新开始，不要重复已完成的写入或命令。完成后简要说明本次补充了什么。',
+  ]
+  return parts.filter(Boolean).join('\n')
+}
+
 function recordChatRunActivity(task, event) {
   if (!task || task.state !== 'running' || !event?.type) return
   const now = Date.now()
@@ -7437,9 +8242,53 @@ function recordChatRunActivity(task, event) {
     detail = '工具调用已开始，等待返回结果'
     task.toolCallsSeen = (task.toolCallsSeen || 0) + 1
     task.progress = Math.min(90, Math.max(task.progress || 20, 30 + task.toolCallsSeen * 8))
+    const callId = String(event.data?.callId || '')
+    if (callId) {
+      const pending = task.pendingToolCalls && typeof task.pendingToolCalls === 'object' ? task.pendingToolCalls : {}
+      pending[callId] = {
+        name: tool,
+        summary: rawSummary.slice(0, 180),
+        paths: checkpointPathsFromToolCall(tool, args),
+        at: now,
+      }
+      task.pendingToolCalls = pending
+    }
+    // 工具已经“开始”不等于已经“完成”：这里只记最后动作，完成步骤数在 tool/result 里加。
+    updateChatCheckpoint(task, {
+      phase: 'running',
+      lastTool: { name: tool, summary: rawSummary.slice(0, 180), at: now },
+      progressText: activity.slice(0, 160),
+    })
+    // 检查点不能只在任务结束时落库：进程被强杀时，内存里的最后动作会一起丢失。
+    // 写入/命令这类有副作用的动作立即落库；普通只读动作仍按 2 秒节流，避免频繁重写。
+    const baseTool = String(tool).replace(/^mcp__[^_]+__/, '')
+    const sideEffect = ['write', 'edit', 'apply_patch', 'pwsh', 'run_code'].includes(baseTool) || isExternalSideEffectTool(tool)
+    if (sideEffect || (now - Number(task.checkpointPersistedAt || 0)) >= 2000) {
+      task.checkpointPersistedAt = now
+      persistPersistentState()
+    }
   } else if (event.type === 'tool/result') {
+    const callId = String(event.data?.toolCallId || '')
+    const pending = callId && task.pendingToolCalls ? task.pendingToolCalls[callId] : null
+    const failed = Boolean(event.data?.error)
+    task.toolResultsSeen = (task.toolResultsSeen || 0) + 1
+    const previous = Array.isArray(task.checkpoint?.filesWritten) ? task.checkpoint.filesWritten : []
+    const paths = !failed && pending && Array.isArray(pending.paths) ? pending.paths : []
+    updateChatCheckpoint(task, {
+      phase: 'running',
+      stepsCompleted: completedCheckpointSteps(task),
+      filesWritten: [...new Set([...previous, ...paths])].slice(-20),
+      progressText: activity ? activity.slice(0, 160) : `已收到 ${chatToolLabel(pending?.name)} 返回结果`,
+    })
+    if (pending && callId) {
+      const next = { ...task.pendingToolCalls }
+      delete next[callId]
+      task.pendingToolCalls = next
+    }
     activity = '正在整理工具结果'
-    detail = event.data?.error ? '工具返回异常，正在处理并准备下一步' : '已收到工具返回，继续下一步'
+    detail = failed ? '工具返回异常，正在处理并准备下一步' : '已收到工具返回，继续下一步'
+    task.checkpointPersistedAt = now
+    persistPersistentState()
   } else if (event.type === 'turn/end') {
     activity = '正在整理最终答复'
     detail = '本轮执行结束，正在生成可读结果'
@@ -7460,11 +8309,18 @@ function recordChatRunActivity(task, event) {
 
 function cancelChatRunTask(task, reason = '用户停止执行') {
   if (!task) return
+  // 任务可能还在等槽位；先从等待队列摘除，避免已取消任务继续占位或延迟到前一个任务结束才返回。
+  dropChatRunWaiter(task)
   task.state = 'cancelled'
   task.finishedAt = Date.now()
   task.reason = String(reason).slice(0, 160)
   task.progress = Math.min(100, Math.max(0, task.progress || 0))
-  task.checkpoint = { ...(task.checkpoint || {}), phase: 'cancelled', updatedAt: Date.now() }
+  task.checkpoint = {
+    ...(task.checkpoint || {}),
+    phase: 'cancelled',
+    stepsCompleted: completedCheckpointSteps(task, task.checkpoint?.stepsCompleted ?? 0),
+    updatedAt: Date.now(),
+  }
   persistPersistentState()
 }
 
@@ -7477,8 +8333,130 @@ function finishChatRunTask(task, { steps = 0, artifacts = 0, reply = '' } = {}) 
   task.replyText = String(reply || '').slice(0, 20000)
   task.finishedAt = Date.now()
   task.reason = ''
-  task.checkpoint = { ...(task.checkpoint || {}), phase: 'done', updatedAt: Date.now() }
+  task.checkpoint = { ...(task.checkpoint || {}), phase: 'done', stepsCompleted: completedCheckpointSteps(task, steps), updatedAt: Date.now() }
   persistPersistentState()
+}
+
+/** 工作轮次被模型输出上限截断：保留已读到的进度，但不冒充完成。 */
+function interruptChatRunTask(task, reason, { steps = 0, artifacts = 0, reply = '' } = {}) {
+  if (!task) return
+  task.state = 'interrupted'
+  task.progress = Math.min(99, Math.max(task.progress || 0, 1))
+  task.steps = steps
+  task.artifacts = artifacts
+  task.replyText = String(reply || '').slice(0, 20000)
+  task.finishedAt = Date.now()
+  task.reason = String(reason || '本轮未完成').slice(0, 160)
+  task.checkpoint = {
+    ...(task.checkpoint || {}),
+    phase: 'interrupted',
+    stepsCompleted: completedCheckpointSteps(task, steps),
+    updatedAt: Date.now(),
+  }
+  persistPersistentState()
+}
+
+/**
+ * 产物计数只算“用户可见成果”。data/ 下的中枢数据库、运行目录、备份、
+ * 依赖和 git 元数据会随服务自身运行变化，不能算成项目产物。
+ */
+const RUNTIME_ARTIFACT_RE = /^(?:data\/|node_modules\/|\.git\/|runtime\/|\.dsh(?:-|$))/i
+
+/** 从本轮工具调用里取任务自己的写入路径，避免并发任务共享工作区时把别人的文件算进来。 */
+function artifactPathsFromSteps(steps = []) {
+  const paths = new Set()
+  for (const step of Array.isArray(steps) ? steps : []) {
+    const tool = String(step?.tool || '')
+    if (!['write', 'edit', 'apply_patch'].includes(tool)) continue
+    let detail = step?.detail
+    if (typeof detail === 'string') {
+      try { detail = JSON.parse(detail) } catch { detail = null }
+    }
+    if (detail && typeof detail === 'object') {
+      const path = detail.file_path || detail.filePath || detail.path
+      if (path) paths.add(String(path).replace(/\\/g, '/'))
+    }
+    const raw = typeof step?.detail === 'string' ? step.detail : JSON.stringify(step?.detail || {})
+    for (const match of raw.matchAll(/\*\*\* (?:Add|Update|Delete) File:\s*([^\s]+)/g)) {
+      paths.add(String(match[1]).replace(/\\/g, '/'))
+    }
+  }
+  return paths
+}
+
+function countTaskArtifacts(workspaceChanges = [], deliverables = [], steps = []) {
+  const paths = new Set()
+  for (const item of Array.isArray(deliverables) ? deliverables : []) {
+    const path = String(item?.path || item?.name || '').replace(/\\/g, '/')
+    if (path) paths.add(path)
+  }
+  const stepPaths = artifactPathsFromSteps(steps)
+  for (const path of stepPaths) {
+    if (path && !RUNTIME_ARTIFACT_RE.test(path)) paths.add(path)
+  }
+  // 有明确的 write/edit/apply_patch 记录就以任务自己的调用为准；
+  // 只有纯命令产物的旧任务才回退到工作区 diff，避免并发任务互相“认领”文件。
+  if (stepPaths.size === 0) {
+    for (const change of Array.isArray(workspaceChanges) ? workspaceChanges : []) {
+      const rel = String(change?.rel || change?.path || '').replace(/\\/g, '/').replace(/^[A-Za-z]:\/[^/]+\/[^/]+\//, '')
+      if (!rel || RUNTIME_ARTIFACT_RE.test(rel)) continue
+      paths.add(rel)
+    }
+  }
+  return paths.size
+}
+
+/** 把一次运行真实写入的文件固定到任务记录；只接受其会话工作区内的文件。 */
+function recordTaskOutputFiles(task, conv, result = {}) {
+  if (!task || !conv?.agentCwd) return []
+  let root = null
+  try { root = realpathSync(conv.agentCwd) } catch { return [] }
+  const candidates = new Set()
+  for (const item of Array.isArray(result.deliverables) ? result.deliverables : []) {
+    const value = item?.path || item?.name
+    if (value) candidates.add(String(value))
+  }
+  for (const value of artifactPathsFromSteps(result.steps || [])) candidates.add(value)
+  const files = []
+  for (const value of candidates) {
+    const requested = String(value || '').trim()
+    if (!requested || RUNTIME_ARTIFACT_RE.test(requested.replace(/\\/g, '/'))) continue
+    const safe = safeFilePath(root, isAbsolute(requested) ? relative(root, requested) : requested)
+    if (safe.error) continue
+    try {
+      const stat = statSync(safe.path)
+      if (!stat.isFile()) continue
+      files.push({ path: safe.rel, name: basename(safe.path), size: stat.size, updatedAt: stat.mtimeMs })
+    } catch {}
+  }
+  task.outputFiles = files
+  task.artifacts = files.length
+  return files
+}
+
+/** 门户采集没有模型写文件步骤，报告仍落为可预览、可下载的真实 Markdown。 */
+function writePortalReportFile(task, conv, report) {
+  if (!task || !conv?.agentCwd || !report) return null
+  const rel = `task-output/${task.id}/规划公示报告.md`
+  const safe = safeFilePath(conv.agentCwd, rel)
+  if (safe.error && safe.error !== '文件或目录不存在') return null
+  const full = join(conv.agentCwd, ...rel.split('/'))
+  try {
+    mkdirSync(dirname(full), { recursive: true })
+    const sections = (report.items || []).filter((item) => item?.h !== '数据口径').map((item) => {
+      const links = (item.links || []).map((link) => `- [${link.name || link.url}](${link.url})`).join('\n')
+      return `## ${item.h || '公示信息'}\n\n${item.p || ''}${item.src ? `\n\n来源：${item.src}` : ''}${links ? `\n\n${links}` : ''}`
+    }).join('\n\n')
+    const text = `# ${report.title || '规划公示报告'}\n\n${report.date || ''} · ${report.period || ''}\n\n${report.summary || report.lead || ''}\n\n${sections}\n`
+    writeFileSync(full, text, 'utf8')
+    const stat = statSync(full)
+    task.outputFiles = [{ path: rel, name: basename(rel), size: stat.size, updatedAt: stat.mtimeMs }]
+    task.artifacts = 1
+    return task.outputFiles[0]
+  } catch (error) {
+    console.error('[jg-server] write portal report file failed:', error?.message || error)
+    return null
+  }
 }
 
 function failChatRunTask(task, reason) {
@@ -7487,15 +8465,18 @@ function failChatRunTask(task, reason) {
   task.progress = Math.max(task.progress || 0, 10)
   task.finishedAt = Date.now()
   task.reason = String(reason || '执行失败').slice(0, 160)
-  task.checkpoint = { ...(task.checkpoint || {}), phase: 'failed', updatedAt: Date.now() }
+  task.checkpoint = {
+    ...(task.checkpoint || {}),
+    phase: 'failed',
+    stepsCompleted: completedCheckpointSteps(task, task.checkpoint?.stepsCompleted ?? 0),
+    updatedAt: Date.now(),
+  }
   persistPersistentState()
 }
 
 /* ---- 统一自动记忆：模型辅助提炼（节流、失败静默降级到规则提炼） ---- */
 const memoryDistillAt = new Map()
 const MEMORY_DISTILL_INTERVAL_MS = 10 * 60 * 1000
-const MEMORY_SENSITIVE_RE = /(密码|口令|密钥|token|api[_ -]?key|身份证|银行卡|信用卡|验证码|手机号)/i
-const MEMORY_ONESHOT_RE = /(这次|今天|现在|先帮我|临时|马上|立刻|随便|这一次|本次先|待会儿|等下)/
 
 /**
  * 调用轻量模型从一轮对话中归纳跨会话稳定信息（偏好/事实/决策/实体）。
@@ -7508,7 +8489,7 @@ async function modelDistillMemories({ user, text, reply, projectId = '', convers
   if (now - last < MEMORY_DISTILL_INTERVAL_MS) return []
   const question = String(text || '').replace(/\s+/g, ' ').trim().slice(0, 600)
   const answer = String(reply || '').replace(/\s+/g, ' ').trim().slice(0, 600)
-  if (question.length + answer.length < 40) return []
+  if (question.length + answer.length < 40 || !shouldAttemptMemoryDistill(question)) return []
 
   const modelCfg = resolveModelConfig({ userConfig: mergedUserChatConfig(user.id), request: {} })
   if (modelCfg.source === 'none' || !modelCfg.apiKey) return []
@@ -7517,7 +8498,8 @@ async function modelDistillMemories({ user, text, reply, projectId = '', convers
   const system = [
     '你是长期记忆提炼器。阅读用户与助手的一轮对话，只提炼跨会话仍然有效的稳定信息：',
     '个人偏好与习惯、身份/单位/角色事实、已定决策与选定方案、长期使用的技术栈或口径。',
-    '不要保存：一次性任务、临时上下文、本次操作步骤、常识、寒暄、密码/密钥/证件号等敏感信息。',
+    '只提炼用户明确陈述或明确确认的信息；助手答复只用于理解上下文，不能把助手的建议、计划、任务步骤或复述当作用户偏好。',
+    '不要保存：一次性任务、临时上下文、本次操作步骤、测试/联调内容、常识、寒暄、密码/密钥/证件号等敏感信息。',
     '输出严格 JSON，不要解释：{"memories":[{"text":"简洁客观的中文条目，不超过 60 字","kind":"preference|fact|decision|entity","scope":"global|project"}]}。',
     projectId ? '当前属于项目工作区：项目专属的方案、口径、技术栈用 project；个人背景与通用偏好用 global。' : '没有绑定工作区，全部用 global。',
     '没有可沉淀信息时输出 {"memories":[]}。',
@@ -7543,27 +8525,11 @@ async function modelDistillMemories({ user, text, reply, projectId = '', convers
     console.error('[jg-memory] model distill failed:', error?.message || error)
     return []
   }
-  const list = Array.isArray(parsed?.memories) ? parsed.memories : []
+  const list = Array.isArray(parsed?.memories) ? parsed.memories.slice(0, 4) : []
   const out = []
   for (const item of list) {
-    const textLine = String(item?.text || '').replace(/\s+/g, ' ').trim()
-    if (textLine.length < 4 || textLine.length > 120) continue
-    if (MEMORY_SENSITIVE_RE.test(textLine) || MEMORY_ONESHOT_RE.test(textLine)) continue
-    const kind = ['preference', 'fact', 'decision', 'entity'].includes(item?.kind) ? item.kind : 'fact'
-    const scope = item?.scope === 'project' && projectId ? 'project' : 'global'
-    const written = await writeMemory({
-      user,
-      args: {
-        kind,
-        scope,
-        scopeRef: scope === 'project' ? projectId : '',
-        content: textLine,
-        tags: ['auto-distill'],
-        confidence: 0.62,
-        conversationId,
-      },
-    })
-    if (written?.item) out.push(written.item)
+    const written = distillModelMemory({ user, candidate: item, projectId, conversationId, sourceText: question })
+    if (written) out.push(written)
   }
   return out
 }
@@ -7580,7 +8546,14 @@ function recoverInterruptedTasks() {
         ? '服务重启导致定时任务中断，下次调度会重新执行'
         : '服务重启导致任务中断，可在原会话继续'
       t.interruptedAt = Date.now()
-      t.checkpoint = { ...(t.checkpoint || {}), phase: 'interrupted', updatedAt: Date.now() }
+      // 重启后内存里的等待队列已经清空，保留旧排队位置会让接口出现“已中断却仍在排队”的假状态。
+      t.queuePosition = 0
+      t.checkpoint = {
+        ...(t.checkpoint || {}),
+        phase: 'interrupted',
+        stepsCompleted: Number(t.checkpoint?.stepsCompleted ?? 0),
+        updatedAt: Date.now(),
+      }
       if (t.kind === 'chat-run') {
         const conv = conversations.find((c) => c.id === t.conversationId)
         if (conv && conv.status === 'running') conv.status = 'failed'
@@ -7589,6 +8562,70 @@ function recoverInterruptedTasks() {
     }
   }
   if (changed) persistPersistentState()
+}
+
+/** 后端发起恢复：仍走 /api/chat 的真实执行链，不在恢复接口里伪造任务状态。
+    使用调用者原 cookie 自调用本地中枢；浏览器关闭也不影响已发起的恢复。 */
+async function resumeChatRunTask(task, user, cookie) {
+  task.resumeState = 'requesting'
+  task.resumeRequestedAt = Date.now()
+  task.resumeError = ''
+  persistPersistentState()
+  try {
+    const text = formatCheckpointResumePrompt(task)
+    const conv = conversations.find((c) => c.id === task.conversationId)
+    if (conv && !conv.dshSessionId && task.checkpoint?.dshSessionId) {
+      conv.dshSessionId = String(task.checkpoint.dshSessionId)
+    }
+    /* 只等“任务已创建、执行已开始”，不等整轮跑完：恢复轮可能跑十几分钟，
+       继续挂在同步 HTTP 上会被 Node 的 requestTimeout 掐断，导致原任务被误标为失败。 */
+    const controller = new AbortController()
+    const response = await fetch(`http://127.0.0.1:${port}/api/chat`, {
+      method: 'POST',
+      signal: controller.signal,
+      headers: {
+        'content-type': 'application/json',
+        ...(cookie ? { cookie } : {}),
+      },
+      body: JSON.stringify({
+        text,
+        conversationId: task.conversationId,
+        projectId: taskProjectId(task),
+        mode: task.mode === 'chat' ? 'chat' : 'work',
+        stream: true,
+        resumeFromTaskId: task.id,
+        accessMode: task.accessMode === 'read' ? 'read' : 'write',
+        idempotencyKey: `resume-${task.id}-${Date.now()}`,
+      }),
+    })
+    if (!response.ok) {
+      let payload = {}
+      try { payload = await response.json() } catch { payload = {} }
+      throw new Error(payload?.error || `恢复执行失败（HTTP ${response.status}）`)
+    }
+    /* 收到首个响应头就断开连接；执行本身在服务端继续，断开只停止这一条观察流。 */
+    controller.abort()
+    let resumedTask = null
+    for (let i = 0; i < 80; i += 1) {
+      resumedTask = liveTasks.find((t) => t.kind === 'chat-run'
+        && String(t.conversationId) === String(task.conversationId)
+        && t.id !== task.id
+        && Number(t.createdAt) >= Number(task.resumeRequestedAt || 0))
+      if (resumedTask) break
+      await new Promise((resolve) => setTimeout(resolve, 250))
+    }
+    if (!resumedTask) throw new Error('恢复请求已发出，但没有生成新的执行任务')
+    task.resumeState = 'started'
+    task.resumedAt = Date.now()
+    task.resumedByTaskId = String(resumedTask.id)
+    task.resumeError = ''
+    /* 原会话的 userId 可能是旧数据；恢复成功后把当前操作人留在审计字段里。 */
+    task.resumedBy = String(user?.id || '')
+  } catch (error) {
+    task.resumeState = 'failed'
+    task.resumeError = String(error?.message || error).slice(0, 300)
+  }
+  persistPersistentState()
 }
 
 /* ---- 定时任务：真实调度与执行 ---- */
@@ -7673,10 +8710,279 @@ function setAutomationRunFields(a, task, state, reason = '') {
   if (a.status === 'active') scheduleAutomationNext(a, Date.now() + 60 * 1000)
 }
 
-async function runAutomation(a, trigger = 'manual') {
+/* ---- 规划公示采集器：定时任务的可验证执行分支 ----
+ * 官网栏目列表由站点 JS 从 data_<年份>.xml 拉取，网关要求 x-api-key 头；
+ * 采集器直接取 XML 元数据，落快照后比对，产出可复核的摘要，不依赖模型臆造。 */
+const PORTAL_SNAPSHOT_DIR = () => join(dataDirPath(), 'portal-snapshots')
+
+function portalSnapshotPath(automationId) {
+  return join(PORTAL_SNAPSHOT_DIR(), `${String(automationId || 'unknown').replace(/[^\w.-]/g, '_')}.json`)
+}
+
+function readPortalSnapshot(automationId) {
+  try {
+    const file = portalSnapshotPath(automationId)
+    if (!existsSync(file)) return null
+    return JSON.parse(readFileSync(file, 'utf8'))
+  } catch (error) {
+    console.error('[jg-server] read portal snapshot failed:', error?.message || error)
+    return null
+  }
+}
+
+function writePortalSnapshot(automationId, snapshot) {
+  try {
+    mkdirSync(PORTAL_SNAPSHOT_DIR(), { recursive: true })
+    writeFileSync(portalSnapshotPath(automationId), `${JSON.stringify(snapshot, null, 2)}\n`, 'utf8')
+  } catch (error) {
+    console.error('[jg-server] write portal snapshot failed:', error?.message || error)
+  }
+}
+
+function isPortalAutomation(a) {
+  if (!a) return false
+  if (a.collector === 'plan-publicity') return true
+  const prompt = String(a.prompt || '')
+  return /bnr\.jiujiang\.gov\.cn|规划公示|批前公示/.test(prompt) && !a.collector
+}
+
+/** 采集 + 比对 + 摘要 + 落快照，产出真实报告写回任务与任务记录。 */
+async function runPortalCollector(a, trigger, extraText = '') {
+  const now = Date.now()
+  const task = {
+    id: `T-${now}-${Math.floor(Math.random() * 900 + 100)}`,
+    kind: 'automation-run',
+    title: `${trigger === 'schedule' ? '定时执行' : '手动执行'} · ${a.name}`,
+    state: 'running',
+    progress: 30,
+    target: `定时任务 · ${a.deliver || '工作台'}`,
+    started: new Date().toLocaleTimeString('zh-CN', { hour12: false }).slice(0, 5),
+    createdAt: now,
+    finishedAt: null,
+    automationId: a.id,
+    userId: String(a.userId || ''),
+    prompt: a.prompt || '',
+    permission: 'read-only',
+    steps: 0,
+    artifacts: 0,
+    reason: '',
+    collector: 'plan-publicity',
+  }
+  liveTasks.unshift(task)
+  a.lastTaskId = task.id
+  a.last = '采集中'
+  persistPersistentState()
+
+  try {
+    const collection = await collectPlanningPublicity()
+    const previous = readPortalSnapshot(a.id)
+    const diff = diffAgainstSnapshot(collection, previous)
+    const extras = [...(a.extras || [])]
+    const extraTrim = String(extraText || '').trim()
+    if (extraTrim && !extras.some((e) => String(e.text || '') === extraTrim)) {
+      extras.push({ text: extraTrim, scope: 'now', at: now })
+    }
+    // scope=now 的追加要求只作用于本次执行，执行完成后从任务上移除，避免污染后续调度。
+    const usedNowExtras = extras.filter((e) => e.scope === 'now')
+
+    let summaryText = buildDeterministicSummary({ name: a.name, collection, diff, snapshot: previous, extras })
+    let summarySource = 'collector'
+    // 有模型时用真实采集结果生成 5 行内摘要；模型不可用则保留确定性摘要，不阻塞任务。
+    const modelCfg = resolveModelConfig({ userConfig: mergedUserChatConfig(a.userId), request: {} })
+    if (modelCfg.source !== 'none' && modelCfg.apiKey && (diff.added.length || extras.length || !diff.baseline)) {
+      try {
+        // 追加要求里的“N 天”直接落到数据窗口，避免只当成一句话交给模型。
+        const daysHit = extras.map((e) => String(e.text || '')).join(' ').match(/(\d{1,3})\s*天/)
+        const windowDays = daysHit ? Math.min(365, Math.max(1, Number(daysHit[1]))) : 14
+        const windowStart = new Date(Date.now() - windowDays * 86400000).toISOString().slice(0, 10)
+        const windowItems = collection.items.filter((i) => i.date >= windowStart)
+        const brief = {
+          任务: a.name,
+          采集时间: new Date(collection.collectedAt).toISOString(),
+          来源: collection.columns.map((c) => c.name),
+          基线: Boolean(diff.baseline),
+          总量: { 现有: collection.totalCount, 批前: collection.columnCount.pre, 批后: collection.columnCount.post, 最新日期: collection.latestDate },
+          新增条目: diff.added.slice(0, 10).map((i) => ({ 日期: i.date, 标题: i.title, 栏目: i.columnName, 链接: i.url })),
+          窗口: `近 ${windowDays} 天（${windowStart} 起）共 ${windowItems.length} 条`,
+          窗口条目: windowItems.slice(0, 12).map((i) => ({ 日期: i.date, 标题: i.title, 栏目: i.columnName, 链接: i.url })),
+          追加要求: extras.map((e) => e.text),
+        }
+        const res = await chatCompletion({
+          apiKey: modelCfg.apiKey,
+          baseUrl: modelCfg.baseUrl,
+          model: modelCfg.model,
+          timeoutMs: modelCfg.timeoutMs,
+          temperature: 0.2,
+          maxTokens: 400,
+          messages: [
+            {
+              role: 'system',
+              content:
+                '你是规划公示信息编辑。只能用给定采集数据写摘要，不得补充数据里没有的项目、日期或结论。' +
+                '若“基线”为 true，说明本次只是首次建立基线：只能写现有总量与窗口条目，严禁把已有条目说成“新增”。' +
+                '按“追加要求”调整时间范围、排序或栏目，但只能使用“窗口条目”里真实存在的条目。' +
+                '输出不超过 5 行，每行一句，不要列表符号和标题。',
+            },
+            { role: 'user', content: JSON.stringify(brief) },
+          ],
+        })
+        // 模型偶尔把 5 句写成一行，这里按句号重排成逐行，统一成不超过 5 行。
+        let rows = String(res.content || '').trim().split(/\n+/).map((s) => s.trim()).filter(Boolean)
+        if (rows.length === 1) rows = rows[0].split(/(?<=[。！？])/).map((s) => s.trim()).filter(Boolean)
+        const raw = rows.slice(0, 5).join('\n')
+        // 基线状态下的“新增”措辞不可信，直接退回确定性摘要。
+        const unsafe = Boolean(diff.baseline) && /新增|增加/.test(raw)
+        if (raw && !unsafe) {
+          summaryText = raw
+          summarySource = `model:${res.model || modelCfg.model}`
+          a.model = res.model || a.model
+        } else if (unsafe) {
+          console.error('[jg-server] portal summary model mislabeled baseline as added, fallback to collector')
+        }
+      } catch (modelError) {
+        console.error('[jg-server] portal summary model failed:', modelError?.message || modelError)
+      }
+    }
+
+    const lines = summaryText.split('\n')
+    const report = buildReport({ name: a.name, collection, diff, extras, summaryLines: lines })
+    report.summarySource = summarySource
+    a.report = report
+    a.lastResult = summaryText.slice(0, 4000)
+    a.lastRunAt = now
+    a.portalMeta = {
+      collectedAt: collection.collectedAt,
+      latestDate: collection.latestDate,
+      totalCount: collection.totalCount,
+      addedCount: diff.baseline ? 0 : diff.added.length,
+      baseline: Boolean(diff.baseline),
+      fetches: collection.fetches,
+    }
+    a.last = `${new Date().toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).replace(/\//g, '-')} 成功`
+    if (usedNowExtras.length) a.extras = (a.extras || []).filter((e) => e.scope !== 'now')
+    if (a.status === 'active') scheduleAutomationNext(a, Date.now())
+
+    writePortalSnapshot(a.id, nextSnapshot(collection, previous, now))
+
+    task.state = 'done'
+    task.progress = 100
+    task.finishedAt = Date.now()
+    task.steps = collection.fetches.length
+    task.artifacts = 1
+    task.replyText = summaryText.slice(0, 20000)
+    task.report = report
+    // 真实采集到的每条公示都带原文链接，作为这条定时任务消息的来源。
+    const links = []
+    const linkSeen = new Set()
+    const addLink = (name, url) => {
+      const clean = String(url || '').trim()
+      if (!/^https?:\/\//i.test(clean) || linkSeen.has(clean)) return
+      linkSeen.add(clean)
+      links.push({ name: String(name || clean).slice(0, 120), url: clean })
+    }
+    collection.columns.forEach((c) => addLink(c.name, c.url))
+    ;(collection.items.filter((i) => i.date >= new Date(collection.collectedAt - extraWindowDays(extras) * 86400000).toISOString().slice(0, 10)).slice(0, 6)).forEach((i) => addLink(i.title, i.url))
+    addLink(`最新一条 · ${collection.items[0]?.title || ''}`, collection.items[0]?.url)
+    task.sourceLinks = links.slice(0, 8)
+    report.sourceLinks = task.sourceLinks
+    report.schedule = a.schedule
+    report.next = a.next
+    const ownerAccount = getAccount(a.userId) || getAccountByRole('admin')
+    if (ownerAccount) {
+      const owner = userOfAccount(ownerAccount)
+      const conv = automationConversation(a, owner, a.lastConversationId)
+      conv.status = 'done'
+      conv.time = '刚刚'
+      conv.messages.push({
+        role: 'assistant',
+        text: summaryText,
+        time: new Date().toLocaleTimeString('zh-CN', { hour12: false }).slice(0, 5),
+        createdAt: new Date().toISOString(),
+        steps: [],
+        citations: [],
+        sourceLinks: task.sourceLinks,
+        report,
+        automationId: a.id,
+      })
+      task.conversationId = conv.id
+      writePortalReportFile(task, conv, report)
+    }
+    persistPersistentState()
+    logAudit({ id: a.userId, name: a.owner || '—' }, 'automation.collect', a.id, 'allow', 'inet')
+    return { ok: true, task, report }
+  } catch (error) {
+    task.state = 'failed'
+    task.finishedAt = Date.now()
+    task.reason = String(error?.message || error || '采集失败').slice(0, 160)
+    a.last = `${new Date().toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).replace(/\//g, '-')} 失败：${task.reason}`
+    if (a.status === 'active') scheduleAutomationNext(a, Date.now())
+    persistPersistentState()
+    return { ok: false, error: task.reason, task }
+  }
+}
+
+/** 从运行步骤与答复里抽出可点击的网页来源（只保留真正参与过检索/抓取的链接）。 */
+function extractSourceLinks(steps = [], reply = '', limit = 8) {
+  const rows = []
+  const seen = new Set()
+  const push = (url, name = '') => {
+    const clean = String(url || '').replace(/[)），。；、"'<>]+$/, '').trim()
+    if (!/^https?:\/\//i.test(clean) || seen.has(clean)) return
+    seen.add(clean)
+    rows.push({ url: clean, name: String(name || '').trim() || (() => { try { return new URL(clean).hostname.replace(/^www\./, ''); } catch { return clean.slice(0, 90); } })() })
+  }
+  const webTools = /搜索网页|读取网页|web_search|web_fetch/i
+  for (const step of steps) {
+    if (!step || !webTools.test(String(step.tool || ''))) continue
+    const urls = String(step.detail || '').match(/https?:\/\/[^\s<>"'）)，。；]+/g) || []
+    urls.forEach((u) => push(u))
+  }
+  const replyUrls = String(reply || '').match(/https?:\/\/[^\s<>"'）)，。；]+/g) || []
+  replyUrls.forEach((u) => push(u))
+  return rows.slice(0, limit)
+}
+
+/** 定时任务固定复用同一条会话：结果落在「定时任务 · 任务名」里，前端默认置顶。 */
+function automationConversation(a, user, convId) {
+  const existing = convId ? conversations.find((c) => c.id === convId) : null
+  if (existing && String(existing.userId || '') === String(user.id || '')) {
+    existing.automationId = a.id
+    existing.pinnedByDefault = true
+    if (!existing.agentCwd) existing.agentCwd = chatWorkspaceDir(user, existing.id)
+    return existing
+  }
+  const automationConvId = convId || `C-AU-${Date.now()}`
+  const conv = {
+    id: automationConvId,
+    title: `定时任务 · ${a.name}`,
+    time: '刚刚',
+    messages: [],
+    status: 'done',
+    projectId: a.projectId || null,
+    userId: user.id,
+    owner: a.owner || user.name,
+    createdAt: Date.now(),
+    automationId: a.id,
+    pinnedByDefault: true,
+    agentCwd: chatWorkspaceDir(user, automationConvId),
+  }
+  conversations.unshift(conv)
+  a.lastConversationId = conv.id
+  return conv
+}
+
+async function runAutomation(a, trigger = 'manual', extraText = '') {
   if (!a) return { ok: false, error: '不存在该定时任务' }
   if (a.status !== 'active' && trigger === 'schedule') return { ok: false, error: '任务已暂停' }
   if (automationRunning.has(a.id)) return { ok: false, error: '该定时任务正在执行', code: 'RUNNING' }
+  if (isPortalAutomation(a)) {
+    automationRunning.add(a.id)
+    try {
+      return await runPortalCollector(a, trigger, extraText)
+    } finally {
+      automationRunning.delete(a.id)
+    }
+  }
   const account = getAccount(a.userId) || getAccountByRole('admin')
   if (!account) return { ok: false, error: '任务归属账号不存在' }
   const user = userOfAccount(account)
@@ -7744,6 +9050,8 @@ async function runAutomation(a, trigger = 'manual') {
     userId: user.id,
     owner: user.name,
     createdAt: Date.now(),
+    automationId: a.id,
+    pinnedByDefault: true,
     agentCwd: chatWorkspaceDir(user, convId),
   }
   conversations.unshift(conv)
@@ -7810,12 +9118,14 @@ async function runAutomation(a, trigger = 'manual') {
       })
       conv.dshSessionId = result.sessionId || ''
       conv.status = 'done'
-      conv.messages.push({ role: 'assistant', text: result.reply || '', time: new Date().toLocaleTimeString('zh-CN', { hour12: false }).slice(0, 5), steps: result.steps || [], model: result.model })
+      const sourceLinks = extractSourceLinks(result.steps || [], result.reply || '')
+      conv.messages.push({ role: 'assistant', text: result.reply || '', time: new Date().toLocaleTimeString('zh-CN', { hour12: false }).slice(0, 5), steps: result.steps || [], model: result.model, citations: [], sourceLinks })
+      task.sourceLinks = sourceLinks
       task.state = 'done'
       task.progress = 100
       task.finishedAt = Date.now()
       task.steps = Array.isArray(result.steps) ? result.steps.length : 0
-      task.artifacts = Array.isArray(result.deliverables) ? result.deliverables.length : 0
+      recordTaskOutputFiles(task, conv, result)
       task.replyText = String(result.reply || '').slice(0, 20000)
       a.last = `${new Date().toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).replace(/\//g, '-')} 成功`
       a.lastResult = String(result.reply || '').slice(0, 4000)
@@ -7881,7 +9191,93 @@ function resourceFileId(resource) {
   return ''
 }
 
-async function refContextForModel(user, net, refs) {
+const CHAT_ATTACHMENT_MAX_BYTES = 64 * 1024 * 1024
+
+function safeAttachmentBase(name = '') {
+  const raw = basename(String(name || '')).replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').replace(/^\.+/, '').trim()
+  const fallback = raw || `附件-${Date.now()}`
+  if (fallback.length <= 150) return fallback
+  const ext = extname(fallback).slice(0, 24)
+  return `${fallback.slice(0, Math.max(1, 150 - ext.length))}${ext}`
+}
+
+/**
+ * 把本轮 refs 解析成可回显的轻量元信息（不含文件正文），随用户消息持久化。
+ * 消息气泡据此渲染附件卡片；无权限/已删除的引用直接剔除。
+ */
+function summarizeChatRefs(user, net, refs) {
+  const out = []
+  if (!Array.isArray(refs)) return out
+  for (const ref of refs.slice(0, 8)) {
+    if (!ref || !ref.id) continue
+    if (ref.kind === 'library') {
+      const r = liveResources.find((x) => x.id === ref.id)
+      if (r && canSee(user, r, net)) out.push({ kind: 'library', id: ref.id, label: r.name, type: r.type || '资料库' })
+    } else if (ref.kind === 'project') {
+      const p = liveProjects.find((x) => x.id === ref.id)
+      if (p) out.push({ kind: 'project', id: ref.id, label: p.name, type: '项目' })
+    } else if (ref.kind === 'file') {
+      const meta = getFile(String(ref.id))
+      if (meta && meta.deletedAt == null && fileVisibleToUser(user, net, String(ref.id))) {
+        out.push({ kind: 'file', id: meta.id, label: meta.name, mime: meta.mime, size: meta.size })
+      }
+    }
+  }
+  return out
+}
+
+/**
+ * 聊天附件默认只存在于附件库，Work 代理扫描项目 cwd 时看不到。
+ * 在会话开始时把有权限的 file ref 落到 workspace 的 .jg/chat-attachments/<会话>/，
+ * 并把落盘路径写入模型上下文；.jg 不进文件树，不会污染项目展示。
+ */
+function materializeChatAttachments({ user, net, refs, root, conversationId }) {
+  const out = new Map()
+  if (!root || !Array.isArray(refs) || !refs.length) return out
+  let rootAbs
+  try { rootAbs = resolve(String(root)) } catch { return out }
+  const convKey = String(conversationId || 'default').replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 80) || 'default'
+  const dir = join(rootAbs, '.jg', 'chat-attachments', convKey)
+  let dirReady = false
+  for (const ref of refs) {
+    if (!ref || ref.kind !== 'file' || !ref.id) continue
+    try {
+      const meta = getFile(String(ref.id))
+      if (!meta || meta.deletedAt != null) continue
+      if (!fileVisibleToUser(user, net, String(ref.id))) continue
+      if (Number(meta.size || 0) > CHAT_ATTACHMENT_MAX_BYTES) continue
+      const buffer = readFileBuffer(String(ref.id))
+      if (!buffer?.length) continue
+      const base = safeAttachmentBase(meta.name)
+      const ext = extname(base).slice(0, 24)
+      const stem = ext ? base.slice(0, -ext.length) : base
+      const digest = String(meta.sha256 || createHash('sha256').update(buffer).digest('hex'))
+      let dest = join(dir, base)
+      if (existsSync(dest)) {
+        try {
+          const old = readFileSync(dest)
+          if (old.equals(buffer)) {
+            out.set(String(ref.id), dest)
+            continue
+          }
+        } catch {}
+        dest = join(dir, `${stem}-${digest.slice(0, 8)}${ext}`)
+      }
+      if (!dest.startsWith(`${rootAbs}${sep}`)) continue
+      if (!dirReady) {
+        mkdirSync(dir, { recursive: true })
+        dirReady = true
+      }
+      writeFileSync(dest, buffer)
+      out.set(String(ref.id), dest)
+    } catch (error) {
+      console.warn('[jg-server] materialize chat attachment failed:', ref?.id, error?.message || error)
+    }
+  }
+  return out
+}
+
+async function refContextForModel(user, net, refs, attachmentPaths = null) {
   const out = []
   for (const ref of (Array.isArray(refs) ? refs : []).slice(0, 8)) {
     if (!ref || !ref.id) continue
@@ -7903,7 +9299,8 @@ async function refContextForModel(user, net, refs) {
             excerpt = Buffer.from(buffer).toString('utf8').slice(0, 1200)
           } catch { excerpt = '' }
         }
-        out.push(`会话附件：${meta.name}（${meta.size} 字节，${meta.mime || '未知类型'}）\n${excerpt ? `正文摘录：\n${excerpt}` : '（二进制文件，正文未展开）'}`)
+        const localPath = attachmentPaths?.get?.(String(ref.id)) || ''
+        out.push(`会话附件：${meta.name}（${meta.size} 字节，${meta.mime || '未知类型'}；文件 ID ${ref.id}）\n${localPath ? `已落盘到当前工作区：${localPath}` : '（未落盘，需要时用文件 ID 读取）'}\n${excerpt ? `正文摘录：\n${excerpt}` : '（二进制文件，正文未展开；Work 可直接读取上述落盘路径）'}`)
       }
     } else if (ref.kind === 'tool') {
       out.push(`已选工具：${ref.label || ref.id}`)
@@ -8287,7 +9684,7 @@ function marketSkillInstalled(id, ctx = {}) {
   if (existsSync(join(marketSkillTarget(id, ctx), 'SKILL.md'))) return true
   return marketSkillGlobalBaseline(id)
 }
-async function installMarketSkill(item, user, ctx = {}) {
+async function installMarketSkill(item, user, ctx = {}, onPhase = () => {}) {
   const source = marketSkillSource(item.id)
   if (!source) {
     throw new Error('该插件尚未提供可安装的技能包')
@@ -8295,6 +9692,7 @@ async function installMarketSkill(item, user, ctx = {}) {
   if (marketSkillGlobalBaseline(item.id)) {
     throw new Error('该技能已作为全客户端基线安装，不能再按账号或项目重复安装')
   }
+  onPhase('准备技能目录', 24, 36)
   const target = marketSkillTarget(item.id, ctx)
   if (existsSync(target)) {
     const manifest = marketSkillManifestAt(target)
@@ -8304,7 +9702,9 @@ async function installMarketSkill(item, user, ctx = {}) {
     rmSync(target, { recursive: true, force: true })
   }
   mkdirSync(target, { recursive: true })
+  onPhase('复制技能包', 40, 58)
   cpSync(source, target, { recursive: true })
+  onPhase('写入技能清单', 64, 78)
   writeFileSync(join(target, MARKET_MANIFEST), `${JSON.stringify({
     marketId: item.id,
     name: item.name,
@@ -8315,6 +9715,7 @@ async function installMarketSkill(item, user, ctx = {}) {
     projectId: ctx.projectId || '',
   }, null, 2)}\n`, 'utf8')
   // 关闭空闲运行时，下一轮对话重新加载技能目录；有会话执行时由调用方先拒绝。
+  onPhase('重载技能索引', 84, 92)
   await closeHarness()
 }
 async function uninstallMarketSkill(item, user, ctx = {}) {
@@ -8448,15 +9849,17 @@ function bundleInstallUsers(id) {
 function anyUserBundleInstalled(id) {
   return bundleInstallUsers(id).length > 0
 }
-async function installMarketBundle(item, home) {
+async function installMarketBundle(item, home, onPhase = () => {}) {
   if (!pnpmAvailable()) throw new Error('客户端未内置 pnpm，无法安装 DSH Bundle')
   const pkg = bundlePackageManifest(item.id)
   if (!pkg || !pkg.name) throw new Error('该插件尚未提供可安装的 Bundle 包')
   const dir = bundlePackageDir(item.id)
-  const result = runDshPlugin(['add', `file:${dir.replace(/\\/g, '/')}`], 180000, home)
+  onPhase('安装运行时依赖', 32, 74)
+  const result = await runDshPluginAsync(['add', `file:${dir.replace(/\\/g, '/')}`], 180000, home)
   if (result.status !== 0) {
     throw new Error(`Bundle 安装失败：${(result.stderr || result.stdout || 'pnpm 未返回诊断').slice(-1800)}`)
   }
+  onPhase('校验插件入口', 78, 88)
   const bundles = profileManifest(home)?.dsh?.profile?.bundles || []
   if (!bundles.includes(pkg.name)) setProfileBundle(home, pkg.name, true)
   const installed = marketBundleInstalled(item.id, home)
@@ -8465,6 +9868,7 @@ async function installMarketBundle(item, home) {
     setProfileBundle(home, pkg.name, false)
     throw new Error('Bundle 已下载但未进入当前账号的 profile bundles，已回滚；请检查包内 dsh.bundle 与 cordis.patch.yml')
   }
+  onPhase('重载 DSH 运行时', 92, 96)
   await closeHarnessForHome(home)
 }
 async function uninstallMarketBundle(item, home) {
@@ -8893,39 +10297,7 @@ function appToolCatalog(user) {
       note: capabilities.note,
     })
   }
-  for (const item of localAppCatalog(user)) {
-    if (!items.some((app) => app.appId === item.appId)) items.push(item)
-  }
-  return items
-}
-
-/* 本地已安装应用是第二来源：市场台账可能缺失（历史导入、手工安装），
-   但 data/apps 下的 current.json + app.json 才是真实安装态。 */
-function localAppCatalog(user) {
-  if (!existsSync(AS_APPS_ROOT)) return []
-  const items = []
-  for (const entry of readdirSync(AS_APPS_ROOT, { withFileTypes: true })) {
-    if (!entry.isDirectory() || entry.name.startsWith('.')) continue
-    const appId = entry.name
-    const info = currentAppInfo(appId)
-    if (!info) continue
-    const capabilities = appCapabilities(appId)
-    if (!capabilities) continue
-    const userDir = join(AS_APPS_ROOT, appId, 'users', String(user?.id || ''))
-    if (!canManage(user) && !existsSync(userDir)) continue
-    items.push({
-      marketId: `local:${appId}`,
-      appId,
-      name: capabilities.appName,
-      version: capabilities.version,
-      installed: true,
-      declared: capabilities.declared,
-      tools: capabilities.tools,
-      resources: capabilities.resources,
-      verdict: capabilities.verdict,
-      note: capabilities.note,
-    })
-  }
+  /* 应用只认市场条目与安装台账；data/apps 下手工放入的包不进入平台能力目录。 */
   return items
 }
 
@@ -8935,17 +10307,22 @@ function skillCatalogForUser(user) {
   const items = []
   for (const entry of readdirSync(skillsRoot, { withFileTypes: true })) {
     if (!entry.isDirectory() || entry.name.startsWith('.')) continue
-    const skillFile = join(skillsRoot, entry.name, 'SKILL.md')
+    const target = join(skillsRoot, entry.name)
+    /* 平台只把市场安装的技能当能力：没有 .jg-market.json 的手工目录既不展示，也不进入能力目录。 */
+    const manifest = marketSkillManifestAt(target)
+    if (!manifest?.marketId) continue
+    const skillFile = join(target, 'SKILL.md')
     if (!existsSync(skillFile)) continue
     let text = ''
     try { text = readFileSync(skillFile, 'utf8') } catch { continue }
-    const name = /^name:\s*(.+)$/m.exec(text)?.[1]?.trim() || entry.name
+    const name = /^name:\s*(.+)$/m.exec(text)?.[1]?.trim() || manifest.name || entry.name
     const description = /^description:\s*(.+)$/m.exec(text)?.[1]?.trim() || ''
     items.push({
       name,
       description: description.slice(0, 240),
       dir: entry.name,
-      source: 'agent',
+      marketId: manifest.marketId,
+      source: 'market',
       callWith: 'skill',
     })
   }
@@ -8971,22 +10348,7 @@ function pluginCatalogForUser(user) {
       note: isCodeReview ? '只读源码审查插件，作为 mcp__jg__code_review 暴露' : '平台/Harness 插件，不直接作为对话工具暴露',
     })
   }
-  const runtimePluginsRoot = join(root, 'plugins')
-  if (existsSync(runtimePluginsRoot)) {
-    for (const entry of readdirSync(runtimePluginsRoot, { withFileTypes: true })) {
-      if (!entry.isDirectory() || entry.name.startsWith('.')) continue
-      result.push({
-        id: `runtime:${entry.name}`,
-        name: entry.name,
-        version: '',
-        installed: true,
-        callable: false,
-        tool: '',
-        callWith: '由 Harness 运行时加载',
-        note: '运行时插件，不是对话工具',
-      })
-    }
-  }
+  /* 只列产品内置插件与市场插件；仓库 plugins/ 下的手工运行时插件不进入平台能力目录。 */
   return result
 }
 
@@ -9067,9 +10429,10 @@ const APP_AI_GENERIC_TOOLS = [
 ]
 
 
-async function installMarketApp(item, user) {
+async function installMarketApp(item, user, onPhase = () => {}) {
   const info = marketAppInfo(item)
   if (!info) throw new Error('该应用尚未完成入库，暂不能安装')
+  onPhase('登记账号安装记录', 38, 58)
   addMarketInstallRecord(item.id, {
     userId: user.id,
     userName: user.name,
@@ -9085,6 +10448,9 @@ async function installMarketApp(item, user) {
 async function uninstallMarketApp(item, user) {
   const appId = item.appId || item.id
   removeMarketInstallRecord(item.id, { userId: user.id, scope: 'account', projectId: '' })
+  /* 卸下应用时同步撤掉这个账号在该应用上的待触发提醒；否则应用已经不在，
+     到期仍会往铃铛里弹一条“幽灵待办”。 */
+  if (removeAppRemindersForUser(appId, user.id)) persistPersistentState()
   const remaining = marketInstallRecords(item.id).filter((r) => r.userId !== user.id)
   if (!remaining.length) {
     // 机器级单例：没有其它账号持有安装记录时强制回收进程（常驻模式下普通释放不会停进程）。
@@ -9300,13 +10666,239 @@ function readNotificationSet(name) {
   return set
 }
 
-/** 真实通知流：任务收尾、审批与授权变更、安全拦截，全部来自当前用户可追溯的真实记录。 */
+function clearedNotificationSet(name) {
+  const value = clearedNotifications.get(name)
+  if (value instanceof Set) return value
+  const set = new Set(Array.isArray(value) ? value : value && typeof value === 'object' ? Object.keys(value) : [])
+  clearedNotifications.set(name, set)
+  return set
+}
+
+/* -------------------------------------------------------------------------
+ * 应用提醒：应用只登记“何时提醒谁”，到点写铃铛由中枢调度器完成。
+ * 应用进程重启、窗口关闭、账号切换都不会把定时器一起带走；中枢宕机期间
+ * 到期的提醒在下一次 tick 补发一次，通知 ID 由 appId+账号+key+dueAt 稳定生成，
+ * 因此同一提醒即使重复注册也不会重复进铃铛。
+ * ------------------------------------------------------------------------- */
+function appRequestContext(req, body = {}, appIdOverride = '') {
+  const bearer = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim()
+  if (bearer) {
+    const modelContext = verifyAppModelToken(bearer)
+    if (modelContext) return modelContext
+  }
+  const contextToken = String(
+    req.headers['x-as-context'] || body.contextToken || body.asContext || '',
+  ).trim()
+  const appId = String(
+    appIdOverride || body.appId || req.headers['x-as-app-id'] || '',
+  ).trim()
+  if (!contextToken || !appId) return null
+  return verifyAppContext(contextToken, appId)
+}
+
+function appReminderError(message, status, code) {
+  const error = new Error(message)
+  error.status = status
+  error.code = code
+  return error
+}
+
+function normalizeAppReminderKey(value) {
+  const key = String(value || '').trim()
+  if (!key || key.length > 100 || !/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(key)) return ''
+  return key
+}
+
+function appReminderNotificationId(reminder) {
+  const digest = createHash('sha256')
+    .update(`${reminder.appId}|${reminder.userId}|${reminder.key}|${reminder.dueAt}`)
+    .digest('hex')
+    .slice(0, 24)
+  return `N-AS-R-${digest}`
+}
+
+function appReminderView(reminder) {
+  return {
+    id: reminder.key,
+    appId: reminder.appId,
+    title: reminder.title,
+    body: reminder.body,
+    dueAt: reminder.dueAt,
+    firedAt: reminder.firedAt || 0,
+    notificationId: reminder.notificationId || '',
+    updatedAt: reminder.updatedAt || 0,
+  }
+}
+
+function registerAppReminder(context, body = {}) {
+  const appInfo = currentAppInfo(context.appId)
+  if (!appInfo) throw appReminderError('应用未安装或缺少 app.json，不能登记提醒', 404, 'AS_APP_NOT_FOUND')
+  const key = normalizeAppReminderKey(body.key || body.id)
+  if (!key) throw appReminderError('提醒 key 非法或缺失', 400, 'APP_REMINDER_KEY_INVALID')
+  const parsedDue = typeof body.dueAt === 'number'
+    ? body.dueAt
+    : Date.parse(String(body.dueAt || ''))
+  if (!Number.isFinite(parsedDue) || parsedDue <= 0) throw appReminderError('dueAt 必须是有效时间', 400, 'APP_REMINDER_DUE_INVALID')
+  const dueAt = Math.round(parsedDue)
+  if (dueAt > Date.now() + 5 * 365 * 24 * 60 * 60 * 1000) throw appReminderError('提醒时间超过 5 年上限', 400, 'APP_REMINDER_DUE_RANGE')
+  const title = String(body.title || '').trim().slice(0, 80)
+  if (!title) throw appReminderError('缺少提醒标题', 400, 'APP_REMINDER_TITLE_REQUIRED')
+  const reminderBody = String(body.body || '').trim().slice(0, 300)
+  const appName = String(appInfo.manifest.name || context.appId)
+
+  let reminder = appReminders.find((item) => item.appId === context.appId && item.userId === String(context.userId) && item.key === key)
+  if (!reminder) {
+    if (appReminders.length >= APP_REMINDER_MAX) throw appReminderError('提醒数量已达上限', 429, 'APP_REMINDER_LIMIT')
+    reminder = {
+      appId: context.appId,
+      userId: String(context.userId),
+      key,
+      title,
+      body: reminderBody,
+      dueAt,
+      appName,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      firedAt: 0,
+      notificationId: '',
+      removedAt: 0,
+    }
+    appReminders.unshift(reminder)
+    return reminder
+  }
+
+  const dueChanged = Number(reminder.dueAt) !== dueAt
+  reminder.title = title
+  reminder.body = reminderBody
+  reminder.appName = appName
+  reminder.dueAt = dueAt
+  reminder.updatedAt = Date.now()
+  reminder.removedAt = 0
+  /* 同一条待办重新登记同一个到期时间，不能把已经发过的提醒再发一次；
+     只有用户改了到期时间才重置 firedAt，让新时间重新参与调度。 */
+  if (dueChanged) {
+    reminder.firedAt = 0
+    reminder.notificationId = ''
+    reminder.skipped = ''
+  }
+  return reminder
+}
+
+function removeAppReminder(context, keyValue) {
+  const key = normalizeAppReminderKey(keyValue)
+  if (!key) throw appReminderError('提醒 key 非法或缺失', 400, 'APP_REMINDER_KEY_INVALID')
+  const before = appReminders.length
+  for (let index = appReminders.length - 1; index >= 0; index -= 1) {
+    const item = appReminders[index]
+    if (item.appId === context.appId && String(item.userId) === String(context.userId) && item.key === key) {
+      appReminders.splice(index, 1)
+    }
+  }
+  return before !== appReminders.length
+}
+
+function removeAppRemindersForUser(appId, userId) {
+  const before = appReminders.length
+  for (let index = appReminders.length - 1; index >= 0; index -= 1) {
+    const item = appReminders[index]
+    if (item.appId === String(appId) && String(item.userId) === String(userId)) appReminders.splice(index, 1)
+  }
+  return before !== appReminders.length
+}
+
+function appReminderTick(now = Date.now()) {
+  let changed = false
+  let notificationChanged = false
+  for (const reminder of appReminders) {
+    if (!reminder || reminder.removedAt || reminder.firedAt || Number(reminder.dueAt) > now) continue
+    const appInfo = currentAppInfo(reminder.appId)
+    if (!appInfo) {
+      reminder.firedAt = now
+      reminder.skipped = 'app-not-installed'
+      reminder.updatedAt = now
+      changed = true
+      continue
+    }
+    const notificationId = appReminderNotificationId(reminder)
+    if (notifications.some((item) => item && item.id === notificationId)) {
+      reminder.firedAt = now
+      reminder.notificationId = notificationId
+      reminder.updatedAt = now
+      changed = true
+      continue
+    }
+    const appName = String(appInfo.manifest.name || reminder.appName || reminder.appId)
+    notifications.unshift({
+      id: notificationId,
+      kind: 'warn',
+      title: reminder.title,
+      body: reminder.body,
+      userId: reminder.userId,
+      createdAt: now,
+      time: '刚刚',
+      nav: 'apps',
+      appId: reminder.appId,
+      appName,
+      reminderId: reminder.key,
+    })
+    reminder.firedAt = now
+    reminder.notificationId = notificationId
+    reminder.updatedAt = now
+    changed = true
+    notificationChanged = true
+    logAudit({ id: reminder.userId, name: reminder.userId, visibleModules: [] }, 'as.reminder.fire', `${reminder.appId} ${reminder.key}`, 'allow', 'inet')
+  }
+  if (notificationChanged && notifications.length > 200) notifications.length = 200
+  if (changed) persistPersistentState()
+  return { fired: notificationChanged, pending: appReminders.filter((item) => !item.firedAt && !item.removedAt).length }
+}
+
+/** Codex 式 Run 收件箱：定时规则留在 Automations，这里只呈现每一次真实执行。 */
+function taskCenterForUser(user) {
+  const read = readNotificationSet(user.name)
+  const cleared = clearedNotificationSet(user.name)
+  return liveTasks.filter((task) => task && String(task.userId || '') === String(user.id || ''))
+    .filter((task) => !cleared.has(`run:${task.id}`))
+    .map((task) => {
+      const terminal = ['done', 'failed', 'interrupted', 'cancelled'].includes(task.state)
+      const automation = task.automationId ? liveAutomations.find((item) => item.id === task.automationId) : null
+      const outputCount = Array.isArray(task.outputFiles) ? task.outputFiles.length : Number(task.artifacts || 0)
+      return {
+        id: task.id,
+        kind: task.kind || 'chat-run',
+        title: task.title || task.prompt || '未命名任务',
+        state: task.state,
+        progress: Number(task.progress || 0),
+        target: task.target || '',
+        reason: task.reason || '',
+        replyText: String(task.replyText || '').slice(0, 20000),
+        conversationId: task.conversationId || '',
+        automationId: task.automationId || '',
+        automationName: automation?.name || '',
+        projectId: taskProjectId(task),
+        projectName: taskProjectName(task),
+        createdAt: Number(task.createdAt || 0),
+        finishedAt: Number(task.finishedAt || 0),
+        started: task.started || '',
+        outputCount,
+        sourceLinks: Array.isArray(task.sourceLinks) ? task.sourceLinks : [],
+        checkpoint: task.checkpoint || null,
+        unread: terminal && task.state !== 'cancelled' && !read.has(`run:${task.id}`),
+      }
+    })
+    .sort((a, b) => Number(b.finishedAt || b.createdAt || 0) - Number(a.finishedAt || a.createdAt || 0))
+    .slice(0, 100)
+}
+
+/** 真实通知流：审批、授权、安全拦截等系统提醒；任务 Run 统一由 taskCenterForUser 提供。 */
 function notificationsForUser(user) {
   const read = readNotificationSet(user.name)
+  const cleared = clearedNotificationSet(user.name)
   const items = []
   const seen = new Set()
   const push = (item) => {
     if (!item || !item.id || seen.has(item.id)) return
+    if (cleared.has(item.id)) return
     seen.add(item.id)
     items.push({ ...item, unread: !read.has(item.id) && item.unread !== false })
   }
@@ -9315,42 +10907,6 @@ function notificationsForUser(user) {
     if (n.userId && String(n.userId) !== String(user.id) && String(n.userId) !== String(user.name)) continue
     if (n.audience === 'admin' && !(Array.isArray(user.visibleModules) && user.visibleModules.includes('admin'))) continue
     push({ ...n, time: n.time || notificationTimeLabel(n.createdAt) })
-  }
-
-  const now = Date.now()
-  const cutoff = now - 7 * 24 * 60 * 60 * 1000
-  let taskCount = 0
-  for (const task of liveTasks) {
-    if (!task) continue
-    const automation = task.kind === 'automation-run'
-    const chatFailure = task.kind === 'chat-run' && task.state === 'failed'
-    if (!automation && !chatFailure) continue
-    if (String(task.userId || '') !== String(user.id || '')) continue
-    if (!['done', 'failed', 'interrupted'].includes(task.state)) continue
-    const finishedAt = Number(task.finishedAt || 0)
-    if (!finishedAt || finishedAt < cutoff) continue
-    if (taskCount >= 8) break
-    taskCount += 1
-    const label = String(task.title || task.prompt || task.id).replace(/\s+/g, ' ').slice(0, 60)
-    const done = task.state === 'done'
-    const failed = task.state === 'failed'
-    push({
-      id: `task:${task.id}:${task.state}`,
-      userId: task.userId,
-      kind: done ? 'ok' : failed ? 'danger' : 'warn',
-      title: automation
-        ? done ? '定时任务已完成' : failed ? '定时任务执行失败' : '定时任务已中断'
-        : '会话执行失败',
-      body: done
-        ? `「${label}」执行完成`
-        : failed
-          ? `「${label}」：${String(task.reason || '未返回失败原因').slice(0, 100)}`
-          : `「${label}」执行中断，可在原会话继续`,
-      time: notificationTimeLabel(finishedAt),
-      createdAt: finishedAt,
-      nav: automation ? 'automation' : 'home',
-      conversationId: task.conversationId && conversations.some((c) => c.id === task.conversationId) ? String(task.conversationId) : '',
-    })
   }
 
   const canAdmin = Array.isArray(user.visibleModules) && user.visibleModules.includes('admin')
@@ -9386,6 +10942,193 @@ function notificationsForUser(user) {
 
   items.sort((a, b) => (Number(b.createdAt) || 0) - (Number(a.createdAt) || 0))
   return items.slice(0, 40)
+}
+
+function publishError(message, status = 409, code = 'PUBLISH_FAILED', details = null) {
+  const error = new Error(message)
+  error.status = status
+  error.code = code
+  error.details = details
+  return error
+}
+
+/**
+ * 把一条 pluginSubs 记录真正入库到插件市场。
+ * 路由 /api/plugin-subs/review 与 skill_publish / plugin_publish / app_publish 共用同一段逻辑，
+ * 避免“网页审核能装、Agent 发布装不上”的两套行为。
+ */
+function approvePluginSubmission(sub, user, net) {
+  sub.reason = ''
+  const kind = sub.kind || 'bundle'
+  let marketId = sub.marketId || (kind === 'skill' ? `PLG-${sub.id.replace(/^SUB-/, '')}` : `M-${Date.now()}`)
+  let reusedAppEntry = null
+  if (kind === 'skill' || kind === 'bundle' || kind === 'app') {
+    const meta = getFile(sub.fileId)
+    if (!meta) throw publishError('插件包文件已失效，请重新发布', 409, 'PUBLISH_PACKAGE_MISSING')
+    const filePath = uploadedFilePath(meta)
+    if (!filePath || !existsSync(filePath)) throw publishError('插件包文件已失效，请重新发布', 409, 'PUBLISH_PACKAGE_MISSING')
+    try {
+      if (kind === 'app') {
+        const appId = String(sub.appId || '').trim()
+        if (!appId) throw new Error('app.json 缺少 id，无法入库')
+        const appVersion = String(sub.appVersion || sub.version || '').trim()
+        if (!appVersion) throw new Error('app.json 缺少 version，无法入库')
+        /* 同一个 appId 在市场上已有一条条目时复用，避免两个条目共用一份 app 包后互相删坏。 */
+        const dupEntry = liveMarket.find((m) => m.kind === 'app' && m.id !== marketId && String(m.appId || m.id) === appId)
+        if (dupEntry) { marketId = dupEntry.id; reusedAppEntry = dupEntry }
+        const target = appVersionDir(appId, appVersion)
+        const existing = liveMarket.find((m) => m.id === marketId)
+        if (existing) backupMarketPackage(existing, `审核替换 ${appVersion}`)
+        rmSync(target, { recursive: true, force: true })
+        mkdirSync(target, { recursive: true })
+        extractAppPackage(filePath, target)
+        const manifest = JSON.parse(readFileSync(join(target, 'app.json'), 'utf8'))
+        if (String(manifest.id || '') !== appId) throw new Error('app.json 的 id 与审核记录不一致')
+        /* 审核通过只让新版本“可用”，不替用户切换正在使用的版本。 */
+        if (!currentAppInfo(appId)) setCurrentAppVersion(appId, appVersion)
+        sub.marketId = marketId
+        sub.appId = appId
+        sub.appVersion = appVersion
+        sub.version = appVersion
+      } else {
+        const target = kind === 'skill' ? join(MARKET_PACKAGE_ROOT, marketId) : bundlePackageDir(marketId)
+        const existing = liveMarket.find((m) => m.id === marketId)
+        if (existing) backupMarketPackage(existing, `审核替换 ${sub.version || ''}`.trim())
+        rmSync(target, { recursive: true, force: true })
+        mkdirSync(target, { recursive: true })
+        if (kind === 'skill') {
+          extractSkillPackage(filePath, target)
+        } else {
+          extractBundlePackage(filePath, target)
+          const pkg = bundlePackageManifest(marketId)
+          if (!pkg || !pkg.name || !pkg.dsh || !pkg.dsh.bundle) throw new Error('Bundle 的 package.json 缺少 name 或 dsh.bundle')
+          sub.packageName = pkg.name
+        }
+        sub.marketId = marketId
+      }
+    } catch (error) {
+      throw publishError(
+        `${kind === 'app' ? '应用包' : kind === 'skill' ? '技能包' : 'Bundle'}入库失败：${error.message}`,
+        409,
+        'PUBLISH_EXTRACT_FAILED',
+        { kind, checks: sub.checks || [] },
+      )
+    }
+  }
+  const packageReady = kind === 'skill' || kind === 'bundle' || kind === 'app'
+  if (!reusedAppEntry && !liveMarket.some((m) => m.subId === sub.id)) {
+    liveMarket.unshift({
+      id: marketId, subId: sub.id, section: '企业内部', name: sub.name, desc: sub.desc,
+      publisher: sub.unit, installed: false, scope: sub.scope, version: sub.version,
+      kind, appId: sub.appId || '', packageId: packageReady ? marketId : '',
+    })
+  }
+  if (reusedAppEntry) {
+    reusedAppEntry.version = sub.version
+    reusedAppEntry.packageId = marketId
+  }
+  sub.status = 'approved'
+  sub.reviewed = '刚刚'
+  persistPersistentState()
+  return { marketId, packageReady }
+}
+
+function safePackageName(name) {
+  return String(name || 'package').replace(/[\\/:*?"<>|]+/g, '-').replace(/\s+/g, '-').slice(0, 80) || 'package'
+}
+
+function publishScanError(scan, kind) {
+  const failed = (scan.checks || []).filter((c) => c[1] === '不通过')
+  const details = failed.map((c) => `${c[0]}：${c[2]}`).join('；') || '自动检测未通过'
+  let hint = ''
+  if (kind === 'skill' && /可执行文件|可执行|\.py|\.js|\.sh|\.exe/i.test(details)) {
+    hint = '技能包只允许文档与静态资源；如果要带脚本，请把技能封装成 Bundle（根目录 package.json + dsh.bundle）后用 plugin_publish 发布，单纯把 SKILL.md 目录改名不会通过类型检测。'
+  } else if (kind === 'skill' && /SKILL\.md/i.test(details)) {
+    hint = '技能包根目录必须有 SKILL.md，且不要多套一层目录。'
+  } else if (kind === 'bundle' && /package\.json|dsh\.bundle/i.test(details)) {
+    hint = 'Bundle 根目录必须有 package.json，并在 dsh.bundle 中声明插件入口。'
+  } else if (kind === 'app' && /app\.json|runtime|entry/i.test(details)) {
+    hint = '应用包根目录必须有 app.json，runtime 只支持 node 或 python，entry 指向真实入口文件。'
+  }
+  return publishError(`自动检测未通过：${details}${hint ? `\n${hint}` : ''}`, 422, 'PUBLISH_SCAN_FAILED', {
+    kind,
+    checks: scan.checks || [],
+    hint,
+  })
+}
+
+/**
+ * 目录 → ZIP → 上传 → 扫描 → 提交 → 入库。
+ * kind 固定由工具决定，扫描出来的类型必须一致，防止把技能误当应用上架。
+ */
+function publishPackageToMarket({ dir, kind, name, version, desc, scope, live = true, dryRun = false, user, net }) {
+  const packed = packDirectoryToZip(dir, { kind })
+  const scan = inspectPluginZip(packed.buffer)
+  const detected = scan.kind || 'bundle'
+  if (detected !== kind) throw publishError(`包类型不匹配：按 ${kind} 发布，但扫描结果是 ${detected}`, 422, 'PUBLISH_KIND_MISMATCH', { detected, checks: scan.checks || [] })
+  const hasFail = (scan.checks || []).some((c) => c[1] === '不通过')
+  if (dryRun) {
+    return {
+      ok: !hasFail, dryRun: true, kind, name: name || scan.packageName || scan.appName || packed.name,
+      root: packed.root, fileCount: packed.fileCount, totalBytes: packed.totalBytes,
+      detectedKind: detected, checks: scan.checks || [],
+      hint: hasFail ? publishScanError(scan, kind).message : '',
+    }
+  }
+  if (hasFail) throw publishScanError(scan, kind)
+  const displayName = String(name || scan.packageName || scan.appName || packed.name).trim()
+  if (!displayName) throw publishError('缺少发布名称', 400, 'PUBLISH_NAME_REQUIRED')
+  const meta = putFile({
+    id: newFileId('PKG'),
+    name: `${safePackageName(displayName)}.zip`,
+    mime: 'application/zip',
+    buffer: packed.buffer,
+    owner: user.name,
+    net,
+    note: `publish:${kind}`,
+  })
+  const id = `SUB-${Date.now().toString(36).toUpperCase()}`
+  const sizeText = meta.size >= 1024 ** 2 ? `${(meta.size / 1024 ** 2).toFixed(1)} MB` : `${Math.max(1, Math.round(meta.size / 1024))} KB`
+  const existing = kind === 'app' ? null : liveMarket.find((m) => m.kind === kind && String(m.name || '') === displayName)
+  const sub = {
+    id, name: displayName, version: version || scan.appVersion || '0.1.0', file: meta.name, size: sizeText,
+    fileId: meta.id, sha256: meta.sha256, kind,
+    appId: scan.appId || '', appName: scan.appName || '', appVersion: scan.appVersion || '',
+    appDir: scan.appDir || '', entry: scan.entry || '', runtime: scan.runtime || '',
+    packagePolicy: scan.packagePolicy || null,
+    author: user.name, unit: user.unit, scope: scope || '全集团',
+    status: 'pending', submitted: stamp(),
+    desc: desc || (kind === 'app' ? '企业自研应用，按 AS app.json 清单打包，经平台审核后由 AS Runtime 托管' : kind === 'skill' ? '企业自研技能，按 SKILL.md 规范打包，经平台检测后上架' : '企业自研插件，按插件开发规范打包，经平台检测与审核后上架'),
+    checks: scan.checks || [],
+    reason: '',
+    marketId: existing ? existing.id : '',
+  }
+  pluginSubs.unshift(sub)
+  const canAutoApprove = live && canManage(user)
+  let review = null
+  if (live) {
+    if (canAutoApprove) {
+      try { review = approvePluginSubmission(sub, user, net) } catch (error) {
+        sub.status = 'rejected'
+        sub.reason = error.message
+        throw error
+      }
+    } else {
+      sub.reason = '当前账号不是管理员，已提交待审核；管理员审核通过后才会进入插件市场。'
+    }
+  } else {
+    sub.reason = '已提交待审核；live=false 时不会自动上架，需管理员在插件市场审核。'
+  }
+  persistPersistentState()
+  logAudit(user, `publish.${kind}`, `${sub.id}:${meta.sha256.slice(0, 12)}`, review ? 'approved' : 'pending', net)
+  return {
+    ok: true, kind, item: sub, marketId: review?.marketId || sub.marketId || '',
+    packageReady: Boolean(review?.packageReady), status: sub.status,
+    file: { id: meta.id, name: meta.name, size: meta.size, sha256: meta.sha256 },
+    root: packed.root, fileCount: packed.fileCount, totalBytes: packed.totalBytes,
+    checks: scan.checks || [],
+    note: review ? '已提交并自动审核上架' : sub.reason,
+  }
 }
 
 const api = {
@@ -9575,6 +11318,8 @@ const api = {
       }),
       modules,
       quickPrompts,
+      session: session ? { expiresAt: session.expiresAt, lastSeen: session.lastSeen } : null,
+      settingsCenter: session ? settingsCenter.overview(user) : null,
       counts: {
         resources: visible.length,
         resourcesTotal: liveResources.length,
@@ -9583,7 +11328,7 @@ const api = {
         apps: liveApps.filter((a) => (a.nets || []).includes(net)).length,
         tasks: liveTasks.length,
       },
-      conversations: user.id === 'guest' ? [] : conversations.map((c) => ({ id: c.id, title: c.title, kind: c.kind, time: c.time, model: c.model, turns: c.turns, status: c.status, workspace: c.workspace, projectId: c.projectId || '', worktreePath: c.worktreePath || '', worktreeBranch: c.worktreeBranch || '', dshSessionId: c.dshSessionId || '', agentPresetId: c.agentPresetId || '' })),
+      conversations: user.id === 'guest' ? [] : conversations.filter((c) => !c.archivedAt).map((c) => ({ id: c.id, title: c.title, kind: c.kind, time: c.time, model: c.model, turns: c.turns, status: c.status, workspace: c.workspace, projectId: c.projectId || '', worktreePath: c.worktreePath || '', worktreeBranch: c.worktreeBranch || '', dshSessionId: c.dshSessionId || '', agentPresetId: c.agentPresetId || '' })),
       tasks: user.id === 'guest' ? [] : liveTasks,
       tools: conf.tools,
       models: user.id === 'guest' ? [] : conf.models,
@@ -9596,7 +11341,7 @@ const api = {
       dutyCatalog,
       authed: !!session,
       mustChangePassword: !!account?.mustChangePassword,
-      messagesUnread: liveMessages.filter((m) => m.unread).length,
+      messagesUnread: messagesFor(user).filter((m) => m.unread).length,
       orgSummary: { units: orgUnits.length, members: liveMembers.length, multiPost: liveMembers.filter((m) => m.posts.length > 1).length },
       orgUnits,
       settings: { ...runtimeSettings },
@@ -9636,7 +11381,10 @@ const api = {
     }
     const role = userOfAccount(account)
     closeAllCloudSessions('身份切换，云会话由服务端强制结束')
-    const sid = createSession(account.role, netOf(req), undefined, account.id)
+    const sid = createSession(account.role, netOf(req), undefined, account.id, {
+      userAgent: req.headers['user-agent'] || '',
+      ipAddress: req.socket?.remoteAddress || '',
+    })
     res.setHeader('set-cookie', [
       sessionCookie(sid),
       'jg_role=; Path=/; Max-Age=0; SameSite=Lax',
@@ -10380,6 +12128,19 @@ const api = {
       if (!buffer || !buffer.length) return json(res, 404, { error: `文件内容不可读：${meta.name}` })
       files.push({ name: ref.name || meta.name, path: ref.path || ref.name || meta.name, buffer })
     }
+    const jobId = String(body.jobId || '').trim()
+    if (jobId) {
+      pruneImportJobs()
+      PIPELINE_IMPORT_JOBS.set(jobId, { percent: 1, message: '准备导入…', stage: 'start', done: false, error: '', startedAt: Date.now(), updatedAt: Date.now() })
+    }
+    const onProgress = jobId ? (event) => {
+      const job = PIPELINE_IMPORT_JOBS.get(jobId)
+      if (!job || job.done) return
+      job.percent = Math.max(Number(job.percent) || 0, Number(event?.percent) || 0)
+      job.message = String(event?.message || job.message)
+      job.stage = String(event?.stage || job.stage)
+      job.updatedAt = Date.now()
+    } : null
     try {
       const result = await importPipeline({
         user, net, files,
@@ -10389,15 +12150,46 @@ const api = {
         sourceType: String(body.sourceType || ''),
         stage: String(body.stage || 'existing'),
         datum: String(body.datum || '1985 国家高程基准'),
+        onProgress,
       })
       const ds = result.dataset || {}
       logAudit(user, 'pipeline.import', `${ds.id || '-'}:${ds.name || ''}`, `allow(${result.summary?.lineCount || 0}段)`, net)
+      if (jobId) {
+        const job = PIPELINE_IMPORT_JOBS.get(jobId) || {}
+        PIPELINE_IMPORT_JOBS.set(jobId, {
+          ...job, percent: 100, message: '导入完成', stage: 'done', done: true, error: '',
+          datasetId: ds.id || '', summary: result.summary || {}, updatedAt: Date.now(),
+        })
+      }
       json(res, 200, { ok: true, ...result })
     } catch (error) {
       const status = Number(error?.status) || 500
       logAudit(user, 'pipeline.import', files.map((file) => file.name).join(','), `deny(${status})`, net)
+      if (jobId) {
+        const job = PIPELINE_IMPORT_JOBS.get(jobId) || {}
+        PIPELINE_IMPORT_JOBS.set(jobId, {
+          ...job, done: true, error: error?.message || String(error), stage: 'error', updatedAt: Date.now(),
+        })
+      }
       json(res, status, { error: error?.message || String(error), code: error?.code || 'PIPELINE_IMPORT_FAILED' })
     }
+  },
+  'GET /api/pipeline/import/progress': (req, res, url) => {
+    const jobId = String(url.searchParams.get('job') || '').trim()
+    if (!jobId) return json(res, 400, { error: '缺少 job 参数' })
+    pruneImportJobs()
+    const job = PIPELINE_IMPORT_JOBS.get(jobId)
+    if (!job) return json(res, 404, { error: '导入任务不存在或已过期', done: true })
+    json(res, 200, {
+      job: jobId,
+      percent: Number(job.percent) || 0,
+      message: String(job.message || ''),
+      stage: String(job.stage || ''),
+      done: Boolean(job.done),
+      error: String(job.error || ''),
+      datasetId: String(job.datasetId || ''),
+      summary: job.summary || null,
+    })
   },
   'GET /api/pipeline/scene': (req, res, url) => {
     const user = roleOf(req)
@@ -10411,7 +12203,8 @@ const api = {
       if (!ds) return json(res, 404, { error: '数据集不存在' })
       if (ds.owner !== user.name && !user.scopes.includes('all-org')) return json(res, 403, { error: '无权访问该管网数据集' })
     }
-    const payload = pipelineScenePayload(ids)
+    // 大图按 8000 条等步长抽样展示：既覆盖整幅图，又把三维绘制调用控制在两万级
+    const payload = pipelineScenePayload(ids, { limit: 8000 })
     // 三维载荷按次生成，不落表；模型版本以数据集 updatedAt 为准，供前端判断是否需要重建缓存
     logAudit(user, 'pipeline.scene', ids.join('+'), `allow(${payload.counts?.lines || 0}段)`, net)
     json(res, 200, payload)
@@ -11112,6 +12905,69 @@ const api = {
       return json(res, error instanceof ImageProviderError ? error.status : 502, { error: error.message, code: error.code || 'IMAGE_PROVIDER_ERROR' })
     }
   },
+  /**
+   * 应用任务完成提醒：应用在后台跑完批量任务后，推一条站内通知到当前账号的铃铛。
+   * 只收标题/正文/级别，不允许自定义账号或跳转目标，避免被应用拿来发任意消息。
+   */
+  'POST /api/as/v1/notify': (req, res) => {
+    const body = JSON.parse(req.__body || '{}')
+    const context = appRequestContext(req, body)
+    if (!context) return json(res, 401, { error: '应用上下文无效或已过期', code: 'AS_CONTEXT_INVALID' })
+    const title = String(body.title || '').trim().slice(0, 80)
+    if (!title) return json(res, 400, { error: '缺少通知标题', code: 'NOTIFY_TITLE_REQUIRED' })
+    const appInfo = currentAppInfo(context.appId) || {}
+    notifications.unshift({
+      id: `N-AS-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      kind: ['ok', 'warn', 'danger', 'info'].includes(body.kind) ? body.kind : 'info',
+      title,
+      body: String(body.body || '').trim().slice(0, 300),
+      userId: context.userId,
+      createdAt: Date.now(),
+      time: '刚刚',
+      nav: 'apps',
+      appId: context.appId,
+      appName: String(appInfo.name || ''),
+    })
+    if (notifications.length > 200) notifications.length = 200
+    logAudit({ id: context.userId, name: context.userId, visibleModules: [] }, 'as.notify', `${context.appId} ${title}`, 'allow', netOf(req))
+    return json(res, 200, { ok: true })
+  },
+  /**
+   * 应用提醒注册：只登记标题、正文和到期时间，不直接写铃铛。
+   * 应用进程可以退出；中枢按 15 秒 tick 扫描到期项，并负责补发和去重。
+   */
+  'POST /api/as/v1/reminders': (req, res) => {
+    const body = JSON.parse(req.__body || '{}')
+    const context = appRequestContext(req, body)
+    if (!context) return json(res, 401, { error: '应用上下文无效或已过期', code: 'AS_CONTEXT_INVALID' })
+    try {
+      const reminder = registerAppReminder(context, body)
+      persistPersistentState()
+      return json(res, 200, { ok: true, reminder: appReminderView(reminder) })
+    } catch (error) {
+      return json(res, Number(error.status) || 400, { error: error.message, code: error.code || 'APP_REMINDER_REGISTER_FAILED' })
+    }
+  },
+  'POST /api/as/v1/reminders/remove': (req, res) => {
+    const body = JSON.parse(req.__body || '{}')
+    const context = appRequestContext(req, body)
+    if (!context) return json(res, 401, { error: '应用上下文无效或已过期', code: 'AS_CONTEXT_INVALID' })
+    try {
+      const removed = removeAppReminder(context, body.key || body.id)
+      if (removed) persistPersistentState()
+      return json(res, 200, { ok: true, removed })
+    } catch (error) {
+      return json(res, Number(error.status) || 400, { error: error.message, code: error.code || 'APP_REMINDER_REMOVE_FAILED' })
+    }
+  },
+  'GET /api/as/v1/reminders': (req, res, url) => {
+    const context = appRequestContext(req, {}, url.searchParams.get('appId') || '')
+    if (!context) return json(res, 401, { error: '应用上下文无效或已过期', code: 'AS_CONTEXT_INVALID' })
+    const items = appReminders
+      .filter((item) => item.appId === context.appId && String(item.userId) === String(context.userId) && !item.removedAt)
+      .map(appReminderView)
+    return json(res, 200, { ok: true, items })
+  },
   'POST /api/as/model/app': async (req, res) => {
     const body = JSON.parse(req.__body || '{}')
     const appId = String(body.appId || '').trim()
@@ -11153,8 +13009,10 @@ const api = {
     }
     try {
       const result = await startApp({ id: item.appId || item.id, userId: user.id })
+      const appId = item.appId || item.id
+      const entryUrl = appEntryPoint(req, appId, result.url)
       logAudit(user, 'as.start', item.id, `port=${result.port}`, netOf(req))
-      return json(res, 200, { ok: true, ...result, runtime: runtimeState(item.appId || item.id) })
+      return json(res, 200, { ok: true, ...result, ...(entryUrl ? { entryUrl } : {}), runtime: runtimeState(appId) })
     } catch (error) {
       return json(res, 409, { error: error.message || '应用启动失败', code: 'AS_START_FAILED' })
     }
@@ -11275,6 +13133,7 @@ const api = {
     const args = { ...(body.args && typeof body.args === 'object' ? body.args : {}) }
     const approvalId = String(body.approvalId || args.approvalId || '')
     delete args.approvalId
+    recordToolLedgerCall(appAiToolName(appId, tool), { actor: user.name, action: 'as.call' })
     try {
       const spec = appToolSpec(appId, tool)
       let allowSideEffect = false
@@ -11310,13 +13169,20 @@ const api = {
     if (item.kind === 'app') {
       if (!marketAppAvailable(item)) return json(res, 409, { error: '该应用尚未完成入库，暂不能安装', code: 'MARKET_PACKAGE_NOT_READY' })
       const has = marketInstallRecords(item.id).some((r) => r.userId === user.id)
+      const jobId = has ? '' : installJobStart(body.jobId, user, 'app', item.name)
       try {
         if (has) await uninstallMarketApp(item, user)
-        else await installMarketApp(item, user)
+        else {
+          installJobPhase(jobId, '校验应用运行条件', 16, 26)
+          await installMarketApp(item, user, (label, percent, ceiling) => installJobPhase(jobId, label, percent, ceiling))
+          installJobPhase(jobId, '刷新应用列表', 82, 92)
+        }
       } catch (error) {
+        installJobEnd(jobId, false, error.message)
         return json(res, 409, { error: error.message || (has ? '应用卸载失败' : '应用安装失败') })
       }
       logAudit(user, has ? 'app.uninstall' : 'app.install', item.id, `account(${user.id})`, netOf(req))
+      installJobEnd(jobId, true)
       return json(res, 200, {
         ok: true,
         item: { ...marketItemState(item, { userId: user.id }), installed: !has },
@@ -11338,17 +13204,28 @@ const api = {
     const home = isBundle ? ensureUserDshHome(user.id) : ''
     const ctx = { scope, userId: user.id, projectId, projectCwd: projectCwdOf(projectId), dshHome: home }
     const has = isBundle ? marketBundleInstalled(item.id, home) : Boolean(marketSkillManifestAt(marketSkillTarget(item.id, ctx))?.marketId === item.id)
+    const jobId = has ? '' : installJobStart(body.jobId, user, isBundle ? 'plugin' : 'skill', item.name)
     try {
       if (isBundle) {
-        if (!pnpmAvailable()) return json(res, 501, { error: '客户端未内置 pnpm，无法安装 DSH Bundle', code: 'PNPM_MISSING' })
+        if (!(await pnpmAvailableAsync())) {
+          installJobEnd(jobId, false, '客户端未内置 pnpm，无法安装 DSH Bundle')
+          return json(res, 501, { error: '客户端未内置 pnpm，无法安装 DSH Bundle', code: 'PNPM_MISSING' })
+        }
         if (has) await uninstallMarketBundle(item, home)
-        else await installMarketBundle(item, home)
+        else {
+          installJobPhase(jobId, '校验 Bundle 包', 18, 28)
+          await installMarketBundle(item, home, (label, percent, ceiling) => installJobPhase(jobId, label, percent, ceiling))
+          installJobPhase(jobId, '写入安装记录', 90, 94)
+        }
       } else if (has) {
         await uninstallMarketSkill(item, user, ctx)
       } else {
-        await installMarketSkill(item, user, ctx)
+        installJobPhase(jobId, '校验技能包', 18, 28)
+        await installMarketSkill(item, user, ctx, (label, percent, ceiling) => installJobPhase(jobId, label, percent, ceiling))
+        installJobPhase(jobId, '写入安装记录', 90, 94)
       }
     } catch (error) {
+      installJobEnd(jobId, false, error.message)
       return json(res, 409, { error: error.message || (has ? '卸载失败' : '安装失败') })
     }
     if (isBundle) {
@@ -11359,12 +13236,33 @@ const api = {
       else addMarketInstallRecord(item.id, { userId: user.id, userName: user.name, scope, projectId, installedAt: Date.now() })
     }
     logAudit(user, has ? 'plugin.remove' : 'plugin.install', item.id, `${scope}(${user.id})${projectId ? `:${projectId}` : ''}`, netOf(req))
+    installJobEnd(jobId, true)
     json(res, 200, {
       ok: true,
       item: { ...marketItemState(item, { userId: user.id }), installed: !has },
       message: has
         ? (scope === 'project' ? '已从该项目卸下，对项目外会话不可见' : '已从当前账号卸下，其他账号不受影响')
         : (scope === 'project' ? '已安装到当前项目，仅该项目会话可见' : '已安装到当前账号，其他账号不可见'),
+    })
+  },
+  'GET /api/plugin-market/install/progress': (req, res, url) => {
+    const user = roleOf(req)
+    const jobId = String(url.searchParams.get('jobId') || '')
+    const job = installJobs.get(jobId)
+    if (!job || job.userId !== String(user.id || '')) {
+      return json(res, 404, { error: '安装任务不存在或已过期', code: 'INSTALL_JOB_NOT_FOUND' })
+    }
+    return json(res, 200, {
+      ok: true,
+      jobId: job.id,
+      kind: job.kind,
+      name: job.name,
+      percent: job.percent,
+      ceiling: job.ceiling,
+      label: job.label,
+      done: job.done,
+      ok: job.ok,
+      error: job.error,
     })
   },
   'GET /api/admin/plugin-market': (req, res) => {
@@ -11549,87 +13447,28 @@ const api = {
     const sub = pluginSubs.find((x) => x.id === body.id)
     if (!sub) return json(res, 404, { error: '提交记录不存在' })
     const action = body.action === 'approve' ? 'approve' : 'reject'
-    sub.status = action === 'approve' ? 'approved' : 'rejected'
-    sub.reviewed = '刚刚'
-    if (action === 'reject') sub.reason = String(body.reason || '').trim() || '安全检测或权限说明不满足上架要求'
-    let packageReady = false
-    if (action === 'approve') {
-      const kind = sub.kind || 'bundle'
-      let marketId = sub.marketId || (kind === 'skill' ? `PLG-${sub.id.replace(/^SUB-/, '')}` : `M-${Date.now()}`)
-      let reusedAppEntry = null
-      if (kind === 'skill' || kind === 'bundle' || kind === 'app') {
-        const meta = getFile(sub.fileId)
-        if (!meta) return json(res, 409, { error: '插件包文件已失效，请让提交人重新上传' })
-        const filePath = uploadedFilePath(meta)
-        if (!filePath || !existsSync(filePath)) return json(res, 409, { error: '插件包文件已失效，请让提交人重新上传' })
-        try {
-          if (kind === 'app') {
-            const appId = String(sub.appId || '').trim()
-            if (!appId) throw new Error('app.json 缺少 id，无法入库')
-            const appVersion = String(sub.appVersion || sub.version || '').trim()
-            if (!appVersion) throw new Error('app.json 缺少 version，无法入库')
-            /* 同一个 appId 在市场上已有一条条目（同一个应用被重复提交 / 包缺失后重传恢复）：
-               复用那条条目，不再新建第二条。两个条目共用一份 app 包时，删任意一条都会把另一条打成「包缺失」。 */
-            const dupEntry = liveMarket.find((m) => m.kind === 'app' && m.id !== marketId && String(m.appId || m.id) === appId)
-            if (dupEntry) { marketId = dupEntry.id; reusedAppEntry = dupEntry }
-            const target = appVersionDir(appId, appVersion)
-            const existing = liveMarket.find((m) => m.id === marketId)
-            if (existing) backupMarketPackage(existing, `审核替换 ${appVersion}`)
-            rmSync(target, { recursive: true, force: true })
-            mkdirSync(target, { recursive: true })
-            extractAppPackage(filePath, target)
-            const manifest = JSON.parse(readFileSync(join(target, 'app.json'), 'utf8'))
-            if (String(manifest.id || '') !== appId) throw new Error('app.json 的 id 与审核记录不一致')
-            /* 审核通过只让新版本"可用"（写进 versions/<ver>），不替用户换掉正在用的版本。
-               类似 App Store：新版本下载完了，仍然要用户点「更新」才切过去。
-               只有本机还没有可用当前版本（首次入库、或 current.json 指向的目录已丢失）才直接指向它，
-               否则已安装用户会看到"版本自己变了"，运行中的进程也解释不清。 */
-            if (!currentAppInfo(appId)) setCurrentAppVersion(appId, appVersion)
-            sub.marketId = marketId
-            sub.appId = appId
-            sub.appVersion = appVersion
-            sub.version = appVersion
-            packageReady = true
-          } else {
-            const target = kind === 'skill' ? join(MARKET_PACKAGE_ROOT, marketId) : bundlePackageDir(marketId)
-            const existing = liveMarket.find((m) => m.id === marketId)
-            if (existing) backupMarketPackage(existing, `审核替换 ${sub.version || ''}`.trim())
-            rmSync(target, { recursive: true, force: true })
-            mkdirSync(target, { recursive: true })
-            if (kind === 'skill') {
-              extractSkillPackage(filePath, target)
-            } else {
-              extractBundlePackage(filePath, target)
-              const pkg = bundlePackageManifest(marketId)
-              if (!pkg || !pkg.name || !pkg.dsh || !pkg.dsh.bundle) throw new Error('Bundle 的 package.json 缺少 name 或 dsh.bundle')
-              sub.packageName = pkg.name
-            }
-            sub.marketId = marketId
-            packageReady = true
-          }
-        } catch (error) {
-          return json(res, 409, { error: `${kind === 'app' ? '应用包' : kind === 'skill' ? '技能包' : 'Bundle'}入库失败：${error.message}` })
-        }
-      }
-      if (!reusedAppEntry && !liveMarket.some((m) => m.subId === sub.id)) {
-        liveMarket.unshift({
-          id: marketId, subId: sub.id, section: '企业内部', name: sub.name, desc: sub.desc,
-          publisher: sub.unit, installed: false, scope: sub.scope, version: sub.version,
-          kind, appId: sub.appId || '', packageId: packageReady ? marketId : '',
-        })
-      }
-      if (reusedAppEntry) {
-        reusedAppEntry.version = sub.version
-        reusedAppEntry.packageId = marketId
-      }
+    if (action === 'reject') {
+      sub.status = 'rejected'
+      sub.reviewed = '刚刚'
+      sub.reason = String(body.reason || '').trim() || '安全检测或权限说明不满足上架要求'
+      logAudit(user, 'plugin.review.reject', sub.id, 'allow', netOf(req))
+      return json(res, 200, { ok: true, item: sub, packageReady: false, note: '' })
     }
-    logAudit(user, 'plugin.review.' + action, sub.id, 'allow', netOf(req))
-    json(res, 200, {
-      ok: true,
-      item: sub,
-      packageReady,
-      note: action === 'approve' && !packageReady ? '已上架，但该包没有可安装的包文件，当前运行时不能直接安装' : '',
-    })
+    try {
+      const result = approvePluginSubmission(sub, user, netOf(req))
+      logAudit(user, 'plugin.review.approve', sub.id, 'allow', netOf(req))
+      return json(res, 200, {
+        ok: true,
+        item: sub,
+        packageReady: result.packageReady,
+        note: !result.packageReady ? '已上架，但该包没有可安装的包文件，当前运行时不能直接安装' : '',
+      })
+    } catch (error) {
+      sub.status = 'pending'
+      sub.reason = error.message
+      sub.reviewed = '刚刚'
+      return json(res, error.status || 409, { error: error.message, code: error.code || 'PUBLISH_EXTRACT_FAILED', details: error.details || null })
+    }
   },
   'GET /api/projects': (req, res) => {
     const user = roleOf(req)
@@ -11814,11 +13653,121 @@ const api = {
     logAudit(user, `app.${body.action}`, app.id, 'allow', net)
     json(res, 200, { ok: true, item: app })
   },
-  'GET /api/tasks': (req, res) => {
+  'GET /api/tasks': (req, res, url) => {
     taskTick()
     const user = roleOf(req)
-    const items = liveTasks.filter((t) => !t.userId || String(t.userId) === String(user.id || ''))
-    json(res, 200, { items })
+    const projectId = String(url.searchParams.get('projectId') || '').trim()
+    let items = liveTasks.filter((t) => !t.userId || String(t.userId) === String(user.id || ''))
+    if (projectId) items = items.filter((t) => taskProjectId(t) === projectId)
+    json(res, 200, {
+      items: items.map((t) => ({
+        ...t,
+        projectId: taskProjectId(t),
+        projectName: taskProjectName(t),
+      })),
+    })
+  },
+  'GET /api/tasks/files': (req, res, url) => {
+    const user = roleOf(req)
+    const net = netOf(req)
+    const automationId = String(url.searchParams.get('automationId') || '').trim()
+    const taskId = String(url.searchParams.get('taskId') || '').trim()
+    if (!automationId && !taskId) return json(res, 400, { error: '缺少任务标识' })
+    let runs = liveTasks.filter((task) => (!automationId || task.automationId === automationId) && (!taskId || task.id === taskId))
+    runs = runs.filter((task) => !task.userId || String(task.userId) === String(user.id || ''))
+    if ((taskId || automationId) && runs.length === 0) return json(res, 404, { error: '任务不存在或无权查看' })
+    if (automationId) {
+      const automation = liveAutomations.find((item) => item.id === automationId)
+      if (!automation) return json(res, 404, { error: '定时任务不存在' })
+      if (automation.userId && String(automation.userId) !== String(user.id || '')) return json(res, 403, { error: '无权查看该任务文件' })
+    }
+    const items = []
+    const seen = new Set()
+    for (const task of runs) {
+      const conv = conversations.find((item) => item.id === task.conversationId && !item.removed)
+      const outputs = new Map((Array.isArray(task.outputFiles) ? task.outputFiles : []).map((file) => [file.path, file]))
+      // 兼容已有聊天任务：旧记录没保存 outputFiles，但会话仍保留交付物与写入步骤。
+      if (outputs.size === 0 && conv) {
+        for (const message of conv.messages || []) {
+          if (message.role !== 'assistant') continue
+          for (const file of message.deliverables || []) {
+            const value = file?.path || file?.name
+            if (value && !outputs.has(value)) outputs.set(value, { path: value, name: file.name || basename(String(value)) })
+          }
+          for (const value of artifactPathsFromSteps(message.steps || [])) {
+            if (value && !outputs.has(value) && !RUNTIME_ARTIFACT_RE.test(value)) outputs.set(value, { path: value, name: basename(String(value)) })
+          }
+        }
+      }
+      for (const file of outputs.values()) {
+        const rawPath = String(file.path || file.name || '')
+        const key = `${task.id}:output:${rawPath}`
+        if (seen.has(key)) continue
+        seen.add(key)
+        let safe = { error: '无任务工作区' }
+        if (conv?.agentCwd) {
+          try {
+            const root = realpathSync(conv.agentCwd)
+            safe = safeFilePath(root, isAbsolute(rawPath) ? relative(root, rawPath) : rawPath)
+          } catch { safe = { error: '任务工作区不可访问' } }
+        }
+        if (safe.error) continue
+        try {
+          const stat = statSync(safe.path)
+          if (!stat.isFile()) continue
+          items.push({ kind: 'output', taskId: task.id, taskTitle: task.title, runAt: task.createdAt, state: task.state, conversationId: conv.id, path: safe.rel, name: basename(safe.path), size: stat.size, updatedAt: stat.mtimeMs })
+        } catch {}
+      }
+      for (const message of conv?.messages || []) {
+        if (message.role !== 'user') continue
+        for (const ref of message.refs || []) {
+          if (ref.kind !== 'file' || !ref.id || !fileVisibleToUser(user, net, String(ref.id))) continue
+          const key = `${task.id}:input:${ref.id}`
+          if (seen.has(key)) continue
+          seen.add(key)
+          items.push({ kind: 'input', taskId: task.id, taskTitle: task.title, runAt: task.createdAt, state: task.state, fileId: String(ref.id), name: ref.label || getFile(ref.id)?.name || '来源附件', size: Number(ref.size || getFile(ref.id)?.size || 0), mime: ref.mime || getFile(ref.id)?.mime || '' })
+        }
+      }
+    }
+    items.sort((a, b) => Number(b.runAt || 0) - Number(a.runAt || 0) || (a.kind === b.kind ? 0 : a.kind === 'output' ? -1 : 1))
+    json(res, 200, { items, total: items.length, outputCount: items.filter((item) => item.kind === 'output').length, inputCount: items.filter((item) => item.kind === 'input').length })
+  },
+  'GET /api/task-center': (req, res) => {
+    const user = roleOf(req)
+    const items = taskCenterForUser(user)
+    json(res, 200, { items, total: items.length, unread: items.filter((item) => item.unread).length })
+  },
+  'POST /api/task-center/read': (req, res) => {
+    const user = roleOf(req)
+    const body = JSON.parse(req.__body || '{}')
+    const items = taskCenterForUser(user)
+    const read = readNotificationSet(user.name)
+    if (body.id === 'all') items.forEach((item) => read.add(`run:${item.id}`))
+    else if (items.some((item) => item.id === body.id)) read.add(`run:${body.id}`)
+    else return json(res, 404, { error: '执行记录不存在或无权操作' })
+    persistPersistentState()
+    json(res, 200, { ok: true, unread: taskCenterForUser(user).filter((item) => item.unread).length })
+  },
+  'POST /api/task-center/archive': (req, res) => {
+    const user = roleOf(req)
+    const body = JSON.parse(req.__body || '{}')
+    const items = taskCenterForUser(user)
+    const read = readNotificationSet(user.name)
+    const cleared = clearedNotificationSet(user.name)
+    let archived = 0
+    for (const item of items) {
+      if (body.id !== 'all' && item.id !== body.id) continue
+      if (['queued', 'running', 'resuming'].includes(item.state)) continue
+      if (body.id === 'all' && item.unread) continue
+      if (body.id !== 'all' && item.unread) return json(res, 409, { error: '请先打开这条执行记录，再归档' })
+      read.add(`run:${item.id}`)
+      cleared.add(`run:${item.id}`)
+      archived += 1
+      if (body.id !== 'all') break
+    }
+    if (body.id !== 'all' && !items.some((item) => item.id === body.id)) return json(res, 404, { error: '执行记录不存在或无权操作' })
+    persistPersistentState()
+    json(res, 200, { ok: true, archived })
   },
   'POST /api/tasks': (req, res) => {
     const user = roleOf(req)
@@ -11831,6 +13780,26 @@ const api = {
     logAudit(user, 'task.create', task.id, 'allow', netOf(req))
     json(res, 200, { ok: true, task })
   },
+  'POST /api/tasks/resume': (req, res) => {
+    const user = roleOf(req)
+    const body = JSON.parse(req.__body || '{}')
+    const t = liveTasks.find((x) => x.id === body.id)
+    if (!t) return json(res, 404, { error: '任务不存在' })
+    if (t.kind !== 'chat-run') return json(res, 400, { error: '只有聊天/工作任务支持原地恢复', code: 'TASK_NOT_RESUMABLE' })
+    if (t.userId && String(t.userId) !== String(user.id)) return json(res, 403, { error: '只能恢复本人的任务' })
+    if (!['interrupted', 'failed'].includes(t.state)) return json(res, 409, { error: '当前状态不可恢复' })
+    const conv = conversations.find((c) => c.id === t.conversationId)
+    if (!conv) return json(res, 404, { error: '原会话已不存在，无法恢复' })
+    if (conv.status === 'running') return json(res, 409, { error: '原会话正在执行，请等本轮结束' })
+    if (t.resumeState === 'requesting' && Date.now() - Number(t.resumeRequestedAt || 0) < 60000) {
+      return json(res, 409, { error: '恢复请求正在发起，请稍候' })
+    }
+    if (t.resumeState === 'started') return json(res, 409, { error: '该任务已发起过恢复，请查看新任务执行记录' })
+    if (!req.headers.cookie) return json(res, 401, { error: '恢复需要当前登录会话', code: 'SESSION_REQUIRED' })
+    void resumeChatRunTask(t, user, req.headers.cookie)
+    logAudit(user, 'task.resume', t.id, `account(${user.id}) conversation(${t.conversationId})`, netOf(req))
+    json(res, 202, { ok: true, resuming: true, task: { ...t, resumeState: 'requesting' } })
+  },
   'POST /api/tasks/retry': (req, res) => {
     const user = roleOf(req)
     const body = JSON.parse(req.__body || '{}')
@@ -11838,6 +13807,21 @@ const api = {
     if (!t) return json(res, 404, { error: '任务不存在' })
     if (t.userId && String(t.userId) !== String(user.id)) return json(res, 403, { error: '只能恢复本人的任务' })
     if (!['interrupted', 'failed', 'cancelled'].includes(t.state)) return json(res, 409, { error: '当前状态不可恢复' })
+    /* 聊天/工作任务不能只改状态：旧实现把 queued 写回去却没有执行者，任务会永远停在排队。
+       这里转交真实恢复入口；自动化任务仍由调度器接管。 */
+    if (t.kind === 'chat-run') {
+      const conv = conversations.find((c) => c.id === t.conversationId)
+      if (!conv) return json(res, 404, { error: '原会话已不存在，无法恢复' })
+      if (conv.status === 'running') return json(res, 409, { error: '原会话正在执行，请等本轮结束' })
+      if (t.resumeState === 'requesting' && Date.now() - Number(t.resumeRequestedAt || 0) < 60000) {
+        return json(res, 409, { error: '恢复请求正在发起，请稍候' })
+      }
+      if (t.resumeState === 'started') return json(res, 409, { error: '该任务已发起过恢复，请查看新任务执行记录' })
+      if (!req.headers.cookie) return json(res, 401, { error: '恢复需要当前登录会话', code: 'SESSION_REQUIRED' })
+      void resumeChatRunTask(t, user, req.headers.cookie)
+      logAudit(user, 'task.resume', t.id, `account(${user.id}) conversation(${t.conversationId})`, netOf(req))
+      return json(res, 202, { ok: true, resuming: true, task: { ...t, resumeState: 'requesting' } })
+    }
     t.state = 'queued'
     t.progress = 0
     t.createdAt = Date.now()
@@ -11864,7 +13848,7 @@ const api = {
     const withText = url.searchParams.get('withText') === '1'
     json(res, 200, {
       items: conversations
-        .filter((c) => conversationAllowed(user, c))
+        .filter((c) => conversationAllowed(user, c) && !c.archivedAt)
         .map((c) => ({
           id: c.id, title: c.title, kind: c.kind, time: c.time, model: c.model, turns: c.turns, status: c.status,
           workspace: c.workspace, projectId: c.projectId || '', worktreePath: c.worktreePath || '', worktreeBranch: c.worktreeBranch || '', executionPolicy: c.executionPolicy || 'auto', dshSessionId: c.dshSessionId || '',
@@ -12083,7 +14067,13 @@ const api = {
     const url = new URL(req.url, 'http://127.0.0.1')
     const q = url.searchParams.get('q') || ''
     if (!q.trim()) return json(res, 400, { error: '缺少检索词 q', code: 'MEMORY_QUERY_REQUIRED' })
-    const items = await searchMemory({ user, query: q, limit: Number(url.searchParams.get('limit') || 8) })
+    const items = await searchMemory({
+      user,
+      query: q,
+      limit: Number(url.searchParams.get('limit') || 8),
+      projectId: url.searchParams.get('projectId') || '',
+      conversationId: url.searchParams.get('conversationId') || '',
+    })
     json(res, 200, { ok: true, items, ...memoryStats(user) })
   },
   'POST /api/memories': async (req, res) => {
@@ -12133,7 +14123,7 @@ const api = {
       return json(res, 409, { error: '该项目下还有其他会话正在执行，暂不能停止运行时', code: 'JOB_RUNTIME_BUSY' })
     }
     try {
-      await stopBackgroundRuntime(conv.agentCwd)
+      await stopBackgroundRuntime(conv.agentCwd, conv.id)
       for (const message of (conv.messages || [])) {
         for (const item of (message.jobs || [])) if (liveStatus(item.status)) item.status = '已停止'
       }
@@ -12544,14 +14534,42 @@ const api = {
     const user = roleOf(req)
     const net = netOf(req)
     const body = JSON.parse(req.__body || '{}')
-    const text = (body.text || '').trim()
-    if (!text) return json(res, 400, { error: '请输入任务描述' })
+    const attachedRefs = Array.isArray(body.refs) ? body.refs.slice(0, 8).filter(Boolean) : []
+    let text = String(body.text || '').trim()
+    if (!text && attachedRefs.length) {
+      const names = attachedRefs
+        .filter((ref) => ref && ['file', 'library', 'project'].includes(ref.kind))
+        .map((ref) => {
+          if (String(ref.label || '').trim()) return String(ref.label).trim()
+          if (ref.kind === 'file') return String(getFile(ref.id)?.name || '').trim()
+          if (ref.kind === 'project') return String(liveProjects.find((p) => p.id === ref.id)?.name || '').trim()
+          return ''
+        })
+        .filter(Boolean)
+        .slice(0, 4)
+      text = names.length === 1
+        ? `请处理我上传的附件「${names[0]}」；如果我上一条消息已有要求，就按上一条要求执行。`
+        : names.length > 1
+          ? `请处理我上传的 ${names.length} 个附件（${names.join('、')}）；如果我上一条消息已有要求，就按上一条要求执行。`
+          : '请处理我引用的上下文；如果我上一条消息已有要求，就按上一条要求执行。'
+    }
+    if (!text) return json(res, 400, { error: '请输入任务描述，或添加附件后再发送' })
     const regenerate = body.regenerate === true
     const regenerateIndex = Number(body.messageIndex)
     const projectId = String(body.projectId || '')
     const project = projectId ? liveProjects.find((p) => p.id === projectId && !p.removed) : null
     if (projectId && !project) return json(res, 404, { error: '项目不存在' })
+    // DSH 的 Windows workspace-write 沙箱需要项目目录对当前 OS 用户显式开放 WRITE_DAC；
+    // 继承来的 Modify 不包含该项，未补 ACL 时 pwsh/run_code 会以 Win32 5 启动失败。
+    if (project?.cwd) ensureWorkspaceAcl(project.cwd)
     const requestedWorktreePath = String(body.worktreePath || '').trim()
+    const resumeFromTaskId = String(body.resumeFromTaskId || '').trim().slice(0, 80)
+    const resumeParent = resumeFromTaskId ? liveTasks.find((t) => t.id === resumeFromTaskId) : null
+    const explicitAccessMode = body.accessMode === 'read' || body.accessMode === 'write'
+      ? body.accessMode
+      : body.readOnly === true ? 'read' : ''
+    // 只读并发必须由调用方显式声明；未声明的请求继续按写任务独占，避免把真实写入误判成只读。
+    const accessMode = explicitAccessMode || (resumeParent?.accessMode === 'read' ? 'read' : 'write')
     const idempotencyKey = String(body.idempotencyKey || req.headers['idempotency-key'] || '').trim().slice(0, 160)
     if (idempotencyKey) {
       const prior = liveTasks.find((t) => t.kind === 'chat-run' && t.idempotencyKey === idempotencyKey && String(t.userId || '') === String(user.id || ''))
@@ -12604,6 +14622,16 @@ const api = {
       })
     }
     let conv = conversations.find((c) => c.id === body.conversationId)
+    /* 左侧对话本轮引用的 Office 选区：以服务端选区表为准，客户端只能提供 docKey/hash 作为绑定，
+       选文正文不信任客户端缓存，避免旧页面把已经变化的文档内容重新带进模型上下文。 */
+    const requestedDocContext = body.docContext && typeof body.docContext === 'object' ? body.docContext : null
+    const officeDocContext = (() => {
+      if (!requestedDocContext) return null
+      const latest = officeSelectionForUser(user, { docKey: String(requestedDocContext.docKey || '') })
+      if (!latest || !latest.text) return null
+      if (requestedDocContext.hash && String(requestedDocContext.hash) !== latest.hash) return null
+      return latest
+    })()
     let threadWorktree = null
     if (project && (requestedWorktreePath || conv?.worktreePath)) {
       const wanted = conv?.worktreePath || requestedWorktreePath
@@ -12659,6 +14687,14 @@ const api = {
         activePreset = agentPresets.find((p) => p.id === conv.agentPresetId) || null
       }
     }
+    if (officeDocContext) {
+      conv.lastDocContext = {
+        docKey: officeDocContext.docKey,
+        hash: officeDocContext.hash,
+        docName: officeDocContext.docName,
+        path: officeDocContext.path,
+      }
+    }
     if (threadWorktree) {
       conv.worktreePath = threadWorktree.path
       conv.worktreeBranch = threadWorktree.branch || ''
@@ -12675,6 +14711,9 @@ const api = {
       })
     }
     conv.agentCwd = (conv.worktreePath && existsSync(conv.worktreePath)) ? conv.worktreePath : (project?.cwd || chatWorkspaceDir(user, conv.id))
+    const attachmentPaths = materializeChatAttachments({
+      user, net, refs: attachedRefs, root: conv.agentCwd, conversationId: conv.id,
+    })
     conv.cancelRequested = false
     if (!regenerate) {
       const userSentAt = new Date()
@@ -12683,6 +14722,7 @@ const api = {
         text,
         time: userSentAt.toLocaleTimeString('zh-CN', { hour12: false }).slice(0, 5),
         createdAt: userSentAt.toISOString(),
+        refs: summarizeChatRefs(user, net, attachedRefs),
       })
       // 规则自动捕获：稳定的偏好、身份事实、已定决策入库；一次性任务与敏感信息在提炼器内过滤。
       // 工作路径仍可由模型通过 memory_write 工具主动改写与去重。
@@ -12729,12 +14769,20 @@ const api = {
     }
     let chatTask = null
     let chatSlotHeld = false
+    let sseStarted = false
+    const sendChatResult = (status, payload) => {
+      if (!sseStarted) return json(res, status, payload)
+      if (status >= 200 && status < 300) sseSend(res, 'done', payload)
+      else sseSend(res, 'error', { error: payload?.error || '本轮执行失败', code: payload?.code || 'CHAT_FAILED' })
+      res.end()
+      return undefined
+    }
     // 直连快速通道：天气/日期/问候等确定性事实不进入 Harness，零模型调用；
     // 一旦直连数据不可用（城市不明、接口失败、需要工具链），直接落到下面的 Harness 分支。
     const directStartedAt = Date.now()
     /* 前端声明 stream=true 且本轮属于轻量直连时，改走 SSE：首字即达，答案不再整段等一下。
        不满足轻量直连条件的轮次（工具、项目、深度思索等）保持原有一次性返回。 */
-    if (body.stream === true) {
+    if (body.stream === true && !officeDocContext) {
       const streamPlan = await planQuickModelReply({ text, body, mode, projectId, deepThink, webSearch, regenerate, conv, modelCfg, user })
       if (streamPlan) {
         await streamQuickReply({ res, conv, plan: streamPlan, modelCfg, text, user, mode, taskMode, project, net })
@@ -12749,8 +14797,8 @@ const api = {
         }))
       }
     }
-    let direct = await tryDirectReply({ text, body, mode, projectId, deepThink, webSearch, regenerate })
-    if (!direct) {
+    let direct = officeDocContext ? null : await tryDirectReply({ text, body, mode, projectId, deepThink, webSearch, regenerate })
+    if (!direct && !officeDocContext) {
       try {
         direct = await tryQuickModelReply({ text, body, mode, projectId, deepThink, webSearch, regenerate, conv, modelCfg, user })
       } catch (error) {
@@ -12767,16 +14815,29 @@ const api = {
       }
     }
     try {
-      chatTask = startChatRunTask({ conv, user, text, mode, taskMode, target: project?.name || '', idempotencyKey })
-      await acquireChatRunSlot()
+      chatTask = startChatRunTask({ conv, user, text, mode, taskMode, target: project?.name || '', project, idempotencyKey, resumedFromTaskId: resumeFromTaskId, accessMode })
+      if (body.stream === true) {
+        // 先回 meta，再等执行槽位；否则排队中的任务在客户端看来是“没有响应”。
+        openSse(res)
+        sseStarted = true
+        sseSend(res, 'meta', { conversationId: conv.id, model: modelCfg.model, kind: 'harness', taskId: chatTask.id, queued: true })
+      }
+      const slotGranted = await acquireChatRunSlot(chatTask)
+      // 排队期间被取消时 dropChatRunWaiter 会返回 false；此时没有占用槽位，不能再走 release，
+      // 否则会误减全局并发计数并破坏后续排队。
+      if (!slotGranted) {
+        conv.status = 'done'
+        activeRuns.delete(conv.id)
+        return sendChatResult(200, { ok: true, cancelled: true, conversation: conv })
+      }
       chatSlotHeld = true
       if (conv.cancelRequested || chatTask.state === 'cancelled') {
         cancelChatRunTask(chatTask, '排队期间已停止')
         conv.status = 'done'
         activeRuns.delete(conv.id)
-        return json(res, 200, { ok: true, cancelled: true, conversation: conv })
+        return sendChatResult(200, { ok: true, cancelled: true, conversation: conv })
       }
-      const refContext = await refContextForModel(user, net, body.refs)
+      const refContext = await refContextForModel(user, net, attachedRefs, attachmentPaths)
       const selectedPlugins = (Array.isArray(body.tools) ? body.tools : [])
         .map((id) => installedPluginsForUser(user.id).find((p) => p.id === id))
         .filter((p) => p)
@@ -12785,12 +14846,12 @@ const api = {
         : ''
       // 简单事实查询不需要项目资源目录、可视化规范和完整技能目录；
       // 只保留身份、审批、网络与检索约束，避免每次模型调用重复携带大段上下文。
-      const simpleLookup = mode === 'chat' && !projectId && !deepThink && isSimpleLookup(text)
+      const simpleLookup = mode === 'chat' && !projectId && !deepThink && !officeDocContext && isSimpleLookup(text)
       const lightHistoryContext = quickHistoryContext(conv)
       const agentsDocs = collectAgentsInstructions(agentsRootFor(conv.agentCwd), conv.agentCwd)
       const context = [
         `当前用户：${user.name}（${user.label}，${user.unit || '—'}）`,
-        '当前所在地：九江市（集团所在地；用户没有点名城市时，天气、位置类问题按九江回答，不要按服务器出口 IP 猜测）',        `当前任务模式：${taskMode === 'auto' ? `自动（本轮判定为${mode === 'work' ? '工作' : '对话'}模式：${route.reason}）` : taskMode === 'chat' ? '对话模式（默认只读；用户明确要求创建或修改文件、执行命令时，按权限流程申请审批，由用户逐次决定是否授权，不要自行拒绝或绕过审批）' : '工作模式（可以调用文件、命令、代码与技能工具执行任务）'}`,
+        '当前所在地：九江市（集团所在地；用户没有点名城市时，天气、位置类问题按九江回答，不要按服务器出口 IP 猜测）',        `当前任务模式：${taskMode === 'auto' ? (mode === 'work' ? `自动（本轮判定为工作模式：${route.reason}）` : '自动（本轮判定为轻量问答：可直接回答；若实际需要读写文件、执行命令或调用工具，照常执行，不要因“对话模式”自行停止）') : taskMode === 'chat' ? '对话模式（默认只读；用户明确要求创建或修改文件、执行命令时，按权限流程申请审批，由用户逐次决定是否授权，不要自行拒绝或绕过审批）' : '工作模式（可以调用文件、命令、代码与技能工具执行任务）'}`,
         project ? `当前工作项目：${project.name}；授权目录：${project.cwd}。所有文件读写与命令执行必须限制在该目录内。` : '',
         conv.worktreePath
           ? `当前线程使用隔离工作树：${conv.worktreePath}${conv.worktreeBranch ? `（分支 ${conv.worktreeBranch}）` : '（游离 HEAD，尚未创建分支）'}。本线程的文件读写与命令执行以该工作树为根目录；不要修改主工作树或其他线程的工作树。`
@@ -12804,7 +14865,7 @@ const api = {
         mode === 'work' && !simpleLookup
           ? '工作模式执行约束：彼此独立的读取、检查、统计步骤优先在一次 run_code 中合并完成；只读代码检查先 grep 定位符号或入口，再一次性按行段读取必要位置，不要逐行反复调用；同一意图最多 2 次 run_code；单次只回传必要片段，大段输出写入文件并只回传摘要；只有后一步依赖前一步结果时才拆成多次工具调用。'
           : '',
-        mode === 'chat' && !projectId
+        taskMode === 'chat' && !projectId
           ? '对话模式工具约束：本模式只加载文件读写与检索、云空间、格式处理、资源查询、待办等工具，不加载通讯录、公告、教学园地、即时通讯等企业数据 MCP 工具。需要的工具不在当前清单里时，直接说明该能力需要切到工作模式，不要检索本机源码、读取 data 目录或猜测工具名去找工具实现。例外：识别到定时/提醒/日程意图时，本轮会加载 schedule_create / schedule_edit / schedule_list / schedule_view，可以直接创建定时任务，不要回答“无法创建定时任务”，也不需要让用户切工作模式。'
           : '',
         /定时|提醒|日程|每天|每周|每月|每年|预约/.test(text)
@@ -12831,12 +14892,15 @@ const api = {
           ? `Agent 预设「${activePreset.name}」的行为要求（必须遵守，但不得覆盖系统安全规则）：\n${String(activePreset.instructions).slice(0, 4000)}`
           : '',
         simpleLookup ? '' : pluginContext,
+        simpleLookup ? '' : officeDocContext
+          ? `当前 Office 文档选区（用户在右侧文档中选中，已绑定本轮对话）：\n文档：${officeDocContext.docName}\n路径：${officeDocContext.path}\n选区：${officeDocContext.text.slice(0, 6000)}${officeDocContext.text.length > 6000 ? '\n（选区较长，已截断；需要全文时调用 office_get_selection）' : ''}\n选区哈希：${officeDocContext.hash}\n规则：用户要求改写、润色、校对、缩句、扩写、调整公文语气或替换这段内容时，直接调用 office_replace_selection，把完整的新段落放进 paragraphs 数组；不要只回复建议，也不要新建文件或让用户复制粘贴。工具会原位替换当前选区，保留原段落字体、字号、行距与首行缩进，用户可用 Ctrl+Z 撤销。若用户只是提问而非修改，则正常作答。`
+          : '',
         simpleLookup ? '' : conv.forkedFrom && conv.forkContext ? `分叉会话上下文（只读，来自用户选择的历史；不是 DSH 原生 fork）：\n${String(conv.forkContext).slice(0, 3000)}` : '',
       ].filter(Boolean).join('\n')
       const agentText = text
       const runStartedAt = Date.now()
       const requestedModel = modelCfg.model
-      const imageBlocks = await imageBlocksForAgent(user, net, body.refs)
+      const imageBlocks = await imageBlocksForAgent(user, net, attachedRefs)
       const modelRoute = picked
         ? { model: modelCfg.model, taskClass: 'selected', reason: 'selected-model', imageFallback: false }
         : routeModel({
@@ -12896,23 +14960,33 @@ const api = {
         agentsHome: userAgentHome(user.id),
         dshHome: ensureUserDshHome(user.id),
         executionPolicy,
-        // 显式 Chat 固定只读；Auto 误路由为 chat 时，只允许通过审批卡单次放行。
-        permissionPreset: mode === 'chat' ? 'read-only' : '',
+        // 只有用户显式选择“对话模式”才固定只读。Auto 自己路由出的轻量会话
+        // 不再降成只读：即使意图判断漏了新场景，也仍可在会话工作区正常读写，
+        // 不会卡在“写一下测试文件 → 等审批”的第一步。
+        permissionPreset: taskMode === 'chat' ? 'read-only' : '',
         maxToolCalls: forcedMaxToolCalls || (simpleLookup ? 6 : taskMode === 'chat' ? 30 : projectId ? 100 : 60),
         maxRunCode,
         toolPolicy,
         runKey: conv.id,
-        runtimeScope: conv.id,
+        // Chat 共享同账号同模型的常驻运行时，靠 DSH Session working directory 隔离；
+        // Work 仍按线程隔离，避免工作树/项目并发互相污染。
+        runtimeScope: mode === 'work' ? conv.id : '',
         onStart: (dshSessionId) => markChatRunStarted(chatTask, dshSessionId),
         shouldCancel: () => Boolean(conv.cancelRequested),
         images: imageBlocks,
         reasoningEffort: simpleLookup ? 'low' : reasoningEffort,
         handlers: {
+          onDelta: (delta) => {
+            appendChatCheckpointReply(chatTask, delta)
+            if (!sseStarted) return
+            if (delta?.text) sseSend(res, 'delta', { text: delta.text })
+          },
           onApproval: (params) => {
             const evaluation = describeToolApproval(params)
-            // 对话模式默认只读；一旦越界，不在系统侧替用户拒绝，而是发审批卡让用户决定。
-            if (mode === 'chat') {
-              const rule = taskMode === 'chat' ? 'chat-mode-approval' : 'auto-chat-runtime-approval'
+            // 只有用户显式选择的对话模式才走“只读降级审批”。
+            // Auto 路由出的会话仍按自动工作区权限处理，避免新场景被误判后停住。
+            if (taskMode === 'chat') {
+              const rule = 'chat-mode-approval'
               const decisionId = recordApprovalDecision({
                 conversationId: conv.id,
                 callId: params?.callId || '',
@@ -12970,11 +15044,20 @@ const api = {
         },
       })
       let reply = result.reply
+      const outputTruncated = mode === 'work' && result.finishReason === 'max-tokens'
+      if (outputTruncated) {
+        // 模型把输出预算耗在读取/推理上时，最后一句话可能是“任务已完成”，
+        // 但没有写出任何成果。这里必须改写成明确的未完成状态，并允许从执行记录恢复。
+        const partial = String(reply || '').trim()
+        reply = `【未完成】本轮执行达到模型输出上限，未生成完整成果，任务已标记为中断，可从执行记录恢复继续。${partial && !/^任务已完成/.test(partial) ? `\n\n${partial}` : ''}`
+      }
       if (conv.cancelRequested) {
         conv.status = 'done'
         activeRuns.delete(conv.id)
         cancelChatRunTask(chatTask, '用户停止本轮执行')
-        return json(res, 200, { ok: true, cancelled: true, conversation: conv })
+        // SSE 已经打开后不能再回 JSON：否则响应既不结束、也不发 done，连接会被
+        // 心跳永久保活，浏览器占满同源连接数后，后续对话请求会一直排队。
+        return sendChatResult(200, { ok: true, cancelled: true, conversation: conv })
       }
       const messageId = `M-${Date.now().toString(36).toUpperCase()}-${randomBytes(3).toString('hex').toUpperCase()}`
       const fromReply = visualsFromReply(reply, user, conv.id)
@@ -13000,6 +15083,17 @@ const api = {
       })
       const steps = result.steps
       const workspaceChanges = treeBefore ? diffTree(treeBefore, snapshotTree(conv.agentCwd), conv.agentCwd) : []
+      const artifactCount = countTaskArtifacts(workspaceChanges, result.deliverables, steps)
+      const checkpointFiles = [...artifactPathsFromSteps(steps)]
+      const priorCheckpointFiles = Array.isArray(chatTask.checkpoint?.filesWritten) ? chatTask.checkpoint.filesWritten : []
+      updateChatCheckpoint(chatTask, {
+        phase: outputTruncated ? 'interrupted' : 'done',
+        stepsCompleted: completedCheckpointSteps(chatTask, 0),
+        filesWritten: [...new Set([...priorCheckpointFiles, ...checkpointFiles])].slice(-20),
+        partialReply: String(reply || '').slice(-3000),
+        finishReason: String(result.finishReason || ''),
+        dshSessionId: String(result.sessionId || conv.dshSessionId || ''),
+      })
       const traceId = makeTraceId()
       const runStats = buildRunStats({
         startedAt: runStartedAt,
@@ -13055,6 +15149,7 @@ const api = {
       conv.deepThink = deepThink
       if (reasoningEffort) conv.reasoningEffort = deepThink ? 'high' : effortLevel
       conv.dshSessionId = result.sessionId || conv.dshSessionId || ''
+      if (chatTask) recordTaskOutputFiles(chatTask, conv, result)
       persistPersistentState()
       try {
         writeTrace(userAgentHome(user.id), {
@@ -13086,11 +15181,19 @@ const api = {
         console.error('[jg-server] trace persist failed:', traceError?.message || traceError)
       }
       activeRuns.delete(conv.id)
-      finishChatRunTask(chatTask, {
-        steps: Array.isArray(steps) ? steps.length : 0,
-        artifacts: workspaceChanges.length + (Array.isArray(result.deliverables) ? result.deliverables.length : 0),
-        reply,
-      })
+      if (outputTruncated) {
+        interruptChatRunTask(chatTask, '模型输出达到上限，本轮未完成', {
+          steps: Array.isArray(steps) ? steps.length : 0,
+          artifacts: artifactCount,
+          reply,
+        })
+      } else {
+        finishChatRunTask(chatTask, {
+          steps: Array.isArray(steps) ? steps.length : 0,
+          artifacts: artifactCount,
+          reply,
+        })
+      }
       // 一轮结束后异步沉淀稳定信息到统一记忆库；规则提炼先行，模型归纳节流补充，不阻塞响应。
       void Promise.resolve().then(async () => {
         try {
@@ -13104,7 +15207,7 @@ const api = {
       for (const tool of (result.toolAudit || [])) {
         logAudit(user, 'harness.tool', tool.tool, `${tool.status}(${tool.callId || '—'}) ${tool.detail}`.slice(0, 900), net)
       }
-      return json(res, 200, {
+      return sendChatResult(200, {
         ok: true, conversation: conv, reply, steps, subagents: result.subagents || [], workflows: result.workflows || [], todos: result.todos || [], jobs: result.jobs || [], deliverables: result.deliverables || [], usage: result.usage || null, citations,
         taskMode, resolvedMode: mode, modeReason: route.reason,
         workspaceChanges,
@@ -13115,21 +15218,21 @@ const api = {
         conv.status = 'done'
         activeRuns.delete(conv.id)
         cancelChatRunTask(chatTask, '用户停止本轮执行')
-        return json(res, 200, { ok: true, cancelled: true, conversation: conv })
+        return sendChatResult(200, { ok: true, cancelled: true, conversation: conv })
       }
       conv.status = 'failed'
       activeRuns.delete(conv.id)
       failChatRunTask(chatTask, error?.message || error)
       logAudit(user, 'chat.message', conv.id, `deny(${error.code || 'HARNESS_ERROR'})`, net)
       if (error instanceof HarnessError) {
-        return json(res, error.status, { error: error.message, code: error.code, detail: error.detail })
+        return sendChatResult(error.status, { error: error.message, code: error.code, detail: error.detail })
       }
       if (error instanceof ModelError) {
-        return json(res, error.status, { error: error.message, code: error.code, detail: error.detail })
+        return sendChatResult(error.status, { error: error.message, code: error.code, detail: error.detail })
       }
-      return json(res, 502, { error: `模型调用失败：${error?.message || error}`, code: 'MODEL_ERROR' })
+      return sendChatResult(502, { error: `模型调用失败：${error?.message || error}`, code: 'MODEL_ERROR' })
     } finally {
-      if (chatSlotHeld) releaseChatRunSlot()
+      if (chatSlotHeld) releaseChatRunSlot(chatTask)
     }
   },
   'GET /api/chat/pending': (req, res) => {
@@ -13205,8 +15308,15 @@ const api = {
     if (conv && !conversationAllowed(user, conv)) return json(res, 403, { error: '无权停止该会话', code: 'CONVERSATION_FORBIDDEN' })
     const task = conv?.taskRunId ? liveTasks.find((t) => t.id === conv.taskRunId) : null
     try {
+      const hadPending = [...pendingInteractions.values()].some((item) => item.conversationId === body.conversationId)
       cancelPendingInteractions(body.conversationId)
       if (!conv) return json(res, 404, { error: '会话不存在', code: 'CONVERSATION_NOT_FOUND' })
+      const running = activeRuns.has(conv.id) || (task && ['running', 'queued'].includes(task.state))
+      // 什么都没有在跑时不能再往会话里塞“已停止本轮生成”：
+      // 前端旧状态可能把停止请求打到用户当前打开的另一个会话上。
+      if (!running && !hadPending) {
+        return json(res, 409, { error: '该会话当前没有正在执行的任务，无需停止', code: 'CHAT_NOT_RUNNING' })
+      }
       conv.cancelRequested = true
       let native = false
       let closedRuntime = false
@@ -13298,6 +15408,10 @@ const api = {
       source: 'local',
       createdAt: Date.now(),
     }
+    // 采集类任务带固定执行器：官方栏目数据由采集器直取，避免无人值守时依赖模型臆造。
+    if (String(body.collector || '') === 'plan-publicity') item.collector = 'plan-publicity'
+    else if (/bnr\.jiujiang\.gov\.cn|规划公示|批前公示/.test(prompt)) item.collector = 'plan-publicity'
+    item.extras = Array.isArray(body.extras) ? body.extras.filter((e) => e && String(e.text || '').trim()).slice(0, 10) : []
     scheduleAutomationNext(item, Date.now())
     liveAutomations.unshift(item)
     persistPersistentState()
@@ -13342,15 +15456,30 @@ const api = {
     logAudit(user, 'automation.delete', id, 'allow', netOf(req))
     json(res, 200, { ok: true })
   },
+  'POST /api/automations/append': (req, res) => {
+    const user = roleOf(req)
+    const body = JSON.parse(req.__body || '{}')
+    const a = liveAutomations.find((x) => x.id === String(body.id || '') && String(x.userId || '') === String(user.id || ''))
+    if (!a) return json(res, 404, { error: '不存在该定时任务' })
+    const text = String(body.text || '').trim()
+    if (!text) return json(res, 400, { error: '追加要求不能为空' })
+    if (text.length > 500) return json(res, 400, { error: '追加要求最多 500 字' })
+    const scope = body.scope === 'now' ? 'now' : 'next'
+    a.extras = [...(a.extras || []), { text, scope, at: Date.now(), by: user.name }].slice(-10)
+    persistPersistentState()
+    logAudit(user, 'automation.append', a.id, 'allow', netOf(req))
+    json(res, 200, { ok: true, item: a })
+  },
   'POST /api/automations/run': async (req, res) => {
     const user = roleOf(req)
     const body = JSON.parse(req.__body || '{}')
     const a = liveAutomations.find((x) => x.id === String(body.id || '') && String(x.userId || '') === String(user.id || ''))
     if (!a) return json(res, 404, { error: '不存在' })
-    const result = await runAutomation(a, 'manual')
+    const extra = String(body.extra || '').trim().slice(0, 500)
+    const result = await runAutomation(a, 'manual', extra)
     if (!result.ok) return json(res, result.code === 'RUNNING' ? 409 : 500, { error: result.error, task: result.task })
     logAudit(user, 'automation.run', a.id, 'allow', netOf(req))
-    json(res, 200, { ok: true, item: a, task: result.task })
+    json(res, 200, { ok: true, item: a, task: result.task, report: result.report || null })
   },
   'GET /api/admin/pending': (req, res) => {
     const user = roleOf(req)
@@ -13702,18 +15831,18 @@ const api = {
         state = 'locked'
         reason = s.approval === 'dept' ? '需部门负责人审批后开通' : '当前角色无该系统授权'
       }
-      const cred = cloudCredentials.find((c) => c.id === s.credId) || {}
-      return { ...s, state, reason, credential: { account: cred.account, algo: cred.algo, rotated: cred.rotated, export: cred.export, inject: cred.inject } }
+      return { ...s, state, reason }
     })
     json(res, 200, {
       systems,
-      sessions: cloudLog,
-      policy: cloudPolicy,
+      sessions: cloudLog.filter((s) => s.userId === user.id || (!s.userId && s.user === user.name)),
+      policy: cloudPolicy.map((item) => item.id === 'inject' ? { ...item, on: false, text: '门户凭据注入已禁用，请在目标系统页面自行登录' } : item),
       instance: {
         network: networks[net].label,
         region: net === 'gov' ? '政务网 · 政务云' : '互联网 · 企业云',
-        kernel: 'Chromium 开源内核（容器化，远程画面流）',
-        isolation: '一会话一容器，会话结束即销毁',
+        kernel: 'Chromium 隔离网页视图',
+        isolation: '一标签一独立网页视图，会话结束即销毁',
+        credentialInjection: false,
         ttl: '15 分钟',
       },
       user: { name: user.name, unit: user.unit },
@@ -16076,6 +18205,262 @@ const api = {
     })
     res.end(buffer)
   },
+  'GET /api/office/selection/latest': (req, res, url) => {
+    const user = roleOf(req)
+    const item = officeSelectionForUser(user, { docKey: String(url.searchParams.get('docKey') || '') })
+    return json(res, 200, { ok: true, selection: item })
+  },
+  'POST /api/office/bridge/selection': (req, res) => {
+    return recordOfficeSelection(req, res)
+  },
+  'GET /api/office/bridge/events': (req, res, url) => {
+    return officeBridgeEvents(req, res, url)
+  },
+  'POST /api/office/bridge/ack': (req, res) => {
+    return ackOfficeCommand(req, res)
+  },
+  'GET /api/office/plugin/config.json': (req, res, url) => {
+    return officePluginConfig(req, res, url)
+  },
+  'GET /api/office/plugin/index.html': (req, res) => {
+    return officePluginPage(req, res)
+  },
+  'GET /api/office/plugin/plugin.js': (req, res) => {
+    return officePluginScript(req, res)
+  },
+  'GET /api/office/plugin/plugins.js': (req, res) => {
+    return officePluginSdk(req, res)
+  },
+  'GET /api/office/plugin/icon.svg': (req, res) => {
+    return officePluginIcon(req, res)
+  },
+  'GET /api/office/editor': async (req, res, url) => {    const config = onlyOfficeConfig()
+    const user = roleOf(req)
+    const q = previewQueryOf(url)
+    const source = resolvePreviewSource(user, url, netOf(req))
+    if (source?.error) return json(res, source.status || 400, { error: source.error })
+    const displayName = String(url.searchParams.get('name') || '').trim() || source.name
+    const kind = previewKind(displayName, false)
+    if (kind !== 'office') return json(res, 400, { error: 'OnlyOffice 只支持 Word、Excel、PPT 文档' })
+    if (!config.enabled || !config.secret || !(await onlyOfficeReachable())) {
+      /* 文档服务未启用或还没启动时回退只读 PDF 预览，不让界面落在报错页上。 */
+      res.writeHead(302, { location: `/api/preview?${q.toString()}` })
+      res.end()
+      return
+    }
+    if (!onlyOfficeType(displayName)) return json(res, 400, { error: `OnlyOffice 不支持该 Office 格式：${displayName}` })
+    const backUrl = `/api/preview?${q.toString()}`
+    const downloadUrl = `/api/preview/raw?${q.toString()}&download=1`
+    try {
+      const key = officeKeyForSource(source, user)
+      const tokenSource = { ...source, net: netOf(req) }
+      const fileToken = createOnlyOfficeToken({ purpose: 'file', source: tokenSource, user, name: displayName })
+      const callbackToken = createOnlyOfficeToken({ purpose: 'callback', source: tokenSource, user, name: displayName })
+      // 选区桥令牌绑定当前用户、源文件和文档 key；插件只能改这篇文档的当前选区。
+      const pluginToken = createOnlyOfficeToken({ purpose: 'copilot', source: tokenSource, user, name: displayName, docKey: key })
+      const forwardedProto = String(req.headers['x-forwarded-proto'] || 'http').split(',')[0].trim() || 'http'
+      const forwardedHost = String(req.headers['x-forwarded-host'] || req.headers.host || '127.0.0.1:54269').split(',')[0].trim()
+      const pluginOrigin = `${forwardedProto}://${forwardedHost}`
+      const editorConfig = buildOnlyOfficeConfig({ source: tokenSource, user, displayName, key, fileToken, callbackToken, pluginToken, pluginOrigin })
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
+      res.end(onlyOfficeEditorPage({
+        config: editorConfig, name: displayName, backUrl, downloadUrl,
+        saveUrl: `/api/office/save?${q.toString()}`, saveKey: key,
+      }))
+      logAudit(user, 'office.editor.open', source.fileId || source.path || displayName, `${config.documentHostUrl}`, netOf(req))
+    } catch (error) {
+      console.error('[jg-server] OnlyOffice 编辑器打开失败，回退 PDF 预览:', error?.message || error)
+      res.writeHead(302, { location: backUrl })
+      res.end()
+    }
+  },
+  'GET /api/office/file': async (req, res, url) => {
+    const payload = readOnlyOfficeToken(url.searchParams.get('token'), 'file')
+    if (!payload) return json(res, 403, { error: 'OnlyOffice 文件令牌无效或已过期', code: 'ONLYOFFICE_TOKEN_INVALID' })
+    try {
+      const source = officeSourceFromToken(payload)
+      const buffer = source.buffer || readFileSync(source.path)
+      res.writeHead(200, {
+        'content-type': mimeFor(source.name),
+        'content-length': buffer.length,
+        'content-disposition': contentDisposition(source.name),
+        'cache-control': 'no-store',
+      })
+      res.end(buffer)
+      logAudit({ id: payload.uid, name: payload.uname }, 'office.file.read', payload.fid || payload.path || source.name, `${buffer.length} bytes`, payload.net || 'inet')
+    } catch (error) {
+      return json(res, 404, { error: `OnlyOffice 读取源文件失败：${error?.message || error}` })
+    }
+  },
+  'POST /api/office/save': async (req, res, url) => {
+    const user = roleOf(req)
+    const source = resolvePreviewSource(user, url, netOf(req))
+    if (source?.error) return json(res, source.status || 400, { error: source.error })
+    const displayName = String(url.searchParams.get('name') || '').trim() || source.name
+    if (previewKind(displayName, false) !== 'office') return json(res, 400, { error: 'OnlyOffice 只支持 Office 文档' })
+    try {
+      const key = officeKeyForSource(source, user)
+      let body = {}
+      try { body = JSON.parse(req.__body || '{}') } catch {}
+      if (body.key && String(body.key) !== key) return json(res, 409, { error: '文档已变化，请重新打开后再保存' })
+      const result = await forceOnlyOfficeSave(key)
+      logAudit(user, 'office.editor.force-save', source.fileId || source.path || displayName, `key=${key} changed=${result.changed}`, netOf(req))
+      return json(res, 200, { ok: true, changed: result.changed !== false, key })
+    } catch (error) {
+      return json(res, 502, { error: `OnlyOffice 强制保存失败：${error?.message || error}` })
+    }
+  },
+  'POST /api/office/callback': async (req, res, url) => {
+    const config = onlyOfficeConfig()
+    const payload = readOnlyOfficeToken(url.searchParams.get('token'), 'callback')
+    if (!payload) return json(res, 403, { error: 'OnlyOffice 回调令牌无效或已过期', code: 'ONLYOFFICE_TOKEN_INVALID' })
+    let body
+    try { body = JSON.parse(req.__body || '{}') } catch { return json(res, 400, { error: 'OnlyOffice 回调不是合法 JSON' }) }
+    const headerToken = String(req.headers[config.header.toLowerCase()] || req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim() || String(body.token || '')
+    const headerPayload = headerToken ? verifyOnlyOfficeJwt(headerToken, config.secret) : null
+    if (!headerPayload) console.error('[jg-server] OnlyOffice 回调缺少可验证的 JWT 头；已使用签名回调 URL 继续校验')
+    if (!headerPayload) console.error('[jg-server] OnlyOffice 回调缺少可验证的 JWT 头；已使用签名回调 URL 继续校验')
+    const status = Number(body.status || 0)
+    console.log('[jg-server] OnlyOffice callback', status, JSON.stringify({ key: body.key, url: body.url ? String(body.url).slice(0, 160) : '', error: body.error || '', actions: body.actions || [], users: body.users || [] }).slice(0, 800))
+    if (status === 2 || status === 6) {
+      try {
+        const result = await saveOnlyOfficePayload(payload, body)
+        logAudit({ id: payload.uid, name: payload.uname }, 'office.editor.save', payload.fid || payload.path || payload.name, `${result.kind}:${result.bytes || 0} bytes${result.backup ? ` backup=${result.backup}` : ''}`, payload.net || 'inet')
+        return json(res, 200, { error: 0 })
+      } catch (error) {
+        console.error('[jg-server] OnlyOffice 保存失败:', error?.message || error)
+        return json(res, 200, { error: 1, message: String(error?.message || error) })
+      }
+    }
+    if (status === 3 || status === 7) {
+      console.error('[jg-server] OnlyOffice 保存回调报错:', body?.error || status)
+      logAudit({ id: payload.uid, name: payload.uname }, 'office.editor.save-error', payload.fid || payload.path || payload.name, `status=${status} error=${body?.error || ''}`, payload.net || 'inet')
+    }
+    return json(res, 200, { error: 0 })
+  },
+  'GET /api/preview': async (req, res, url) => {
+    const user = roleOf(req)
+    const source = resolvePreviewSource(user, url, netOf(req))
+    if (source?.error) return json(res, source.status || 400, { error: source.error })
+    const displayName = String(url.searchParams.get('name') || '').trim() || source.name
+    const q = previewQueryOf(url)
+    const rawUrl = `/api/preview/raw?${q.toString()}`
+    const downloadUrl = `/api/preview/raw?${q.toString()}&download=1`
+    const kind = previewKind(displayName, source.isDirectory)
+    const bare = url.searchParams.get('bare') === '1'
+    const send = (html) => {
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
+      res.end(html)
+      logAudit(user, 'preview.open', source.fileId || source.path || displayName, kind, netOf(req))
+    }
+    try {
+      if (kind === 'office') {
+        const result = source.path
+          ? await officePdfFor(source.path, displayName)
+          : await officePdfForBuffer(source.buffer, displayName)
+        const missing = (result.missingFonts || []).filter(Boolean)
+        const fontNote = missing.length
+          ? `<span class="pv-warn">缺少字体：${missing.map((name) => escapePreviewText(name)).join('、')}；已用系统可用字体替代</span>`
+          : '<span class="pv-badge">LibreOffice 原生引擎</span>'
+        return send(officeViewer({
+          rawUrl, downloadUrl, name: displayName, ext: extname(displayName), size: source.size, bare,
+          editUrl: onlyOfficeConfig().enabled && onlyOfficeConfig().secret ? `/api/office/editor?${q.toString()}` : '',
+          badge: result.cached ? '已命中转换缓存' : result.backend === 'native' ? '已真实转换' : '已转换',
+          note: `<span class="pv-badge">只读预览</span><span>由 LibreOffice 将原文件真实转换为 PDF；不修改源文件，也不写入项目目录。</span>${fontNote}`,
+        }))
+      }
+      if (kind === 'pdf') {
+        return send(pdfViewer({ rawUrl, downloadUrl, name: displayName, size: source.size, bare }))
+      }
+      if (kind === 'image') {
+        return send(imageViewer({ rawUrl, downloadUrl, name: displayName, ext: extname(displayName), size: source.size, bare }))
+      }
+      if (kind === 'text') {
+        const buffer = source.buffer || readFileSync(source.path)
+        const text = buffer.subarray(0, 400000).toString('utf8')
+        return send(textViewer({ text, downloadUrl, name: displayName, ext: extname(displayName), size: source.size, truncated: buffer.length > 400000, bare }))
+      }
+      if (kind === 'spatial') {
+        const data = await spatialPreviewResult(source)
+        if (data.truncated) data.note = `图纸实体较多，为控制加载体积已抽样预览 ${data.features} 个实体；完整内容请在专业 CAD 软件中打开。`
+        return send(spatialViewer({ meta: data, svg: data.svg || '', name: displayName, ext: extname(displayName), size: source.size, downloadUrl }))
+      }
+      if (kind === 'folder') {
+        return send(unsupportedViewer({ name: displayName, ext: '', size: 0, reason: '目录本身不预览；请选择目录内的文件。', downloadUrl: '', bare }))
+      }
+      return send(unsupportedViewer({
+        name: displayName, ext: extname(displayName), size: source.size, downloadUrl, bare,
+        reason: '当前在线预览已支持 Word、Excel、PPT、PDF、DXF、SHP/GDB、GeoJSON、图片和文本；该格式尚未接入。',
+      }))
+    } catch (error) {
+      return send(errorViewer({
+        name: displayName, ext: extname(displayName), size: source.size, downloadUrl, bare,
+        title: kind === 'office' ? 'Office 文档转换失败' : '预览生成失败',
+        reason: String(error?.message || error),
+      }))
+    }
+  },
+  'GET /api/preview/raw': async (req, res, url) => {
+    const user = roleOf(req)
+    const source = resolvePreviewSource(user, url, netOf(req))
+    if (source?.error) return json(res, source.status || 400, { error: source.error })
+    if (source.isDirectory) return json(res, 400, { error: '目录没有可下载的单文件内容' })
+    const name = String(url.searchParams.get('name') || '').trim() || source.name
+    const download = url.searchParams.get('download') === '1'
+    let buffer
+    let contentType
+    try {
+      const kind = previewKind(name, false)
+      if (kind === 'office' && !download) {
+        const result = source.path ? await officePdfFor(source.path, name) : await officePdfForBuffer(source.buffer, name)
+        buffer = readFileSync(result.pdfPath)
+        contentType = 'application/pdf'
+      } else {
+        buffer = source.buffer || readFileSync(source.path)
+        contentType = kind === 'text' ? 'text/plain; charset=utf-8' : mimeFor(name)
+      }
+    } catch (error) {
+      return json(res, 422, { error: String(error?.message || error) })
+    }
+    res.writeHead(200, {
+      'content-type': contentType,
+      'content-length': buffer.length,
+      'content-disposition': download ? contentDisposition(name) : contentDisposition(name).replace(/^attachment/, 'inline'),
+      'cache-control': 'no-store',
+    })
+    res.end(buffer)
+    logAudit(user, download ? 'preview.download' : 'preview.raw', source.fileId || source.path || name, contentType, netOf(req))
+  },
+  'GET /api/preview/thumb': async (req, res, url) => {
+    const user = roleOf(req)
+    const source = resolvePreviewSource(user, url, netOf(req))
+    if (source?.error) return json(res, source.status || 400, { error: source.error })
+    const displayName = String(url.searchParams.get('name') || '').trim() || source.name
+    const kind = previewKind(displayName, source.isDirectory)
+    try {
+      let pdfBuffer
+      if (kind === 'office') {
+        const result = source.path
+          ? await officePdfFor(source.path, displayName)
+          : await officePdfForBuffer(source.buffer, displayName)
+        pdfBuffer = readFileSync(result.pdfPath)
+      } else if (kind === 'pdf') {
+        pdfBuffer = source.buffer || readFileSync(source.path)
+      } else if (kind === 'image') {
+        const buffer = source.buffer || readFileSync(source.path)
+        res.writeHead(200, { 'content-type': mimeFor(displayName), 'content-length': buffer.length, 'cache-control': 'no-store' })
+        return res.end(buffer)
+      } else {
+        return json(res, 415, { error: '该格式暂不支持缩略预览' })
+      }
+      const png = await renderPdfFirstPagePng(pdfBuffer, { scale: 1.25 })
+      res.writeHead(200, { 'content-type': 'image/png', 'content-length': png.length, 'cache-control': 'no-store' })
+      res.end(png)
+      logAudit(user, 'preview.thumb', source.fileId || source.path || displayName, kind, netOf(req))
+    } catch (error) {
+      return json(res, 422, { error: String(error?.message || error) })
+    }
+  },
   'GET /api/harness/file': (req, res, url) => {
     const user = roleOf(req)
     const requested = String(url.searchParams.get('path') || '')
@@ -16119,6 +18504,38 @@ const api = {
     logAudit(user, 'harness.file.open', full, 'allow', netOf(req))
     res.end(buffer)
   },
+  'GET /api/harness/open-folder': (req, res, url) => {
+    const user = roleOf(req)
+    const requested = String(url.searchParams.get('path') || '')
+    if (!requested) return json(res, 400, { error: '缺少文件路径' })
+    const workspace = join(dataDirPath(), 'dsh-workspace')
+    const full = normalize(requested)
+    if (!existsSync(full)) return json(res, 404, { error: '文件不存在或已被移动' })
+    const roots = [workspace]
+    for (const project of liveProjects) {
+      if (project.removed || !project.cwd || !projectVisibleTo(user, project)) continue
+      roots.push(project.cwd)
+    }
+    let realFull
+    try { realFull = realpathSync(full) } catch { return json(res, 404, { error: '文件不存在或已被移动' }) }
+    const allowed = roots.some((rootDir) => {
+      try { return pathInside(realFull, realpathSync(rootDir)) } catch { return false }
+    })
+    if (!allowed) return json(res, 403, { error: '该文件不在当前用户授权的工作区或项目目录内' })
+    try {
+      if (process.platform === 'win32') {
+        spawn('explorer.exe', [`/select,${realFull}`], { detached: true, stdio: 'ignore' })
+      } else if (process.platform === 'darwin') {
+        spawn('open', ['-R', realFull], { detached: true, stdio: 'ignore' })
+      } else {
+        spawn('xdg-open', [dirname(realFull)], { detached: true, stdio: 'ignore' })
+      }
+      logAudit(user, 'harness.reveal', realFull, 'allow', netOf(req))
+      return json(res, 200, { ok: true })
+    } catch (error) {
+      return json(res, 500, { error: String(error?.message || error) })
+    }
+  },
   'GET /api/files/download': (req, res, url) => {
     const user = roleOf(req)
     const net = netOf(req)
@@ -16152,19 +18569,20 @@ const api = {
       logAudit(user, 'cloud.open', s.id, 'deny', netOf(req))
       return json(res, 403, { error: deny, detail: { system: s.name, network: networks[s.net].label, approval: s.approval } })
     }
-    const id = `CS-${Date.now().toString().slice(-6)}`
+    const id = `CS-${Date.now().toString(36)}-${randomBytes(4).toString('hex')}`
+    const now = Date.now()
     const session = {
-      id, systemId: s.id, user: user.name, started: new Date().toLocaleTimeString('zh-CN', { hour12: false }).slice(0, 5),
+      id, systemId: s.id, userId: user.id, user: user.name, startedAt: new Date(now).toISOString(), expiresAt: new Date(now + 15 * 60 * 1000).toISOString(),
+      started: new Date(now).toLocaleTimeString('zh-CN', { hour12: false }).slice(0, 5),
       ttl: '剩余 15:00', state: 'active',
-      watermark: `${user.name} · ${user.unit} · ${new Date().toLocaleDateString('zh-CN').replace(/\//g, '-')}`,
-      record: `REC-${id.slice(-6)}`, ops: 0, note: '新会话，凭据已在服务端注入',
+      watermark: `${user.name} · ${user.unit} · ${new Date(now).toLocaleDateString('zh-CN').replace(/\//g, '-')}`,
+      record: `REC-${id.slice(-8)}`, ops: 0, note: '会话已创建；门户凭据注入禁用',
     }
     cloudLog.unshift(session)
     logAudit(user, 'cloud.open', s.id, 'allow', netOf(req))
     json(res, 200, {
       session,
-      ticket: { token: `st-${Math.random().toString(36).slice(2, 10)}`, ttlSec: 900, boundTo: `${user.name}|${s.id}|${net}` },
-      notice: '凭据仅在服务端注入，不回传客户端；会话结束容器即销毁。',
+      notice: '会话已创建；不会向目标系统注入门户凭据。',
     })
   },
   'POST /api/cloud/close': (req, res) => {
@@ -16172,9 +18590,15 @@ const api = {
     const body = JSON.parse(req.__body || '{}')
     const s = cloudLog.find((x) => x.id === body.id)
     if (!s) return json(res, 404, { error: '会话不存在' })
+    if (s.userId ? s.userId !== user.id : s.user !== user.name) {
+      logAudit(user, 'cloud.close', s.id, 'deny(owner)', netOf(req))
+      return json(res, 403, { error: '只能结束本人创建的会话' })
+    }
+    if (s.state === 'closed') return json(res, 200, { ok: true, session: s, alreadyClosed: true })
     s.state = 'closed'
+    s.closedAt = new Date().toISOString()
     s.ttl = '已结束'
-    s.note = `会话由${user.name}主动结束，录屏已归档`
+    s.note = `会话由${user.name}主动结束，网页视图由客户端销毁`
     logAudit(user, 'cloud.close', s.id, 'allow', netOf(req))
     json(res, 200, { ok: true, session: s })
   },
@@ -16202,6 +18626,17 @@ const api = {
     else if (body.id) rs.add(body.id)
     persistPersistentState()
     json(res, 200, { ok: true })
+  },
+  'POST /api/notifications/clear': (req, res) => {
+    const user = roleOf(req)
+    const cleared = clearedNotificationSet(user.name)
+    const isSecurity = (n) => String(n.title || '').includes('安全事件')
+    let removed = 0
+    for (const n of notificationsForUser(user)) {
+      if (n.unread === false && !isSecurity(n)) { cleared.add(n.id); removed++ }
+    }
+    persistPersistentState()
+    json(res, 200, { ok: true, removed })
   },
   'GET /api/notebooks': (req, res) => {
     const user = roleOf(req)
@@ -16478,9 +18913,8 @@ const api = {
       logAudit(user, 'notebook.source.remove', body.removeSource, 'allow', netOf(req))
       return json(res, 200, { ok: true, sources: nb.sources })
     }
-    if (nb.sources.length >= NOTEBOOK_MAX_SOURCES) {
-      return json(res, 409, { error: `每本笔记本最多 ${NOTEBOOK_MAX_SOURCES} 个来源，请先移除不用的来源` })
-    }
+    // 条数名额仅约束本地上传文件；网页、云空间、数据中心引用不占条数名额。
+    const fileSourceCount = nb.sources.filter((x) => x.kind === 'file').length
     if (Array.isArray(body.sources) && body.sources.length) {
       const incoming = body.sources.filter((s) => s && s.name && s.url)
       if (!incoming.length) return json(res, 400, { error: '请选择要加入的网页来源' })
@@ -16488,8 +18922,6 @@ const api = {
         return json(res, 400, { error: '批量加入目前只支持网页来源' })
       }
       const webGroups = NOTEBOOK_WEB_SOURCE_GROUP_IDS.slice()
-      const remaining = NOTEBOOK_MAX_SOURCES - nb.sources.length
-      if (remaining <= 0) return json(res, 409, { error: `每本笔记本最多 ${NOTEBOOK_MAX_SOURCES} 个来源，请先移除不用的来源` })
       const existingUrls = new Set(nb.sources
         .filter((x) => x.kind === 'web' && x.url)
         .map((x) => normalizeAuthoritativeWebUrl(x.url, webGroups))
@@ -16509,13 +18941,6 @@ const api = {
         }
         batchSeen.add(requestedUrl)
         work.push({ s, requestedUrl })
-      }
-      if (work.length > remaining) {
-        return json(res, 409, {
-          error: `本次选择 ${work.length} 条，但当前最多还能添加 ${remaining} 条；请减少选择后再加入`,
-          code: 'NOTEBOOK_SOURCE_LIMIT',
-          failed,
-        })
       }
       const prepared = await mapWithLimit(work, 3, ({ s }) => prepareWebNotebookSource(nb, s, webGroups, existingUrls))
       const added = []
@@ -16585,6 +19010,9 @@ const api = {
         fileUrl = fileUrl || `/api/files/download?id=${encodeURIComponent(fileId)}`
       }
       if (kind === 'file') {
+        if (fileSourceCount >= NOTEBOOK_MAX_SOURCES) {
+          return json(res, 409, { error: `本地上传文件最多 ${NOTEBOOK_MAX_SOURCES} 个；网页与引用类来源不占此名额，请先移除不用的本地文件` })
+        }
         fileId = String(s.fileId || '').trim()
         if (!fileId) {
           return json(res, 400, {
@@ -16882,10 +19310,15 @@ const api = {
       const cid = String(req.headers['x-jg-conversation'] || '')
       return cid ? conversations.find((c) => c.id === cid) : null
     })()
-    const memoryProjectId = String(args.projectId || memoryConv?.projectId || '')
     const body = JSON.parse(req.__body || '{}')
     const name = String(body.tool || '')
     const args = body.args && typeof body.args === 'object' ? body.args : {}
+    /* 台账计数在入口处累加：被权限/审批拦下的调用也是真实调用尝试，不能只记成功。 */
+    recordToolLedgerCall(
+      name === 'app_call' && args.appId && args.tool ? appAiToolName(String(args.appId), String(args.tool)) : name,
+      { actor: user.name, action: 'ai.invoke' },
+    )
+    const memoryProjectId = String(args.projectId || memoryConv?.projectId || '')
     const appDynamic = parseAppAiToolName(name)
     const appArgs = { ...(args.args && typeof args.args === 'object' ? args.args : {}) }
     const appApprovalId = String(args.approvalId || appArgs.approvalId || '')
@@ -16956,6 +19389,7 @@ const api = {
         user: memoryUser,
         args: {
           content, kind: args.kind, scope, scopeRef, tags: args.tags, confidence: args.confidence, pinned: args.pinned,
+          dedupe: true, replace: args.replace === true,
           conversationId: req.headers['x-jg-conversation'] || '',
         },
       })
@@ -17081,11 +19515,68 @@ const api = {
         return json(res, 422, { error: String(error?.message || error), code: error?.code || 'AS_CALL_FAILED' })
       }
     }
+    if (name === 'skill_publish' || name === 'plugin_publish' || name === 'app_publish') {
+      const kind = name === 'skill_publish' ? 'skill' : name === 'app_publish' ? 'app' : 'bundle'
+      const dir = String(args.dir || args.path || args.directory || '').trim()
+      if (!dir) return json(res, 400, { error: `${name} 需要 dir：请传入要发布的目录`, code: 'PUBLISH_DIR_REQUIRED' })
+      try {
+        const result = publishPackageToMarket({
+          dir, kind,
+          name: args.name, version: args.version, desc: args.desc, scope: args.scope,
+          live: args.live !== false && args.autoApprove !== false,
+          dryRun: args.dryRun === true,
+          user, net: netOf(req),
+        })
+        logAudit(user, 'ai.invoke', name, `${kind} ${result.dryRun ? 'dry-run' : result.status || 'submitted'} ${String(args.name || dir).slice(0, 120)}`, netOf(req))
+        return json(res, 200, { ok: true, tool: name, actor: `${user.name}（${user.unit}）`, result })
+      } catch (error) {
+        logAudit(user, 'ai.invoke', name, `deny(${error?.code || 'PUBLISH_FAILED'})`, netOf(req))
+        return json(res, Number(error?.status) || 422, { error: String(error?.message || error), code: error?.code || 'PUBLISH_FAILED', details: error?.details || null })
+      }
+    }
+    if (name === 'office_get_selection' || name === 'office_replace_selection') {
+      const pinned = memoryConv?.lastDocContext && typeof memoryConv.lastDocContext === 'object'
+        ? memoryConv.lastDocContext
+        : null
+      const selection = officeSelectionForUser(user, {
+        docKey: String(args.docKey || pinned?.docKey || ''),
+        includeHtml: false,
+      })
+      if (name === 'office_get_selection') {
+        logAudit(user, 'ai.invoke', name, selection ? `allow(${selection.chars} chars)` : 'allow(no-selection)', netOf(req))
+        return json(res, 200, {
+          ok: true, tool: name, actor: `${user.name}（${user.unit}）`,
+          result: { selection: selection ? { ...selection, html: undefined } : null },
+        })
+      }
+      if (!selection || !selection.text) {
+        return json(res, 409, {
+          error: '当前没有可替换的 Office 选区，请先在右侧文档中选中一段文字，再从左侧发送修改指令',
+          code: 'OFFICE_SELECTION_MISSING',
+        })
+      }
+      const paragraphs = args.paragraphs ?? args.text ?? args.replacement ?? ''
+      const expectedHash = String(args.expectedHash || pinned?.hash || selection.hash)
+      const sourceText = String(args.sourceText || pinned?.text || selection.text)
+      try {
+        const result = await applyOfficeSelectionReplace({ user, docKey: selection.docKey, paragraphs, expectedHash, sourceText })
+        logAudit(user, 'ai.invoke', name, `${result.docName} ${result.charsBefore}->${result.charsAfter}`, netOf(req))
+        return json(res, 200, {
+          ok: true, tool: name, actor: `${user.name}（${user.unit}）`, result,
+        })
+      } catch (error) {
+        logAudit(user, 'ai.invoke', name, `deny(${error?.code || 'OFFICE_REPLACE_FAILED'})`, netOf(req))
+        return json(res, Number(error?.status) || 422, {
+          error: String(error?.message || error),
+          code: error?.code || 'OFFICE_REPLACE_FAILED',
+        })
+      }
+    }
     const tool = aiTools.find((t) => t.name === name)
     if (!tool) return json(res, 404, { error: '工具不存在', hint: '先调用 GET /api/ai/tools 获取可用工具' })
     const TOOL_MODULE = { 云空间: 'drive', 通知公告: 'notice', 教学园地: 'academy', 通讯录: 'contacts', 即时通讯: 'im', 任务: 'tasks', 智能笔记本: 'knowledge', 数据中心: 'datacenter' }
     // 平台基础服务不属于任何业务模块：只要当前账号已登录，就按服务自身的资源边界校验。
-    const PLATFORM_BASE_TOOLS = new Set(['format_capabilities', 'format_inspect', 'format_extract', 'format_export', 'code_review', 'visual_create', 'visual_update', 'visual_get', 'visual_export', 'visual_save', 'history_list', 'audit_list', 'approval_list', 'app_data_list', 'app_data_read'])
+    const PLATFORM_BASE_TOOLS = new Set(['format_capabilities', 'format_inspect', 'format_extract', 'format_export', 'code_review', 'visual_create', 'visual_update', 'visual_get', 'visual_export', 'visual_save', 'history_list', 'audit_list', 'approval_list', 'app_data_list', 'app_data_read', 'skill_publish', 'plugin_publish', 'app_publish'])
     if (!PLATFORM_BASE_TOOLS.has(name) && !user.visibleModules.includes(TOOL_MODULE[tool.target] || 'tasks')) {
       logAudit(user, 'ai.invoke', name, 'deny(403)', netOf(req))
       return json(res, 403, { error: `当前角色无权调用「${tool.label}」` })
@@ -17281,20 +19772,22 @@ const api = {
   },
   'GET /api/messages': (req, res) => {
     const user = roleOf(req)
+    const items = messagesFor(user)
     json(res, 200, {
-      items: liveMessages,
-      unread: liveMessages.filter((m) => m.unread).length,
+      items,
+      unread: items.filter((m) => m.unread).length,
       canManage: canManage(user),
     })
   },
   'POST /api/messages/read': (req, res) => {
+    const user = roleOf(req)
     const body = JSON.parse(req.__body || '{}')
-    if (body.all) liveMessages.forEach((m) => { m.unread = false })
+    if (body.all) messagesFor(user).forEach((m) => { m.unread = false })
     else {
-      const m = liveMessages.find((x) => x.id === body.id)
+      const m = messagesFor(user).find((x) => x.id === body.id)
       if (m) m.unread = false
     }
-    json(res, 200, { ok: true, unread: liveMessages.filter((m) => m.unread).length })
+    json(res, 200, { ok: true, unread: messagesFor(user).filter((m) => m.unread).length })
   },
   'GET /api/resource/versions': (req, res, url) => {
     const id = url.searchParams.get('id')
@@ -17488,9 +19981,19 @@ const api = {
     logAudit(user, 'browser-ext.request', name, 'allow', netOf(req))
     json(res, 200, { ok: true, item: browserExtSafe(record), message: '扩展申请已提交，等待管理中心审核' })
   },
+  'POST /api/browser/download-audit': (req, res) => {
+    const user = roleOf(req)
+    const body = JSON.parse(req.__body || '{}')
+    const state = ['completed', 'failed', 'blocked', 'cancelled'].includes(body.state) ? body.state : 'failed'
+    const name = String(body.name || '').replace(/[\r\n\0]/g, '').slice(0, 160)
+    let source = ''
+    try { const url = new URL(String(body.url || '')); if (['http:', 'https:'].includes(url.protocol)) source = url.origin } catch (_) {}
+    logAudit(user, `browser.download.${state}`, name || '未命名文件', source, netOf(req))
+    json(res, 200, { ok: true })
+  },
   'GET /api/browser-exts/active': (req, res) => {
     const user = roleOf(req)
-    const items = activeBrowserExts(user.id).map((rec) => ({ id: rec.id, name: rec.name, extPath: String(rec.extPath || '') }))
+    const items = activeBrowserExts(user.id).map((rec) => ({ id: rec.id, name: rec.name }))
     json(res, 200, { items })
   },
   /* 管理中心审核台：批准 / 拒绝下架 / 移除。 */
@@ -17509,6 +20012,7 @@ const api = {
     rec.note = String(body.note || rec.note || '').trim().slice(0, 120)
     rec.extPath = action === 'approve' ? String(body.extPath || rec.extPath || '').trim().slice(0, 240) : rec.extPath
     rec.updatedAt = now
+    persistBrowserExtensionReviewRegistry()
     logAudit(user, action === 'approve' ? 'browser-ext.approve' : 'browser-ext.reject', rec.id, 'allow', netOf(req))
     json(res, 200, { ok: true, item: browserExtSafe(rec), message: action === 'approve' ? '扩展已上架到扩展市场' : '扩展已拒绝并下架' })
   },
@@ -17519,6 +20023,7 @@ const api = {
     const rec = liveBrowserExts.get(String(body.id || ''))
     if (!rec) return json(res, 404, { error: '扩展不存在', code: 'EXT_NOT_FOUND' })
     liveBrowserExts.delete(rec.id)
+    persistBrowserExtensionReviewRegistry()
     logAudit(user, 'browser-ext.delete', rec.id, 'allow', netOf(req))
     json(res, 200, { ok: true, message: '扩展已移除' })
   },
@@ -17595,12 +20100,22 @@ const api = {
   'GET /api/tool-ledger': (req, res) => {
     const user = roleOf(req)
     if (!canManage(user)) return json(res, 403, { error: '工具台账仅管理角色可见' })
-    json(res, 200, { items: liveToolLedger, total: liveToolLedger.length, highRisk: liveToolLedger.filter((t) => t.risk === '高').length })
+    /* 首次访问时把"当前已安装应用的工具 + 通用应用数据工具"补进目录；
+       台账接口是管理员看到的权威口径，不能只显示 10 条静态 seed。 */
+    if (syncToolLedgerForUser(user)) persistPersistentState()
+    json(res, 200, {
+      items: liveToolLedger,
+      total: liveToolLedger.length,
+      highRisk: liveToolLedger.filter((t) => t.risk === '高').length,
+      callsTotal: liveToolLedger.reduce((sum, t) => sum + Math.max(0, Number(t.calls) || 0), 0),
+      identity: '调用次数由 /api/ai/invoke 与 /api/as/call 真实请求累加；种子工具从 0 起算',
+    })
   },
   'POST /api/tool-ledger': (req, res) => {
     const user = roleOf(req)
     if (!canManage(user)) return json(res, 403, { error: '仅管理角色可调整工具策略' })
     const body = JSON.parse(req.__body || '{}')
+    if (syncToolLedgerForUser(user)) persistPersistentState()
     const t = liveToolLedger.find((x) => x.id === body.id)
     if (!t) return json(res, 404, { error: '工具不存在' })
     if (body.confirm !== undefined) t.confirm = !!body.confirm
@@ -17780,11 +20295,113 @@ function recoverPersistedConversations() {
   if (changed) persistPersistentState()
 }
 
-const server = createServer(async (req, res) => {
+function requestHostname(hostHeader) {
+  try { return new URL(`http://${hostHeader || ''}`).hostname.toLowerCase() } catch { return '' }
+}
+
+function appGatewayIdFromHost(hostHeader) {
+  if (!appGatewayEnabled) return ''
+  const hostname = requestHostname(hostHeader)
+  const suffix = `.${appGatewayDomain}`
+  if (!hostname.endsWith(suffix)) return ''
+  const label = hostname.slice(0, -suffix.length)
+  return /^[a-z0-9][a-z0-9_-]{0,63}$/.test(label) ? label : ''
+}
+
+function appEntryPoint(req, appId, internalUrl) {
+  if (!appGatewayEnabled) return ''
+  // 云入口只做 API 联调，不生成应用子域名入口；必须按实际监听端口判定，
+  // 不能只看 Host，否则本机访问 127.0.0.1:云端口 也会被误判成客户端请求。
+  if (Number(req.socket?.localPort || 0) !== port) return ''
+  const hostname = requestHostname(req.headers.host)
+  if (!['127.0.0.1', 'localhost', '::1'].includes(hostname)) return ''
+  try {
+    const target = new URL(internalUrl)
+    return `http://${appId}.${appGatewayDomain}:${port}${target.pathname}${target.search}`
+  } catch {
+    return ''
+  }
+}
+
+function rewriteAppLocation(location, target, publicOrigin) {
+  try {
+    const parsed = new URL(location, target)
+    if (parsed.origin === target.origin) return `${publicOrigin}${parsed.pathname}${parsed.search}${parsed.hash}`
+    return location
+  } catch {
+    return location
+  }
+}
+
+function proxyAppRequest(req, res, appId) {
+  const runtime = runtimeState(appId)
+  if (!runtime?.running || !runtime.url) {
+    return json(res, 503, {
+      error: `应用「${appId}」尚未启动，请从智能中枢的应用入口打开`,
+      code: 'AS_APP_NOT_RUNNING',
+    })
+  }
+
+  let target
+  try {
+    target = new URL(req.url || '/', runtime.url)
+  } catch {
+    return json(res, 502, { error: '应用入口地址无效', code: 'AS_APP_PROXY_TARGET_INVALID' })
+  }
+
+  const headers = { ...req.headers }
+  for (const key of ['connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailer', 'transfer-encoding', 'upgrade']) {
+    delete headers[key]
+  }
+  headers.host = target.host
+  headers['x-forwarded-host'] = req.headers.host || ''
+  headers['x-forwarded-proto'] = req.socket.encrypted ? 'https' : 'http'
+  if (req.socket.remoteAddress) headers['x-forwarded-for'] = req.socket.remoteAddress
+
+  const publicOrigin = req.headers.host ? `http://${req.headers.host}` : `http://${appId}.${appGatewayDomain}:${port}`
+  const upstream = httpRequest(target, { method: req.method, headers }, (upstreamRes) => {
+    const status = upstreamRes.statusCode || 502
+    const responseHeaders = { ...upstreamRes.headers }
+    for (const key of ['connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailer', 'transfer-encoding', 'upgrade']) {
+      delete responseHeaders[key]
+    }
+    if (responseHeaders.location) responseHeaders.location = rewriteAppLocation(responseHeaders.location, target, publicOrigin)
+    if (responseHeaders['set-cookie']) {
+      const cookies = Array.isArray(responseHeaders['set-cookie']) ? responseHeaders['set-cookie'] : [responseHeaders['set-cookie']]
+      responseHeaders['set-cookie'] = cookies.map((cookie) => String(cookie).replace(/;\s*Domain=[^;]+/gi, ''))
+    }
+    res.writeHead(status, responseHeaders)
+    upstreamRes.pipe(res)
+    upstreamRes.on('error', () => { try { res.destroy() } catch {} })
+  })
+
+  upstream.on('error', (error) => {
+    if (res.headersSent) {
+      try { res.destroy() } catch {}
+      return
+    }
+    json(res, 502, { error: `应用入口转发失败：${error?.message || error}`, code: 'AS_APP_PROXY_FAILED' })
+  })
+  res.on('close', () => {
+    if (!upstream.destroyed) upstream.destroy()
+  })
+  req.pipe(upstream)
+}
+
+Object.assign(api, settingsCenter.routes)
+for (const key of Object.keys(settingsCenter.routes)) GUEST_GUARD[key] = 'home'
+
+const requestHandler = async (req, res) => {
+  // 应用网关只挂在客户端入口；云入口仅用于 API 联调，不暴露应用子域名。
+  const gatewayAppId = Number(req.socket?.localPort || 0) === port ? appGatewayIdFromHost(req.headers.host) : ''
+  if (gatewayAppId) return proxyAppRequest(req, res, gatewayAppId)
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`)
 
   if (url.pathname === '/api/health') {
-    return json(res, 200, { ok: true, service: 'jg-server', storage: 'sqlite', time: new Date().toISOString() })
+    return json(res, 200, {
+      ok: true, service: 'jg-server', storage: 'sqlite', time: new Date().toISOString(),
+      ports: { client: port, cloud: cloudPort || 0 },
+    })
   }
 
   if (url.pathname.startsWith('/api/')) {
@@ -17793,15 +20410,24 @@ const server = createServer(async (req, res) => {
     if (!handler) return json(res, 404, { error: `no route ${key}` })
 
     // 保留登录前的三个入口：读取引导、选网络、选角色；其余 API 必须先有服务端会话。
-    const publicApi = new Set(['GET /api/captcha', 'GET /api/bootstrap', 'POST /api/login', 'POST /api/network', 'POST /api/logout'])
-    const appDataApi = new Set(['POST /api/app-data/token', 'POST /api/app-data/query', 'POST /api/as/verify-context', 'POST /api/as/model/chat', 'POST /api/as/model/image', 'POST /api/as/model/app', 'GET /api/as/models', 'GET /api/as/datacenter', 'GET /api/as/datacenter/file', 'POST /api/as/v1/chat/completions', 'POST /api/as/v1/images/edit'])
+    const publicApi = new Set(['GET /api/captcha', 'GET /api/bootstrap', 'POST /api/login', 'POST /api/network', 'POST /api/logout', 'GET /api/office/file', 'POST /api/office/callback', 'POST /api/office/bridge/selection', 'GET /api/office/bridge/events', 'POST /api/office/bridge/ack', 'GET /api/office/plugin/config.json', 'GET /api/office/plugin/index.html', 'GET /api/office/plugin/plugin.js', 'GET /api/office/plugin/plugins.js', 'GET /api/office/plugin/icon.svg'])
+    const appDataApi = new Set(['POST /api/app-data/token', 'POST /api/app-data/query', 'POST /api/as/verify-context', 'POST /api/as/model/chat', 'POST /api/as/model/image', 'POST /api/as/model/app', 'GET /api/as/models', 'GET /api/as/datacenter', 'GET /api/as/datacenter/file', 'POST /api/as/v1/chat/completions', 'POST /api/as/v1/images/edit', 'POST /api/as/v1/notify', 'POST /api/as/v1/reminders', 'POST /api/as/v1/reminders/remove', 'GET /api/as/v1/reminders'])
     const mcpToken = process.env.JG_MCP_TOKEN || ''
     const viaMcp = Boolean(mcpToken) && String(req.headers['x-jg-mcp-token'] || '') === mcpToken
-    if (!publicApi.has(key) && !appDataApi.has(key) && !viaMcp && !sessionOf(req)) {
+    const sid = parseCookies(req.headers.cookie).jg_sid
+    const authSession = sid ? getSession(sid) : null
+    if (!publicApi.has(key) && !appDataApi.has(key) && !viaMcp && !authSession) {
       return json(res, 401, { error: '未登录或会话已过期，请重新选择身份', code: 'AUTH_REQUIRED' })
     }
+    // 活跃 API 请求即续期：同时后移服务端过期时间和浏览器 cookie Max-Age。
+    // 这样正常使用不会被固定 8 小时踢出；真正闲置到期时前端仍按 expiresAt 提示。
+    if (authSession && key !== 'POST /api/logout') {
+      const expiresAt = extendSession(authSession.id, SESSION_TTL_MS)
+      res.setHeader('set-cookie', sessionCookie(authSession.id))
+      res.setHeader('x-session-expires', String(expiresAt))
+    }
     if (!publicApi.has(key) && !viaMcp && key !== 'POST /api/account/password') {
-      const account = sessionOf(req)?.accountId ? getAccount(sessionOf(req).accountId) : null
+      const account = authSession?.accountId ? getAccount(authSession.accountId) : null
       if (account?.mustChangePassword) {
         return json(res, 403, { error: '首次登录需先修改初始密码', code: 'PASSWORD_CHANGE_REQUIRED' })
       }
@@ -17865,7 +20491,10 @@ const server = createServer(async (req, res) => {
     res.writeHead(200, { 'content-type': mime['.html'] })
     res.end(fallback)
   }
-})
+}
+
+const server = createServer(requestHandler)
+const cloudServer = cloudPort && cloudPort !== port ? createServer(requestHandler) : null
 
 /* 端口被占用时给出可执行的提示：默认 4173 常被本地开发服务（如材料工作台）占用，
    单跑 server.mjs 撞上时原生只会抛 EADDRINUSE，很难看出是端口冲突。 */
@@ -17877,24 +20506,45 @@ server.on('error', (err) => {
   throw err
 })
 
+/* 云入口独立监听，失败不拖死客户端入口。 */
+if (cloudServer) {
+  cloudServer.on('error', (err) => {
+    if (err && err.code === 'EADDRINUSE') {
+      console.error(`[jg-cloud] 端口 ${cloudPort} 已被占用；客户端入口继续运行，云入口未启动。可用 JG_CLOUD_PORT 换一个空闲端口。`)
+      return
+    }
+    console.error('[jg-cloud] 启动失败:', err && err.message ? err.message : err)
+  })
+  cloudServer.listen(cloudPort, cloudHost, () => {
+    const lanIPs = [...new Set(Object.values(networkInterfaces()).flat()
+      .filter((item) => item && (item.family === 'IPv4' || item.family === 4) && !item.internal && !String(item.address).startsWith('169.254.'))
+      .map((item) => item.address))]
+    console.log(`[jg-cloud] http://${cloudHost}:${cloudPort}`)
+    for (const ip of lanIPs) console.log(`[jg-cloud] lan: http://${ip}:${cloudPort}`)
+    console.log('[jg-cloud] 仅用于测试；公网访问请走内网穿透/反向代理，不要直接把明文 HTTP 暴露到公网。')
+  })
+}
+
 server.listen(port, '127.0.0.1', () => {
   cleanupSessions()
   ensureNativeSessionSearch()
   refreshRuntimeConfigDump()
   pricingWatch.start()
-  reconcileAppsOnBoot().catch((err) => console.error('[as-runtime] reconcile failed:', err && err.message ? err.message : err))
+  reconcileAppsOnBoot()
+    .then(() => autoStartInstalledApps())
+    .catch((err) => console.error('[as-runtime] reconcile failed:', err && err.message ? err.message : err))
   const asSweepTimer = setInterval(() => {
     try { sweepApps() } catch (err) { console.error('[as-runtime] sweep failed:', err && err.message ? err.message : err) }
   }, 5000)
   if (typeof asSweepTimer.unref === 'function') asSweepTimer.unref()
-  console.log(`[jg-hub] http://127.0.0.1:${port}`)
+  console.log(`[jg-hub] client: http://127.0.0.1:${port}`)
   console.log(`[jg-server] origin: ${serverOrigin}（client=客户端托管，manual=手工启动）`)
   /* 单实例标记：客户端重启前先读它，只要进程还活着就等待，不再另起一套服务。 */
   try {
     const runDir = join(dataDirPath(), 'run')
     mkdirSync(runDir, { recursive: true })
     writeFileSync(join(runDir, 'server.pid'), JSON.stringify({
-      pid: process.pid, port, origin: serverOrigin, startedAt: new Date().toISOString(),
+      pid: process.pid, port, cloudPort, cloudHost, origin: serverOrigin, startedAt: new Date().toISOString(),
     }), 'utf8')
   } catch (err) {
     console.error('[jg-server] write pid file failed:', err && err.message ? err.message : err)
@@ -17953,7 +20603,7 @@ function lifecycleLog(event, detail = '') {
   } catch {}
 }
 pruneLifecycleLogs()
-lifecycleLog('start', `port=${port} node=${process.version}`)
+lifecycleLog('start', `port=${port} cloudPort=${cloudPort || '-'} node=${process.version}`)
 process.on('exit', () => {
   /* 只删自己写的标记文件：端口被占用启动失败时，别把原实例的 server.pid 删掉。 */
   try {
@@ -17983,3 +20633,4 @@ process.on('unhandledRejection', (error) => {
   lifecycleLog('unhandledRejection', error && error.stack ? String(error.stack).slice(0, 400) : String(error))
   console.error('[jg-server] unhandledRejection:', error && error.stack ? error.stack : error)
 })
+

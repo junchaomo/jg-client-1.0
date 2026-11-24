@@ -1,0 +1,26 @@
+services:
+  documentserver:
+    image: ${JG_ONLYOFFICE_IMAGE:-docker.m.daocloud.io/onlyoffice/documentserver:latest}
+    container_name: jg-onlyoffice
+    restart: unless-stopped
+    ports:
+      - "${JG_ONLYOFFICE_PORT:-8082}:80"
+    environment:
+      JWT_ENABLED: "true"
+      JWT_SECRET: "${JG_ONLYOFFICE_SECRET:?请在 .env 中设置 JG_ONLYOFFICE_SECRET}"
+      JWT_HEADER: AuthorizationJwt
+    shm_size: "2gb"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - jg-onlyoffice-data:/var/www/onlyoffice/Data
+      - jg-onlyoffice-log:/var/log/onlyoffice
+      - jg-onlyoffice-lib:/var/lib/onlyoffice
+      - jg-onlyoffice-fonts:/usr/share/fonts/truetype/custom
+      - jg-onlyoffice-fonts:/var/www/onlyoffice/Data/custom-fonts
+
+volumes:
+  jg-onlyoffice-data:
+  jg-onlyoffice-log:
+  jg-onlyoffice-lib:
+  jg-onlyoffice-fonts:

@@ -482,6 +482,7 @@ export function runtimeState(id) {
     dataRoot: String(state.dataRoot || ''),
     dataDir: String(state.dataDir || ''),
     activeUser: String(state.activeUser || ''),
+    autoStart: state.autoStart === undefined ? null : Boolean(state.autoStart),
   }
 }
 
@@ -512,6 +513,7 @@ export async function startApp({ id, userId }) {
           dataRoot,
           activeUser: safeUser(userId),
           dataDir,
+          autoStart: true,
         })
         const contextToken = signContext(appId, userId, existingSecret, CONTEXT_TTL_MS)
         return { leaseId, url: userUrl(existing.url, userId, contextToken), port: existing.port, pid: existing.pid, status: 'running', dataRoot, dataDir, contextToken }
@@ -568,6 +570,7 @@ export async function startApp({ id, userId }) {
         lastHeartbeat: Date.now(),
         lastError: '',
         persistent: true,
+        autoStart: true,
       })
       const contextToken = signContext(appId, userId, contextSecret, CONTEXT_TTL_MS)
       return { leaseId, url: userUrl(url, userId, contextToken), port, pid: child.pid, status: 'running', dataRoot, dataDir, contextToken }
@@ -671,12 +674,12 @@ export function releaseApp({ id, leaseId, force = false }) {
   const count = set.size
   const state = readRuntime(appId)
   if (!state?.pid || !pidAlive(state.pid)) {
-    writeRuntime(appId, { status: 'stopped', pid: 0, stopAt: 0, leaseCount: 0 })
+    writeRuntime(appId, { status: 'stopped', pid: 0, stopAt: 0, leaseCount: 0, autoStart: force ? false : Boolean(state?.autoStart) })
     return { stopped: true, status: 'stopped', leaseCount: 0 }
   }
   if (force) {
     killTree(state.pid)
-    writeRuntime(appId, { status: 'stopped', pid: 0, stopAt: 0, leaseCount: 0 })
+    writeRuntime(appId, { status: 'stopped', pid: 0, stopAt: 0, leaseCount: 0, autoStart: false })
     return { stopped: true, status: 'stopped', leaseCount: 0 }
   }
   /* 常驻托管：普通视图释放只清占用计数，不进宽限期、不杀进程，应用继续留在后台；
@@ -689,6 +692,12 @@ export function releaseApp({ id, leaseId, force = false }) {
     writeRuntime(appId, { leaseCount: count, stopAt: 0 })
   }
   return { stopped: false, status: readRuntime(appId)?.status || 'running', leaseCount: count, stopAt: readRuntime(appId)?.stopAt || 0 }
+}
+
+export function setAppAutoStart({ id, autoStart = true }) {
+  const appId = safeId(id)
+  writeRuntime(appId, { autoStart: Boolean(autoStart) })
+  return { appId, autoStart: Boolean(autoStart) }
 }
 
 export function sweepApps(now = Date.now()) {
@@ -748,8 +757,15 @@ export async function shutdownApps() {
   }
   for (const id of dirs) {
     const state = readRuntime(id)
+    const wasRunning = Boolean(state && (state.status === 'running' || state.status === 'starting') && state.pid && pidAlive(state.pid))
     if (state?.pid && pidAlive(state.pid)) killTree(state.pid)
-    if (state) writeRuntime(id, { status: 'stopped', pid: 0, stopAt: 0, leaseCount: 0 })
+    if (state) writeRuntime(id, {
+      status: 'stopped',
+      pid: 0,
+      stopAt: 0,
+      leaseCount: 0,
+      autoStart: wasRunning ? true : Boolean(state.autoStart),
+    })
     LEASES.delete(id)
   }
 }
@@ -780,7 +796,8 @@ export async function reconcileAppsOnBoot() {
       pid: 0,
       stopAt: 0,
       leaseCount: 0,
-      lastError: wasAlive ? '客户端重启，上一轮应用进程已回收' : String(state.lastError || ''),
+      autoStart: wasAlive ? true : (state.autoStart === undefined ? null : Boolean(state.autoStart)),
+      lastError: wasAlive ? '客户端重启，上一轮应用进程已回收；稍后按上次运行状态自动拉起' : String(state.lastError || ''),
     })
   }
   LEASES.clear()

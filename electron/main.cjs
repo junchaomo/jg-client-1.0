@@ -1,7 +1,8 @@
-const { app, BrowserWindow, Menu, ipcMain, shell, dialog, WebContentsView, screen } = require('electron')
+const { app, BrowserWindow, Menu, ipcMain, shell, dialog, WebContentsView, screen, safeStorage } = require('electron')
 const path = require('path')
 const fs = require('fs')
 const crypto = require('crypto')
+const { createDnrBlocker } = require('./extension-dnr.cjs')
 const { spawn } = require('child_process')
 const http = require('http')
 const net = require('net')
@@ -13,7 +14,7 @@ const PREFERRED_PORT = Number(process.env.JG_PORT || 54269)
 
 // 与旧客户端彻底隔离，避免沿用旧客户端的登录态、缓存与窗口状态。
 app.setName('jg-client-1.0')
-app.setPath('userData', path.join(app.getPath('appData'), 'jg-client-1.0'))
+app.setPath('userData', process.env.JG_ELECTRON_USER_DATA_DIR || path.join(app.getPath('appData'), 'jg-client-1.0'))
 if (process.platform === 'win32') app.setAppUserModelId('com.jiugui.harness')
 const BRIDGE = `
 (() => {
@@ -58,9 +59,23 @@ const BRIDGE = `
 `
 
 let mainWindow = null
-let browserView = null
-let browserAttached = false
-let browserUrl = ''
+/* 每个网页/企业系统会话标签都有独立 WebContentsView；切换标签只改变可见性，
+   关闭标签只销毁自己的视图。内部预览复用主窗口会话，外部网页使用隔离分区。 */
+const browserViews = new Map()
+let activeBrowserTabId = ''
+
+// 原生标题栏覆盖层：背景透明，按钮符号色跟随页面文字色。
+// overlay 背景透明：右侧按钮槽位不再铺一块不透明底色压住 menubar 的 1px 底边，
+// 整行背景与分隔线由页面 menubar 透出贯通，避免按钮区下方边线断开。按钮符号色由 symbolColor 控制。
+const TITLEBAR_THEME = {
+  login: { color: '#00000000', symbolColor: '#3a3f45', height: 38 },
+  app: { color: '#00000000', symbolColor: '#3a3f45', height: 38 },
+}
+function applyTitleBarTheme(window, mode) {
+  if (process.platform !== 'win32' || !window || window.isDestroyed()) return
+  const cfg = TITLEBAR_THEME[mode] || TITLEBAR_THEME.login
+  try { window.setTitleBarOverlay(cfg) } catch (_) { /* 旧版本忽略 */ }
+}
 /* 最近一次渲染进程推来的槽位矩形。容器先行（应用启动期间先挂壳、后建视图）时，
    这次 bounds 会早于视图创建到达，先存下来、建视图时立刻应用，避免 0 尺寸白屏。 */
 let browserBounds = null
@@ -129,6 +144,28 @@ function findMediakitCli() {
     if (found) return found
   }
   return ''
+}
+
+function ensureOnlyOfficeService() {
+  if (process.platform !== 'win32') return
+  if (String(process.env.JG_ONLYOFFICE_AUTOSTART || '') === '0') return
+  const script = path.join(ROOT, 'scripts', 'onlyoffice-deploy.ps1')
+  if (!fs.existsSync(script)) return
+  const ps = process.env.JG_POWERSHELL_EXE || 'powershell.exe'
+  try {
+    const child = spawn(ps, [
+      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script,
+      '-StartOnly', '-EnsureDockerDesktop', '-WaitSeconds', '25',
+    ], {
+      cwd: ROOT,
+      windowsHide: true,
+      detached: true,
+      stdio: 'ignore',
+    })
+    child.unref()
+  } catch (error) {
+    console.error('[jg-office] 自动启动 OnlyOffice 失败:', error?.message || error)
+  }
 }
 
 function startServer(port) {
@@ -219,7 +256,7 @@ async function probeHealth(port, timeoutMs = 5000, attempts = 3) {
 
 function readServerPidInfo() {
   try {
-    const raw = fs.readFileSync(path.join(ROOT, 'data', 'run', 'server.pid'), 'utf8')
+    const raw = fs.readFileSync(path.join(process.env.JG_DATA_DIR || path.join(ROOT, 'data'), 'run', 'server.pid'), 'utf8')
     const parsed = JSON.parse(raw)
     return parsed && Number.isFinite(Number(parsed.pid)) ? parsed : null
   } catch (_) {
@@ -242,10 +279,9 @@ function installBridge(contents) {
   })
 }
 
-let browserDownloads = []
-let browserDownloadSeq = 0
-let browserSessionHooked = false
+const browserSessionsHooked = new WeakSet()
 const BROWSER_PARTITION = 'persist:jg-cloud-browser'
+const BROWSER_TAB_ID = /^[A-Za-z0-9_-]{1,96}$/
 
 /* 浏览器视图禁止回环访问本机服务（中枢服务跑在 127.0.0.1，浏览器只承载外网网页）。 */
 function isLoopbackUrl(url) {
@@ -255,194 +291,234 @@ function isLoopbackUrl(url) {
   } catch (_) { return false }
 }
 
-/* 下载文件中需要提醒的可执行 / 脚本类型（浏览器隔离挡不住文件被系统程序执行）。 */
-const RISKY_DOWNLOAD_EXTS = new Set(['.exe', '.msi', '.msix', '.appx', '.bat', '.cmd', '.scr', '.com', '.ps1', '.vbs', '.reg'])
+/* 只放行中枢自己的只读预览/在线编辑页；不是所有回环地址都能进主窗口会话。 */
+function isInternalPreviewUrl(url) {
+  try {
+    const u = new URL(String(url))
+    if (!['127.0.0.1', 'localhost', '[::1]', '::1'].includes(u.hostname)) return false
+    const port = Number(u.port || (u.protocol === 'https:' ? 443 : 80))
+    if (!serverPort || port !== Number(serverPort)) return false
+    const path = String(u.pathname || '')
+    return path === '/api/preview'
+      || path.startsWith('/api/preview/')
+      || path === '/api/office/editor'
+      || path.startsWith('/api/office/editor/')
+  } catch (_) { return false }
+}
 
-/* 扩展只允许从客户端内置扩展目录加载，禁止 IPC 传入任意本机路径。 */
-const EXT_ROOT = path.join(ROOT, 'extensions')
-const loadedExts = new Map() // abs path -> Electron Extension
-async function syncBrowserExtensions(paths) {
-  if (!browserView) return
-  const session = browserView.webContents.session
-  const wanted = new Set()
-  for (const raw of Array.isArray(paths) ? paths : []) {
-    const abs = path.resolve(String(raw || ''))
-    const within = abs === EXT_ROOT || abs.startsWith(EXT_ROOT + path.sep)
-    if (!within) continue
-    if (!fs.existsSync(path.join(abs, 'manifest.json'))) continue
-    wanted.add(abs)
-    if (!loadedExts.has(abs)) {
-      try {
-        const ext = await session.loadExtension(abs, { allowFileAccess: false })
-        loadedExts.set(abs, ext)
-      } catch (error) {
-        console.error('[browser-ext] 加载失败:', abs, error?.message || error)
-      }
-    }
-  }
-  for (const [abs, ext] of [...loadedExts]) {
-    if (!wanted.has(abs)) {
-      try { session.removeExtension(ext.id) } catch (_) {}
-      loadedExts.delete(abs)
-    }
+/* 渲染进程给的是 CSS 像素；BrowserView.setBounds 要的是窗口 DIP。
+   页面被 Ctrl+滚轮/菜单缩放到 50% 时，innerWidth 会是窗口宽度的两倍，
+   直接传 CSS 坐标会把原生视图放到窗口外，界面只剩 DOM 里的加载占位。 */
+function cssRectToWindow(rect = {}) {
+  const zoom = mainWindow && !mainWindow.isDestroyed()
+    ? Math.max(0.25, Math.min(4, Number(mainWindow.webContents.getZoomFactor()) || 1))
+    : 1
+  return {
+    x: Math.max(0, Math.round((Number(rect.x) || 0) * zoom)),
+    y: Math.max(0, Math.round((Number(rect.y) || 0) * zoom)),
+    width: Math.max(1, Math.round((Number(rect.width) || 1) * zoom)),
+    height: Math.max(1, Math.round((Number(rect.height) || 1) * zoom)),
+    zoom,
   }
 }
 
+/* 扩展只能按管理中心审核落盘的 id + 相对目录加载。渲染进程不能传本机路径，
+   也不能把未审核目录塞入白名单。 */
+const EXT_ROOT = path.join(ROOT, 'extensions')
+const EXT_REVIEW_REGISTRY = path.join(process.env.JG_DATA_DIR || path.join(ROOT, 'data'), 'browser-extension-review.json')
+const loadedExts = new Map() // ext id -> { abs, extension, session }
+const browserDnrEngines = new Map() // session -> Map(ext id -> blocker)
+function installDnrCompat(session, id, extensionPath) {
+  const blocker = createDnrBlocker(extensionPath)
+  if (!browserDnrEngines.has(session)) {
+    const engines = new Map()
+    browserDnrEngines.set(session, engines)
+    session.webRequest?.onBeforeRequest((details, callback) => {
+      for (const engine of engines.values()) {
+        if (engine.match(details.url)) { callback({ cancel: true }); return }
+      }
+      callback({})
+    })
+  }
+  browserDnrEngines.get(session).set(id, blocker)
+  console.info('[browser-ext] DNR 基础兼容规则已加载:', id, blocker.rules, '条；高级/不兼容规则', blocker.unsupported, '条')
+}
+function removeDnrCompat(session, id) {
+  const engines = browserDnrEngines.get(session)
+  engines?.delete(id)
+  if (engines?.size === 0) browserDnrEngines.delete(session)
+}
+function approvedBrowserExtensions() {
+  try {
+    const body = JSON.parse(fs.readFileSync(EXT_REVIEW_REGISTRY, 'utf8'))
+    return new Map((Array.isArray(body.items) ? body.items : [])
+      .filter((x) => x && x.status === 'listed' && x.reviewedBy && x.reviewedAt && BROWSER_TAB_ID.test(String(x.id || '')))
+      .map((x) => [String(x.id), String(x.extPath || '')]))
+  } catch (_) { return new Map() }
+}
+async function syncBrowserExtensions(ids) {
+  const first = [...browserViews.values()].find((rec) => !rec.internal)
+  if (!first) return []
+  const session = first.view.webContents.session
+  const approved = approvedBrowserExtensions()
+  const wanted = new Set()
+  for (const id of Array.isArray(ids) ? ids : []) {
+    const key = String(id || '')
+    if (!approved.has(key)) continue
+    const rel = approved.get(key)
+    if (!rel || path.isAbsolute(rel) || rel.includes('..')) continue
+    const abs = path.resolve(EXT_ROOT, rel)
+    if (!abs.startsWith(EXT_ROOT + path.sep) || !fs.existsSync(path.join(abs, 'manifest.json'))) continue
+    wanted.add(key)
+    if (!loadedExts.has(key)) {
+      try {
+        const extension = await session.loadExtension(abs, { allowFileAccess: false })
+        installDnrCompat(session, key, abs)
+        loadedExts.set(key, { abs, extension, session })
+      } catch (error) { console.error('[browser-ext] 审核扩展加载失败:', key, error?.message || error) }
+    }
+  }
+  for (const [id, rec] of [...loadedExts]) {
+    if (wanted.has(id)) continue
+    try { session.removeExtension(rec.extension.id) } catch (_) {}
+    removeDnrCompat(session, id)
+    loadedExts.delete(id)
+  }
+  return [...wanted].filter((id) => loadedExts.has(id))
+}
+
+/* 每次下载由用户选择保存位置，默认仍落在九规下载目录；敏感类型先警告、由用户决定。
+   文件工具只认本进程真实下载记录和默认目录文件，绝不接受任意路径作为打开依据。 */
+const RISKY_DOWNLOAD_EXTS = new Set(['.exe', '.msi', '.msix', '.appx', '.bat', '.cmd', '.scr', '.com', '.ps1', '.psm1', '.vbs', '.vbe', '.js', '.jse', '.wsf', '.wsh', '.reg', '.dll', '.lnk', '.hta', '.jar', '.sh', '.app', '.dmg', '.pkg', '.deb', '.rpm'])
+const browserDownloads = []
+let browserDownloadSeq = 0
 function downloadDir() {
-  const dir = path.join(app.getPath('downloads'), '九规智能中枢')
-  try { fs.mkdirSync(dir, { recursive: true }) } catch (_) {}
+  const dir = process.env.JG_BROWSER_DOWNLOAD_DIR || path.join(app.getPath('downloads'), '九规智能中枢')
+  fs.mkdirSync(dir, { recursive: true })
   return dir
 }
-
+function riskyDownload(name) { return RISKY_DOWNLOAD_EXTS.has(path.extname(String(name || '')).toLowerCase()) }
 function emitDownload(entry) {
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('browser:download-state', entry)
-  }
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('browser:download-state', { ...entry })
 }
-
+function uniqueDownloadPath(filename) {
+  const safeName = path.basename(String(filename || 'download.bin')).replace(/[<>:"|?*]/g, '_') || 'download.bin'
+  const ext = path.extname(safeName)
+  const base = path.basename(safeName, ext)
+  let target = path.join(downloadDir(), safeName)
+  let index = 1
+  while (fs.existsSync(target)) target = path.join(downloadDir(), `${base} (${index++})${ext}`)
+  return target
+}
 function diskDownloads() {
-  const dir = downloadDir()
   try {
-    return fs.readdirSync(dir, { withFileTypes: true })
-      .filter((item) => item.isFile() && !/\.(crdownload|part|tmp)$/i.test(item.name))
-      .map((item) => {
-        const full = path.join(dir, item.name)
-        let stat = null
-        try { stat = fs.statSync(full) } catch (_) {}
-        return {
-          id: `FS-${item.name}`,
-          name: item.name,
-          path: full,
-          url: '',
-          state: 'completed',
-          bytes: stat ? stat.size : 0,
-          total: stat ? stat.size : 0,
-          received: stat ? stat.size : 0,
-          completedAt: stat ? stat.mtimeMs : 0,
-        }
-      })
-      .sort((a, b) => b.completedAt - a.completedAt)
-  } catch (_) {
-    return []
-  }
+    return fs.readdirSync(downloadDir(), { withFileTypes: true }).filter((item) => item.isFile() && !/\.(crdownload|part|tmp)$/i.test(item.name)).map((item) => {
+      const full = path.join(downloadDir(), item.name)
+      let stat
+      try { stat = fs.statSync(full) } catch (_) { return null }
+      return { id: `FS-${item.name}`, name: item.name, path: full, url: '', state: 'completed', bytes: stat.size, total: stat.size, received: stat.size, completedAt: stat.mtimeMs }
+    }).filter(Boolean).sort((a, b) => b.completedAt - a.completedAt)
+  } catch (_) { return [] }
+}
+function safeCompletedDownload(target) {
+  const full = path.resolve(String(target || ''))
+  if (!fs.existsSync(full) || !fs.statSync(full).isFile()) return null
+  const known = [...browserDownloads, ...diskDownloads()]
+  return known.find((item) => item.state === 'completed' && item.path && path.resolve(item.path) === full) || null
 }
 
-function hookBrowserDownloads(session) {
-  if (browserSessionHooked) return
-  browserSessionHooked = true
-  session.on('will-download', (_event, item) => {
-    const id = `DL-${Date.now()}-${++browserDownloadSeq}`
-    const filename = path.basename(String(item.getFilename() || 'download.bin'))
-    const dir = downloadDir()
-    let savePath = path.join(dir, filename)
-    const ext = path.extname(filename)
-    const base = path.basename(filename, ext)
-    let n = 1
-    while (fs.existsSync(savePath)) {
-      savePath = path.join(dir, `${base} (${n})${ext}`)
-      n += 1
+/* 云浏览器分区禁止设备与权限提权；普通文件下载走受控策略。 */
+function hookBrowserPolicy(session) {
+  if (browserSessionsHooked.has(session)) return
+  browserSessionsHooked.add(session)
+  session.on('will-download', async (event, item) => {
+    const filename = path.basename(String(item.getFilename() || 'download.bin')).replace(/[<>:"|?*]/g, '_') || 'download.bin'
+    const url = String(item.getURL() || '')
+    const risky = riskyDownload(filename)
+    let savePath = ''
+    try {
+      if (risky) {
+        const warning = await dialog.showMessageBox(mainWindow, {
+          type: 'warning', title: '敏感文件下载提醒', message: `“${filename}”可能执行代码或修改系统`,
+          detail: `来源：${url}\n\n仅在来源可信且你明确需要该文件时继续。下载后不会自动运行。`,
+          buttons: ['取消下载', '我了解风险，继续'], defaultId: 0, cancelId: 0, noLink: true,
+        })
+        if (warning.response !== 1) {
+          item.cancel()
+          emitDownload({ id: `DL-${Date.now()}-${++browserDownloadSeq}`, name: filename, url, state: 'cancelled', risky, error: '用户取消敏感文件下载' })
+          return
+        }
+      }
+      const choice = await dialog.showSaveDialog(mainWindow, {
+        title: '选择下载保存位置', defaultPath: uniqueDownloadPath(filename), buttonLabel: '保存',
+        properties: ['createDirectory', 'showOverwriteConfirmation'],
+      })
+      if (choice.canceled || !choice.filePath) {
+        item.cancel()
+        emitDownload({ id: `DL-${Date.now()}-${++browserDownloadSeq}`, name: filename, url, state: 'cancelled', risky, error: '用户取消下载' })
+        return
+      }
+      savePath = path.resolve(choice.filePath)
+      item.setSavePath(savePath)
+    } catch (_) {
+      item.cancel()
+      emitDownload({ id: `DL-${Date.now()}-${++browserDownloadSeq}`, name: filename, url, state: 'failed', risky, error: '无法选择保存位置' })
+      return
     }
-    item.setSavePath(savePath)
-    const entry = {
-      id, name: path.basename(savePath), path: savePath,
-      url: String(item.getURL() || ''), state: 'downloading',
-      risky: RISKY_DOWNLOAD_EXTS.has(ext.toLowerCase()),
-      received: 0, total: Number(item.getTotalBytes() || 0), startedAt: Date.now(),
-    }
-    browserDownloads = [entry, ...browserDownloads].slice(0, 40)
-    emitDownload({ ...entry })
+    const entry = { id: `DL-${Date.now()}-${++browserDownloadSeq}`, name: path.basename(savePath), path: savePath, url, state: 'downloading', risky, received: 0, total: Number(item.getTotalBytes() || 0), startedAt: Date.now() }
+    browserDownloads.unshift(entry)
+    browserDownloads.splice(40)
+    emitDownload(entry)
     item.on('updated', (_e, state) => {
       entry.state = state === 'interrupted' ? 'interrupted' : 'downloading'
       entry.received = Number(item.getReceivedBytes() || 0)
       entry.total = Number(item.getTotalBytes() || 0)
-      emitDownload({ ...entry })
+      emitDownload(entry)
     })
     item.once('done', (_e, state) => {
       entry.state = state === 'completed' ? 'completed' : state === 'cancelled' ? 'cancelled' : 'failed'
       entry.received = Number(item.getReceivedBytes() || 0)
       entry.total = Number(item.getTotalBytes() || entry.received)
-      if (entry.state === 'completed') {
-        try { entry.bytes = fs.statSync(savePath).size } catch (_) {}
-      }
-      emitDownload({ ...entry })
+      if (entry.state === 'completed') { try { entry.bytes = fs.statSync(savePath).size } catch (_) {} }
+      emitDownload(entry)
     })
   })
+  session.setPermissionRequestHandler((_contents, _permission, callback) => { callback(false) })
+  session.setPermissionCheckHandler(() => false)
+  session.setDevicePermissionHandler(() => false)
 }
 
-function ensureBrowserView() {
-  if (!mainWindow) return null
-  if (!browserView) {
-    browserView = new WebContentsView({
-      webPreferences: {
-        contextIsolation: true,
-        nodeIntegration: false,
-        sandbox: true,
-        spellcheck: false,
-        partition: BROWSER_PARTITION,
-      },
-    })
-    hookBrowserDownloads(browserView.webContents.session)
-    browserView.setBackgroundColor('#ffffff')
-    browserView.webContents.setWindowOpenHandler(({ url }) => {
-      const target = String(url || '')
-      // 页面内 target=_blank / window.open 的新窗口：回传渲染进程，在云浏览器网页标签内打开，不交由系统默认浏览器。
-      if (/^https?:\/\//i.test(target) && mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('browser:new-window', { url: target })
-      }
-      return { action: 'deny' }
-    })
-    browserView.webContents.on('will-navigate', (event, url) => {
-      if (!/^https?:\/\//i.test(url) || isLoopbackUrl(url)) event.preventDefault()
-    })
-    browserView.webContents.on('did-finish-load', () => sendBrowserNavState(browserView.webContents))
-    browserView.webContents.on('page-title-updated', (_event, title) => sendBrowserNavState(browserView.webContents, title))
-    browserView.webContents.on('did-fail-load', (_event, code, description, validatedURL, isMainFrame) => {
-      if (!isMainFrame) return
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('browser:nav-error', { code, description: String(description || ''), url: String(validatedURL || '') })
-      }
-    })
-    browserView.webContents.on('render-process-gone', (_event, details) => {
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('browser:nav-error', {
-          code: String(details?.reason || 'crashed'),
-          description: '页面进程已崩溃，可点击重试重新加载',
-          url: String(browserView.webContents.getURL() || ''),
-        })
-      }
-    })
-    browserView.webContents.on('unresponsive', () => {
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('browser:nav-error', {
-          code: 'unresponsive',
-          description: '页面无响应，可点击重试重新加载',
-          url: String(browserView.webContents.getURL() || ''),
-        })
-      }
-    })
-    browserView.webContents.on('responsive', () => sendBrowserNavState(browserView.webContents))
-    browserView.webContents.on('found-in-page', (_event, result) => {
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('browser:find-result', {
-          matchCount: result.matchCount || 0,
-          activeMatchOrdinal: result.activeMatchOrdinal || 0,
-          finalUpdate: !!result.finalUpdate,
-        })
-      }
-    })
-  }
-  if (!browserAttached) {
-    mainWindow.contentView.addChildView(browserView)
-    browserAttached = true
-  }
-  if (browserBounds) browserView.setBounds(browserBounds)
-  browserView.setVisible(true)
-  return browserView
+/* 网站密码只存在当前 Windows 用户的 Electron userData 中，由 safeStorage/DPAPI 加密。
+   渲染进程只能看到 origin、用户名和记录 id；解密与填充都留在主进程。 */
+const PASSWORD_FILE = path.join(app.getPath('userData'), 'cloud-passwords-v1.json')
+const passwordFillRequests = new Map()
+function httpsOrigin(value) {
+  try {
+    const url = new URL(String(value || ''))
+    return url.protocol === 'https:' ? url.origin : ''
+  } catch (_) { return '' }
 }
-
-function sendBrowserNavState(wc, titleOverride) {
-  if (!mainWindow || mainWindow.isDestroyed()) return
+function readPasswordStore() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(PASSWORD_FILE, 'utf8'))
+    return Array.isArray(parsed?.items) ? parsed.items.filter((item) => item && httpsOrigin(item.origin) && typeof item.password === 'string') : []
+  } catch (_) { return [] }
+}
+function writePasswordStore(items) {
+  if (!safeStorage.isEncryptionAvailable()) throw new Error('当前系统无法提供安全加密，未保存密码')
+  fs.mkdirSync(path.dirname(PASSWORD_FILE), { recursive: true })
+  const temp = `${PASSWORD_FILE}.${process.pid}.tmp`
+  fs.writeFileSync(temp, JSON.stringify({ version: 1, items }), { encoding: 'utf8', mode: 0o600 })
+  fs.renameSync(temp, PASSWORD_FILE)
+}
+function passwordMetadata(item) {
+  return { id: item.id, origin: item.origin, username: item.username || '', createdAt: item.createdAt, updatedAt: item.updatedAt }
+}
+function sendBrowserNavState(rec, titleOverride) {
+  if (!mainWindow || mainWindow.isDestroyed() || !rec || rec.view.webContents.isDestroyed()) return
+  const wc = rec.view.webContents
   mainWindow.webContents.send('browser:nav-state', {
+    tabId: rec.tabId,
     url: String(wc.getURL() || ''),
     title: String(titleOverride || wc.getTitle() || ''),
     canGoBack: wc.canGoBack(),
@@ -450,16 +526,122 @@ function sendBrowserNavState(wc, titleOverride) {
   })
 }
 
-function closeBrowserView() {
-  if (!browserView || !mainWindow) return
-  if (browserAttached) {
-    try { mainWindow.contentView.removeChildView(browserView) } catch (_) {}
-    browserAttached = false
+function sendBrowserNavError(rec, payload) {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  mainWindow.webContents.send('browser:nav-error', { ...payload, tabId: rec.tabId })
+}
+
+function createBrowserView(tabId, internal) {
+  const view = new WebContentsView({
+    webPreferences: {
+      contextIsolation: true, nodeIntegration: false, sandbox: true, spellcheck: false,
+      ...(internal ? { session: mainWindow.webContents.session } : {
+        partition: BROWSER_PARTITION,
+        preload: path.join(__dirname, 'browser-password-preload.cjs'),
+      }),
+    },
+  })
+  const rec = { tabId, view, internal, attached: false, url: '' }
+  const wc = view.webContents
+  if (!internal) hookBrowserPolicy(wc.session)
+  view.setBackgroundColor('#ffffff')
+  wc.setWindowOpenHandler(({ url }) => {
+    const target = String(url || '')
+    const allowed = internal ? isInternalPreviewUrl(target) : /^https?:\/\//i.test(target) && !isLoopbackUrl(target)
+    if (allowed && mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('browser:new-window', { url: target, sourceTabId: tabId })
+    }
+    return { action: 'deny' }
+  })
+  wc.on('will-navigate', (event, url) => {
+    if (internal ? !isInternalPreviewUrl(url) : (!/^https?:\/\//i.test(url) || isLoopbackUrl(url))) event.preventDefault()
+  })
+  wc.on('did-finish-load', () => {
+    rec.url = String(wc.getURL() || rec.url)
+    if (internal) {
+      try { wc.setZoomFactor(1); mainWindow.webContents.setZoomFactor(1) } catch (_) {}
+    }
+    sendBrowserNavState(rec)
+  })
+  wc.on('page-title-updated', (_event, title) => sendBrowserNavState(rec, title))
+  wc.on('did-fail-load', (_event, code, description, validatedURL, isMainFrame) => {
+    if (!isMainFrame || code === -3) return
+    sendBrowserNavError(rec, { code, description: String(description || ''), url: String(validatedURL || '') })
+  })
+  wc.on('render-process-gone', (_event, details) => sendBrowserNavError(rec, {
+    code: String(details?.reason || 'crashed'), description: '页面进程已崩溃，可点击重试重新加载', url: String(wc.getURL() || ''),
+  }))
+  wc.on('unresponsive', () => sendBrowserNavError(rec, {
+    code: 'unresponsive', description: '页面无响应，可点击重试重新加载', url: String(wc.getURL() || ''),
+  }))
+  wc.on('responsive', () => sendBrowserNavState(rec))
+  wc.once('destroyed', () => {
+    rec.attached = false
+    if (browserViews.get(tabId) === rec) browserViews.delete(tabId)
+    if (activeBrowserTabId === tabId) activeBrowserTabId = ''
+  })
+  browserViews.set(tabId, rec)
+  return rec
+}
+
+function hideBrowserViews() {
+  for (const rec of browserViews.values()) {
+    try { rec.view.setVisible(false) } catch (_) {}
   }
-  try { browserView.webContents.close() } catch (_) {}
-  browserView = null
-  browserUrl = ''
-  loadedExts.clear()
+  activeBrowserTabId = ''
+}
+
+function showBrowserView(tabId, target) {
+  if (!mainWindow || !BROWSER_TAB_ID.test(tabId)) return null
+  const internal = isInternalPreviewUrl(target)
+  if (!internal && isLoopbackUrl(target)) return null
+  let rec = browserViews.get(tabId)
+  if (rec && rec.internal !== internal) { closeBrowserView(tabId); rec = null }
+  if (!rec) rec = createBrowserView(tabId, internal)
+  hideBrowserViews()
+  if (!rec.attached) {
+    mainWindow.contentView.addChildView(rec.view)
+    rec.attached = true
+  }
+  if (browserBounds) rec.view.setBounds(browserBounds)
+  rec.view.setVisible(true)
+  activeBrowserTabId = tabId
+  if (rec.url !== target) {
+    rec.url = target
+    rec.view.webContents.loadURL(target).catch(() => {})
+  }
+  return rec
+}
+
+function activeBrowserView() {
+  return browserViews.get(activeBrowserTabId)?.view || null
+}
+
+function closeBrowserView(tabId) {
+  const rec = browserViews.get(String(tabId || ''))
+  if (!rec) return false
+  browserViews.delete(rec.tabId)
+  for (const request of [...passwordFillRequests.values()]) if (request.webContents === rec.view.webContents) {
+    clearTimeout(request.timer)
+    passwordFillRequests.delete(request.id)
+    request.resolve(false)
+  }
+  if (rec.attached && mainWindow && !mainWindow.isDestroyed()) {
+    try { mainWindow.contentView.removeChildView(rec.view) } catch (_) {}
+  }
+  rec.attached = false
+  try { rec.view.webContents.close() } catch (_) {}
+  if (activeBrowserTabId === rec.tabId) activeBrowserTabId = ''
+  return true
+}
+
+function closeAllBrowserViews() {
+  for (const tabId of [...browserViews.keys()]) closeBrowserView(tabId)
+  for (const [id, rec] of [...loadedExts]) {
+    try { rec.session.removeExtension(rec.extension.id) } catch (_) {}
+    removeDnrCompat(rec.session, id)
+    loadedExts.delete(id)
+  }
 }
 
 function appPartition(appId) {
@@ -577,7 +759,7 @@ function windowChromeOptions() {
   // 并且在最大化、还原时自动切换图标，不需要在页面里自绘窗口按钮。
   return {
     titleBarStyle: 'hidden',
-    titleBarOverlay: { color: '#ffffff', symbolColor: '#3a3f45', height: 38 },
+    titleBarOverlay: { ...TITLEBAR_THEME.login },
   }
 }
 
@@ -604,7 +786,22 @@ function createWindow() {
     },
   })
 
-  window.once('ready-to-show', () => window.show())
+  /* ready-to-show 依赖首帧渲染；GPU 合成异常时可能一直不触发，窗口就永远藏在后台。
+     页面加载完成或兜底计时到点都必须把窗口显示出来，避免用户看到“进程在跑但没有窗口”。 */
+  const showWindow = () => {
+    if (window.isDestroyed()) return
+    if (window.isMinimized()) window.restore()
+    window.show()
+    window.focus()
+    if (typeof window.moveTop === 'function') window.moveTop()
+  }
+  window.once('ready-to-show', showWindow)
+  window.webContents.once('did-finish-load', showWindow)
+  window.webContents.on('did-fail-load', (_event, code, description, url) => {
+    console.error(`[jg-window] 页面加载失败 ${code} ${description} ${url}`)
+    showWindow()
+  })
+  setTimeout(showWindow, 3000)
   const broadcastWindowState = () => pushWindowState(window)
   for (const eventName of ['maximize', 'unmaximize', 'enter-full-screen', 'leave-full-screen', 'resize', 'move']) {
     window.on(eventName, broadcastWindowState)
@@ -612,10 +809,9 @@ function createWindow() {
   window.on('closed', () => {
     if (mainWindow === window) {
       closeAllAppViews()
+      closeAllBrowserViews()
       mainWindow = null
-      browserView = null
-      browserAttached = false
-      browserUrl = ''
+      activeBrowserTabId = ''
     }
   })
 
@@ -664,6 +860,32 @@ function createWindow() {
     }
   })
 
+  /* 复位主窗口原生缩放：Chromium 会按站点持久化上次的 zoom level，
+     一旦被缩到 50%，CSS 视口会翻倍、布局按两倍宽度排，表现为元素偏小、
+     右侧与下方大片留白。启动时强制回到 100%，加载完成后再兜底复位一次；
+     运行中若内核缩放偏离 100%（误触 Ctrl±/滚轮或档位漂移），立即拉回。 */
+  const resetMainZoom = () => { try { window.webContents.setZoomLevel(0); window.webContents.setZoomFactor(1) } catch (_) {} }
+  resetMainZoom()
+  window.webContents.on('dom-ready', () => { resetMainZoom() })
+  window.webContents.on('did-finish-load', () => { resetMainZoom() })
+  window.webContents.on('did-frame-finish-load', () => { resetMainZoom() })
+  window.webContents.on('zoom-changed', () => {
+    if (Math.abs(window.webContents.getZoomFactor() - 1) > 1e-6) resetMainZoom()
+  })
+  /* 方案 A：主窗口内核原生缩放锁死 100%，缩放只由前端菜单的 CSS zoom 承担。
+     拦截 Ctrl/⌘ + =/+/-/_/0 键盘手势，不让其落到内核改档位；
+     Ctrl+滚轮缩放在渲染层拦截。内嵌云浏览器/应用视图有独立缩放，不走此锁定。 */
+  window.webContents.on('before-input-event', (event, input) => {
+    if (input.type !== 'keyDown') return
+    if (!(input.control || input.meta)) return
+    if (['=', '+', '-', '_', '0'].includes(input.key)) { event.preventDefault(); resetMainZoom() }
+  })
+  const lockMainWheelZoom = `(() => {
+    if (window.__jgWheelZoomLocked) return
+    window.__jgWheelZoomLocked = true
+    window.addEventListener('wheel', (e) => { if (e.ctrlKey) e.preventDefault() }, { passive: false, capture: true })
+  })()`
+  window.webContents.on('did-finish-load', () => { window.webContents.executeJavaScript(lockMainWheelZoom, true).catch(() => {}) })
   installBridge(window.webContents)
   window.loadURL(`http://127.0.0.1:${serverPort}/`)
   return window
@@ -716,110 +938,180 @@ ipcMain.on('window:close', (event) => {
   BrowserWindow.fromWebContents(event.sender)?.close()
 })
 
-ipcMain.on('browser:open', (_event, url) => {
-  if (!/^https?:\/\//i.test(String(url || ''))) return
-  if (isLoopbackUrl(url)) return
-  const view = ensureBrowserView()
-  if (!view) return
-  const next = String(url)
-  if (browserUrl !== next) {
-    browserUrl = next
-    view.webContents.loadURL(next).catch(() => {})
+ipcMain.on('window:titlebar-theme', (event, payload = {}) => {
+  applyTitleBarTheme(BrowserWindow.fromWebContents(event.sender), payload.mode)
+})
+
+ipcMain.on('browser:open', (_event, payload = {}) => {
+  const tabId = String(payload.tabId || '')
+  const target = String(payload.url || '')
+  if (!BROWSER_TAB_ID.test(tabId) || !/^https?:\/\//i.test(target)) return
+  const rec = showBrowserView(tabId, target)
+  if (!rec && mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('browser:nav-error', {
+      tabId, code: 'address-blocked', description: '该地址不在云浏览器允许范围内', url: target,
+    })
   }
 })
 
-ipcMain.on('browser:bounds', (_event, rect = {}) => {
-  const x = Math.max(0, Math.round(Number(rect.x) || 0))
-  const y = Math.max(0, Math.round(Number(rect.y) || 0))
-  const width = Math.max(1, Math.round(Number(rect.width) || 1))
-  const height = Math.max(1, Math.round(Number(rect.height) || 1))
-  browserBounds = { x, y, width, height }
-  if (!browserView || !browserAttached) return
-  browserView.setBounds(browserBounds)
+ipcMain.on('browser:bounds', (_event, payload = {}) => {
+  const box = cssRectToWindow(payload.rect || payload)
+  browserBounds = { x: box.x, y: box.y, width: box.width, height: box.height }
+  activeBrowserView()?.setBounds(browserBounds)
 })
 
-ipcMain.on('browser:reload', () => {
-  if (browserView) browserView.webContents.reload()
+ipcMain.on('browser:activate', (_event, tabId) => {
+  const rec = browserViews.get(String(tabId || ''))
+  if (!rec) return
+  showBrowserView(rec.tabId, rec.url || rec.view.webContents.getURL())
 })
-
+ipcMain.on('browser:hide', () => hideBrowserViews())
+ipcMain.on('browser:reload', () => { activeBrowserView()?.webContents.reload() })
 ipcMain.on('browser:go-back', () => {
-  if (browserView && browserView.webContents.canGoBack()) browserView.webContents.goBack()
+  const wc = activeBrowserView()?.webContents
+  if (wc?.canGoBack()) wc.goBack()
 })
-
 ipcMain.on('browser:go-forward', () => {
-  if (browserView && browserView.webContents.canGoForward()) browserView.webContents.goForward()
+  const wc = activeBrowserView()?.webContents
+  if (wc?.canGoForward()) wc.goForward()
 })
+ipcMain.on('browser:close', (_event, tabId) => { closeBrowserView(String(tabId || '')) })
+ipcMain.on('browser:close-all', () => closeAllBrowserViews())
 
+/* 常用工具只作用于当前云浏览器标签；内部预览不允许缩放或清除中枢会话。 */
 ipcMain.on('browser:set-zoom', (_event, factor) => {
-  if (!browserView) return
-  const f = Math.max(0.5, Math.min(2, Number(factor) || 1))
-  browserView.webContents.setZoomFactor(f)
+  const rec = browserViews.get(activeBrowserTabId)
+  if (!rec || rec.internal) return
+  rec.view.webContents.setZoomFactor(Math.max(0.5, Math.min(2, Number(factor) || 1)))
 })
-
 ipcMain.handle('browser:zoom', () => {
-  if (!browserView) return { ok: true, factor: 1 }
-  return { ok: true, factor: Number(browserView.webContents.getZoomFactor() || 1) }
+  const rec = browserViews.get(activeBrowserTabId)
+  return { ok: true, factor: rec && !rec.internal ? Number(rec.view.webContents.getZoomFactor() || 1) : 1 }
 })
-
-/* 打印当前页面（保留背景色与图片）。 */
-ipcMain.on('browser:print', () => {
-  if (!browserView) return
-  browserView.webContents.print({ silent: false, printBackground: true }, () => {})
-})
-
-/* 截取当前页面，保存到下载目录并计入下载记录。 */
+ipcMain.on('browser:print', () => { activeBrowserView()?.webContents.print({ silent: false, printBackground: true }, () => {}) })
 ipcMain.handle('browser:screenshot', async () => {
-  if (!browserView) return { ok: false, error: '自带浏览器未打开' }
+  const wc = activeBrowserView()?.webContents
+  if (!wc) return { ok: false, error: '云浏览器未打开' }
   try {
-    const img = await browserView.webContents.capturePage()
-    const png = img.toPNG()
-    const file = path.join(downloadDir(), `screenshot-${Date.now()}.png`)
+    const image = browserBounds && mainWindow && !mainWindow.isDestroyed()
+      ? await mainWindow.capturePage(browserBounds)
+      : await wc.capturePage()
+    const png = image.toPNG()
+    const file = uniqueDownloadPath(`screenshot-${Date.now()}.png`)
     fs.writeFileSync(file, png)
-    const entry = { id: `dl-${Date.now()}`, name: path.basename(file), path: file, state: 'completed', received: png.length, total: png.length, mime: 'image/png' }
-    browserDownloads = [entry, ...browserDownloads.filter((x) => x.path !== file)].slice(0, 40)
+    const entry = { id: `DL-${Date.now()}-${++browserDownloadSeq}`, name: path.basename(file), path: file, url: String(wc.getURL() || ''), state: 'completed', received: png.length, total: png.length, bytes: png.length }
+    browserDownloads.unshift(entry)
+    browserDownloads.splice(40)
     emitDownload(entry)
     return { ok: true, path: file }
-  } catch (error) {
-    return { ok: false, error: String(error?.message || error) }
-  }
+  } catch (error) { return { ok: false, error: String(error?.message || error) } }
 })
-
-/* 清除当前浏览器分区的本地存储（缓存、Cookie、localStorage 等）。 */
 ipcMain.handle('browser:clear-data', async () => {
-  if (!browserView) return { ok: false, error: '自带浏览器未打开' }
+  const rec = browserViews.get(activeBrowserTabId)
+  if (!rec) return { ok: false, error: '云浏览器未打开' }
+  if (rec.internal) return { ok: false, error: '内部预览使用中枢会话，不能在此清除' }
+  try { await rec.view.webContents.session.clearStorageData(); return { ok: true } }
+  catch (error) { return { ok: false, error: String(error?.message || error) } }
+})
+ipcMain.on('browser:find', (_event, payload = {}) => {
+  const rec = browserViews.get(activeBrowserTabId)
+  const wc = rec?.view.webContents
+  if (!wc) return
+  const text = String(payload.text || '').trim().slice(0, 200)
+  if (!text) return
+  const forward = payload.forward !== false
+  /* 当前 Electron 的原生 findInPage/stopFindInPage 会阻塞后续视图 IPC；
+     使用页面 window.find 完成同等定位，不触发该原生缺陷。 */
+  wc.executeJavaScript(`(() => { try { return window.find(${JSON.stringify(text)}, false, ${forward}, true, false, false, false) } catch (_) { return false } })()`, true)
+    .then((found) => {
+      if (!mainWindow || mainWindow.isDestroyed()) return
+      mainWindow.webContents.send('browser:find-result', { tabId: rec.tabId, matchCount: found ? 1 : 0, activeMatchOrdinal: found ? 1 : 0, finalUpdate: true })
+    }).catch(() => {})
+})
+ipcMain.handle('browser:downloads', () => {
+  const live = browserDownloads.map((entry) => ({ ...entry }))
+  const paths = new Set(live.filter((entry) => entry.path).map((entry) => path.resolve(entry.path)))
+  return { ok: true, items: [...live, ...diskDownloads().filter((entry) => !paths.has(path.resolve(entry.path)))].slice(0, 60), directory: downloadDir() }
+})
+ipcMain.on('browser:download-open', (_event, target) => {
+  const entry = safeCompletedDownload(target)
+  if (entry) shell.openPath(entry.path).catch(() => {})
+})
+ipcMain.on('browser:download-reveal', (_event, target) => {
+  const entry = safeCompletedDownload(target)
+  if (entry) shell.showItemInFolder(entry.path)
+})
+
+/* HTTPS 登录表单提交后默认自动加密保存；同网站、同账号再次提交会更新密码。
+   明文不进入中枢前端，前端只收到保存结果和元数据。 */
+ipcMain.on('browser:password-submit', (event, payload = {}) => {
+  const rec = [...browserViews.values()].find((item) => !item.internal && item.view.webContents === event.sender)
+  if (!rec) return
+  const origin = httpsOrigin(payload.origin)
+  const password = String(payload.password || '')
+  const username = String(payload.username || '').slice(0, 320)
+  if (!origin || origin !== httpsOrigin(rec.view.webContents.getURL()) || !password || password.length > 1024) return
   try {
-    await browserView.webContents.session.clearStorageData()
-    return { ok: true }
+    const now = new Date().toISOString()
+    const items = readPasswordStore()
+    const existing = items.find((item) => item.origin === origin && item.username === username)
+    const entry = existing || { id: crypto.randomUUID(), origin, username, createdAt: now }
+    entry.password = safeStorage.encryptString(password).toString('base64')
+    entry.updatedAt = now
+    if (!existing) items.push(entry)
+    writePasswordStore(items)
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('browser:password-saved', { ok: true, tabId: rec.tabId, item: passwordMetadata(entry) })
+    return { ok: true, item: passwordMetadata(entry) }
   } catch (error) {
-    return { ok: false, error: String(error?.message || error) }
+    const message = String(error?.message || '密码自动保存失败')
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('browser:password-saved', { ok: false, tabId: rec.tabId, origin, error: message })
+    return { ok: false, error: message }
   }
 })
-
-ipcMain.on('browser:find', (_event, payload) => {
-  if (!browserView) return
-  const q = String(payload?.text || '').trim()
-  if (!q) { browserView.webContents.stopFindInPage('clear'); return }
-  const forward = payload?.forward !== false
-  browserView.webContents.findInPage(q, { findNext: true, forward })
+ipcMain.handle('browser:password-list', () => ({ ok: true, items: readPasswordStore().map(passwordMetadata) }))
+ipcMain.handle('browser:password-delete', (_event, id) => {
+  const target = String(id || '')
+  const items = readPasswordStore()
+  const next = items.filter((item) => item.id !== target)
+  if (next.length === items.length) return { ok: false, error: '密码记录不存在' }
+  try { writePasswordStore(next); return { ok: true } }
+  catch (error) { return { ok: false, error: String(error?.message || error) } }
+})
+ipcMain.on('browser:password-filled', (event, payload = {}) => {
+  const request = passwordFillRequests.get(String(payload.requestId || ''))
+  if (!request || request.webContents !== event.sender) return
+  clearTimeout(request.timer)
+  passwordFillRequests.delete(request.id)
+  request.resolve(!!payload.ok)
+})
+ipcMain.handle('browser:password-fill', async (_event, payload = {}) => {
+  const rec = browserViews.get(String(payload.tabId || ''))
+  if (!rec || rec.internal) return { ok: false, error: '目标网页已关闭' }
+  const item = readPasswordStore().find((entry) => entry.id === String(payload.id || ''))
+  if (!item) return { ok: false, error: '密码记录不存在' }
+  if (httpsOrigin(rec.view.webContents.getURL()) !== item.origin) return { ok: false, error: '网站源不匹配，已拒绝填充' }
+  try {
+    const password = safeStorage.decryptString(Buffer.from(item.password, 'base64'))
+    const wc = rec.view.webContents
+    const requestId = crypto.randomUUID()
+    const filled = await new Promise((resolve) => {
+      const timer = setTimeout(() => { passwordFillRequests.delete(requestId); resolve(false) }, 5000)
+      timer.unref?.()
+      passwordFillRequests.set(requestId, { id: requestId, webContents: wc, resolve, timer })
+      try {
+        wc.send('browser:password-fill', { requestId, origin: item.origin, username: String(item.username || ''), password })
+      } catch (_) {
+        clearTimeout(timer)
+        passwordFillRequests.delete(requestId)
+        resolve(false)
+      }
+    })
+    return filled ? { ok: true } : { ok: false, error: '当前页面没有可填充的密码框或页面未响应' }
+  } catch (_) { return { ok: false, error: '密码解密或填充失败' } }
 })
 
-ipcMain.on('browser:find-stop', () => {
-  if (browserView) browserView.webContents.stopFindInPage('clear')
-})
-
-/* 设备视口：切换移动 / 桌面 UA；视图尺寸仍跟随右侧面板槽位。 */
-ipcMain.on('browser:viewport', (_event, preset) => {
-  if (!browserView) return
-  const ua = preset === 'mobile'
-    ? 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1'
-    : ''
-  browserView.webContents.setUserAgent(ua)
-})
-
-ipcMain.on('browser:close', () => closeBrowserView())
-
-/* 由渲染进程按服务端审核清单推送应加载的扩展目录；路径限定内置扩展根，不存在 manifest 则跳过。 */
-ipcMain.on('browser:load-extensions', (_event, paths) => { syncBrowserExtensions(paths) })
+/* 渲染进程只能提交扩展 id；主进程按管理中心审核注册表解析目录。 */
+ipcMain.handle('browser:load-extensions', async (_event, ids) => ({ ok: true, items: await syncBrowserExtensions(ids) }))
 
 /* ---------- 应用工作区标签页 ---------- */
 ipcMain.on('app:open', (_event, payload = {}) => {
@@ -856,11 +1148,8 @@ ipcMain.on('app:close', (_event, appId) => {
 
 ipcMain.on('app:bounds', (_event, payload = {}) => {
   const rect = payload.rect || payload
-  const x = Math.max(0, Math.round(Number(rect.x) || 0))
-  const y = Math.max(0, Math.round(Number(rect.y) || 0))
-  const width = Math.max(1, Math.round(Number(rect.width) || 1))
-  const height = Math.max(1, Math.round(Number(rect.height) || 1))
-  appBounds = { x, y, width, height }
+  const box = cssRectToWindow(rect)
+  appBounds = { x: box.x, y: box.y, width: box.width, height: box.height }
   const active = appViews.get(activeAppId)
   if (active) active.view.setBounds(appBounds)
 })
@@ -869,10 +1158,11 @@ ipcMain.on('browser:open-external', (_event, url) => {
   if (/^https?:\/\//i.test(String(url || ''))) shell.openExternal(String(url))
 })
 
-ipcMain.handle('browser:page-info', () => {
-  if (!browserView) return { ok: false, error: '自带浏览器未打开' }
+ipcMain.handle('browser:page-info', (_event, tabId) => {
+  const rec = tabId ? browserViews.get(String(tabId)) : browserViews.get(activeBrowserTabId)
+  const wc = rec?.view.webContents
+  if (!wc) return { ok: false, error: '自带浏览器未打开' }
   try {
-    const wc = browserView.webContents
     return {
       ok: true,
       url: String(wc.getURL() || ''),
@@ -885,39 +1175,22 @@ ipcMain.handle('browser:page-info', () => {
   }
 })
 
-ipcMain.handle('browser:page-text', async () => {
-  if (!browserView) return { ok: false, error: '自带浏览器未打开' }
+ipcMain.handle('browser:page-text', async (_event, tabId) => {
+  const rec = tabId ? browserViews.get(String(tabId)) : browserViews.get(activeBrowserTabId)
+  const wc = rec?.view.webContents
+  if (!wc) return { ok: false, error: '自带浏览器未打开' }
   try {
-    const text = await browserView.webContents.executeJavaScript(
-      `(() => { try { return String(document.body ? document.body.innerText : '').slice(0, 20000) } catch (_) { return '' } })()`,
-      true,
-    )
+    const text = await Promise.race([
+      wc.executeJavaScript(
+        `(() => { try { return String(document.body ? document.body.innerText : '').slice(0, 20000) } catch (_) { return '' } })()`,
+        true,
+      ),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('页面正文读取超时')), 5000)),
+    ])
     return { ok: true, text: String(text || '') }
   } catch (error) {
     return { ok: false, error: String(error?.message || error) }
   }
-})
-
-ipcMain.handle('browser:downloads', () => {
-  const live = browserDownloads.map((entry) => ({ ...entry }))
-  const paths = new Set(live.map((entry) => String(entry.path || '').toLowerCase()))
-  const disk = diskDownloads().filter((entry) => !paths.has(entry.path.toLowerCase()))
-  return { ok: true, items: [...live, ...disk].slice(0, 40) }
-})
-
-ipcMain.on('browser:download-open', (_event, target) => {
-  const file = String(target || '')
-  const entry = browserDownloads.find((item) => item.path === file)
-    || diskDownloads().find((item) => item.path === file)
-  if (!entry || entry.state !== 'completed') return
-  shell.openPath(entry.path).then((err) => { if (err) shell.showItemInFolder(entry.path) }).catch(() => {})
-})
-
-ipcMain.on('browser:download-reveal', (_event, target) => {
-  const file = String(target || '')
-  const entry = browserDownloads.find((item) => item.path === file)
-    || diskDownloads().find((item) => item.path === file)
-  if (entry) shell.showItemInFolder(entry.path)
 })
 
 ipcMain.handle('shell:reveal-path', async (_event, target) => {
@@ -930,6 +1203,25 @@ ipcMain.handle('shell:reveal-path', async (_event, target) => {
     return { ok: false, error }
   }
   return { ok: true }
+})
+
+ipcMain.handle('shell:reveal-file', async (_event, target) => {
+  const file = String(target || '')
+  if (!file || !path.isAbsolute(file)) return { ok: false, error: '文件路径无效' }
+  if (!fs.existsSync(file)) return { ok: false, error: '文件不存在或已离线' }
+  shell.showItemInFolder(file)
+  return { ok: true }
+})
+
+ipcMain.handle('settings:clear-cache', async (event) => {
+  try {
+    const session = event.sender.session
+    await session.clearCache()
+    await session.clearStorageData({ storages: ['cachestorage', 'shadercache'] })
+    return { ok: true }
+  } catch (error) {
+    return { ok: false, error: error?.message || String(error) }
+  }
 })
 
 ipcMain.handle('dialog:choose-folder', async (event, options = {}) => {
@@ -949,25 +1241,35 @@ if (!hasLock) {
 } else {
   app.on('second-instance', () => {
     if (mainWindow) {
+      // 已在后台运行时再次点击快捷方式：必须先还原并显示到前台，仅 focus 在最小化/被遮挡时不会把窗口带回可见。
       if (mainWindow.isMinimized()) mainWindow.restore()
+      mainWindow.show()
       mainWindow.focus()
+      if (typeof mainWindow.moveTop === 'function') mainWindow.moveTop()
     }
   })
 
   app.whenReady().then(async () => {
     Menu.setApplicationMenu(null)
     app.on('web-contents-created', (_event, contents) => installBridge(contents))
+    ensureOnlyOfficeService()
 
     try {
       /* 已经有健康的本机服务就复用，不再另起一套：两套服务会同时写同一个 SQLite。 */
       const pidInfo = readServerPidInfo()
+      const pidPort = pidInfo && Number.isFinite(Number(pidInfo.port)) ? Number(pidInfo.port) : null
       const holderAlive = Boolean(pidInfo && isProcessAlive(pidInfo.pid))
       if (await probeHealth(PREFERRED_PORT)) {
         serverPort = PREFERRED_PORT
         console.log(`[jg-server] 复用已在运行的本机服务 http://127.0.0.1:${serverPort}`)
+      } else if (pidPort && pidPort !== PREFERRED_PORT && await probeHealth(pidPort)) {
+        /* 标记文件里的实例可能不在首选端口（历史启动脚本、手工服务）。
+           它健康就先用它，不能只认 PREFERRED_PORT 然后误判成“服务已死”。 */
+        serverPort = pidPort
+        console.log(`[jg-server] 复用标记文件中的服务 pid=${pidInfo.pid} http://127.0.0.1:${serverPort}`)
       } else if (holderAlive) {
         /* 进程还活着但暂时没响应（长任务、正在启动）：等它恢复，不能再起第二套。 */
-        serverPort = PREFERRED_PORT
+        serverPort = pidPort || PREFERRED_PORT
         try {
           await waitForServer(serverPort, 30000)
           console.log(`[jg-server] 等待已有服务恢复 pid=${pidInfo.pid}`)
